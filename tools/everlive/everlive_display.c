@@ -211,15 +211,15 @@ static void start_audio_pipeline(const char *adev)
         char cmd[2048];
 
         if (g_pw_node[0] != '\0') {
-            /* Native PipeWire loopback with explicit adaptive resampler enabled (immune to clock drift) */
+            /* Native PipeWire loopback with explicit adaptive resampler enabled (immune to clock drift, 40ms safe buffer) */
             snprintf(cmd, sizeof(cmd),
-                     "pw-loopback -i '{ target.object = \"%s\" resample.disable = false }' -l 20 "
+                     "pw-loopback -i '{ target.object = \"%s\" resample.disable = false }' -l 40 "
                      "-o '{ resample.disable = false resample.quality = 4 application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" "
                      "application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"everlive-audio\" "
                      "node.description = \"EverLive Game Audio\" media.name = \"HDMI Game Audio\" media.role = \"Game\" }' 2>/dev/null",
                      g_pw_node, (int)parent_pid);
         } else {
-            /* Fallback to ALSA arecord -> pw-play with tuned 10ms period */
+            /* Fallback to ALSA arecord -> pw-play with tuned 20ms period / 80ms buffer */
             char plug_dev[256];
             if (strncmp(adev, "hw:", 3) == 0) {
                 snprintf(plug_dev, sizeof(plug_dev), "plughw:%s", adev + 3);
@@ -228,11 +228,11 @@ static void start_audio_pipeline(const char *adev)
             }
 
             snprintf(cmd, sizeof(cmd),
-                     "{ arecord -D \"%s\" -f S16_LE -c 8 -r 48000 --period-time=10000 --buffer-time=40000 -q 2>/dev/null || "
-                     "  arecord -D \"%s\" -f S16_LE -c 6 -r 48000 --period-time=10000 --buffer-time=40000 -q 2>/dev/null || "
-                     "  arecord -D \"%s\" -f S16_LE -c 2 -r 48000 --period-time=10000 --buffer-time=40000 -q 2>/dev/null || "
-                     "  arecord -D \"%s\" -f S16_LE -c 2 -r 48000 --period-time=10000 --buffer-time=40000 -q 2>/dev/null; } | "
-                     "pw-play --latency=20ms -P '{ application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"everlive-audio\" node.description = \"EverLive Game Audio\" media.name = \"HDMI Game Audio\" media.role = \"Game\" }' - 2>/dev/null",
+                     "{ arecord -D \"%s\" -f S16_LE -c 8 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null || "
+                     "  arecord -D \"%s\" -f S16_LE -c 6 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null || "
+                     "  arecord -D \"%s\" -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null || "
+                     "  arecord -D \"%s\" -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null; } | "
+                     "pw-play --latency=40ms -P '{ application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"everlive-audio\" node.description = \"EverLive Game Audio\" media.name = \"HDMI Game Audio\" media.role = \"Game\" }' - 2>/dev/null",
                      adev, adev, adev, plug_dev, (int)parent_pid);
         }
 

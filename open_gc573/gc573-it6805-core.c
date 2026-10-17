@@ -2164,7 +2164,8 @@ it6805_handle_port0_system_irq_locked(struct gc555_it6805 *it6805,
 		return ret;
 	if (snapshot->port0_status[1] & (BIT(6) | BIT(7))) {
 		hdmi2 = true;
-	} else if (it6805->runtime.timing.valid) {
+	} else if (it6805->runtime.timing.valid &&
+		   it6805->runtime.video_state == IT6805_VIDEO_ACTIVE) {
 		hdmi2 = it6805->runtime.timing.pixel_clock_khz >= 340000;
 	} else {
 		hdmi2 = system->hdmi2_phy;
@@ -2195,23 +2196,13 @@ it6805_handle_port0_system_irq_locked(struct gc555_it6805 *it6805,
 
 	/* Stock dispatches saved events in register order after W1C. */
 	if (actions & IT6805_SYS_ACTION_MODE_CHANGE) {
-		bool video_active;
 		bool is_dvi;
-		bool update_audio;
 
 		ret = it6805_detect_dvi_locked(it6805, &is_dvi);
 		if (ret)
 			return ret;
-		video_active = it6805->runtime.video_state == IT6805_VIDEO_ACTIVE;
-		if (video_active)
-			it6805->runtime.output = (struct it6805_video_output){};
-		update_audio = is_dvi ?
-			it6805->runtime.audio.state != IT6805_AUDIO_OFF :
-			video_active &&
-			it6805->runtime.audio.state != IT6805_AUDIO_REQUEST;
-		if (update_audio) {
-			it6805->runtime.audio.state = is_dvi ? IT6805_AUDIO_OFF :
-							IT6805_AUDIO_REQUEST;
+		if (is_dvi && it6805->runtime.audio.state != IT6805_AUDIO_OFF) {
+			it6805->runtime.audio.state = IT6805_AUDIO_OFF;
 			it6805->runtime.audio.rate_mismatch_count = 0;
 			ret = it6805_clear_audio_output_locked(it6805);
 			if (ret)
