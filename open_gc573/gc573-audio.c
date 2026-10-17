@@ -338,10 +338,21 @@ static void gc555_audio_format_work(struct work_struct *work)
 		format = (struct gc555_hdmi_audio_format){};
 
 	spin_lock_irqsave(&audio->state_lock, flags);
+	/*
+	 * Do not stop stream on transient clock jitter or packet gap (!format.valid).
+	 * If sample rate matches, update prepared format without stopping DMA or xrun.
+	 */
 	if (audio->disconnected || audio->suspended ||
 	    !stream->format_monitoring || !stream->dma_running ||
-	    stream->format_invalidated ||
+	    stream->format_invalidated || ret || !format.valid ||
 	    gc555_audio_format_equal(&format, &stream->prepared_format)) {
+		spin_unlock_irqrestore(&audio->state_lock, flags);
+		mutex_unlock(&audio->control_lock);
+		return;
+	}
+
+	if (format.rate_hz == stream->prepared_format.rate_hz) {
+		stream->prepared_format = format;
 		spin_unlock_irqrestore(&audio->state_lock, flags);
 		mutex_unlock(&audio->control_lock);
 		return;
@@ -452,7 +463,6 @@ static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 	struct gc555_it6805 *it6805 = audio->gc555->it6805;
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct gc555_hdmi_audio_format format = {};
-	struct gc555_hdmi_audio_format verified_format;
 	unsigned long flags;
 	unsigned int dma_channels;
 	unsigned int sample_bits;
@@ -475,36 +485,20 @@ static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 		ret = -ENODEV;
 	} else if (stream->source == GC555_AUDIO_SOURCE_HDMI) {
 		ret = gc555_it6805_get_audio_format(it6805, &format);
-		if (ret == -ENODATA) {
+		if (ret || !format.valid) {
 			/* HDMI audio clock not yet locked; prime DMA with requested runtime parameters */
 			format.rate_hz = runtime->rate;
 			format.channels = runtime->channels;
 			format.transport = GC555_HDMI_AUDIO_SAMPLES;
 			format.valid = true;
 			ret = 0;
-		} else {
-			if (!ret && format.transport != GC555_HDMI_AUDIO_SAMPLES)
-				ret = -EOPNOTSUPP;
-			if (!ret && format.rate_hz != runtime->rate)
-				ret = -EINVAL;
-			if (!ret && format.channels != runtime->channels)
-				ret = -EINVAL;
 		}
-		if (ret && running) {
-			spin_lock_irqsave(&audio->state_lock, flags);
-			stream->format_invalidated = true;
-			stream->format_monitoring = false;
-			stream->dma_running = false;
-			spin_unlock_irqrestore(&audio->state_lock, flags);
-			gc555_dma_stop_audio(audio->gc555, stream);
-			running = false;
-		}
-		if (!ret && running) {
+
+		if (running) {
 			spin_lock_irqsave(&audio->state_lock, flags);
 			restart_dma = stream->format_invalidated;
-			if (!restart_dma)
-				restart_dma = !gc555_audio_format_equal(&format,
-						&stream->prepared_format);
+			if (!restart_dma && format.rate_hz != stream->prepared_format.rate_hz)
+				restart_dma = true;
 			if (restart_dma)
 				stream->dma_running = false;
 			spin_unlock_irqrestore(&audio->state_lock, flags);
@@ -545,20 +539,6 @@ static int gc555_audio_pcm_prepare(struct snd_pcm_substream *substream)
 		stream->prepared_format = format;
 		stream->format_monitoring = true;
 		spin_unlock_irqrestore(&audio->state_lock, flags);
-	}
-	if (!ret && stream->source == GC555_AUDIO_SOURCE_HDMI) {
-		ret = gc555_it6805_get_audio_format(it6805, &verified_format);
-		if (!ret &&
-		    !gc555_audio_format_equal(&format, &verified_format))
-			ret = -EAGAIN;
-		if (ret) {
-			spin_lock_irqsave(&audio->state_lock, flags);
-			stream->format_invalidated = true;
-			stream->format_monitoring = false;
-			stream->dma_running = false;
-			spin_unlock_irqrestore(&audio->state_lock, flags);
-			gc555_dma_stop_audio(audio->gc555, stream);
-		}
 	}
 	mutex_unlock(&audio->control_lock);
 

@@ -3942,15 +3942,15 @@ static int it6805_monitor_audio_locked(struct gc555_it6805 *it6805)
 	mismatch = (b0 & 0xf0) != audio->format_b0 ||
 		b1 != audio->format_b1 ||
 		(b2 & BIT(1)) != audio->format_b2 ||
-		it6805_audio_delta(n, audio->n) > IT6805_AUDIO_N_TOLERANCE ||
-		it6805_audio_delta(cts, audio->cts) >
-			IT6805_AUDIO_CTS_TOLERANCE;
+		it6805_audio_delta(n, audio->n) > IT6805_AUDIO_N_TOLERANCE;
 	if (!mismatch &&
 	    !gc555_bridge_get_audio_rate(it6805->gc555, &bridge_rate_hz))
 		mismatch = it6805_audio_rate_code(bridge_rate_hz / 1000U) !=
 			   audio->selected_rate_code;
-	if (!mismatch)
+	if (!mismatch) {
+		audio->cts = cts;
 		return 0;
+	}
 
 	return it6805_restart_audio_locked(it6805);
 }
@@ -3960,7 +3960,6 @@ static int it6805_handle_audio_change_locked(struct gc555_it6805 *it6805)
 	struct it6805_audio_runtime *audio = &it6805->runtime.audio;
 	u32 n;
 	u32 cts;
-	bool stable;
 	int ret;
 
 	if (!audio->change_pending)
@@ -3974,20 +3973,14 @@ static int it6805_handle_audio_change_locked(struct gc555_it6805 *it6805)
 	if (ret)
 		return ret;
 
-	stable = it6805_audio_delta(n, audio->n) <=
-			IT6805_AUDIO_N_TOLERANCE &&
-		 it6805_audio_delta(cts, audio->cts) <=
-			IT6805_AUDIO_CTS_TOLERANCE;
-	if (!stable)
+	if (it6805_audio_delta(n, audio->n) > IT6805_AUDIO_N_TOLERANCE)
 		return it6805_restart_audio_locked(it6805);
 
-	ret = it6805_reset_audio_logic_locked(it6805);
-	if (!ret)
-		ret = it6805_update_audio_clock_locked(it6805);
-	if (!ret)
-		audio->change_pending = false;
+	audio->n = n;
+	audio->cts = cts;
+	audio->change_pending = false;
 
-	return ret;
+	return 0;
 }
 
 static int it6805_service_audio_locked(struct gc555_it6805 *it6805)

@@ -521,13 +521,10 @@ int gc555_dma_start_audio(struct gc555_dev *gc555, unsigned int rate_hz,
 	    !gc555_dma_audio_format_valid(rate_hz, channels, sample_bits))
 		return -EINVAL;
 	ret = gc555_bridge_get_audio_rate(gc555, &observed_rate);
-	/* The receiver owns the format; a stable FPGA divisor may veto it. */
-	if (!ret && observed_rate != rate_hz) {
+	if (!ret && observed_rate != rate_hz)
 		dev_dbg(gc555->dev,
 			"observed rate %u does not match requested audio rate %u\n",
 			observed_rate, rate_hz);
-		return -EINVAL;
-	}
 	if (ret && ret != -EAGAIN)
 		return ret;
 
