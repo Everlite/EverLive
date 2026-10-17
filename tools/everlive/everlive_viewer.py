@@ -339,6 +339,7 @@ class GameStreamer:
     def __init__(self, vdev: Optional[str] = None, adev: Optional[str] = None, force_mpv: bool = False):
         self.vdev = vdev if vdev is not None else find_gc573_vdev()
         self.adev = adev if adev is not None else find_gc573_adev()
+        self.pw_node = find_pipewire_source_node()
         self.force_mpv = force_mpv
         self.mpv_proc: Optional[subprocess.Popen] = None
         self.arecord_proc: Optional[subprocess.Popen] = None
@@ -550,6 +551,8 @@ class GameStreamer:
 
         if not self.force_mpv and os.path.isfile(native_bin) and os.access(native_bin, os.X_OK):
             cmd = [native_bin, "-d", self.vdev, "-a", self.adev]
+            if self.pw_node:
+                cmd.extend(["--pw-node", self.pw_node])
             if fullscreen:
                 cmd.append("-f")
             if vsync:
@@ -611,11 +614,10 @@ class GameStreamer:
                         "node.name = \"everlive-audio\" node.description = \"EverLive Game Audio\" "
                         "media.name = \"HDMI Game Audio\" media.role = \"Game\" }"
                     )
-                    pw_node = find_pipewire_source_node()
-                    if pw_node:
+                    if self.pw_node:
                         cmd = (
-                            f"pw-loopback -i '{{ target.object = \"{pw_node}\" }}' -l 20 "
-                            f"-o '{props}' 2>/dev/null"
+                            f"pw-loopback -i '{{ target.object = \"{self.pw_node}\" resample.disable = false }}' -l 20 "
+                            f"-o '{{ resample.disable = false resample.quality = 4 {props[1:-1]} }}' 2>/dev/null"
                         )
                     else:
                         plug_adev = f"plughw:{self.adev[3:]}" if self.adev.startswith("hw:") else self.adev
@@ -1137,7 +1139,11 @@ if HAS_QT:
             b_layout = QHBoxLayout(bottom_box)
             b_layout.setContentsMargins(4, 2, 4, 2)
 
-            lbl_vdev = QLabel(f"V4L2: {self.streamer.vdev} • ALSA: {self.streamer.adev}")
+            if self.streamer.pw_node:
+                audio_str = f"PipeWire ({self.streamer.pw_node})"
+            else:
+                audio_str = f"ALSA ({self.streamer.adev})"
+            lbl_vdev = QLabel(f"V4L2: {self.streamer.vdev} • Audio: {audio_str}")
             lbl_vdev.setStyleSheet("color: #64748b; font-size: 11px;")
             b_layout.addWidget(lbl_vdev)
 

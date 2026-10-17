@@ -164,6 +164,8 @@ static void sigusr1_handler(int sig)
     g_show_stats = !g_show_stats;
 }
 
+static char g_pw_node[256] = {0};
+
 static bool detect_pipewire_source(char *out_node, size_t max_len)
 {
     const char *cmd =
@@ -206,17 +208,16 @@ static void start_audio_pipeline(const char *adev)
     if (pid == 0) {
         setpgid(0, 0);
 
-        char pw_node[256] = {0};
         char cmd[2048];
 
-        if (detect_pipewire_source(pw_node, sizeof(pw_node)) && pw_node[0]) {
-            /* Native PipeWire loopback with adaptive resampler (immune to clock drift) */
+        if (g_pw_node[0] != '\0') {
+            /* Native PipeWire loopback with explicit adaptive resampler enabled (immune to clock drift) */
             snprintf(cmd, sizeof(cmd),
-                     "pw-loopback -i '{ target.object = \"%s\" }' -l 20 "
-                     "-o '{ application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" "
+                     "pw-loopback -i '{ target.object = \"%s\" resample.disable = false }' -l 20 "
+                     "-o '{ resample.disable = false resample.quality = 4 application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" "
                      "application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"everlive-audio\" "
                      "node.description = \"EverLive Game Audio\" media.name = \"HDMI Game Audio\" media.role = \"Game\" }' 2>/dev/null",
-                     pw_node, (int)parent_pid);
+                     g_pw_node, (int)parent_pid);
         } else {
             /* Fallback to ALSA arecord -> pw-play with tuned 10ms period */
             char plug_dev[256];
@@ -562,10 +563,13 @@ int main(int argc, char *argv[])
                 g_volume = v;
             }
         }
+        else if (!strcmp(argv[i], "--pw-node") && i + 1 < argc) {
+            strncpy(g_pw_node, argv[++i], sizeof(g_pw_node) - 1);
+        }
         else if (!strcmp(argv[i], "--no-audio") || !strcmp(argv[i], "-n"))
             adev = "none";
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
-            printf("Usage: %s [-f|--fullscreen] [--vsync] [-s|--streamer-mode] [-d /dev/videoX] [-a hw:CARD,DEV|none] [-w wid] [--no-audio]\n", argv[0]);
+            printf("Usage: %s [-f|--fullscreen] [--vsync] [-s|--streamer-mode] [-d /dev/videoX] [-a hw:CARD,DEV|none] [--pw-node node_name] [-w wid] [--no-audio]\n", argv[0]);
             return 0;
         }
     }
@@ -592,6 +596,15 @@ int main(int argc, char *argv[])
     }
     if (!adev)
         adev = detect_adev();
+
+    if (adev && strcmp(adev, "none") != 0 && g_pw_node[0] == '\0') {
+        detect_pipewire_source(g_pw_node, sizeof(g_pw_node));
+    }
+    if (g_pw_node[0] != '\0') {
+        printf("[Audio] Native PipeWire Loopback active (Source: %s)\n", g_pw_node);
+    } else if (adev && strcmp(adev, "none") != 0) {
+        printf("[Audio] ALSA fallback active (Device: %s)\n", adev);
+    }
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);

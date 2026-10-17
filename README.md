@@ -139,7 +139,7 @@ flowchart TD
     v4l2 -->|"mmap, then SDL texture upload"| game
     game -->|"VSync off by default"| screen["120 Hz Monitor"]
 
-    alsa -->|arecord| pw["PipeWire (pw-play, 20 ms)"]
+    alsa -->|"pw-loopback (adaptive resampler)"| pw["PipeWire (20 ms)"]
     pw -->|Channel mixdown| speakers["Headset / Speakers"]
   end
 ```
