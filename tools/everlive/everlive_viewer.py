@@ -117,11 +117,48 @@ def find_pipewire_source_node() -> Optional[str]:
                 driver = p.get("alsa.driver_name", "")
                 card_id = p.get("alsa.id", "")
                 card_name = p.get("alsa.card_name", "")
-                dev = p.get("card.profile.device", 0)
-                if (driver == "open_gc573" or card_id in ("A4K", "GC573") or "Live Gamer 4K" in card_name) and dev in (0, "0", None):
-                    return p.get("node.name")
+                node_name = p.get("node.name", "")
+                node_desc = p.get("node.description", "")
+                alsa_name = p.get("alsa.name", "")
+                dev = p.get("card.profile.device", p.get("alsa.device", 0))
+
+                is_gc573 = (
+                    driver == "open_gc573"
+                    or card_id in ("A4K", "GC573")
+                    or "live gamer 4k" in card_name.lower()
+                    or "live gamer 4k" in node_desc.lower()
+                    or "gc573" in node_name.lower()
+                    or "gc573" in node_desc.lower()
+                    or "gc573" in alsa_name.lower()
+                )
+                is_hdmi = (
+                    dev in (0, "0", None)
+                    and "line" not in node_desc.lower()
+                    and "line" not in alsa_name.lower()
+                    and "input-1" not in node_name
+                )
+                if is_gc573 and is_hdmi:
+                    return node_name
     except Exception:
         pass
+
+    # Secondary check via wpctl status if pw-dump didn't match
+    try:
+        out = subprocess.check_output(["wpctl", "status"], stderr=subprocess.DEVNULL).decode("utf-8", errors="ignore")
+        in_sources = False
+        for line in out.splitlines():
+            if "Sources:" in line:
+                in_sources = True
+                continue
+            elif in_sources and ("Sinks:" in line or "Filters:" in line or "Streams:" in line):
+                break
+            if in_sources and ("live gamer 4k" in line.lower() or "gc573" in line.lower()) and "line" not in line.lower():
+                parts = line.strip().split(".")
+                if parts and parts[0].strip().lstrip("*").strip().isdigit():
+                    return parts[0].strip().lstrip("*").strip()
+    except Exception:
+        pass
+
     return None
 
 
@@ -622,10 +659,8 @@ class GameStreamer:
                     else:
                         plug_adev = f"plughw:{self.adev[3:]}" if self.adev.startswith("hw:") else self.adev
                         cmd = (
-                            f"{{ arecord -D '{self.adev}' -f S16_LE -c 8 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null || "
-                            f"   arecord -D '{self.adev}' -f S16_LE -c 6 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null || "
-                            f"   arecord -D '{self.adev}' -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null || "
-                            f"   arecord -D '{plug_adev}' -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null; }} | "
+                            f"{{ arecord -D '{self.adev}' -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null || "
+                            f"   arecord -D '{plug_adev}' -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null; }} | "
                             f"pw-play --latency=40ms -P '{props}' - 2>/dev/null"
                         )
                     self.pwplay_proc = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid)

@@ -176,8 +176,46 @@ static bool detect_pipewire_source(char *out_node, size_t max_len)
         "    for n in json.loads(out):\n"
         "        p = n.get(\"info\", {}).get(\"props\", {})\n"
         "        if p.get(\"media.class\") == \"Audio/Source\":\n"
-        "            if (p.get(\"alsa.driver_name\") == \"open_gc573\" or p.get(\"alsa.id\") in (\"A4K\", \"GC573\") or \"Live Gamer 4K\" in p.get(\"alsa.card_name\", \"\")) and p.get(\"card.profile.device\", 0) in (0, \"0\", None):\n"
-        "                sys.stdout.write(p.get(\"node.name\", \"\"))\n"
+        "            driver = p.get(\"alsa.driver_name\", \"\")\n"
+        "            card_id = p.get(\"alsa.id\", \"\")\n"
+        "            card_name = p.get(\"alsa.card_name\", \"\")\n"
+        "            node_name = p.get(\"node.name\", \"\")\n"
+        "            node_desc = p.get(\"node.description\", \"\")\n"
+        "            alsa_name = p.get(\"alsa.name\", \"\")\n"
+        "            dev = p.get(\"card.profile.device\", p.get(\"alsa.device\", 0))\n"
+        "            is_gc573 = (\n"
+        "                driver == \"open_gc573\"\n"
+        "                or card_id in (\"A4K\", \"GC573\")\n"
+        "                or \"live gamer 4k\" in card_name.lower()\n"
+        "                or \"live gamer 4k\" in node_desc.lower()\n"
+        "                or \"gc573\" in node_name.lower()\n"
+        "                or \"gc573\" in node_desc.lower()\n"
+        "                or \"gc573\" in alsa_name.lower()\n"
+        "            )\n"
+        "            is_hdmi = (\n"
+        "                dev in (0, \"0\", None)\n"
+        "                and \"line\" not in node_desc.lower()\n"
+        "                and \"line\" not in alsa_name.lower()\n"
+        "                and \"input-1\" not in node_name\n"
+        "            )\n"
+        "            if is_gc573 and is_hdmi:\n"
+        "                sys.stdout.write(node_name)\n"
+        "                sys.exit(0)\n"
+        "except Exception:\n"
+        "    pass\n"
+        "try:\n"
+        "    out = subprocess.check_output([\"wpctl\", \"status\"], stderr=subprocess.DEVNULL).decode(\"utf-8\", errors=\"ignore\")\n"
+        "    in_sources = False\n"
+        "    for line in out.splitlines():\n"
+        "        if \"Sources:\" in line:\n"
+        "            in_sources = True\n"
+        "            continue\n"
+        "        elif in_sources and (\"Sinks:\" in line or \"Filters:\" in line or \"Streams:\" in line):\n"
+        "            break\n"
+        "        if in_sources and (\"live gamer 4k\" in line.lower() or \"gc573\" in line.lower()) and \"line\" not in line.lower():\n"
+        "            parts = line.strip().split(\".\")\n"
+        "            if parts and parts[0].strip().lstrip(\"*\").strip().isdigit():\n"
+        "                sys.stdout.write(parts[0].strip().lstrip(\"*\").strip())\n"
         "                sys.exit(0)\n"
         "except Exception:\n"
         "    pass\n"
@@ -219,7 +257,7 @@ static void start_audio_pipeline(const char *adev)
                      "node.description = \"EverLive Game Audio\" media.name = \"HDMI Game Audio\" media.role = \"Game\" }' 2>/dev/null",
                      g_pw_node, (int)parent_pid);
         } else {
-            /* Fallback to ALSA arecord -> pw-play with tuned 20ms period / 80ms buffer */
+            /* Fallback to ALSA arecord -> pw-play with formatted WAV stream */
             char plug_dev[256];
             if (strncmp(adev, "hw:", 3) == 0) {
                 snprintf(plug_dev, sizeof(plug_dev), "plughw:%s", adev + 3);
@@ -228,12 +266,10 @@ static void start_audio_pipeline(const char *adev)
             }
 
             snprintf(cmd, sizeof(cmd),
-                     "{ arecord -D \"%s\" -f S16_LE -c 8 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null || "
-                     "  arecord -D \"%s\" -f S16_LE -c 6 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null || "
-                     "  arecord -D \"%s\" -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null || "
-                     "  arecord -D \"%s\" -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null; } | "
+                     "{ arecord -D \"%s\" -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null || "
+                     "  arecord -D \"%s\" -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null; } | "
                      "pw-play --latency=40ms -P '{ application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"everlive-audio\" node.description = \"EverLive Game Audio\" media.name = \"HDMI Game Audio\" media.role = \"Game\" }' - 2>/dev/null",
-                     adev, adev, adev, plug_dev, (int)parent_pid);
+                     adev, plug_dev, (int)parent_pid);
         }
 
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
