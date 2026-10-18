@@ -11,10 +11,6 @@
 
 #include "gc573.h"
 
-static int led_mode = 0;
-module_param(led_mode, int, 0644);
-MODULE_PARM_DESC(led_mode, "LED lighting mode: 0=off (dark), 1=solid blue, 2=solid green, 3=solid red, 4=cyan, 5=magenta, 6=yellow, 7=white");
-
 #define GC555_LED_COUNT			26
 #define GC555_LED_COLORS		3
 #define GC555_LED_I2C_ADDRESS		0x74
@@ -37,15 +33,23 @@ struct gc555_led_pixel {
 	unsigned int index;
 };
 
+struct gc573_fpga_led {
+	struct led_classdev_mc mc;
+	struct mc_subled subled[GC555_LED_COLORS];
+	struct gc555_dev *gc555;
+	char name[32];
+	bool registered;
+};
+
 struct gc555_led {
 	struct gc555_dev *gc555;
 	struct i2c_client *client;
 	struct delayed_work update_work;
 	struct mutex lock;
 	struct gc555_led_pixel pixels[GC555_LED_COUNT];
+	struct gc573_fpga_led fpga_led;
 	u8 pwm[GC555_LED_PWM_REG_COUNT];
 	unsigned int registered;
-	int mode;
 	bool running;
 };
 
@@ -254,6 +258,9 @@ static void gc573_fpga_write_rgb(struct gc555_dev *gc555, bool r, bool g, bool b
 {
 	int i;
 
+	if (!gc555 || !gc555->bridge.regs)
+		return;
+
 	gc555_bridge_write(gc555, GC573_LED_REG_DIVIDER, 0x0003ffff);
 	for (i = 0; i < 5; i++) {
 		u32 btn_reg = GC573_LED_REG_BTN_BASE + i * 24;
@@ -270,106 +277,69 @@ static void gc573_fpga_write_rgb(struct gc555_dev *gc555, bool r, bool g, bool b
 	gc555_bridge_write(gc555, GC573_LED_REG_ENABLE, (r || g || b) ? 0x1f : 0x00);
 }
 
-static void gc573_fpga_set_led(struct gc555_dev *gc555, int mode)
+static int gc573_led_set_brightness(struct led_classdev *cdev,
+				    enum led_brightness brightness)
 {
-	if (!gc555 || !gc555->bridge.regs)
-		return;
+	struct led_classdev_mc *mc = lcdev_to_mccdev(cdev);
+	struct gc573_fpga_led *fpga_led =
+		container_of(mc, struct gc573_fpga_led, mc);
+	struct gc555_dev *gc555 = fpga_led->gc555;
+	bool r, g, b;
 
-	/* Stop the FPGA hardware LED sequencer before reprogram */
-	gc555_bridge_write(gc555, GC573_LED_REG_ENABLE, 0x00);
+	led_mc_calc_color_components(mc, brightness);
 
-	switch (mode) {
-	case 0: /* All LEDs OFF / Dark */
-		gc573_fpga_write_rgb(gc555, false, false, false);
-		break;
-	case 1: /* Solid Blue (Profile 4 from official customer_LEDgc573.txt) */
-		gc573_fpga_write_rgb(gc555, false, false, true);
-		break;
-	case 2: /* Solid Green */
-		gc573_fpga_write_rgb(gc555, false, true, false);
-		break;
-	case 3: /* Solid Red (Profile 1) */
-		gc573_fpga_write_rgb(gc555, true, false, false);
-		break;
-	case 4: /* Cyan / Türkis */
-		gc573_fpga_write_rgb(gc555, false, true, true);
-		break;
-	case 5: /* Magenta / Lila */
-		gc573_fpga_write_rgb(gc555, true, false, true);
-		break;
-	case 6: /* Gelb */
-		gc573_fpga_write_rgb(gc555, true, true, false);
-		break;
-	case 7: /* Weiß */
-		gc573_fpga_write_rgb(gc555, true, true, true);
-		break;
-	default:
-		break;
-	}
+	r = mc->subled_info[0].brightness > 0;
+	g = mc->subled_info[1].brightness > 0;
+	b = mc->subled_info[2].brightness > 0;
+
+	gc573_fpga_write_rgb(gc555, r, g, b);
+	return 0;
 }
 
-int gc555_led_get_mode(struct gc555_dev *gc555)
+static int gc573_led_register(struct gc555_led *led)
 {
-	if (!gc555 || !gc555->led)
-		return -ENODEV;
-	return gc555->led->mode;
-}
+	struct gc555_dev *gc555 = led->gc555;
+	struct gc573_fpga_led *fpga_led = &led->fpga_led;
+	int ret;
 
-int gc555_led_set_mode(struct gc555_dev *gc555, int mode)
-{
-	struct gc555_led *led;
-	u8 enable[GC555_LED_ENABLE_REG_COUNT];
-	int ret = 0;
+	fpga_led->gc555 = gc555;
+	fpga_led->subled[0].color_index = LED_COLOR_ID_RED;
+	fpga_led->subled[1].color_index = LED_COLOR_ID_GREEN;
+	fpga_led->subled[2].color_index = LED_COLOR_ID_BLUE;
+	fpga_led->subled[0].intensity = 255;
+	fpga_led->subled[1].intensity = 255;
+	fpga_led->subled[2].intensity = 255;
 
-	if (!gc555 || !gc555->led)
-		return -ENODEV;
+	fpga_led->mc.num_colors = GC555_LED_COLORS;
+	fpga_led->mc.subled_info = fpga_led->subled;
 
-	if (mode < 0 || mode > 7)
-		return -EINVAL;
+	snprintf(fpga_led->name, sizeof(fpga_led->name), "gc573:rgb:status");
+	fpga_led->mc.led_cdev.name = fpga_led->name;
+	fpga_led->mc.led_cdev.max_brightness = 255;
+	fpga_led->mc.led_cdev.brightness = 0;
+	fpga_led->mc.led_cdev.brightness_set_blocking = gc573_led_set_brightness;
 
-	/* 1. Control GC573 FPGA hardware MMIO RGB LED engine (0x800-0x81c, 0x2008) */
-	gc573_fpga_set_led(gc555, mode);
+	/* Stop factory red-blinking hardware sequencer immediately and stay dark */
+	gc573_fpga_write_rgb(gc555, false, false, false);
 
-	led = gc555->led;
-	mutex_lock(&led->lock);
-
-	/* If GC555 IS31FL3731 I2C controller is present (GC555 Live Gamer BOLT only) */
-	if (led->client && gc555->pdev->subsystem_device == GC555_PCI_SUBDEVICE_ID) {
-		if (mode == 0) {
-			gc555_bridge_set_gpio(gc555, 9, true, 5);
-			gc555_led_select_page(led, GC555_LED_FUNCTION_PAGE);
-			gc555_led_write_byte(led, 0x00, 0x00);
-			gc555_led_write_byte(led, 0x08, 0x00);
-			gc555_led_write_byte(led, 0x09, 0x00);
-			gc555_led_write_byte(led, 0x0f, 0x00);
-			gc555_led_write_byte(led, 0x0a, 0x00);
-			gc555_led_select_page(led, GC555_LED_PWM_PAGE);
-			memset(enable, 0, sizeof(enable));
-			gc555_led_write(led, 0x00, enable, sizeof(enable));
-			memset(led->pwm, 0, sizeof(led->pwm));
-			gc555_led_write_chunked(led, GC555_LED_PWM_FIRST_REG,
-					       led->pwm, sizeof(led->pwm));
-			gc555_bridge_set_gpio(gc555, 9, false, 0);
-		} else {
-			gc555_bridge_set_gpio(gc555, 9, true, 10);
-			gc555_led_select_page(led, GC555_LED_FUNCTION_PAGE);
-			gc555_led_write_byte(led, 0x00, 0x00);
-			gc555_led_write_byte(led, 0x01, 0x00);
-			gc555_led_write_byte(led, 0x08, 0x00);
-			gc555_led_write_byte(led, 0x09, 0x00);
-			gc555_led_write_byte(led, 0x0f, 0x00);
-			gc555_led_write_byte(led, 0x0a, 0x01);
-			gc555_led_select_page(led, GC555_LED_PWM_PAGE);
-			memset(enable, 0xff, sizeof(enable));
-			gc555_led_write(led, 0x00, enable, sizeof(enable));
-		}
+	ret = led_classdev_multicolor_register(gc555->dev, &fpga_led->mc);
+	if (ret) {
+		dev_warn(gc555->dev, "failed to register multicolor LED: %d\n", ret);
+		return ret;
 	}
 
-	led->mode = mode;
-	dev_info(gc555->dev, "LED mode set to %d\n", mode);
+	fpga_led->registered = true;
+	dev_info(gc555->dev, "registered multicolor LED device '%s'\n", fpga_led->name);
+	return 0;
+}
 
-	mutex_unlock(&led->lock);
-	return ret;
+static void gc573_led_unregister(struct gc555_led *led)
+{
+	if (led->fpga_led.registered) {
+		led_classdev_multicolor_unregister(&led->fpga_led.mc);
+		led->fpga_led.registered = false;
+	}
+	gc573_fpga_write_rgb(led->gc555, false, false, false);
 }
 
 static struct i2c_client *gc555_led_probe_client(struct gc555_dev *gc555)
@@ -449,11 +419,10 @@ int gc555_led_init(struct gc555_dev *gc555)
 			led->client = NULL;
 		}
 	} else {
-		led->client = NULL;
+		ret = gc573_led_register(led);
+		if (ret)
+			return ret;
 	}
-
-	/* Apply configured LED mode at driver load (FPGA MMIO & I2C) */
-	gc555_led_set_mode(gc555, led_mode);
 
 	return 0;
 }
@@ -462,20 +431,22 @@ void gc555_led_cleanup(struct gc555_dev *gc555)
 {
 	struct gc555_led *led;
 
-	gc573_fpga_set_led(gc555, 0);
-
 	if (!gc555 || !gc555->led)
 		return;
 
 	led = gc555->led;
-	mutex_lock(&led->lock);
-	led->running = false;
-	mutex_unlock(&led->lock);
-	cancel_delayed_work_sync(&led->update_work);
-	if (led->client) {
-		gc555_led_unregister_pixels(led);
-		i2c_unregister_device(led->client);
-		led->client = NULL;
+	if (gc555->pdev->subsystem_device != GC555_PCI_SUBDEVICE_ID) {
+		gc573_led_unregister(led);
+	} else {
+		mutex_lock(&led->lock);
+		led->running = false;
+		mutex_unlock(&led->lock);
+		cancel_delayed_work_sync(&led->update_work);
+		if (led->client) {
+			gc555_led_unregister_pixels(led);
+			i2c_unregister_device(led->client);
+			led->client = NULL;
+		}
 	}
 	gc555->led = NULL;
 }
@@ -488,27 +459,36 @@ void gc555_led_suspend(struct gc555_dev *gc555)
 		return;
 
 	led = gc555->led;
-	mutex_lock(&led->lock);
-	led->running = false;
-	mutex_unlock(&led->lock);
-	cancel_delayed_work_sync(&led->update_work);
+	if (gc555->pdev->subsystem_device != GC555_PCI_SUBDEVICE_ID) {
+		gc573_fpga_write_rgb(gc555, false, false, false);
+	} else {
+		mutex_lock(&led->lock);
+		led->running = false;
+		mutex_unlock(&led->lock);
+		cancel_delayed_work_sync(&led->update_work);
+	}
 }
 
 int gc555_led_resume(struct gc555_dev *gc555)
 {
 	struct gc555_led *led;
-	int ret;
+	int ret = 0;
 
 	if (!gc555 || !gc555->led)
 		return 0;
 
 	led = gc555->led;
+	if (gc555->pdev->subsystem_device != GC555_PCI_SUBDEVICE_ID) {
+		if (led->fpga_led.registered)
+			gc573_led_set_brightness(&led->fpga_led.mc.led_cdev,
+						 led->fpga_led.mc.led_cdev.brightness);
+		return 0;
+	}
+
 	mutex_lock(&led->lock);
 	ret = gc555_led_hw_init(led);
-	if (!ret) {
+	if (!ret)
 		led->running = true;
-		gc555_led_set_mode(gc555, led->mode);
-	}
 	mutex_unlock(&led->lock);
 
 	return ret;

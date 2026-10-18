@@ -1102,7 +1102,7 @@ static int gc555_video_querycap(struct file *file, void *priv,
 	struct gc555_video *video = video_drvdata(file);
 	struct gc555_dev *gc555 = READ_ONCE(video->gc555);
 
-	strscpy(capability->driver, "gc555", sizeof(capability->driver));
+	strscpy(capability->driver, "open_gc573", sizeof(capability->driver));
 	strscpy(capability->card,
 		gc555 && gc555->pdev->subsystem_device == 0x5730 ?
 		"AVerMedia Live Gamer 4K GC573" :

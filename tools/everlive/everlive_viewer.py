@@ -250,8 +250,11 @@ def create_led_icon(mode: int, size: int = 14):
 
 
 def find_led_sysfs_path() -> Optional[str]:
-    """Locates the open_gc573 sysfs led_mode attribute."""
+    """Locates the open_gc573 standard multicolor LED class or legacy sysfs led_mode attribute."""
     import glob
+    led_class = "/sys/class/leds/gc573:rgb:status"
+    if os.path.exists(led_class):
+        return led_class
     candidates = glob.glob("/sys/bus/pci/drivers/open_gc573/*/led_mode")
     if candidates and os.path.exists(candidates[0]):
         return candidates[0]
@@ -261,12 +264,36 @@ def find_led_sysfs_path() -> Optional[str]:
 def read_led_mode() -> int:
     """Reads current LED mode from kernel driver."""
     path = find_led_sysfs_path()
-    if path:
-        try:
+    if not path:
+        return -1
+    try:
+        if os.path.isdir(path):
+            # Official Linux Multicolor LED classdev
+            with open(os.path.join(path, "brightness"), "r") as f:
+                brightness = int(f.read().strip())
+            if brightness == 0:
+                return 0
+            with open(os.path.join(path, "multi_intensity"), "r") as f:
+                vals = [int(x) > 0 for x in f.read().strip().split()]
+            if len(vals) >= 3:
+                r, g, b = vals[0], vals[1], vals[2]
+                modes = {
+                    (False, False, False): 0,
+                    (False, False, True): 1,
+                    (False, True, False): 2,
+                    (True, False, False): 3,
+                    (False, True, True): 4,
+                    (True, False, True): 5,
+                    (True, True, False): 6,
+                    (True, True, True): 7,
+                }
+                return modes.get((r, g, b), 1)
+            return 1
+        else:
             with open(path, "r") as f:
                 return int(f.read().strip())
-        except Exception:
-            pass
+    except Exception:
+        pass
     return -1
 
 
@@ -277,9 +304,28 @@ def write_led_mode(mode: int) -> bool:
         return False
     success = False
     try:
-        with open(path, "w") as f:
-            f.write(f"{mode}\n")
-        success = True
+        if os.path.isdir(path):
+            # Official Linux Multicolor LED classdev
+            colors = {
+                0: ((0, 0, 0), 0),
+                1: ((0, 0, 255), 255),
+                2: ((0, 255, 0), 255),
+                3: ((255, 0, 0), 255),
+                4: ((0, 255, 255), 255),
+                5: ((255, 0, 255), 255),
+                6: ((255, 255, 0), 255),
+                7: ((255, 255, 255), 255),
+            }
+            rgb, brightness = colors.get(mode, ((0, 0, 0), 0))
+            with open(os.path.join(path, "multi_intensity"), "w") as f:
+                f.write(f"{rgb[0]} {rgb[1]} {rgb[2]}\n")
+            with open(os.path.join(path, "brightness"), "w") as f:
+                f.write(f"{brightness}\n")
+            success = True
+        else:
+            with open(path, "w") as f:
+                f.write(f"{mode}\n")
+            success = True
     except Exception:
         success = False
 

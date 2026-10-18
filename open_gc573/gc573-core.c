@@ -63,35 +63,6 @@ static struct bin_attribute input_edid_attr = {
 	.read = input_edid_read,
 };
 
-static ssize_t led_mode_show(struct device *dev,
-			     struct device_attribute *attr, char *buf)
-{
-	struct pci_dev *pdev = to_pci_dev(dev);
-	struct gc555_dev *gc555 = pci_get_drvdata(pdev);
-	int mode = gc555_led_get_mode(gc555);
-
-	return sysfs_emit(buf, "%d\n", mode);
-}
-
-static ssize_t led_mode_store(struct device *dev,
-			      struct device_attribute *attr,
-			      const char *buf, size_t count)
-{
-	struct pci_dev *pdev = to_pci_dev(dev);
-	struct gc555_dev *gc555 = pci_get_drvdata(pdev);
-	int mode, ret;
-
-	ret = kstrtoint(buf, 10, &mode);
-	if (ret)
-		return ret;
-
-	ret = gc555_led_set_mode(gc555, mode);
-	if (ret)
-		return ret;
-
-	return count;
-}
-static DEVICE_ATTR_RW(led_mode);
 
 static ssize_t hpd_pulse_store(struct device *dev,
 			       struct device_attribute *attr,
@@ -220,15 +191,9 @@ static int gc555_probe(struct pci_dev *pdev,
 	if (ret)
 		goto cleanup_it6664;
 
-	ret = device_create_file(&pdev->dev, &dev_attr_led_mode);
-	if (ret)
-		goto remove_input_edid;
-	if (sysfs_chmod_file(&pdev->dev.kobj, &dev_attr_led_mode.attr, 0660))
-		dev_warn(&pdev->dev, "Could not set permissions for led_mode to 0660\n");
-
 	ret = device_create_file(&pdev->dev, &dev_attr_hpd_pulse);
 	if (ret)
-		goto remove_led_mode;
+		goto remove_input_edid;
 	if (sysfs_chmod_file(&pdev->dev.kobj, &dev_attr_hpd_pulse.attr, 0660))
 		dev_warn(&pdev->dev, "Could not set permissions for hpd_pulse to 0660\n");
 
@@ -274,8 +239,6 @@ cleanup_it6805:
 	gc555_it6805_cleanup(gc555);
 remove_hpd_pulse:
 	device_remove_file(&pdev->dev, &dev_attr_hpd_pulse);
-remove_led_mode:
-	device_remove_file(&pdev->dev, &dev_attr_led_mode);
 remove_input_edid:
 	sysfs_remove_bin_file(&pdev->dev.kobj, &input_edid_attr);
 cleanup_it6664:
@@ -320,7 +283,6 @@ static void gc555_remove(struct pci_dev *pdev)
 	gc555_it6664_suspend(gc555);
 	gc555_led_suspend(gc555);
 	device_remove_file(&pdev->dev, &dev_attr_hpd_pulse);
-	device_remove_file(&pdev->dev, &dev_attr_led_mode);
 	sysfs_remove_bin_file(&pdev->dev.kobj, &input_edid_attr);
 
 	gc555_video_cleanup(gc555);

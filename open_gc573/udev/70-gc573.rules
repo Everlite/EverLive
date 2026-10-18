@@ -14,5 +14,5 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", \
   SYMLINK+="v4l/by-id/$env{ID_BUS}-$env{ID_SERIAL}-video-index$attr{index}"
 
 # Allow regular desktop users to control RGB LED lighting and trigger HDMI HPD re-sync
-SUBSYSTEM=="pci", ATTRS{vendor}=="0x1461", ATTRS{device}=="0x0054", TEST=="led_mode", RUN+="/bin/chgrp video /sys%p/led_mode", RUN+="/bin/chmod 0660 /sys%p/led_mode"
+SUBSYSTEM=="leds", KERNEL=="gc573:rgb:status", ACTION=="add", RUN+="/bin/chgrp video /sys/class/leds/%k/brightness /sys/class/leds/%k/multi_intensity", RUN+="/bin/chmod 0660 /sys/class/leds/%k/brightness /sys/class/leds/%k/multi_intensity"
 SUBSYSTEM=="pci", ATTRS{vendor}=="0x1461", ATTRS{device}=="0x0054", TEST=="hpd_pulse", RUN+="/bin/chgrp video /sys%p/hpd_pulse", RUN+="/bin/chmod 0660 /sys%p/hpd_pulse"

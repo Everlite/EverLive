@@ -48,8 +48,8 @@ echo "[*] Lade neuen open_gc573 Treiber (${MODULE})..."
 insmod "${MODULE}"
 
 # Sysfs RGB LED & HPD Re-Sync Zugriff für Desktop-Benutzer (Gruppe video) freigeben
-chgrp video /sys/bus/pci/drivers/open_gc573/*/led_mode /sys/bus/pci/drivers/open_gc573/*/hpd_pulse 2>/dev/null || true
-chmod 0660 /sys/bus/pci/drivers/open_gc573/*/led_mode /sys/bus/pci/drivers/open_gc573/*/hpd_pulse 2>/dev/null || true
+chgrp video /sys/class/leds/gc573:rgb:status/brightness /sys/class/leds/gc573:rgb:status/multi_intensity /sys/bus/pci/drivers/open_gc573/*/hpd_pulse 2>/dev/null || true
+chmod 0660 /sys/class/leds/gc573:rgb:status/brightness /sys/class/leds/gc573:rgb:status/multi_intensity /sys/bus/pci/drivers/open_gc573/*/hpd_pulse 2>/dev/null || true
 
 echo "[+] open_gc573 erfolgreich geladen!"
 
@@ -67,7 +67,7 @@ cat > /etc/udev/rules.d/70-everlive.rules <<'UDEV_EOF' 2>/dev/null || true
 # AVerMedia Live Gamer 4K (GC573) - EverLive Gaming Access
 SUBSYSTEM=="video4linux", KERNEL=="video*", ATTRS{vendor}=="0x1461", ATTRS{device}=="0x0054", MODE="0660", TAG+="uaccess", GROUP="video"
 SUBSYSTEM=="sound", KERNEL=="pcmC*D*c", ATTRS{vendor}=="0x1461", ATTRS{device}=="0x0054", MODE="0660", TAG+="uaccess", GROUP="audio"
-SUBSYSTEM=="pci", ATTRS{vendor}=="0x1461", ATTRS{device}=="0x0054", TEST=="led_mode", RUN+="/bin/chgrp video /sys%p/led_mode", RUN+="/bin/chmod 0660 /sys%p/led_mode"
+SUBSYSTEM=="leds", KERNEL=="gc573:rgb:status", ACTION=="add", RUN+="/bin/chgrp video /sys/class/leds/%k/brightness /sys/class/leds/%k/multi_intensity", RUN+="/bin/chmod 0660 /sys/class/leds/%k/brightness /sys/class/leds/%k/multi_intensity"
 SUBSYSTEM=="pci", ATTRS{vendor}=="0x1461", ATTRS{device}=="0x0054", TEST=="hpd_pulse", RUN+="/bin/chgrp video /sys%p/hpd_pulse", RUN+="/bin/chmod 0660 /sys%p/hpd_pulse"
 UDEV_EOF
 udevadm control --reload-rules 2>/dev/null || true

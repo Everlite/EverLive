@@ -210,7 +210,7 @@ cat > /etc/udev/rules.d/70-everlive.rules <<EOF
 # AVerMedia Live Gamer 4K (GC573) - EverLive Gaming Access
 SUBSYSTEM=="video4linux", KERNEL=="video*", ATTRS{vendor}=="0x1461", ATTRS{device}=="0x0054", MODE="0660", TAG+="uaccess", GROUP="video"
 SUBSYSTEM=="sound", KERNEL=="pcmC*D*c", ATTRS{vendor}=="0x1461", ATTRS{device}=="0x0054", MODE="0660", TAG+="uaccess", GROUP="audio"
-SUBSYSTEM=="pci", ATTRS{vendor}=="0x1461", ATTRS{device}=="0x0054", TEST=="led_mode", RUN+="/bin/chgrp video /sys%p/led_mode", RUN+="/bin/chmod 0660 /sys%p/led_mode"
+SUBSYSTEM=="leds", KERNEL=="gc573:rgb:status", ACTION=="add", RUN+="/bin/chgrp video /sys/class/leds/%k/brightness /sys/class/leds/%k/multi_intensity", RUN+="/bin/chmod 0660 /sys/class/leds/%k/brightness /sys/class/leds/%k/multi_intensity"
 SUBSYSTEM=="pci", ATTRS{vendor}=="0x1461", ATTRS{device}=="0x0054", TEST=="hpd_pulse", RUN+="/bin/chgrp video /sys%p/hpd_pulse", RUN+="/bin/chmod 0660 /sys%p/hpd_pulse"
 EOF
 udevadm control --reload-rules 2>/dev/null || true
@@ -249,19 +249,33 @@ fi
 
 cat > "${APPS_DIR}/everlive.desktop" <<EOF
 [Desktop Entry]
-Name=EverLive
-GenericName=Console Gaming Screen
-Comment=Ultra-Low-Latency HDMI Gaming Screen für PS5 & Konsolen (AVerMedia GC573)
+Name=EverLive Mainline
+GenericName=Console Gaming Screen (Mainline Upstream)
+Comment=Ultra-Low-Latency HDMI Gaming Screen für PS5 & Konsolen (AVerMedia GC573 - Mainline Branch)
 Exec=${SCRIPT_DIR}/play.sh
 Icon=everlive
 Terminal=false
 Type=Application
 Categories=Game;AudioVideo;Video;
-Keywords=EverLive;PS5;Capture;AVerMedia;GC573;HDMI;Gaming;Console;
+Keywords=EverLive;PS5;Capture;AVerMedia;GC573;HDMI;Gaming;Console;Mainline;
 StartupWMClass=EverLive
 EOF
 
-chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive.desktop" 2>/dev/null || true
+cat > "${APPS_DIR}/everlive-mainline.desktop" <<EOF
+[Desktop Entry]
+Name=EverLive Mainline
+GenericName=Console Gaming Screen (Mainline Upstream)
+Comment=Ultra-Low-Latency HDMI Gaming Screen für PS5 & Konsolen (AVerMedia GC573 - Mainline Branch)
+Exec=${SCRIPT_DIR}/play.sh
+Icon=everlive
+Terminal=false
+Type=Application
+Categories=Game;AudioVideo;Video;
+Keywords=EverLive;PS5;Capture;AVerMedia;GC573;HDMI;Gaming;Console;Mainline;
+StartupWMClass=EverLive
+EOF
+
+chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive.desktop" "${APPS_DIR}/everlive-mainline.desktop" 2>/dev/null || true
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "${APPS_DIR}" 2>/dev/null || true
 fi
