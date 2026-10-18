@@ -249,33 +249,20 @@ fi
 
 cat > "${APPS_DIR}/everlive.desktop" <<EOF
 [Desktop Entry]
-Name=EverLive Mainline
-GenericName=Console Gaming Screen (Mainline Upstream)
-Comment=Ultra-Low-Latency HDMI Gaming Screen für PS5 & Konsolen (AVerMedia GC573 - Mainline Branch)
+Name=EverLive
+GenericName=Console Gaming Screen
+Comment=Ultra-Low-Latency HDMI Gaming Screen für PS5 & Konsolen (AVerMedia GC573)
 Exec=${SCRIPT_DIR}/play.sh
 Icon=everlive
 Terminal=false
 Type=Application
 Categories=Game;AudioVideo;Video;
-Keywords=EverLive;PS5;Capture;AVerMedia;GC573;HDMI;Gaming;Console;Mainline;
+Keywords=EverLive;PS5;Capture;AVerMedia;GC573;HDMI;Gaming;Console;
 StartupWMClass=EverLive
 EOF
 
-cat > "${APPS_DIR}/everlive-mainline.desktop" <<EOF
-[Desktop Entry]
-Name=EverLive Mainline
-GenericName=Console Gaming Screen (Mainline Upstream)
-Comment=Ultra-Low-Latency HDMI Gaming Screen für PS5 & Konsolen (AVerMedia GC573 - Mainline Branch)
-Exec=${SCRIPT_DIR}/play.sh
-Icon=everlive
-Terminal=false
-Type=Application
-Categories=Game;AudioVideo;Video;
-Keywords=EverLive;PS5;Capture;AVerMedia;GC573;HDMI;Gaming;Console;Mainline;
-StartupWMClass=EverLive
-EOF
-
-chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive.desktop" "${APPS_DIR}/everlive-mainline.desktop" 2>/dev/null || true
+rm -f "${APPS_DIR}/everlive-mainline.desktop" 2>/dev/null || true
+chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive.desktop" 2>/dev/null || true
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "${APPS_DIR}" 2>/dev/null || true
 fi

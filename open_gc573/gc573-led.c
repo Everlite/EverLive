@@ -254,26 +254,43 @@ static void gc555_led_unregister_pixels(struct gc555_led *led)
 #define GC573_LED_REG_BTN_BASE   0x0808
 #define GC573_LED_REG_SCRIPT     0x2008
 
-static void gc573_fpga_write_rgb(struct gc555_dev *gc555, bool r, bool g, bool b)
+static void gc573_fpga_write_rgb(struct gc555_dev *gc555, u8 r, u8 g, u8 b)
 {
 	int i;
 
 	if (!gc555 || !gc555->bridge.regs)
 		return;
 
-	gc555_bridge_write(gc555, GC573_LED_REG_DIVIDER, 0x0003ffff);
+	/* 1. Stop FPGA hardware LED sequencer before reprogramming */
+	gc555_bridge_write(gc555, GC573_LED_REG_ENABLE, 0x00);
+
+	/* 2. Clock divider for Profile 241 (Constant Color) */
+	gc555_bridge_write(gc555, GC573_LED_REG_DIVIDER, 0x0000000f);
+
+	/* 3. Program button routing: Red -> Script 1 (3), Green -> Script 2 (4), Blue -> Script 3 (5) */
 	for (i = 0; i < 5; i++) {
 		u32 btn_reg = GC573_LED_REG_BTN_BASE + i * 24;
 
-		gc555_bridge_write(gc555, btn_reg + 0, r ? 3 : 2);
-		gc555_bridge_write(gc555, btn_reg + 4, r ? 4 : 2);
-		gc555_bridge_write(gc555, btn_reg + 8, g ? 3 : 2);
-		gc555_bridge_write(gc555, btn_reg + 12, g ? 4 : 2);
-		gc555_bridge_write(gc555, btn_reg + 16, b ? 3 : 2);
-		gc555_bridge_write(gc555, btn_reg + 20, b ? 4 : 2);
+		gc555_bridge_write(gc555, btn_reg + 0, 3);
+		gc555_bridge_write(gc555, btn_reg + 4, 3);
+		gc555_bridge_write(gc555, btn_reg + 8, 4);
+		gc555_bridge_write(gc555, btn_reg + 12, 4);
+		gc555_bridge_write(gc555, btn_reg + 16, 5);
+		gc555_bridge_write(gc555, btn_reg + 20, 5);
 	}
+
+	/* 4. Script RAM (0x2008):
+	 * Script 0 (offset 0) = off
+	 * Script 1 (offset 1) = Red PWM component (0xc0010000 | (r << 8) | r)
+	 * Script 2 (offset 2) = Green PWM component (0xc0010000 | (g << 8) | g)
+	 * Script 3 (offset 3) = Blue PWM component (0xc0010000 | (b << 8) | b)
+	 */
 	gc555_bridge_write(gc555, GC573_LED_REG_SCRIPT + 0, 0x00000000);
-	gc555_bridge_write(gc555, GC573_LED_REG_SCRIPT + 4, 0x40211010);
+	gc555_bridge_write(gc555, GC573_LED_REG_SCRIPT + 4, 0xc0010000 | ((u32)r << 8) | (u32)r);
+	gc555_bridge_write(gc555, GC573_LED_REG_SCRIPT + 8, 0xc0010000 | ((u32)g << 8) | (u32)g);
+	gc555_bridge_write(gc555, GC573_LED_REG_SCRIPT + 12, 0xc0010000 | ((u32)b << 8) | (u32)b);
+
+	/* 5. Start sequencer if any color component is active */
 	gc555_bridge_write(gc555, GC573_LED_REG_ENABLE, (r || g || b) ? 0x1f : 0x00);
 }
 
@@ -284,13 +301,13 @@ static int gc573_led_set_brightness(struct led_classdev *cdev,
 	struct gc573_fpga_led *fpga_led =
 		container_of(mc, struct gc573_fpga_led, mc);
 	struct gc555_dev *gc555 = fpga_led->gc555;
-	bool r, g, b;
+	u8 r, g, b;
 
 	led_mc_calc_color_components(mc, brightness);
 
-	r = mc->subled_info[0].brightness > 0;
-	g = mc->subled_info[1].brightness > 0;
-	b = mc->subled_info[2].brightness > 0;
+	r = mc->subled_info[0].brightness;
+	g = mc->subled_info[1].brightness;
+	b = mc->subled_info[2].brightness;
 
 	gc573_fpga_write_rgb(gc555, r, g, b);
 	return 0;
@@ -320,7 +337,7 @@ static int gc573_led_register(struct gc555_led *led)
 	fpga_led->mc.led_cdev.brightness_set_blocking = gc573_led_set_brightness;
 
 	/* Stop factory red-blinking hardware sequencer immediately and stay dark */
-	gc573_fpga_write_rgb(gc555, false, false, false);
+	gc573_fpga_write_rgb(gc555, 0, 0, 0);
 
 	ret = led_classdev_multicolor_register(gc555->dev, &fpga_led->mc);
 	if (ret) {
@@ -339,7 +356,7 @@ static void gc573_led_unregister(struct gc555_led *led)
 		led_classdev_multicolor_unregister(&led->fpga_led.mc);
 		led->fpga_led.registered = false;
 	}
-	gc573_fpga_write_rgb(led->gc555, false, false, false);
+	gc573_fpga_write_rgb(led->gc555, 0, 0, 0);
 }
 
 static struct i2c_client *gc555_led_probe_client(struct gc555_dev *gc555)
@@ -460,7 +477,7 @@ void gc555_led_suspend(struct gc555_dev *gc555)
 
 	led = gc555->led;
 	if (gc555->pdev->subsystem_device != GC555_PCI_SUBDEVICE_ID) {
-		gc573_fpga_write_rgb(gc555, false, false, false);
+		gc573_fpga_write_rgb(gc555, 0, 0, 0);
 	} else {
 		mutex_lock(&led->lock);
 		led->running = false;
