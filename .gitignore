@@ -41,3 +41,6 @@ tools/everlive/gc573_display
 GC573_Drv_x64_V2.2802.64.107_WHQL_Install.exe
 win_driver/
 driver_dump/
+
+# Worktree for upstream staging refactoring
+refactor/
