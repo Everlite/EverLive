@@ -108,7 +108,7 @@ def find_gc573_adev() -> str:
 
 
 def find_pipewire_source_node() -> Optional[str]:
-    """Finds the native PipeWire Audio/Source node for GC573."""
+    """Finds the native PipeWire Audio/Source node.name for GC573 HDMI Capture."""
     try:
         out = subprocess.check_output(["pw-dump", "Node"], stderr=subprocess.DEVNULL)
         for n in json.loads(out):
@@ -120,7 +120,6 @@ def find_pipewire_source_node() -> Optional[str]:
                 node_name = p.get("node.name", "")
                 node_desc = p.get("node.description", "")
                 alsa_name = p.get("alsa.name", "")
-                dev = p.get("card.profile.device", p.get("alsa.device", 0))
 
                 is_gc573 = (
                     driver == "open_gc573"
@@ -131,18 +130,19 @@ def find_pipewire_source_node() -> Optional[str]:
                     or "gc573" in node_desc.lower()
                     or "gc573" in alsa_name.lower()
                 )
-                is_hdmi = (
-                    dev in (0, "0", None)
-                    and "line" not in node_desc.lower()
-                    and "line" not in alsa_name.lower()
-                    and "input-1" not in node_name
+                is_line = (
+                    "line" in node_desc.lower()
+                    or "line" in alsa_name.lower()
+                    or "input-1" in node_name
+                    or "pro-input-1" in node_name
+                    or p.get("alsa.device") == 1
                 )
-                if is_gc573 and is_hdmi:
+                if is_gc573 and not is_line:
                     return node_name
     except Exception:
         pass
 
-    # Secondary check via wpctl status if pw-dump didn't match
+    # Secondary check via wpctl status if pw-dump didn't match directly
     try:
         import re
         out = subprocess.check_output(["wpctl", "status"], stderr=subprocess.DEVNULL).decode("utf-8", errors="ignore")
@@ -156,7 +156,18 @@ def find_pipewire_source_node() -> Optional[str]:
             if in_sources and ("live gamer 4k" in line.lower() or "gc573" in line.lower() or "a4k" in line.lower()) and "line" not in line.lower():
                 m = re.search(r"^\s*[│\s*]*(\d+)\.", line)
                 if m:
-                    return m.group(1)
+                    wp_id = m.group(1)
+                    # Resolve numeric wpctl ID to exact PipeWire node.name
+                    try:
+                        insp = subprocess.check_output(["wpctl", "inspect", wp_id], text=True, stderr=subprocess.DEVNULL)
+                        for insp_line in insp.splitlines():
+                            if "node.name" in insp_line and "=" in insp_line:
+                                actual_name = insp_line.split("=")[-1].strip().strip('"')
+                                if actual_name:
+                                    return actual_name
+                    except Exception:
+                        pass
+                    return wp_id
     except Exception:
         pass
 

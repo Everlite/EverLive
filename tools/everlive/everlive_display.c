@@ -248,16 +248,56 @@ static void start_audio_pipeline(const char *adev)
         setpgid(0, 0);
 
         char cmd[2048];
+        char target_node[256] = "";
 
         if (g_pw_node[0] != '\0') {
-            /* Native PipeWire loopback with explicit adaptive resampler enabled (immune to clock drift, 40ms safe buffer) */
+            strncpy(target_node, g_pw_node, sizeof(target_node) - 1);
+            target_node[sizeof(target_node) - 1] = '\0';
+
+            /* If a numeric wpctl ID was passed, resolve it to exact PipeWire node.name */
+            if (isdigit((unsigned char)target_node[0])) {
+                char inspect_cmd[512];
+                snprintf(inspect_cmd, sizeof(inspect_cmd), "wpctl inspect %s 2>/dev/null", g_pw_node);
+                FILE *fp = popen(inspect_cmd, "r");
+                if (fp) {
+                    char line[512];
+                    while (fgets(line, sizeof(line), fp)) {
+                        char *pos = strstr(line, "node.name");
+                        if (pos) {
+                            char *eq = strchr(pos, '=');
+                            if (eq) {
+                                char *val = eq + 1;
+                                while (*val == ' ' || *val == '"') val++;
+                                char *end = val + strlen(val) - 1;
+                                while (end > val && (*end == ' ' || *end == '"' || *end == '\n' || *end == '\r')) {
+                                    *end = '\0';
+                                    end--;
+                                }
+                                if (strlen(val) > 0) {
+                                    strncpy(target_node, val, sizeof(target_node) - 1);
+                                    target_node[sizeof(target_node) - 1] = '\0';
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    pclose(fp);
+                }
+            }
+        }
+
+        if (target_node[0] != '\0') {
+            /* Native PipeWire loopback with explicit adaptive resampler enabled (immune to clock drift, 40ms safe buffer).
+             * -C forces strict binding to the capture card node so it NEVER defaults to system microphone.
+             * node.virtual = false ensures PipeWire-Pulse assigns a real client for Cinnamon / GNOME / KDE mixers.
+             */
             snprintf(cmd, sizeof(cmd),
-                     "PIPEWIRE_PROPS='application.name=\"EverLive\" application.icon-name=\"everlive\" application.id=\"everlive\"' "
-                     "pw-loopback -i '{ target.object = \"%s\" resample.disable = false }' -l 40 "
-                     "-o '{ resample.disable = false resample.quality = 4 application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" "
-                     "application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"everlive-audio\" "
-                     "node.description = \"EverLive Game Audio\" media.name = \"HDMI Game Audio\" media.role = \"Game\" }' 2>/dev/null",
-                     g_pw_node, (int)parent_pid);
+                     "PIPEWIRE_PROPS='{ application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" }' "
+                     "pw-loopback -C \"%s\" -i '{ target.object = \"%s\" resample.disable = false }' -l 40 "
+                     "-o '{ node.virtual = false resample.disable = false resample.quality = 4 application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" "
+                     "application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"EverLive\" "
+                     "node.description = \"EverLive Game Audio\" media.name = \"EverLive\" media.role = \"Game\" }' 2>/dev/null",
+                     target_node, target_node, (int)parent_pid);
         } else {
             /* Fallback to ALSA arecord -> pw-play with formatted WAV stream */
             char plug_dev[256];
@@ -270,8 +310,8 @@ static void start_audio_pipeline(const char *adev)
             snprintf(cmd, sizeof(cmd),
                      "{ arecord -D \"%s\" -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null || "
                      "  arecord -D \"%s\" -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null; } | "
-                     "PIPEWIRE_PROPS='application.name=\"EverLive\" application.icon-name=\"everlive\" application.id=\"everlive\"' "
-                     "pw-play --latency=40ms -P '{ application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"everlive-audio\" node.description = \"EverLive Game Audio\" media.name = \"HDMI Game Audio\" media.role = \"Game\" }' - 2>/dev/null",
+                     "PIPEWIRE_PROPS='{ application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" }' "
+                     "pw-play --latency=40ms -P '{ node.virtual = false application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"EverLive\" node.description = \"EverLive Game Audio\" media.name = \"EverLive\" media.role = \"Game\" }' - 2>/dev/null",
                      adev, plug_dev, (int)parent_pid);
         }
 
