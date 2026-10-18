@@ -2,7 +2,7 @@
 Name=EverLive Mainline
 GenericName=Console Gaming Screen (Mainline Upstream)
 Comment=Ultra-Low-Latency HDMI Gaming Screen für PS5 & Konsolen (AVerMedia GC573 - Mainline Branch)
-Exec=/home/everlite/Dokumente/Projekte/Avermedia-GC573-Linux/play.sh
+Exec=/home/everlite/Dokumente/Projekte/Avermedia-GC573-Linux/refactor/play.sh
 Icon=everlive
 Terminal=false
 Type=Application
