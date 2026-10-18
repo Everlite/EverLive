@@ -144,6 +144,7 @@ def find_pipewire_source_node() -> Optional[str]:
 
     # Secondary check via wpctl status if pw-dump didn't match
     try:
+        import re
         out = subprocess.check_output(["wpctl", "status"], stderr=subprocess.DEVNULL).decode("utf-8", errors="ignore")
         in_sources = False
         for line in out.splitlines():
@@ -152,10 +153,10 @@ def find_pipewire_source_node() -> Optional[str]:
                 continue
             elif in_sources and ("Sinks:" in line or "Filters:" in line or "Streams:" in line):
                 break
-            if in_sources and ("live gamer 4k" in line.lower() or "gc573" in line.lower()) and "line" not in line.lower():
-                parts = line.strip().split(".")
-                if parts and parts[0].strip().lstrip("*").strip().isdigit():
-                    return parts[0].strip().lstrip("*").strip()
+            if in_sources and ("live gamer 4k" in line.lower() or "gc573" in line.lower() or "a4k" in line.lower()) and "line" not in line.lower():
+                m = re.search(r"^\s*[│\s*]*(\d+)\.", line)
+                if m:
+                    return m.group(1)
     except Exception:
         pass
 
@@ -651,9 +652,12 @@ class GameStreamer:
                         "node.name = \"everlive-audio\" node.description = \"EverLive Game Audio\" "
                         "media.name = \"HDMI Game Audio\" media.role = \"Game\" }"
                     )
+                    client_env = (
+                        "PIPEWIRE_PROPS='application.name=\"EverLive\" application.icon-name=\"everlive\" application.id=\"everlive\"' "
+                    )
                     if self.pw_node:
                         cmd = (
-                            f"pw-loopback -i '{{ target.object = \"{self.pw_node}\" resample.disable = false }}' -l 40 "
+                            f"{client_env}pw-loopback -i '{{ target.object = \"{self.pw_node}\" resample.disable = false }}' -l 40 "
                             f"-o '{{ resample.disable = false resample.quality = 4 {props[1:-1]} }}' 2>/dev/null"
                         )
                     else:
@@ -661,7 +665,7 @@ class GameStreamer:
                         cmd = (
                             f"{{ arecord -D '{self.adev}' -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null || "
                             f"   arecord -D '{plug_adev}' -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null; }} | "
-                            f"pw-play --latency=40ms -P '{props}' - 2>/dev/null"
+                            f"{client_env}pw-play --latency=40ms -P '{props}' - 2>/dev/null"
                         )
                     self.pwplay_proc = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid)
                 except Exception as ae:

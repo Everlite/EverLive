@@ -204,6 +204,7 @@ static bool detect_pipewire_source(char *out_node, size_t max_len)
         "except Exception:\n"
         "    pass\n"
         "try:\n"
+        "    import re\n"
         "    out = subprocess.check_output([\"wpctl\", \"status\"], stderr=subprocess.DEVNULL).decode(\"utf-8\", errors=\"ignore\")\n"
         "    in_sources = False\n"
         "    for line in out.splitlines():\n"
@@ -212,10 +213,10 @@ static bool detect_pipewire_source(char *out_node, size_t max_len)
         "            continue\n"
         "        elif in_sources and (\"Sinks:\" in line or \"Filters:\" in line or \"Streams:\" in line):\n"
         "            break\n"
-        "        if in_sources and (\"live gamer 4k\" in line.lower() or \"gc573\" in line.lower()) and \"line\" not in line.lower():\n"
-        "            parts = line.strip().split(\".\")\n"
-        "            if parts and parts[0].strip().lstrip(\"*\").strip().isdigit():\n"
-        "                sys.stdout.write(parts[0].strip().lstrip(\"*\").strip())\n"
+        "        if in_sources and (\"live gamer 4k\" in line.lower() or \"gc573\" in line.lower() or \"a4k\" in line.lower()) and \"line\" not in line.lower():\n"
+        "            m = re.search(r\"^\\s*[│\\s*]*(\\d+)\\.\", line)\n"
+        "            if m:\n"
+        "                sys.stdout.write(m.group(1))\n"
         "                sys.exit(0)\n"
         "except Exception:\n"
         "    pass\n"
@@ -251,6 +252,7 @@ static void start_audio_pipeline(const char *adev)
         if (g_pw_node[0] != '\0') {
             /* Native PipeWire loopback with explicit adaptive resampler enabled (immune to clock drift, 40ms safe buffer) */
             snprintf(cmd, sizeof(cmd),
+                     "PIPEWIRE_PROPS='application.name=\"EverLive\" application.icon-name=\"everlive\" application.id=\"everlive\"' "
                      "pw-loopback -i '{ target.object = \"%s\" resample.disable = false }' -l 40 "
                      "-o '{ resample.disable = false resample.quality = 4 application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" "
                      "application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"everlive-audio\" "
@@ -268,6 +270,7 @@ static void start_audio_pipeline(const char *adev)
             snprintf(cmd, sizeof(cmd),
                      "{ arecord -D \"%s\" -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null || "
                      "  arecord -D \"%s\" -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null; } | "
+                     "PIPEWIRE_PROPS='application.name=\"EverLive\" application.icon-name=\"everlive\" application.id=\"everlive\"' "
                      "pw-play --latency=40ms -P '{ application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"everlive-audio\" node.description = \"EverLive Game Audio\" media.name = \"HDMI Game Audio\" media.role = \"Game\" }' - 2>/dev/null",
                      adev, plug_dev, (int)parent_pid);
         }
