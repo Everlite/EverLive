@@ -71,9 +71,9 @@ After installation, launch **EverLive** from your application menu, or run:
 - **Multi-channel audio (7.1, 5.1 & stereo):** Captures console LPCM audio from ALSA (tries 8ch, then 6ch, then 2ch; falls back to `plughw` automatically) and plays it through PipeWire (`pw-play`, 10 ms latency target) as the stream **`gc573-audio`**. PipeWire mixes it down to your stereo headset or surround setup.
 - **Hardware RGB LED control (reverse-engineered):**
   - **Factory blinking fixed:** Reverse-engineered the Artix-7 FPGA lighting engine (BAR 0 `0x0800`–`0x086c`, script RAM `0x2008`). The card no longer blinks red endlessly on Linux, and you don't need Windows software.
-  - **No dropped frames, no password prompts:** The sysfs attribute `led_mode` is writable by the `video` group (`0660`). After installing, you can change colors from the hub or the CLI without `sudo`. Changes are applied via direct register writes, with no stream restart and no dropped frames.
+  - **Standard Linux Multicolor LED subsystem:** Implements the kernel multicolor LED classdev at `/sys/class/leds/gc573:rgb:status` using official Profile 241 (Constant Color 24-bit PWM).
+  - **No dropped frames, no password prompts:** Writable by the `video` group (`0660`). After installing, you can change colors from the hub or the CLI without `sudo`. Changes are applied via direct register writes, with no stream restart and no dropped frames.
   - **8 hardware profiles:** Off (Dark), Blue, Green, Red, Cyan, Magenta, Yellow and White.
-  - **Boot persistence:** Set via `/etc/modprobe.d/open_gc573.conf`.
 - **In-game HUD & live volume control:**
   - Change the volume (0–150%) with the **mouse wheel**, the keyboard, the on-screen HUD slider, or the hub slider. All of them work while you play.
   - Stats overlay (FPS, latency, jitter), **on by default**, top right of the game window. <kbd>Tab</kbd> or <kbd>i</kbd> hides it. The same line is printed to the terminal once per second. The latency figure is the time from DMA completion to dequeue, before the texture upload and the present.
@@ -128,7 +128,7 @@ flowchart TD
     ps5["PS5 / Console (1440p @ 120 FPS)"] -->|HDMI 2.0| gc573["AVerMedia GC573 (Live Gamer 4K)"]
     gc573 -->|"PCIe SG-DMA Video (3 mmap buffers)"| v4l2["V4L2 Video Device (/dev/video*)"]
     gc573 -->|"PCIe SG-DMA Audio (8ch LPCM)"| alsa["ALSA PCM Capture (hw:CARD=A4K)"]
-    gc573 -.->|"FPGA MMIO (BAR 0)"| sysfs["sysfs: led_mode / hpd_pulse"]
+    gc573 -.->|"Linux LED classdev / sysfs"| sysfs["/sys/class/leds/gc573:rgb:status<br/>sysfs: hpd_pulse"]
   end
 
   subgraph EverLive["EverLive Linux Suite"]
@@ -182,13 +182,14 @@ These controls work inside the game window:
 
 On Windows, the GC573 needs AVerMedia's background software to stop its unconfigured factory state (endless red blinking). On Linux, this used to leave the card blinking inside the PC case permanently.
 
-Through reverse-engineering of the official firmware and the FPGA register space, **EverLive has full native control over the card's RGB lighting**:
+Through reverse-engineering of the official firmware and the FPGA register space, **EverLive has full native control over the card's RGB lighting** via the standard Linux Multicolor LED subsystem (`/sys/class/leds/gc573:rgb:status`):
 
 ### Key Advantages
-* **No gameplay interruption:** Changing colors is a simple register write. It doesn't renegotiate HDMI, reset DMA, or drop frames. Tested live on PS5 during 1440p @ 120 FPS gameplay.
-* **No sudo needed:** `led_mode` is writable by the `video` group (`0660`, set by the driver and the udev rule). The installer adds your user to that group.
-* **8 hardware profiles:**
-  - `0`: 🌑 **Off (Dark)**, the driver default at load time unless you set `led_mode` (see below). If the Console Hub has no saved color, opening it writes mode `1` (blue).
+* **No gameplay interruption:** Changing colors is a direct register write. It doesn't renegotiate HDMI, reset DMA, or drop frames. Tested live on PS5 during 1440p @ 120 FPS gameplay.
+* **Standard Linux Kernel Subsystem:** Exposed via standard `led_classdev_mc` (`multi_intensity` and `brightness`), writable by the `video` group (`0660`, set by udev rules).
+* **24-bit True Hardware Color PWM:** Implements official Profile 241 with dedicated hardware PWM slots for Red, Green, and Blue.
+* **Hardware profiles:**
+  - `0`: 🌑 **Off (Dark)** (driver default at load time)
   - `1`: 🔵 **Solid Blue**
   - `2`: 🟢 **Solid Green**
   - `3`: 🔴 **Solid Red**
@@ -203,17 +204,6 @@ Through reverse-engineering of the official firmware and the FPGA register space
   ./play.sh --led blue
   ./play.sh --led cyan
   ```
-
-### Boot Persistence
-To make the card start in your preferred color as soon as the driver loads, **without opening EverLive**:
-
-```bash
-# Card stays dark at boot:
-echo "options open_gc573 led_mode=0" | sudo tee /etc/modprobe.d/open_gc573.conf
-
-# Card lights up solid blue at boot:
-echo "options open_gc573 led_mode=1" | sudo tee /etc/modprobe.d/open_gc573.conf
-```
 
 ---
 

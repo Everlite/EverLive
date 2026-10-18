@@ -178,12 +178,12 @@ depmod -a "$(uname -r)"
 # DKMS Support falls dkms installiert ist
 if command -v dkms >/dev/null 2>&1; then
     echo -e "[*] DKMS gefunden. Richte automatische Kernel-Update-Wiederherstellung ein..."
-    DKMS_SRC="/usr/src/everlive-0.3.0"
+    DKMS_SRC="/usr/src/everlive-0.4.0"
     mkdir -p "${DKMS_SRC}"
     cp -r "${DRIVER_DIR}"/* "${DKMS_SRC}/"
     cat > "${DKMS_SRC}/dkms.conf" <<EOF
 PACKAGE_NAME="everlive"
-PACKAGE_VERSION="0.3.0"
+PACKAGE_VERSION="0.4.0"
 BUILT_MODULE_NAME[0]="open_gc573"
 DEST_MODULE_LOCATION[0]="/updates/open_gc573"
 AUTOINSTALL="yes"
@@ -192,8 +192,9 @@ MAKE[0]="make -C \${dkms_tree}/\${PACKAGE_NAME}/\${PACKAGE_VERSION}/build KDIR=\
 EOF
     dkms remove -m everlive -v 0.2.0 --all 2>/dev/null || true
     dkms remove -m everlive -v 0.3.0 --all 2>/dev/null || true
-    dkms add -m everlive -v 0.3.0 2>/dev/null || true
-    if dkms build -m everlive -v 0.3.0 2>/dev/null && dkms install -m everlive -v 0.3.0 --force 2>/dev/null; then
+    dkms remove -m everlive -v 0.4.0 --all 2>/dev/null || true
+    dkms add -m everlive -v 0.4.0 2>/dev/null || true
+    if dkms build -m everlive -v 0.4.0 2>/dev/null && dkms install -m everlive -v 0.4.0 --force 2>/dev/null; then
         echo -e "${GREEN}[+] DKMS registriert: Treiber aktualisiert sich bei Kernel-Updates automatisch!${NC}"
     else
         echo -e "${YELLOW}[!] Hinweis: DKMS-Registrierung übersprungen oder nicht möglich. Der direkt installierte Treiber funktioniert trotzdem einwandfrei.${NC}"

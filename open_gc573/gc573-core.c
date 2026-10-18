@@ -398,4 +398,4 @@ module_pci_driver(gc555_pci_driver);
 
 MODULE_DESCRIPTION("AVerMedia Live Gamer 4K GC573 / BOLT GC555 open driver");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("0.3.0");
+MODULE_VERSION("0.4.0");
