@@ -862,18 +862,21 @@ static bool gc555_fpga_is_native_hdr_p010(
 		 config->input_sampling == GC555_VIDEO_SAMPLING_YUV422);
 
 	return native_mode && supported_transport && !config->interlaced &&
-	       config->input_colorimetry == GC555_VIDEO_COLORIMETRY_BT2020 &&
-	       config->input_hdr_mode == GC555_VIDEO_HDR_PQ_BT2020 &&
+	       (config->input_colorimetry == GC555_VIDEO_COLORIMETRY_BT2020 ||
+	        config->input_colorimetry == GC555_VIDEO_COLORIMETRY_BT709) &&
+	       (config->input_hdr_mode == GC555_VIDEO_HDR_PQ_BT2020 ||
+	        config->input_hdr_mode == GC555_VIDEO_HDR_PQ) &&
 	       config->output_format == GC555_VIDEO_FORMAT_P010;
 }
 
 /*
- * GC573: consoles (PS5) frequently signal BT.2020 colorimetry, with or
- * without PQ, even when the capture side wants an 8-bit format. The FPGA
- * carries BT.2020 RGB->YUV matrices, so pass such signals through instead
- * of refusing to stream. PQ content is delivered untone-mapped.
+ * GC573: consoles and video processors (PS5, Xbox, RetroTINK 4K) frequently
+ * signal BT.2020 or PQ HDR10 even when the capture side requests an 8-bit
+ * format (such as YUYV or NV12). The FPGA carries BT.2020 RGB->YUV matrices,
+ * so pass such signals through cleanly instead of refusing to stream.
+ * PQ content is delivered untone-mapped to userspace.
  */
-static bool gc555_fpga_is_native_bt2020_passthrough(
+static bool gc555_fpga_is_native_hdr_passthrough(
 				const struct gc555_fpga_video_config *config)
 {
 	bool native_mode = gc555_fpga_is_native_4k_high_rate(config) ||
@@ -896,7 +899,9 @@ static bool gc555_fpga_is_native_bt2020_passthrough(
 		 config->input_sampling == GC555_VIDEO_SAMPLING_YUV422);
 
 	return native_mode && supported_transport && !config->interlaced &&
-	       config->input_colorimetry == GC555_VIDEO_COLORIMETRY_BT2020;
+	       (config->input_colorimetry == GC555_VIDEO_COLORIMETRY_BT2020 ||
+	        config->input_hdr_mode == GC555_VIDEO_HDR_PQ ||
+	        config->input_hdr_mode == GC555_VIDEO_HDR_PQ_BT2020);
 }
 
 static bool
@@ -1194,7 +1199,7 @@ gc555_fpga_validate_config(const struct gc555_fpga_video_config *config)
 	native_broadcast_sd_rgb_limited =
 		gc555_fpga_is_native_broadcast_sd_rgb_limited(config);
 	native_hdr_p010 = gc555_fpga_is_native_hdr_p010(config) ||
-		gc555_fpga_is_native_bt2020_passthrough(config);
+		gc555_fpga_is_native_hdr_passthrough(config);
 	native_cea_yuv = gc555_fpga_is_native_cea_yuv(config);
 	native_sd = native_640x480_rgb_full ||
 		native_640x480_rgb_limited ||

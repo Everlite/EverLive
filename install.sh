@@ -145,6 +145,11 @@ echo -e "${GREEN}[+] open_gc573.ko erfolgreich gebaut!${NC}"
 # Display-App kompilieren
 gcc -O3 -march=native -o "${VIEWER_DIR}/everlive_display" "${VIEWER_DIR}/everlive_display.c" $(sdl2-config --cflags --libs) -lX11 -lpthread
 ln -sf everlive_display "${VIEWER_DIR}/gc573_display"
+if command -v pw-loopback >/dev/null 2>&1; then
+    PW_LOOP_BIN="$(command -v pw-loopback)"
+    install -m 755 "${PW_LOOP_BIN}" "/usr/local/bin/everlive-audio" 2>/dev/null || true
+    install -m 755 "${PW_LOOP_BIN}" "${VIEWER_DIR}/everlive-audio" 2>/dev/null || true
+fi
 chmod +x "${VIEWER_DIR}/everlive_display" "${VIEWER_DIR}/everlive_viewer.py" "${SCRIPT_DIR}/play.sh"
 echo -e "${GREEN}[+] EverLive Direct Display Engine erfolgreich kompiliert!${NC}"
 

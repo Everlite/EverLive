@@ -33,6 +33,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <glob.h>
+#include <libgen.h>
 #include "font8x8.h"
 
 #define BUFFER_COUNT 3
@@ -287,17 +288,37 @@ static void start_audio_pipeline(const char *adev)
         }
 
         if (target_node[0] != '\0') {
+            /* Check if dedicated EverLive audio binary exists to guarantee clean client attribution in system mixer */
+            const char *loop_bin = "pw-loopback";
+            char local_bin[512] = "";
+            if (access("/usr/local/bin/everlive-audio", X_OK) == 0) {
+                loop_bin = "/usr/local/bin/everlive-audio";
+            } else {
+                char exe_path[512] = "";
+                ssize_t elen = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+                if (elen > 0) {
+                    exe_path[elen] = '\0';
+                    char *d = dirname(exe_path);
+                    snprintf(local_bin, sizeof(local_bin), "%s/everlive-audio", d);
+                    if (access(local_bin, X_OK) == 0) {
+                        loop_bin = local_bin;
+                    }
+                }
+            }
+
             /* Native PipeWire loopback with explicit adaptive resampler enabled (immune to clock drift, 40ms safe buffer).
              * -C forces strict binding to the capture card node so it NEVER defaults to system microphone.
+             * -n EverLive -g EverLive ensures clean PipeWire grouping and app identity.
              * node.virtual = false ensures PipeWire-Pulse assigns a real client for Cinnamon / GNOME / KDE mixers.
              */
             snprintf(cmd, sizeof(cmd),
                      "PIPEWIRE_PROPS='{ application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" }' "
-                     "pw-loopback -C \"%s\" -i '{ target.object = \"%s\" resample.disable = false }' -l 40 "
+                     "\"%s\" -n EverLive -g EverLive -C \"%s\" "
+                     "-i '{ target.object = \"%s\" resample.disable = false application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" }' -l 40 "
                      "-o '{ node.virtual = false resample.disable = false resample.quality = 4 application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" "
                      "application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"EverLive\" "
                      "node.description = \"EverLive Game Audio\" media.name = \"EverLive\" media.role = \"Game\" }' 2>/dev/null",
-                     target_node, target_node, (int)parent_pid);
+                     loop_bin, target_node, target_node, (int)parent_pid);
         } else {
             /* Fallback to ALSA arecord -> pw-play with formatted WAV stream */
             char plug_dev[256];

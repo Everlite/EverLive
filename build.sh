@@ -13,4 +13,8 @@ echo "[*] Baue EverLive Direct-Renderer (everlive_display)..."
 gcc -O3 -march=native -o "${SCRIPT_DIR}/tools/everlive/everlive_display" "${SCRIPT_DIR}/tools/everlive/everlive_display.c" $(sdl2-config --cflags --libs) -lX11 -lpthread
 ln -sf everlive_display "${SCRIPT_DIR}/tools/everlive/gc573_display"
 chmod +x "${SCRIPT_DIR}/tools/everlive/everlive_display"
+if command -v pw-loopback >/dev/null 2>&1; then
+    cp -f "$(command -v pw-loopback)" "${SCRIPT_DIR}/tools/everlive/everlive-audio"
+    chmod +x "${SCRIPT_DIR}/tools/everlive/everlive-audio"
+fi
 echo "[+] everlive_display erfolgreich kompiliert!"

@@ -32,6 +32,7 @@ reference_gc570d/
 # Compiled display binaries
 tools/everlive/everlive_display
 tools/everlive/gc573_display
+tools/everlive/everlive-audio
 
 # Raw uncompressed video dumps
 20261010_131220.mp4
