@@ -45,7 +45,7 @@ struct gc555_video_format_info {
 struct gc555_video_mode {
 	u16 width;
 	u16 height;
-	u8 rates[12];
+	u8 rates[16];
 	u8 rate_count;
 };
 
@@ -112,7 +112,9 @@ static const struct gc555_video_format_info gc555_video_formats[] = {
 };
 
 static const struct gc555_video_mode gc555_video_modes[] = {
+	{ 640, 400, { 70 }, 1 },
 	{ 640, 480, { 60, 75 }, 2 },
+	{ 720, 400, { 70 }, 1 },
 	{ 720, 480, { 24, 25, 30, 50, 60 }, 5 },
 	{ 720, 576, { 25, 50, 60 }, 3 },
 	{ 800, 600, { 60 }, 1 },
@@ -128,10 +130,10 @@ static const struct gc555_video_mode gc555_video_modes[] = {
 	{ 1440, 900, { 60 }, 1 },
 	{ 1680, 1050, { 60 }, 1 },
 	{ 1920, 240, { 50, 60 }, 2 },
-	{ 1920, 1080, { 24, 25, 30, 50, 60, 96, 100, 120, 144, 180, 240 }, 11 },
+	{ 1920, 1080, { 24, 25, 30, 50, 60, 70, 96, 100, 120, 144, 180, 240 }, 12 },
 	{ 1920, 1200, { 60 }, 1 },
 	{ 2560, 1080, { 50, 60, 100, 144 }, 4 },
-	{ 2560, 1440, { 50, 60, 100, 120, 144 }, 5 },
+	{ 2560, 1440, { 50, 60, 70, 100, 120, 144 }, 6 },
 	{ 2880, 240, { 50, 60 }, 2 },
 	{ 2880, 2160, { 24, 25, 30, 50, 60 }, 5 },
 	{ 3440, 1440, { 50, 60, 100 }, 3 },
@@ -189,16 +191,19 @@ gc555_video_mode_supports_p010(const struct gc555_video_mode *mode)
 
 	switch (mode->width) {
 	case 640:
-		return mode->height == 480;
+		return mode->height == 400 || mode->height == 480;
 	case 720:
-		return mode->height == 480 || mode->height == 576;
+		return mode->height == 400 || mode->height == 480 ||
+		       mode->height == 576;
 	case 800:
 		return mode->height == 600;
 	case 1024:
 		return mode->height == 768;
 	case 1280:
 		return mode->height == 720 || mode->height == 800 ||
-		       mode->height == 1024;
+		       mode->height == 960 || mode->height == 1024;
+	case 1360:
+		return mode->height == 765;
 	case 1440:
 		return mode->height == 240 || mode->height == 480 ||
 		       mode->height == 576 || mode->height == 900;
@@ -225,13 +230,6 @@ gc555_video_p010_supports_rate(const struct gc555_video_mode *mode, u32 rate)
 {
 	if (!gc555_video_mode_supports_p010(mode))
 		return false;
-	if ((mode->width == 640 && mode->height == 480) ||
-	    (mode->width == 1024 && mode->height == 768) ||
-	    (mode->width == 1280 && mode->height == 1024)) {
-		int diff = (int)rate - 60;
-
-		return diff >= -2 && diff <= 2;
-	}
 
 	return gc555_video_mode_supports_rate(mode, rate);
 }
@@ -248,8 +246,8 @@ gc555_video_supports_format(const struct gc555_video_mode *mode,
 	if (format->format == GC555_VIDEO_FORMAT_P010)
 		return gc555_video_mode_supports_p010(mode);
 
-	/* RGB host layouts use the native 1080p60 pipeline. */
-	return mode->width == 1920 && mode->height == 1080;
+	/* RGB host layouts (BGR24, RGB32) are supported for progressive modes */
+	return mode->height != 240;
 }
 
 static bool
@@ -261,12 +259,6 @@ gc555_video_supports_rate(const struct gc555_video_mode *mode,
 		return false;
 	if (format->format == GC555_VIDEO_FORMAT_P010)
 		return gc555_video_p010_supports_rate(mode, rate);
-	if (format->format != GC555_VIDEO_FORMAT_YUYV &&
-	    format->format != GC555_VIDEO_FORMAT_NV12) {
-		int diff = (int)rate - 60;
-
-		return diff >= -2 && diff <= 2;
-	}
 
 	return gc555_video_mode_supports_rate(mode, rate);
 }
@@ -1252,23 +1244,15 @@ gc555_video_enum_frameintervals(struct file *file, void *priv,
 	if (!gc555_video_supports_format(mode, format))
 		return -EINVAL;
 
-	if (format->format != GC555_VIDEO_FORMAT_YUYV &&
-	    format->format != GC555_VIDEO_FORMAT_NV12 &&
-	    format->format != GC555_VIDEO_FORMAT_P010) {
-		if (interval->index)
-			return -EINVAL;
-		rate = 60;
-	} else {
-		index = interval->index;
-		for (i = 0; i < mode->rate_count; i++) {
-			rate = mode->rates[i];
-			if (!gc555_video_supports_rate(mode, format, rate))
-				continue;
-			if (!index--)
-				goto found;
-		}
-		return -EINVAL;
+	index = interval->index;
+	for (i = 0; i < mode->rate_count; i++) {
+		rate = mode->rates[i];
+		if (!gc555_video_supports_rate(mode, format, rate))
+			continue;
+		if (!index--)
+			goto found;
 	}
+	return -EINVAL;
 
 found:
 	interval->type = V4L2_FRMIVAL_TYPE_DISCRETE;

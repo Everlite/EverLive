@@ -687,9 +687,9 @@ gc555_fpga_is_native_1440p60(const struct gc555_fpga_video_config *config)
 	       config->input_width == 2560 && config->input_height == 1440 &&
 	       config->output_width == 2560 && config->output_height == 1440 &&
 	       config->input_frame_rate_hz >= 48 &&
-	       config->input_frame_rate_hz <= 61 &&
+	       config->input_frame_rate_hz <= 72 &&
 	       config->output_frame_rate_hz >= 48 &&
-	       config->output_frame_rate_hz <= 61;
+	       config->output_frame_rate_hz <= 72;
 }
 
 static bool
@@ -817,9 +817,9 @@ gc555_fpga_is_native_1080p_low_rate(
 	       config->output_width == 1920 && config->output_height == 1080 &&
 	       !config->interlaced &&
 	       config->input_frame_rate_hz >= 23 &&
-	       config->input_frame_rate_hz <= 61 &&
+	       config->input_frame_rate_hz <= 72 &&
 	       config->output_frame_rate_hz >= 23 &&
-	       config->output_frame_rate_hz <= 61;
+	       config->output_frame_rate_hz <= 72;
 }
 
 static bool
@@ -1000,9 +1000,15 @@ gc555_fpga_is_native_broadcast_sd(
 		!config->interlaced &&
 		config->input_frame_rate_hz >= 48 &&
 		config->input_frame_rate_hz <= 63;
+	bool native_400 = (config->input_width == 640 ||
+			   config->input_width == 720) &&
+		config->input_height == 400 &&
+		!config->interlaced &&
+		config->input_frame_rate_hz >= 68 &&
+		config->input_frame_rate_hz <= 72;
 
 	return config->input_class == GC555_VIDEO_INPUT_SD &&
-	       (native_480 || native_576 || native_240) &&
+	       (native_480 || native_576 || native_240 || native_400) &&
 	       config->output_width == config->input_width &&
 	       config->output_height == config->input_height &&
 	       config->output_frame_rate_hz == config->input_frame_rate_hz &&
@@ -1042,6 +1048,8 @@ gc555_fpga_is_native_cea_yuv(const struct gc555_fpga_video_config *config)
 		  config->input_frame_rate_hz <= 52) ||
 		 (config->input_frame_rate_hz >= 57 &&
 		  config->input_frame_rate_hz <= 63) ||
+		 (config->input_frame_rate_hz >= 68 &&
+		  config->input_frame_rate_hz <= 72) ||
 		 (config->input_frame_rate_hz >= 94 &&
 		  config->input_frame_rate_hz <= 105) ||
 		 (config->input_frame_rate_hz >= 115 &&
@@ -1092,7 +1100,12 @@ gc555_fpga_is_native_cea_yuv(const struct gc555_fpga_video_config *config)
 		!config->interlaced &&
 		config->input_frame_rate_hz >= 48 &&
 		config->input_frame_rate_hz <= 63;
-	bool native_sd = native_480 || native_576 || native_240;
+	bool native_400 = (config->input_width == 640 ||
+			   config->input_width == 720) &&
+		config->input_height == 400 && !config->interlaced &&
+		config->input_frame_rate_hz >= 68 &&
+		config->input_frame_rate_hz <= 72;
+	bool native_sd = native_480 || native_576 || native_240 || native_400;
 	bool native_size = config->output_width == config->input_width &&
 		config->output_height == config->input_height &&
 		config->output_frame_rate_hz == config->input_frame_rate_hz;

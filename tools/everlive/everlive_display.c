@@ -127,6 +127,7 @@ static uint32_t g_volume_toast_time = 0;
 static char g_toast_custom[64] = "";
 static uint32_t g_toast_time = 0;
 static uintptr_t g_embed_wid = 0;
+static uint32_t g_preferred_fmt = 0;
 
 static pid_t g_audio_pid = 0;
 
@@ -488,6 +489,7 @@ struct stream_ctx {
     bool active;
     uint32_t width;
     uint32_t height;
+    uint32_t preferred_pixelformat;
     uint32_t pixelformat;
     uint32_t bytesperline;
     uint32_t sdl_format;
@@ -539,7 +541,7 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
         sfmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         sfmt.fmt.pix.width = dv.bt.width;
         sfmt.fmt.pix.height = dv.bt.height;
-        sfmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+        sfmt.fmt.pix.pixelformat = ctx->preferred_pixelformat ? ctx->preferred_pixelformat : V4L2_PIX_FMT_YUYV;
         sfmt.fmt.pix.field = dv_interlaced ? V4L2_FIELD_INTERLACED : V4L2_FIELD_NONE;
         ioctl(ctx->fd, VIDIOC_S_FMT, &sfmt);
     } else {
@@ -570,6 +572,10 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
         ctx->sdl_format = SDL_PIXELFORMAT_YUY2;
     else if (ctx->pixelformat == V4L2_PIX_FMT_NV12)
         ctx->sdl_format = SDL_PIXELFORMAT_NV12;
+    else if (ctx->pixelformat == V4L2_PIX_FMT_BGR24)
+        ctx->sdl_format = SDL_PIXELFORMAT_BGR24;
+    else if (ctx->pixelformat == V4L2_PIX_FMT_RGB32)
+        ctx->sdl_format = SDL_PIXELFORMAT_ARGB8888;
     else
         ctx->sdl_format = SDL_PIXELFORMAT_YUY2;
 
@@ -668,8 +674,19 @@ int main(int argc, char *argv[])
         }
         else if (!strcmp(argv[i], "--no-audio") || !strcmp(argv[i], "-n"))
             adev = "none";
+        else if ((!strcmp(argv[i], "-F") || !strcmp(argv[i], "--format")) && i + 1 < argc) {
+            const char *f = argv[++i];
+            if (!strcasecmp(f, "yuyv") || !strcasecmp(f, "yuy2"))
+                g_preferred_fmt = V4L2_PIX_FMT_YUYV;
+            else if (!strcasecmp(f, "nv12"))
+                g_preferred_fmt = V4L2_PIX_FMT_NV12;
+            else if (!strcasecmp(f, "bgr24") || !strcasecmp(f, "bgr3") || !strcasecmp(f, "rgb"))
+                g_preferred_fmt = V4L2_PIX_FMT_BGR24;
+            else if (!strcasecmp(f, "rgb32") || !strcasecmp(f, "rgb4") || !strcasecmp(f, "bgrx") || !strcasecmp(f, "rgba"))
+                g_preferred_fmt = V4L2_PIX_FMT_RGB32;
+        }
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
-            printf("Usage: %s [-f|--fullscreen] [--vsync] [-s|--streamer-mode] [-d /dev/videoX] [-a hw:CARD,DEV|none] [--pw-node node_name] [-w wid] [--no-audio]\n", argv[0]);
+            printf("Usage: %s [-f|--fullscreen] [--vsync] [-s|--streamer-mode] [-F yuyv|nv12|bgr24|rgb32] [-d /dev/videoX] [-a hw:CARD,DEV|none] [--pw-node node_name] [-w wid] [--no-audio]\n", argv[0]);
             return 0;
         }
     }
@@ -880,7 +897,7 @@ int main(int argc, char *argv[])
         SDL_RaiseWindow(window);
     }
 
-    struct stream_ctx ctx = { .fd = fd };
+    struct stream_ctx ctx = { .fd = fd, .preferred_pixelformat = g_preferred_fmt };
     if (!stream_start(&ctx, renderer)) {
         printf("[*] No HDMI signal at launch - standby mode active (waiting for signal)...\n");
     }
@@ -1283,7 +1300,14 @@ int main(int argc, char *argv[])
         lat_ms = (double)lat_us / 1000.0;
 
         /* Direct GPU texture upload from DMA buffer */
-        SDL_UpdateTexture(ctx.texture, NULL, ctx.buffers[buf.index].start, (int)ctx.bytesperline);
+        if (ctx.sdl_format == SDL_PIXELFORMAT_NV12) {
+            const Uint8 *pixels = (const Uint8 *)ctx.buffers[buf.index].start;
+            SDL_UpdateNVTexture(ctx.texture, NULL,
+                                pixels, (int)ctx.bytesperline,
+                                pixels + (size_t)ctx.bytesperline * ctx.height, (int)ctx.bytesperline);
+        } else {
+            SDL_UpdateTexture(ctx.texture, NULL, ctx.buffers[buf.index].start, (int)ctx.bytesperline);
+        }
 
         /* Return buffer to driver immediately so PCIe DMA never starves */
         ioctl(fd, VIDIOC_QBUF, &buf);
@@ -1295,7 +1319,8 @@ int main(int argc, char *argv[])
              * that requires 2x vertical stretching to restore the intended 16:9 aspect ratio.
              * 1440x480 / 1440x576 are 2x pixel-repeated SD signals (CEA-861 VIC 6/21)
              * 2880x240 is 4x/8x pixel-repeated 240p (RetroTINK 4K).
-             * These require 4:3 aspect ratio display (effective width = 720 or 320). */
+             * 720x400 / 640x400 are classic DOS VGA modes displayed on 4:3 CRT monitors.
+             * These require 4:3 aspect ratio display (effective width = 720 or 320 or 533). */
             int eff_w = ctx.width;
             int eff_h = ctx.height;
             if (ctx.width == 3840 && ctx.height == 1080) {
@@ -1308,6 +1333,8 @@ int main(int argc, char *argv[])
                 eff_w = 320;
             } else if (ctx.width == 1920 && ctx.height == 240) {
                 eff_w = 320;
+            } else if ((ctx.width == 720 || ctx.width == 640) && ctx.height == 400) {
+                eff_w = (ctx.height * 4) / 3;
             }
             double scale_w = (double)cur_w / (double)eff_w;
             double scale_h = (double)cur_h / (double)eff_h;
