@@ -1259,6 +1259,7 @@ if HAS_QT:
             # Row 1: Volume & Re-Sync
             lbl_audio = QLabel("Volume:")
             lbl_audio.setStyleSheet("font-weight: 500; color: #94a3b8;")
+            lbl_audio.setToolTip("Set console audio to 2-channel Linear PCM (Stereo) to prevent audio dropouts / clicks.")
             grid.addWidget(lbl_audio, 1, 0)
 
             h_vol = QHBoxLayout()
@@ -1272,6 +1273,7 @@ if HAS_QT:
 
             self.slider_vol = QSlider(Qt.Horizontal)
             self.slider_vol.setRange(0, 150)
+            self.slider_vol.setToolTip("Volume 0-150%. Note: Set console audio to 2-channel Linear PCM (Stereo) to avoid buffer underruns.")
             initial_vol = int(self.saved_cfg.get("volume", 1.0) * 100)
             self.slider_vol.setValue(initial_vol)
             self.slider_vol.valueChanged.connect(self.on_volume_changed)

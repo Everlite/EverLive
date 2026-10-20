@@ -308,15 +308,17 @@ static void start_audio_pipeline(const char *adev)
             }
         }
 
-        /* Native PipeWire loopback with explicit adaptive resampler enabled (immune to clock drift, 40ms safe buffer).
-         * Full 8-channel downmixing matrix ensures 5.1 and 7.1 LPCM (Center dialogue on AUX2, Surround on AUX3-7)
-         * are cleanly folded into stereo without dropped channels or volume loss.
+        printf("[Audio] Starte PipeWire Audio-Pipeline...\n");
+        printf("[Audio] Hinweis: Bitte Konsole auf 2-Kanal Linear PCM (Stereo) einstellen, um Aussetzer/Knacken zu vermeiden.\n");
+
+        /* Native PipeWire loopback with adaptive resampler enabled (immune to clock drift, 60ms safe buffer).
+         * PipeWire automatically matches native channel counts and folds multi-channel into stereo when needed.
          */
         snprintf(cmd, sizeof(cmd),
                  "PIPEWIRE_PROPS='{ application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" }' "
                  "\"%s\" -n EverLive -g EverLive -C \"%s\" "
-                 "-i '{ target.object = \"%s\" audio.position = [ AUX0, AUX1, AUX2, AUX3, AUX4, AUX5, AUX6, AUX7 ] resample.disable = false application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" }' -l 40 "
-                 "-o '{ node.virtual = false audio.position = [ FL, FR ] channelmix.matrix = [ [ 1.0, 0.0, 0.707, 0.5, 0.707, 0.0, 0.5, 0.0 ], [ 0.0, 1.0, 0.707, 0.5, 0.0, 0.707, 0.0, 0.5 ] ] resample.disable = false resample.quality = 4 application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" "
+                 "-i '{ target.object = \"%s\" resample.disable = false application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" }' -l 60 "
+                 "-o '{ node.virtual = false resample.disable = false resample.quality = 4 application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" "
                  "application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"EverLive\" "
                  "node.description = \"EverLive Game Audio\" media.name = \"EverLive\" media.role = \"Game\" }' 2>/dev/null",
                  loop_bin, target_node, target_node, (int)parent_pid);

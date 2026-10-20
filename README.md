@@ -216,13 +216,17 @@ Through reverse-engineering of the official firmware and the FPGA register space
 >   - **Hardware HPD re-sync:** If the HDMI receiver or console stalls while switching clock rates, press <kbd>h</kbd> or <kbd>r</kbd> in the game window (or click **🔄 HDMI Re-Sync** in the Console Hub). This sends a hardware HPD (Hot-Plug Detect) pulse via sysfs, forcing an immediate, clean handshake without touching physical cables.
 > - **Refresh-rate mismatch (120.35 Hz vs. 120.00 Hz):** The PS5 outputs ~120.35 Hz. On a fixed 120.00 Hz monitor with **VSync enabled**, the extra 0.35 frames per second build up, and one frame is dropped about every 3 seconds. With VSync off (default), presentation doesn't wait for vblank, so this doesn't happen.
 > - **SDL backend:** The game window runs natively on Wayland only with sdl2-compat / SDL3. With classic SDL2 it runs through Xwayland (see *Highlights*). You can force a backend with `SDL_VIDEODRIVER=wayland` or `SDL_VIDEODRIVER=x11`.
+> - **Console Audio Settings (Stereo / 2-Channel LPCM Recommended):** On PlayStation 5, Xbox Series X/S, Nintendo Switch, and PC sources, configure audio output to **Linear PCM 2.0 (Stereo)**.
+>   - Multi-channel surround modes (5.1 / 7.1 LPCM) stream uncompressed 8-channel audio, which can cause micro-stutters and buffer resync clicks on desktop USB audio devices (such as wireless headsets or USB DACs) due to asynchronous clock drift between PCIe DMA and USB audio clocks.
+>   - Setting the console to 2-channel Stereo guarantees completely smooth, dropout-free playback and allows console binaural engines (like PS5 Tempest 3D Audio) to deliver an optimal spatial mix for headphones.
 > - **Active development:** DMA queue tuning, buffer recycling and HDMI audio compatibility across more sources are still being improved.
 >
 > **Tips for the best experience:**
-> 1. **Keep VSync off** (default) unless you see tearing that bothers you.
-> 2. **Try VRR / Adaptive Sync:** Depending on your GPU driver, compositor and monitor (e.g. KDE Plasma *System Settings → Display → Adaptive Sync → Always*), VRR can smooth out pacing by matching the refresh rate to the incoming frames. *How well this works depends on your compositor.*
-> 3. **Set your monitor to ≥ 120 Hz:** A 120 FPS stream on a 60 Hz desktop will always drop frames.
-> 4. **Use fullscreen:** Fullscreen gives the compositor the best chance to use direct scanout.
+> 1. **Set Console Audio to 2-channel Linear PCM (Stereo)** to prevent audio dropouts, pops, and USB DAC resyncs.
+> 2. **Keep VSync off** (default) unless you see tearing that bothers you.
+> 3. **Try VRR / Adaptive Sync:** Depending on your GPU driver, compositor and monitor (e.g. KDE Plasma *System Settings → Display → Adaptive Sync → Always*), VRR can smooth out pacing by matching the refresh rate to the incoming frames. *How well this works depends on your compositor.*
+> 4. **Set your monitor to ≥ 120 Hz:** A 120 FPS stream on a 60 Hz desktop will always drop frames.
+> 5. **Use fullscreen:** Fullscreen gives the compositor the best chance to use direct scanout.
 
 ---
 
