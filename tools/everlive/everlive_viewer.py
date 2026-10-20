@@ -369,18 +369,25 @@ def trigger_hpd_pulse() -> bool:
 
 
 def set_audio_volume(vol_pct: int):
-    """Sets stream volume for gc573-audio via wpctl / pactl (0-150%)."""
+    """Sets stream volume for EverLive via wpctl / pactl (0-150%)."""
+    vol_float = vol_pct / 100.0
     try:
         out = subprocess.check_output(["wpctl", "status"], text=True, stderr=subprocess.DEVNULL)
+        in_audio = False
         for line in out.splitlines():
-            if any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]):
-                for part in line.strip().split():
+            line_s = line.strip()
+            if line_s.startswith("Audio"):
+                in_audio = True
+            elif in_audio and (line_s.startswith("Video") or line_s.startswith("Settings")):
+                in_audio = False
+            if in_audio and any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]) and "input." not in line:
+                for part in line_s.split():
                     clean = part.strip(".│*")
                     if clean.isdigit():
-                        vol_float = vol_pct / 100.0
-                        subprocess.run(["wpctl", "set-volume", clean, f"{vol_float:.2f}"],
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        return
+                        res = subprocess.run(["wpctl", "set-volume", clean, f"{vol_float:.2f}"],
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        if res.returncode == 0:
+                            return
     except Exception:
         pass
 
@@ -394,23 +401,31 @@ def set_audio_volume(vol_pct: int):
             elif any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]) and curr_id:
                 subprocess.run(["pactl", "set-sink-input-volume", curr_id, f"{vol_pct}%"],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                break
+                return
     except Exception:
         pass
 
 
 def set_audio_mute(mute: bool):
-    """Mutes or unmutes stream for gc573-audio via wpctl / pactl."""
+    """Mutes or unmutes stream for EverLive via wpctl / pactl."""
+    mute_arg = "1" if mute else "0"
     try:
         out = subprocess.check_output(["wpctl", "status"], text=True, stderr=subprocess.DEVNULL)
+        in_audio = False
         for line in out.splitlines():
-            if any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]):
-                for part in line.strip().split():
+            line_s = line.strip()
+            if line_s.startswith("Audio"):
+                in_audio = True
+            elif in_audio and (line_s.startswith("Video") or line_s.startswith("Settings")):
+                in_audio = False
+            if in_audio and any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]) and "input." not in line:
+                for part in line_s.split():
                     clean = part.strip(".│*")
                     if clean.isdigit():
-                        subprocess.run(["wpctl", "set-mute", clean, "1" if mute else "0"],
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        return
+                        res = subprocess.run(["wpctl", "set-mute", clean, mute_arg],
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        if res.returncode == 0:
+                            return
     except Exception:
         pass
 
@@ -422,9 +437,9 @@ def set_audio_mute(mute: bool):
             if line.startswith("Sink-Eingabe #") or line.startswith("Sink Input #"):
                 curr_id = line.split("#")[-1].strip()
             elif any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]) and curr_id:
-                subprocess.run(["pactl", "set-sink-input-mute", curr_id, "1" if mute else "0"],
+                subprocess.run(["pactl", "set-sink-input-mute", curr_id, mute_arg],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                break
+                return
     except Exception:
         pass
 
