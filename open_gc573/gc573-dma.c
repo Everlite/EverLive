@@ -93,6 +93,7 @@ struct gc555_dma {
 	spinlock_t register_lock;
 	/* Protects callbacks, audio ownership, and completion queue state. */
 	spinlock_t state_lock;
+	struct workqueue_struct *audio_wq;
 	struct gc555_audio_dma hdmi_audio;
 	struct gc555_audio_dma line_audio;
 	gc555_dma_video_irq_t video_irq;
@@ -360,10 +361,10 @@ static irqreturn_t gc555_dma_irq(int irq, void *data)
 	i2c_acknowledged = gc555_i2c_irq(dma->gc555, status);
 	gc555_dma_write(dma, GC555_REG_INTERRUPT_STATUS,
 			 status & GC555_IRQ_ACK_MASK & ~i2c_acknowledged);
-	if (schedule_hdmi_audio)
-		schedule_work(&dma->hdmi_audio.work);
-	if (schedule_line_audio)
-		schedule_work(&dma->line_audio.work);
+	if (schedule_hdmi_audio && dma->audio_wq)
+		queue_work(dma->audio_wq, &dma->hdmi_audio.work);
+	if (schedule_line_audio && dma->audio_wq)
+		queue_work(dma->audio_wq, &dma->line_audio.work);
 
 	return IRQ_HANDLED;
 }
@@ -531,9 +532,9 @@ int gc555_dma_start_audio(struct gc555_dev *gc555, unsigned int rate_hz,
 	dma = gc555->dma;
 	audio = &dma->hdmi_audio;
 	sample_bytes = sample_bits / 8U;
-	/* Packed 44.1 kHz needs two 10 ms units for dword alignment. */
-	period_units = sample_bits == GC555_AUDIO_SAMPLE_BITS_24 &&
-		       rate_hz == GC555_AUDIO_RATE_44100_HZ ? 2U : 1U;
+	/* Use two 10 ms units (20 ms) to provide buffer margin against scheduling delay.
+	 * 44.1 kHz already required 2U for dword alignment. */
+	period_units = 2U;
 	buffer_bytes = rate_hz / 100U * period_units * channels *
 		       sample_bytes;
 	if (!IS_ALIGNED(buffer_bytes, sizeof(u32)) ||
@@ -929,10 +930,17 @@ int gc555_dma_init(struct gc555_dev *gc555)
 				    GC555_LINE_AUDIO_ENGINE_RESET,
 				    GC555_LINE_AUDIO_STREAM_ENABLE, 2);
 
+	dma->audio_wq = alloc_ordered_workqueue("gc573_audio",
+						WQ_HIGHPRI | WQ_MEM_RECLAIM);
+	if (!dma->audio_wq) {
+		ret = -ENOMEM;
+		goto free_dma;
+	}
+
 	ret = pci_alloc_irq_vectors(gc555->pdev, 1, 1,
 				    PCI_IRQ_MSI | PCI_IRQ_INTX);
 	if (ret < 0)
-		goto free_dma;
+		goto free_wq;
 	dma->irq_vectors_allocated = true;
 	dma->irq = pci_irq_vector(gc555->pdev, 0);
 	if (dma->irq < 0) {
@@ -953,6 +961,9 @@ int gc555_dma_init(struct gc555_dev *gc555)
 
 free_vectors:
 	pci_free_irq_vectors(gc555->pdev);
+free_wq:
+	if (dma->audio_wq)
+		destroy_workqueue(dma->audio_wq);
 free_dma:
 	kfree(dma);
 	return dev_err_probe(gc555->dev, ret,
@@ -975,6 +986,11 @@ void gc555_dma_cleanup(struct gc555_dev *gc555)
 	    dma->line_audio.streaming)
 		gc555_dma_quiesce_audio_locked(&dma->line_audio, true);
 	mutex_unlock(&dma->control_lock);
+
+	if (dma->audio_wq) {
+		destroy_workqueue(dma->audio_wq);
+		dma->audio_wq = NULL;
+	}
 
 	if (dma->irq_requested)
 		free_irq(dma->irq, dma);

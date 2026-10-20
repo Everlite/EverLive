@@ -734,6 +734,7 @@ class GameStreamer:
             mpv_cmd.extend(["--no-osc", "--osd-level=0", "--cursor-autohide=always"])
 
         try:
+            mpv_env = os.environ.copy()
             self.mpv_proc = subprocess.Popen(mpv_cmd, env=mpv_env, start_new_session=True)
             self.is_running = True
             if self.adev and self.adev != "none":
@@ -750,9 +751,11 @@ class GameStreamer:
                         "PIPEWIRE_PROPS='application.name=\"EverLive\" application.icon-name=\"everlive\" application.id=\"everlive\"' "
                     )
                     if self.pw_node:
+                        # Full 8-channel downmixing matrix to ensure 5.1 and 7.1 LPCM (Center dialogue, Surround)
+                        # are cleanly folded into stereo without dropped channels or volume loss
                         cmd = (
-                            f"{client_env}pw-loopback -i '{{ target.object = \"{self.pw_node}\" resample.disable = false }}' -l 40 "
-                            f"-o '{{ resample.disable = false resample.quality = 4 {props[1:-1]} }}' 2>/dev/null"
+                            f"{client_env}pw-loopback -i '{{ target.object = \"{self.pw_node}\" audio.position = [ AUX0, AUX1, AUX2, AUX3, AUX4, AUX5, AUX6, AUX7 ] resample.disable = false }}' -l 40 "
+                            f"-o '{{ audio.position = [ FL, FR ] channelmix.matrix = [ [ 1.0, 0.0, 0.707, 0.5, 0.707, 0.0, 0.5, 0.0 ], [ 0.0, 1.0, 0.707, 0.5, 0.0, 0.707, 0.0, 0.5 ] ] resample.disable = false resample.quality = 4 {props[1:-1]} }}' 2>/dev/null"
                         )
                     else:
                         plug_adev = f"plughw:{self.adev[3:]}" if self.adev.startswith("hw:") else self.adev
@@ -761,7 +764,7 @@ class GameStreamer:
                             f"   arecord -D '{plug_adev}' -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null; }} | "
                             f"{client_env}pw-play --latency=40ms -P '{props}' - 2>/dev/null"
                         )
-                    self.pwplay_proc = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid)
+                    self.pwplay_proc = subprocess.Popen(cmd, shell=True, start_new_session=True)
                 except Exception as ae:
                     print(f"[*] Note while starting audio stream: {ae}")
             return True
@@ -796,24 +799,46 @@ class GameStreamer:
 
         if self.pwplay_proc:
             try:
-                self.pwplay_proc.terminate()
+                pgid = os.getpgid(self.pwplay_proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
+            except Exception:
+                try:
+                    self.pwplay_proc.terminate()
+                except Exception:
+                    pass
+            try:
                 self.pwplay_proc.wait(timeout=0.5)
             except Exception:
                 try:
-                    self.pwplay_proc.kill()
+                    pgid = os.getpgid(self.pwplay_proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
                 except Exception:
-                    pass
+                    try:
+                        self.pwplay_proc.kill()
+                    except Exception:
+                        pass
             self.pwplay_proc = None
 
         if self.arecord_proc:
             try:
-                self.arecord_proc.terminate()
+                pgid = os.getpgid(self.arecord_proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
+            except Exception:
+                try:
+                    self.arecord_proc.terminate()
+                except Exception:
+                    pass
+            try:
                 self.arecord_proc.wait(timeout=0.5)
             except Exception:
                 try:
-                    self.arecord_proc.kill()
+                    pgid = os.getpgid(self.arecord_proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
                 except Exception:
-                    pass
+                    try:
+                        self.arecord_proc.kill()
+                    except Exception:
+                        pass
             self.arecord_proc = None
 
     def poll(self) -> bool:
