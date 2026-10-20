@@ -49,7 +49,7 @@ try:
         QGroupBox, QMessageBox, QStackedLayout, QSizePolicy
     )
     from PySide6.QtCore import Qt, QTimer, QThread, Signal, QEvent, QUrl, QSize
-    from PySide6.QtGui import QFont, QIcon, QColor, QPalette, QKeySequence, QShortcut, QDesktopServices, QPixmap, QPainter
+    from PySide6.QtGui import QGuiApplication, QFont, QIcon, QColor, QPalette, QKeySequence, QShortcut, QDesktopServices, QPixmap, QPainter
     HAS_QT = True
 except ImportError:
     HAS_QT = False
@@ -487,15 +487,37 @@ class GameStreamer:
                 info["locked"] = True
                 info["resolution"] = f"{disp_w}x{h}{scan}"
                 info["framerate"] = fps_str
-
+                info["chroma"] = self.chroma_label()
                 info["hdr"] = self.hdr_label() or "SDR"
         except Exception:
             info["locked"] = False
             info["resolution"] = "No Signal"
             info["framerate"] = ""
+            info["chroma"] = ""
             info["hdr"] = ""
 
         return info
+
+    def chroma_label(self) -> str:
+        """Reads active driver pixel format and returns friendly chroma description."""
+        if not self.vdev or not os.path.exists(self.vdev):
+            return ""
+        try:
+            out = subprocess.check_output(
+                ["v4l2-ctl", "-d", self.vdev, "--get-fmt-video"],
+                stderr=subprocess.DEVNULL, timeout=0.8
+            ).decode()
+            if "BGR3" in out or "RGB4" in out:
+                return "RGB 4:4:4"
+            if "NV12" in out:
+                return "YUV 4:2:0"
+            if "P010" in out:
+                return "P010 4:2:0"
+            if "YUYV" in out:
+                return "YUV 4:2:2"
+        except Exception:
+            pass
+        return "YUV 4:2:2"
 
     def hdr_label(self, fallback: bool = True) -> str:
         """SDR, HDR10 or HLG from the driver's cached metadata. No HDMI I2C."""
@@ -1353,12 +1375,14 @@ if HAS_QT:
 
         def _show_live(self, info):
             hdr_str = f" • {info['hdr']}" if info.get("hdr") else ""
-            self.lbl_pill.setText(f"● {info['resolution']} @ {info['framerate']}{hdr_str}")
+            chroma_str = f" • {info['chroma']}" if info.get("chroma") else ""
+            self.lbl_pill.setText(f"● {info['resolution']} @ {info['framerate']}{chroma_str}{hdr_str}")
             self.lbl_pill.setStyleSheet("background-color: #0d2318; color: #34d399; border: 1px solid #164e32;")
             res_clean = re.sub(r"(\d+)x(\d+)([pi]?)", r"\1 × \2\3", info['resolution'])
             self.lbl_hero_signal.setText(f"{res_clean} @ {info['framerate']}")
             hdr_val = info.get('hdr', 'SDR')
-            self.lbl_hero_meta.setText(f"Signal locked • Color: {hdr_val} • 8ch LPCM (PipeWire)")
+            chroma_val = info.get('chroma', 'YUV 4:2:2')
+            self.lbl_hero_meta.setText(f"Signal locked • Chroma: {chroma_val} • Color: {hdr_val} • 8ch LPCM (PipeWire)")
 
         def update_status(self):
             # While the gaming screen is open, only read the cached driver format and HDR control.
@@ -1373,6 +1397,7 @@ if HAS_QT:
                 live = getattr(self, "_live", None)
                 active_res, active_fps = self.streamer.get_active_format()
                 hdr = self.streamer.hdr_label(fallback=False)
+                chroma = self.streamer.chroma_label()
                 if live and live.get("locked"):
                     updated = False
                     live = dict(live)
@@ -1384,6 +1409,9 @@ if HAS_QT:
                         updated = True
                     if hdr and hdr != live.get("hdr"):
                         live["hdr"] = hdr
+                        updated = True
+                    if chroma and chroma != live.get("chroma"):
+                        live["chroma"] = chroma
                         updated = True
                     if updated:
                         self._live = live
@@ -1454,7 +1482,8 @@ def main():
     if args.cli or not HAS_QT:
         print("[*] Launching Gaming Screen in low-latency mode...")
         info = streamer.get_signal_info()
-        print(f"[*] Signal: {info['resolution']} {info['framerate']}".strip())
+        chroma_disp = f" [{info['chroma']}]" if info.get('chroma') else ""
+        print(f"[*] Signal: {info['resolution']} {info['framerate']}{chroma_disp}".strip())
         if not info["locked"]:
             print("[!] Warning: No active HDMI signal detected on GC573.")
             print("    Please check if the video source is powered on and sending video.")
@@ -1465,9 +1494,9 @@ def main():
             time.sleep(0.5)
         streamer.stop()
     else:
+        QGuiApplication.setDesktopFileName("everlive")
         app = QApplication(sys.argv)
         app.setApplicationName("EverLive")
-        app.setDesktopFileName("everlive.desktop")
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "everlive.png")
         if os.path.isfile(icon_path):
             app.setWindowIcon(QIcon(icon_path))

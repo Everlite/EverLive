@@ -527,6 +527,24 @@ static void stream_stop(struct stream_ctx *ctx)
     }
 }
 
+static const char *get_chroma_desc(uint32_t fourcc)
+{
+    switch (fourcc) {
+    case V4L2_PIX_FMT_BGR24:
+        return "RGB 4:4:4";
+    case V4L2_PIX_FMT_RGB32:
+        return "RGB 4:4:4";
+    case V4L2_PIX_FMT_YUYV:
+        return "YUV 4:2:2";
+    case V4L2_PIX_FMT_NV12:
+        return "YUV 4:2:0";
+    case V4L2_PIX_FMT_P010:
+        return "P010 4:2:0";
+    default:
+        return "YUV 4:2:2";
+    }
+}
+
 static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
 {
     stream_stop(ctx);
@@ -638,8 +656,9 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
     }
 
     ctx->active = true;
-    printf("[+] HDMI Stream active: %ux%u%c (%u bytes/line)\n",
-           ctx->width, ctx->height, ctx->interlaced ? 'i' : 'p', ctx->bytesperline);
+    printf("[+] HDMI Stream active: %ux%u%c [%s] (%u bytes/line)\n",
+           ctx->width, ctx->height, ctx->interlaced ? 'i' : 'p',
+           get_chroma_desc(ctx->pixelformat), ctx->bytesperline);
     return true;
 }
 
@@ -1429,9 +1448,9 @@ int main(int argc, char *argv[])
             draw_string(renderer, vol_txt, hud_x + 202, hud_y + 18, 1, (SDL_Color){200, 215, 235, 255});
 
             /* Signal Info Badge */
-            char sig_txt[32];
-            snprintf(sig_txt, sizeof(sig_txt), "%ux%u%c@%.2f", ctx.width, ctx.height, ctx.interlaced ? 'i' : 'p', live_fps > 0.0 ? live_fps : 60.0);
-            draw_string(renderer, sig_txt, hud_x + 260, hud_y + 18, 1, (SDL_Color){63, 185, 80, 255});
+            char sig_txt[48];
+            snprintf(sig_txt, sizeof(sig_txt), "%ux%u%c@%.2f %s", ctx.width, ctx.height, ctx.interlaced ? 'i' : 'p', live_fps > 0.0 ? live_fps : 60.0, get_chroma_desc(ctx.pixelformat));
+            draw_string(renderer, sig_txt, hud_x + 250, hud_y + 18, 1, (SDL_Color){63, 185, 80, 255});
 
             /* Separator */
             SDL_Rect sep = { hud_x + 460, hud_y + 10, 1, 24 };
@@ -1519,17 +1538,19 @@ int main(int argc, char *argv[])
             jitter_count = 0;
             last_title_time = now_ticks;
 
+            char title[180];
+            snprintf(title, sizeof(title), "EverLive - %ux%u%c @ %.2f FPS [%s] | Latency: %.1f ms | Vol: %d%%%s",
+                     ctx.width, ctx.height, ctx.interlaced ? 'i' : 'p', live_fps,
+                     get_chroma_desc(ctx.pixelformat), lat_ms, g_muted ? 0 : (int)(g_volume * 100.0f),
+                     g_streamer_mode ? " [STREAMER MODE]" : "");
             if (g_embed_wid == 0) {
-                char title[180];
-                snprintf(title, sizeof(title), "EverLive - %ux%u%c @ %.2f FPS | Latency: %.1f ms | Vol: %d%%%s",
-                         ctx.width, ctx.height, ctx.interlaced ? 'i' : 'p', live_fps, lat_ms, g_muted ? 0 : (int)(g_volume * 100.0f),
-                         g_streamer_mode ? " [STREAMER MODE]" : "");
                 SDL_SetWindowTitle(window, title);
-                printf("[*] Stream: %ux%u%c @ %.2f FPS | Latency: %.1f ms | Jitter: %u/s%s\n",
-                       ctx.width, ctx.height, ctx.interlaced ? 'i' : 'p', live_fps, lat_ms, live_jitter,
-                       g_streamer_mode ? " [STREAMER MODE]" : "");
-                fflush(stdout);
             }
+            printf("[*] Stream: %ux%u%c @ %.2f FPS [%s] | Latency: %.1f ms | Jitter: %u/s%s\n",
+                   ctx.width, ctx.height, ctx.interlaced ? 'i' : 'p', live_fps,
+                   get_chroma_desc(ctx.pixelformat), lat_ms, live_jitter,
+                   g_streamer_mode ? " [STREAMER MODE]" : "");
+            fflush(stdout);
         }
     }
 
