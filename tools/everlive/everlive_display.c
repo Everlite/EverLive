@@ -352,7 +352,8 @@ static void start_audio_pipeline(const char *adev)
 static void *audio_supervisor_thread(void *arg)
 {
     const char *adev = (const char *)arg;
-    int node_id = -1;
+    int stream_node_id = -1;
+    int source_node_id = -1;
     float last_vol = -1.0f;
     bool last_muted = false;
     int fail_count = 0;
@@ -370,7 +371,7 @@ static void *audio_supervisor_thread(void *arg)
             if (g_running) {
                 last_start_time = time(NULL);
                 start_audio_pipeline(adev);
-                node_id = -1;
+                stream_node_id = -1;
                 g_audio_dirty = 1;
             }
         }
@@ -381,7 +382,7 @@ static void *audio_supervisor_thread(void *arg)
             pid_t r = waitpid(g_audio_pid, &status, WNOHANG);
             if (r > 0) {
                 g_audio_pid = 0;
-                node_id = -1;
+                stream_node_id = -1;
                 time_t now = time(NULL);
                 if (now - last_start_time > 5) {
                     fail_count = 0;
@@ -410,70 +411,106 @@ static void *audio_supervisor_thread(void *arg)
 
         /* Audio Flow Watchdog: periodically check if stream node is still valid and reachable */
         static int watchdog_counter = 0;
-        if (node_id > 0 && (++watchdog_counter % 80 == 0)) {
+        if (stream_node_id > 0 && (++watchdog_counter % 80 == 0)) {
             char chk_cmd[128];
-            snprintf(chk_cmd, sizeof(chk_cmd), "wpctl inspect %d >/dev/null 2>&1", node_id);
+            snprintf(chk_cmd, sizeof(chk_cmd), "wpctl inspect %d >/dev/null 2>&1", stream_node_id);
             if (system(chk_cmd) != 0) {
-                printf("[Audio] Stream node %d invalidated (format change or disconnect), recovering...\n", node_id);
-                node_id = -1;
+                printf("[Audio] Stream node %d invalidated (format change or disconnect), recovering...\n", stream_node_id);
+                stream_node_id = -1;
                 g_audio_resync_needed = 1;
             }
         }
 
-        /* Find PipeWire / PulseAudio node/stream ID (check at most once every 500ms) */
+        /* Find PipeWire / PulseAudio stream and capture source node IDs */
         static int search_counter = 0;
-        if (node_id < 0 && g_audio_pid > 0 && (++search_counter % 20 == 0)) {
-            FILE *fp = popen("wpctl status 2>/dev/null | awk '/^Audio/{in_audio=1} /^Video|^Settings/{in_audio=0} in_audio && (/EverLive/ || /everlive-audio/ || /gc573-audio/) && !/input\\./ {for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\\.$/) {sub(/\\./,\"\",$i); print $i; exit}}'", "r");
-            if (fp) {
-                char buf[32];
-                if (fgets(buf, sizeof(buf), fp)) {
-                    int id = atoi(buf);
-                    if (id > 0) {
-                        node_id = id;
-                        printf("[Audio] PipeWire Audio Stream aktiv (Node ID: %d)\n", node_id);
-                        g_audio_dirty = 1;
-                    }
-                }
-                pclose(fp);
-            }
-
-            if (node_id < 0) {
-                FILE *fp2 = popen("pactl list sink-inputs 2>/dev/null | awk '/^Sink Input #[0-9]+|^Sink-Eingabe #[0-9]+/{id=$NF; sub(/#/,\"\",id)} /application.name = \"EverLive\"|application.id = \"everlive\"|node.name = \"EverLive\"/{print id; exit}'", "r");
-                if (fp2) {
+        if ((stream_node_id < 0 || source_node_id < 0) && (++search_counter % 20 == 0)) {
+            if (stream_node_id < 0 && g_audio_pid > 0) {
+                FILE *fp = popen("wpctl status 2>/dev/null | awk '/^Audio/{in_audio=1} /^Video|^Settings/{in_audio=0} in_audio && (/EverLive/ || /everlive-audio/ || /gc573-audio/) && !/input\\./ {for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\\.$/) {sub(/\\./,\"\",$i); print $i; exit}}'", "r");
+                if (fp) {
                     char buf[32];
-                    if (fgets(buf, sizeof(buf), fp2)) {
+                    if (fgets(buf, sizeof(buf), fp)) {
                         int id = atoi(buf);
                         if (id > 0) {
-                            node_id = id;
-                            printf("[Audio] PulseAudio Sink-Input aktiv (ID: %d)\n", node_id);
+                            stream_node_id = id;
+                            printf("[Audio] PipeWire Audio Stream aktiv (Node ID: %d)\n", stream_node_id);
                             g_audio_dirty = 1;
                         }
                     }
-                    pclose(fp2);
+                    pclose(fp);
+                }
+
+                if (stream_node_id < 0) {
+                    FILE *fp2 = popen("pactl list sink-inputs 2>/dev/null | awk '/^Sink Input #[0-9]+|^Sink-Eingabe #[0-9]+/{id=$NF; sub(/#/,\"\",id)} /application.name = \"EverLive\"|application.id = \"everlive\"|node.name = \"EverLive\"/{print id; exit}'", "r");
+                    if (fp2) {
+                        char buf[32];
+                        if (fgets(buf, sizeof(buf), fp2)) {
+                            int id = atoi(buf);
+                            if (id > 0) {
+                                stream_node_id = id;
+                                printf("[Audio] PulseAudio Sink-Input aktiv (ID: %d)\n", stream_node_id);
+                                g_audio_dirty = 1;
+                            }
+                        }
+                        pclose(fp2);
+                    }
+                }
+            }
+
+            if (source_node_id < 0) {
+                FILE *fp_src = popen("wpctl status 2>/dev/null | awk '/^Audio/{in_audio=1} /^Video|^Settings/{in_audio=0} in_audio && /AVerMedia Live Gamer 4K Pro/ && !/Pro 1/ {for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\\.$/) {sub(/\\./,\"\",$i); print $i; exit}}'", "r");
+                if (fp_src) {
+                    char buf[32];
+                    if (fgets(buf, sizeof(buf), fp_src)) {
+                        int id = atoi(buf);
+                        if (id > 0) {
+                            source_node_id = id;
+                            printf("[Audio] Hardware Capture Source aktiv (Node ID: %d)\n", source_node_id);
+                            g_audio_dirty = 1;
+                        }
+                    }
+                    pclose(fp_src);
                 }
             }
         }
 
         /* Apply volume or mute updates */
-        if (node_id > 0 && (g_audio_dirty || g_volume != last_vol || g_muted != last_muted)) {
+        if ((stream_node_id > 0 || source_node_id > 0) && (g_audio_dirty || g_volume != last_vol || g_muted != last_muted)) {
             g_audio_dirty = 0;
             last_vol = g_volume;
             last_muted = g_muted;
 
-            char cmd_vol[256];
+            char cmd_vol[512] = "";
             if (last_muted) {
-                snprintf(cmd_vol, sizeof(cmd_vol), "wpctl set-mute %d 1 2>/dev/null || pactl set-sink-input-mute %d 1 2>/dev/null", node_id, node_id);
+                if (source_node_id > 0 && stream_node_id > 0) {
+                    snprintf(cmd_vol, sizeof(cmd_vol),
+                             "wpctl set-mute %d 1 2>/dev/null; wpctl set-mute %d 1 2>/dev/null || pactl set-sink-input-mute %d 1 2>/dev/null",
+                             source_node_id, stream_node_id, stream_node_id);
+                } else if (source_node_id > 0) {
+                    snprintf(cmd_vol, sizeof(cmd_vol), "wpctl set-mute %d 1 2>/dev/null", source_node_id);
+                } else {
+                    snprintf(cmd_vol, sizeof(cmd_vol), "wpctl set-mute %d 1 2>/dev/null || pactl set-sink-input-mute %d 1 2>/dev/null", stream_node_id, stream_node_id);
+                }
             } else {
-                snprintf(cmd_vol, sizeof(cmd_vol),
-                         "(wpctl set-mute %d 0 2>/dev/null && wpctl set-volume %d %.2f 2>/dev/null) || "
-                         "(pactl set-sink-input-mute %d 0 2>/dev/null && pactl set-sink-input-volume %d %d%% 2>/dev/null)",
-                         node_id, node_id, last_vol, node_id, node_id, (int)(last_vol * 100.0f));
+                if (source_node_id > 0 && stream_node_id > 0) {
+                    snprintf(cmd_vol, sizeof(cmd_vol),
+                             "(wpctl set-mute %d 0 2>/dev/null && wpctl set-volume %d %.2f 2>/dev/null); "
+                             "((wpctl set-mute %d 0 2>/dev/null && wpctl set-volume %d %.2f 2>/dev/null) || "
+                             "(pactl set-sink-input-mute %d 0 2>/dev/null && pactl set-sink-input-volume %d %d%% 2>/dev/null))",
+                             source_node_id, source_node_id, last_vol,
+                             stream_node_id, stream_node_id, last_vol,
+                             stream_node_id, stream_node_id, (int)(last_vol * 100.0f));
+                } else if (source_node_id > 0) {
+                    snprintf(cmd_vol, sizeof(cmd_vol),
+                             "wpctl set-mute %d 0 2>/dev/null && wpctl set-volume %d %.2f 2>/dev/null",
+                             source_node_id, source_node_id, last_vol);
+                } else {
+                    snprintf(cmd_vol, sizeof(cmd_vol),
+                             "(wpctl set-mute %d 0 2>/dev/null && wpctl set-volume %d %.2f 2>/dev/null) || "
+                             "(pactl set-sink-input-mute %d 0 2>/dev/null && pactl set-sink-input-volume %d %d%% 2>/dev/null)",
+                             stream_node_id, stream_node_id, last_vol, stream_node_id, stream_node_id, (int)(last_vol * 100.0f));
+                }
             }
-            int rc = system(cmd_vol);
-            if (WEXITSTATUS(rc) != 0) {
-                /* Command failed, invalidate node_id to force rediscovery */
-                node_id = -1;
-            }
+            system(cmd_vol);
         }
 
         usleep(25000);

@@ -371,6 +371,7 @@ def trigger_hpd_pulse() -> bool:
 def set_audio_volume(vol_pct: int):
     """Sets stream volume for EverLive via wpctl / pactl (0-150%)."""
     vol_float = vol_pct / 100.0
+    targets = set()
     try:
         out = subprocess.check_output(["wpctl", "status"], text=True, stderr=subprocess.DEVNULL)
         in_audio = False
@@ -380,14 +381,18 @@ def set_audio_volume(vol_pct: int):
                 in_audio = True
             elif in_audio and (line_s.startswith("Video") or line_s.startswith("Settings")):
                 in_audio = False
-            if in_audio and any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]) and "input." not in line:
-                for part in line_s.split():
-                    clean = part.strip(".│*")
-                    if clean.isdigit():
-                        res = subprocess.run(["wpctl", "set-volume", clean, f"{vol_float:.2f}"],
-                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        if res.returncode == 0:
-                            return
+            if in_audio:
+                # Target both the AVerMedia hardware capture source and active EverLive playback stream
+                if (("AVerMedia Live Gamer 4K Pro" in line and "Pro 1" not in line) or
+                    (any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]) and "input." not in line)):
+                    for part in line_s.split():
+                        clean = part.strip(".│*")
+                        if clean.isdigit():
+                            targets.add(clean)
+                            break
+        for target in targets:
+            subprocess.run(["wpctl", "set-volume", target, f"{vol_float:.2f}"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
@@ -401,7 +406,6 @@ def set_audio_volume(vol_pct: int):
             elif any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]) and curr_id:
                 subprocess.run(["pactl", "set-sink-input-volume", curr_id, f"{vol_pct}%"],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return
     except Exception:
         pass
 
@@ -409,6 +413,7 @@ def set_audio_volume(vol_pct: int):
 def set_audio_mute(mute: bool):
     """Mutes or unmutes stream for EverLive via wpctl / pactl."""
     mute_arg = "1" if mute else "0"
+    targets = set()
     try:
         out = subprocess.check_output(["wpctl", "status"], text=True, stderr=subprocess.DEVNULL)
         in_audio = False
@@ -418,14 +423,17 @@ def set_audio_mute(mute: bool):
                 in_audio = True
             elif in_audio and (line_s.startswith("Video") or line_s.startswith("Settings")):
                 in_audio = False
-            if in_audio and any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]) and "input." not in line:
-                for part in line_s.split():
-                    clean = part.strip(".│*")
-                    if clean.isdigit():
-                        res = subprocess.run(["wpctl", "set-mute", clean, mute_arg],
-                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        if res.returncode == 0:
-                            return
+            if in_audio:
+                if (("AVerMedia Live Gamer 4K Pro" in line and "Pro 1" not in line) or
+                    (any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]) and "input." not in line)):
+                    for part in line_s.split():
+                        clean = part.strip(".│*")
+                        if clean.isdigit():
+                            targets.add(clean)
+                            break
+        for target in targets:
+            subprocess.run(["wpctl", "set-mute", target, mute_arg],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
@@ -439,7 +447,6 @@ def set_audio_mute(mute: bool):
             elif any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]) and curr_id:
                 subprocess.run(["pactl", "set-sink-input-mute", curr_id, mute_arg],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return
     except Exception:
         pass
 
