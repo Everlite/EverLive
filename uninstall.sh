@@ -34,6 +34,7 @@ fi
 # 4. Autostart & udev Regeln entfernen
 rm -f /etc/modules-load.d/everlive.conf
 rm -f /etc/udev/rules.d/70-everlive.rules
+rm -f /usr/local/bin/everlive-audio
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger 2>/dev/null || true
 

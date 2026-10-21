@@ -32,10 +32,10 @@ sudo ./install.sh
 ```
 
 ### What the installer does:
-1. **Detects your distribution and dependencies:** Detects your package manager (`pacman` on Arch/CachyOS/Manjaro, `apt` on Ubuntu/Debian/Mint/Pop!_OS, `dnf` on Fedora/Nobara), lists missing packages (kernel headers, build tools, SDL2, PipeWire/ALSA tools, `v4l-utils`, mpv, Qt XCB cursor libs) and offers to install them.
+1. **Detects your distribution and dependencies:** Detects your package manager (`pacman` on Arch/CachyOS/Manjaro, `apt` on Ubuntu/Debian/Mint/Pop!_OS, `dnf` on Fedora/Nobara), lists missing packages (kernel headers, DKMS, build tools, SDL2, PipeWire/ALSA tools, `v4l-utils`, mpv, Qt XCB cursor libs) and offers to install them.
 2. **Sets up Python (PySide6):** If PySide6 is not available system-wide (e.g. Debian, Ubuntu, Linux Mint), it creates a local virtual environment (`tools/everlive/.venv`) so the hub runs without touching system Python.
 3. **Compiles the driver and display engine:** Builds the `open_gc573` kernel module and the native C display engine (`everlive_display`).
-4. **DKMS support for kernel updates:** If DKMS is installed, the module is registered so it is rebuilt automatically after kernel updates.
+4. **DKMS support & auto-recompile on kernel updates:** Registers the module with DKMS for automatic rebuilds on kernel updates. Both `play.sh` and `open_gc573/load.sh` also feature automatic on-the-fly re-compilation whenever a newly updated kernel is booted.
 5. **Loads the driver at boot:** Adds `open_gc573` to `/etc/modules-load.d/everlive.conf`.
 6. **Sets permissions so you can play without root:** Installs `/etc/udev/rules.d/70-everlive.rules` (`TAG+="uaccess"` for video/audio, group `video` for the RGB and HDMI re-sync sysfs files) and adds your user to the `video` and `audio` groups. *Log out and back in once after installing so the group change takes effect.*
 7. **Adds a start menu entry:** Installs the **EverLive** desktop launcher (and removes the old `gc573-ps5.desktop` launcher if present).
@@ -68,7 +68,7 @@ After installation, launch **EverLive** from your application menu, or run:
 - **Aspect-ratio-preserving scaling (letterbox / pillarbox):** Keeps the source aspect ratio on 16:10, 21:9 and 4:3 setups with black borders and no stretching, in both windowed and fullscreen mode.
 - **Live HDR switching:** HDR10 (PQ) and HLG come from the HDMI DRM InfoFrame. At the same resolution the driver updates the color matrix only and leaves DMA running, so the game window stays up. The Console Hub label follows that metadata (`SDR`, `HDR10`, or `HLG`). Switching HDR on a PlayStation 5 during capture was verified. The pixels stay in the selected capture format (usually YUYV); PQ and HLG are not tone-mapped to SDR. P010 is the 10-bit capture format.
 - **Direct render pipeline:** `everlive_display` maps the V4L2 DMA buffers and uploads each frame to an SDL2 OpenGL texture (`SDL_UpdateTexture`). The HUD latency number is taken before that upload and before `SDL_RenderPresent`. It is not the time until the panel shows the frame.
-- **Multi-channel audio (7.1, 5.1 & stereo):** Captures console LPCM audio from ALSA (tries 8ch, then 6ch, then 2ch; falls back to `plughw` automatically) and plays it through PipeWire (`pw-play`, 10 ms latency target) as the stream **`gc573-audio`**. PipeWire mixes it down to your stereo headset or surround setup.
+- **Synchronized low-latency audio (LPCM stereo & surround):** Bridges console LPCM audio to PipeWire via an adaptive loopback pipeline (`everlive-audio` with real-time clock drift compensation and a 60 ms jitter-safe buffer) as the stream **EverLive Game Audio**. PipeWire automatically routes and mixes it down to your stereo headset or surround setup.
 - **Hardware RGB LED control (reverse-engineered):**
   - **Factory blinking fixed:** Reverse-engineered the Artix-7 FPGA lighting engine (BAR 0 `0x0800`–`0x086c`, script RAM `0x2008`). The card no longer blinks red endlessly on Linux, and you don't need Windows software.
   - **Standard Linux Multicolor LED subsystem:** Implements the kernel multicolor LED classdev at `/sys/class/leds/gc573:rgb:status` using official Profile 241 (Constant Color 24-bit PWM).
@@ -139,7 +139,7 @@ flowchart TD
     v4l2 -->|"mmap, then SDL texture upload"| game
     game -->|"VSync off by default"| screen["120 Hz Monitor"]
 
-    alsa -->|"pw-loopback (adaptive resampler)"| pw["PipeWire (20 ms)"]
+    alsa -->|"everlive-audio (adaptive loopback)"| pw["PipeWire (60 ms safe buffer)"]
     pw -->|Channel mixdown| speakers["Headset / Speakers"]
   end
 ```
@@ -238,7 +238,7 @@ Through reverse-engineering of the official firmware and the FPGA register space
 | **AVerMedia Live Gamer BOLT (GC555)** | Thunderbolt 3 | `1461:5550` | **Should work (untested)** | Code inherited from ostrich's clean-room driver; not yet tested on real hardware by Everlite. Testers welcome! |
 
 - **Linux distributions tested:** CachyOS, Arch Linux, Linux Mint 22.3 (Cinnamon), Ubuntu, Debian.
-- **Linux kernels:** Linux 6.19 through 7.x (tested from 7.0 generic up to CachyOS 7.2.9).
+- **Linux kernels:** Linux 6.19 through 7.x (tested from 7.0 generic up to CachyOS 7.2.11).
 - **Desktop environments:** Main test setup is KDE Plasma 6 on Wayland (CachyOS, sdl2-compat → native Wayland game window). Also used on X11 (Cinnamon, XFCE). Other Wayland compositors (GNOME, Hyprland, Sway) should work but haven't been tested yet.
 
 ---
@@ -252,7 +252,7 @@ Through reverse-engineering of the official firmware and the FPGA register space
 
 #### 2. No sound output
 - Make sure audio isn't muted in the game window (press <kbd>m</kbd> or scroll the mouse wheel up).
-- In your KDE/GNOME sound settings under "Applications", make sure the stream **`gc573-audio`** is active and not muted.
+- In your KDE/GNOME sound settings under "Applications", make sure the stream **`EverLive Game Audio`** (or `everlive-audio`) is active and not muted.
 
 #### 3. Signal lost after launching or closing a game (mode / refresh rate switch)
 - **Symptom:** The screen goes black or loses signal when switching between the 60 Hz console menu and a 120 Hz game (e.g. *The Finals*), or when the source changes video mode.
