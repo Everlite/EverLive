@@ -45,3 +45,7 @@ driver_dump/
 
 # Worktree for upstream staging refactoring
 refactor/
+
+# Chronik / Notizen
+crhonic.md
+chronic.md
