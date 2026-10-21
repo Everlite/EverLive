@@ -27,7 +27,7 @@ This keeps GitHub Issues clean and focused on verified bugs and active implement
 1. **Clean-Room & Blob-Free Policy:**
    - Under no circumstances should proprietary binaries, firmware dumps, decompiler outputs, or proprietary SDK headers be committed to the repository.
    - All contributions to `open_gc573` must be original source code under the **GPL-2.0-only** license.
-   - Companion user-space tools in `tools/everlive/` and root scripts are licensed under **MIT**.
+   - Companion user-space tools in `tools/everlive/` and root scripts are also licensed under **GPL-2.0-only** (see [`LICENSE.md`](LICENSE.md)).
 
 2. **Code Standards:**
    - Kernel module code should follow standard Linux kernel coding conventions.

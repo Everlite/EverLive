@@ -9,11 +9,10 @@ MODULE="${SCRIPT_DIR}/open_gc573/open_gc573.ko"
 CURRENT_VERMAGIC="$(modinfo -F vermagic "${MODULE}" 2>/dev/null | awk '{print $1}')"
 if [[ ! -f "${MODULE}" ]] || [[ "${CURRENT_VERMAGIC}" != "$(uname -r)" ]]; then
     echo "[*] open_gc573.ko passt nicht zum laufenden Kernel ($(uname -r)). Kompiliere..."
-    make -C "${SCRIPT_DIR}/open_gc573" clean >/dev/null 2>&1 || true
     if grep -q '^CONFIG_CC_IS_CLANG=y' "/usr/lib/modules/$(uname -r)/build/.config" 2>/dev/null || grep -iq 'clang' /proc/version 2>/dev/null; then
-        make -C "${SCRIPT_DIR}/open_gc573" -j"$(nproc)" LLVM=1 CC=clang >/dev/null 2>&1 || true
+        make -C "${SCRIPT_DIR}/open_gc573" -j"$(nproc)" LLVM=1 CC=clang
     else
-        make -C "${SCRIPT_DIR}/open_gc573" -j"$(nproc)" >/dev/null 2>&1 || true
+        make -C "${SCRIPT_DIR}/open_gc573" -j"$(nproc)"
     fi
 fi
 
@@ -50,7 +49,9 @@ fi
 # Auto-compile native renderer if missing or source is newer
 if [ ! -f "${SCRIPT_DIR}/tools/everlive/everlive_display" ] || [ "${SCRIPT_DIR}/tools/everlive/everlive_display.c" -nt "${SCRIPT_DIR}/tools/everlive/everlive_display" ]; then
     echo "[*] Kompiliere EverLive Direct-Renderer (everlive_display)..."
-    gcc -O3 -march=native -o "${SCRIPT_DIR}/tools/everlive/everlive_display" "${SCRIPT_DIR}/tools/everlive/everlive_display.c" $(sdl2-config --cflags --libs 2>/dev/null) -lX11 -lpthread 2>/dev/null || true
+    if ! gcc -O3 -march=native -o "${SCRIPT_DIR}/tools/everlive/everlive_display" "${SCRIPT_DIR}/tools/everlive/everlive_display.c" $(sdl2-config --cflags --libs 2>/dev/null) -lX11 -lpthread; then
+        echo "[!] Warnung: Kompilierung von everlive_display fehlgeschlagen. Starte Viewer (nutzt ggf. mpv-Fallback)..."
+    fi
     ln -sf everlive_display "${SCRIPT_DIR}/tools/everlive/gc573_display" 2>/dev/null || true
 fi
 

@@ -208,7 +208,7 @@ PRESETS = {
 
 LED_MODES = {
     "Off (Dark)": 0,
-    "Blue (Default)": 1,
+    "Blue": 1,
     "Green": 2,
     "Red": 3,
     "Cyan": 4,
@@ -725,7 +725,7 @@ class GameStreamer:
             "--video-latency-hacks=yes",
             "--interpolation=no",
             "--framedrop=vo",
-            "--video-sync=display-desync",
+            "--video-sync=display-resync" if vsync else "--video-sync=display-desync",
             "--opengl-glfinish=no",
             "--vd-lavc-threads=1",
             "--vd-lavc-fast=yes",
@@ -758,11 +758,10 @@ class GameStreamer:
                         "PIPEWIRE_PROPS='application.name=\"EverLive\" application.icon-name=\"everlive\" application.id=\"everlive\"' "
                     )
                     if self.pw_node:
-                        # Full 8-channel downmixing matrix to ensure 5.1 and 7.1 LPCM (Center dialogue, Surround)
-                        # are cleanly folded into stereo without dropped channels or volume loss
+                        # Native PipeWire loopback with 60ms safe buffer matching everlive_display
                         cmd = (
-                            f"{client_env}pw-loopback -i '{{ target.object = \"{self.pw_node}\" audio.position = [ AUX0, AUX1, AUX2, AUX3, AUX4, AUX5, AUX6, AUX7 ] resample.disable = false }}' -l 40 "
-                            f"-o '{{ audio.position = [ FL, FR ] channelmix.matrix = [ [ 1.0, 0.0, 0.707, 0.5, 0.707, 0.0, 0.5, 0.0 ], [ 0.0, 1.0, 0.707, 0.5, 0.0, 0.707, 0.0, 0.5 ] ] resample.disable = false resample.quality = 4 {props[1:-1]} }}' 2>/dev/null"
+                            f"{client_env}pw-loopback -i '{{ target.object = \"{self.pw_node}\" resample.disable = false }}' -l 60 "
+                            f"-o '{{ node.virtual = false resample.disable = false resample.quality = 4 {props[1:-1]} }}' 2>/dev/null"
                         )
                     else:
                         plug_adev = f"plughw:{self.adev[3:]}" if self.adev.startswith("hw:") else self.adev
@@ -1239,7 +1238,7 @@ if HAS_QT:
                 else:
                     self.combo_led.addItem(name, val)
 
-            saved_led = self.saved_cfg.get("led_mode", 1)
+            saved_led = self.saved_cfg.get("led_mode", None)
             if saved_led is not None and isinstance(saved_led, int) and 0 <= saved_led <= 7:
                 write_led_mode(saved_led)
                 idx = self.combo_led.findData(saved_led)
@@ -1431,7 +1430,7 @@ if HAS_QT:
             self.lbl_hero_signal.setText(f"{res_clean} @ {info['framerate']}")
             hdr_val = info.get('hdr', 'SDR')
             chroma_val = info.get('chroma', 'YUV 4:2:2')
-            self.lbl_hero_meta.setText(f"Signal locked • Chroma: {chroma_val} • Color: {hdr_val} • 8ch LPCM (PipeWire)")
+            self.lbl_hero_meta.setText(f"Signal locked • Chroma: {chroma_val} • Color: {hdr_val} • Stereo LPCM (PipeWire)")
 
         def update_status(self):
             # While the gaming screen is open, only read the cached driver format and HDR control.

@@ -5,7 +5,7 @@
  * Designed specifically for interactive gaming on capture cards.
  * Features:
  * - Direct V4L2 DMA mmap texture upload (< 2 ms display latency)
- * - Built-in low-latency ALSA 8ch LPCM capture with 7.1 -> stereo downmix
+ * - Built-in low-latency ALSA stereo LPCM capture (PipeWire loopback with drift compensation)
  * - Interactive on-screen HUD: Real-time volume slider, mute, signal & stats overlay
  * - Mouse wheel volume control & on-screen volume toasts
  * - Auto-hiding cursor & HUD on mouse inactivity
@@ -989,7 +989,11 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    Uint32 rflags = SDL_RENDERER_ACCELERATED;
+    if (enable_vsync) {
+        rflags |= SDL_RENDERER_PRESENTVSYNC;
+    }
+    SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, rflags);
     if (!renderer) {
         fprintf(stderr, "[Error] SDL_CreateRenderer fehlgeschlagen: %s\n", SDL_GetError());
         SDL_DestroyWindow(window);
@@ -998,8 +1002,8 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* Unthrottle swap interval for zero-delay presentation */
-    SDL_GL_SetSwapInterval(0);
+    /* Set swap interval: 1 if VSync is enabled, or 0 (unthrottled) for lowest input lag */
+    SDL_GL_SetSwapInterval(enable_vsync ? 1 : 0);
 
     SDL_SetRenderDrawColor(renderer, 13, 17, 23, 255);
     SDL_RenderClear(renderer);

@@ -12,7 +12,7 @@
 
 **EverLive** is an all-in-one Linux console gaming suite and 100% blob-free open-source driver for the **AVerMedia Live Gamer 4K (GC573)** (PCI `1461:0054`, Subsystem `1461:5730`) and **Live Gamer BOLT (GC555)** (`1461:5550`).
 
-With **EverLive**, you can play PlayStation 5, Xbox Series X, Nintendo Switch, or PCs directly on your Linux desktop (Wayland & X11) at **1440p @ 120 FPS**. HDMI capture at 1440p and 120.35 Hz is verified on a PlayStation 5. How smooth that looks on the monitor still depends on the panel clock. That part is experimental; see [Known Issues](#️-known-issues--work-in-progress). EverLive also provides synchronized multi-channel audio, live volume control, hardware RGB control, and start-menu integration.
+With **EverLive**, you can play PlayStation 5, Xbox Series X, Nintendo Switch, or PCs directly on your Linux desktop (Wayland & X11) at **1440p @ 120 FPS**. HDMI capture at 1440p and 120.35 Hz is verified on a PlayStation 5. How smooth that looks on the monitor still depends on the panel clock. That part is experimental; see [Known Issues](#️-known-issues--work-in-progress). EverLive also provides synchronized low-latency audio, live volume control, hardware RGB control, and start-menu integration.
 
 ---
 
@@ -32,10 +32,10 @@ sudo ./install.sh
 ```
 
 ### What the installer does:
-1. **Detects your distribution and dependencies:** Detects your package manager (`pacman` on Arch/CachyOS/Manjaro, `apt` on Ubuntu/Debian/Mint/Pop!_OS, `dnf` on Fedora/Nobara), lists missing packages (kernel headers, DKMS, build tools, SDL2, PipeWire/ALSA tools, `v4l-utils`, mpv, Qt XCB cursor libs) and offers to install them.
+1. **Detects your distribution and dependencies:** Detects your package manager (`pacman` on Arch/CachyOS/Manjaro, `apt` on Ubuntu/Debian/Mint/Pop!_OS, `dnf` on Fedora/Nobara), checks for missing packages (kernel headers, DKMS, build tools, SDL2, PipeWire/ALSA tools, `v4l-utils`, mpv, Qt XCB cursor libs) and installs them (prompts for confirmation on Arch/pacman, installs with `-y` on apt/dnf).
 2. **Sets up Python (PySide6):** If PySide6 is not available system-wide (e.g. Debian, Ubuntu, Linux Mint), it creates a local virtual environment (`tools/everlive/.venv`) so the hub runs without touching system Python.
 3. **Compiles the driver and display engine:** Builds the `open_gc573` kernel module and the native C display engine (`everlive_display`).
-4. **DKMS support & auto-recompile on kernel updates:** Registers the module with DKMS for automatic rebuilds on kernel updates. Both `play.sh` and `open_gc573/load.sh` also feature automatic on-the-fly re-compilation whenever a newly updated kernel is booted.
+4. **DKMS support & auto-recompile on kernel updates:** Registers the module with DKMS for automatic rebuilds on kernel updates. Both `play.sh` and `open_gc573/load.sh` check the running kernel version and automatically recompile the module on launch whenever the kernel has been updated.
 5. **Loads the driver at boot:** Adds `open_gc573` to `/etc/modules-load.d/everlive.conf`.
 6. **Sets permissions so you can play without root:** Installs `/etc/udev/rules.d/70-everlive.rules` (`TAG+="uaccess"` for video/audio, group `video` for the RGB and HDMI re-sync sysfs files) and adds your user to the `video` and `audio` groups. *Log out and back in once after installing so the group change takes effect.*
 7. **Adds a start menu entry:** Installs the **EverLive** desktop launcher (and removes the old `gc573-ps5.desktop` launcher if present).
@@ -44,14 +44,14 @@ After installation, launch **EverLive** from your application menu, or run:
 ```bash
 ./play.sh
 ```
-*If the driver isn't loaded yet, `play.sh` loads it for you (it asks for your password once via `pkexec`).*
+*If the driver isn't loaded yet, `play.sh` loads it for you (via `sudo` in the terminal, or a graphical `pkexec` prompt when launched from the application menu).*
 
 ---
 
 ## Highlights & Verified Capabilities
 
-- **2560×1440 @ 120 FPS verified on PlayStation 5:** 120.35 Hz HDMI 2.0 capture verified on real PS5 hardware (*The Finals*, *Fortnite 120Hz Mode*, PS5 Dashboard) with live HDR switching, low-latency Direct Rendering, and PipeWire multichannel audio.
-- **Retro scalers & verified custom modelines (RetroTINK 4K Pro):** Extensively tested on physical hardware by contributor [@haxman](https://github.com/haxman). A measured rate within ±2 Hz of a mode in the driver's table is accepted. The Console Hub and game window HUD print refresh rates to two decimal places (e.g. `59.94 FPS (16.68ms)`) with `p` (progressive) and `i` (interlaced) indicators. Physically verified capabilities include:
+- **2560×1440 @ 120 FPS verified on PlayStation 5:** 120.35 Hz HDMI 2.0 capture verified on real PS5 hardware (*The Finals*, *Fortnite 120Hz Mode*, PS5 Dashboard) with live HDR switching, low-latency Direct Rendering, and PipeWire stereo audio.
+- **Retro scalers & verified custom modelines (RetroTINK 4K Pro):** Extensively tested on physical hardware by contributor [@haxman](https://github.com/haxman). A measured rate within ±2 Hz of a mode in the driver's table is accepted. The game window HUD displays real-time refresh rates with two decimal places (e.g. `59.94 FPS (16.68ms)`), while the Console Hub displays formatted refresh rates (e.g. `120 FPS` or `59.94 FPS`) alongside `p` (progressive) and `i` (interlaced) indicators. Physically verified capabilities include:
   - **240p Retro Modes:** Supports CEA-861 pixel-repeated 240p (`1440x240` / `2880x240 @ 60Hz`) as well as **1920x240 CRT Super Resolution** (~36 MHz clock) with clean 4:3 integer rendering.
   - **480i & 576i Interlaced (CEA-861 HDMI Pixel Repetition):** Decodes 2x pixel-repeated HDMI transport (`1440x480i` / `1440x576i`) with automatic 4:3 aspect-ratio letterboxing.
   - **PAL Modes (50 Hz & 100 Hz):** Verified handshake and capture for `4Kp50`, `1440p50`, `1080p50`, as well as high-refresh `1440p100` and `1080p100`.
@@ -63,12 +63,12 @@ After installation, launch **EverLive** from your application menu, or run:
   - **Why the hub no longer embeds the video:** Earlier versions passed the Qt widget to `everlive_display -w` (`SDL_CreateWindowFrom`) and forced the X11 video driver. On Wayland that path runs through Xwayland. The nested window is composited with the hub, and a size check in the renderer called `SDL_SetWindowSize` on that foreign window. The Console Hub does not pass `-w` anymore. The flag still exists on the renderer.
   - **How it works now:** The **EverLive Console Hub** (Qt, runs natively on Wayland) handles setup: signal status, format preset, RGB LED, volume, HDMI re-sync and launch options. The video stream runs in its **own top-level window** (`everlive_display`, SDL2) that talks to the compositor directly.
   - **Native Wayland window:** If your SDL2 comes from **sdl2-compat / SDL3** (e.g. Arch, CachyOS), the game window is a native Wayland client. With classic SDL2 builds (e.g. older Ubuntu/Mint releases), SDL uses X11 by default, so on Wayland it runs through Xwayland. On X11 sessions it always runs natively.
-  - **Non-blocking presentation:** VSync is off by default. Frames are presented as soon as they arrive and never wait for vblank. In fullscreen, compositors such as KWin can use direct scanout automatically. VSync can be turned on in the hub if you prefer.
-  - **No HDMI polling while you play:** While the game window is open, the hub does not query DV timings. That avoids a once-per-second stall on the HDMI receiver's I2C bus. It still reads the cached `hdr_mode` control once a second, so the label can follow an HDR change.
+  - **Non-blocking presentation:** VSync is off by default. Frames are presented as soon as they arrive and never wait for vblank. In fullscreen, compositors such as KWin can use direct scanout automatically. VSync can be turned on in the hub or via `--vsync` if you prefer.
+  - **No HDMI polling while you play:** While the game window is open, HDMI receiver I2C stalls are avoided: the driver serves cached timings to the hub during active streaming without touching the physical I2C bus. The hub also reads the cached `hdr_mode` control once a second, so the label can follow an HDR change.
 - **Aspect-ratio-preserving scaling (letterbox / pillarbox):** Keeps the source aspect ratio on 16:10, 21:9 and 4:3 setups with black borders and no stretching, in both windowed and fullscreen mode.
 - **Live HDR switching:** HDR10 (PQ) and HLG come from the HDMI DRM InfoFrame. At the same resolution the driver updates the color matrix only and leaves DMA running, so the game window stays up. The Console Hub label follows that metadata (`SDR`, `HDR10`, or `HLG`). Switching HDR on a PlayStation 5 during capture was verified. The pixels stay in the selected capture format (usually YUYV); PQ and HLG are not tone-mapped to SDR. P010 is the 10-bit capture format.
 - **Direct render pipeline:** `everlive_display` maps the V4L2 DMA buffers and uploads each frame to an SDL2 OpenGL texture (`SDL_UpdateTexture`). The HUD latency number is taken before that upload and before `SDL_RenderPresent`. It is not the time until the panel shows the frame.
-- **Synchronized low-latency audio (LPCM stereo & surround):** Bridges console LPCM audio to PipeWire via an adaptive loopback pipeline (`everlive-audio` with real-time clock drift compensation and a 60 ms jitter-safe buffer) as the stream **EverLive Game Audio**. PipeWire automatically routes and mixes it down to your stereo headset or surround setup.
+- **Synchronized low-latency audio (LPCM stereo):** Bridges console 2-channel LPCM audio to PipeWire via an adaptive loopback pipeline (`everlive-audio` with real-time clock drift compensation and a 60 ms jitter-safe buffer; 40 ms in fallback mode) as the stream **EverLive Game Audio**. PipeWire routes it directly to your stereo headset or speakers.
 - **Hardware RGB LED control (reverse-engineered):**
   - **Factory blinking fixed:** Reverse-engineered the Artix-7 FPGA lighting engine (BAR 0 `0x0800`–`0x086c`, script RAM `0x2008`). The card no longer blinks red endlessly on Linux, and you don't need Windows software.
   - **Standard Linux Multicolor LED subsystem:** Implements the kernel multicolor LED classdev at `/sys/class/leds/gc573:rgb:status` using official Profile 241 (Constant Color 24-bit PWM).
@@ -127,7 +127,7 @@ flowchart TD
   subgraph Hardware["Console & Hardware Layer"]
     ps5["PS5 / Console (1440p @ 120 FPS)"] -->|HDMI 2.0| gc573["AVerMedia GC573 (Live Gamer 4K)"]
     gc573 -->|"PCIe SG-DMA Video (3 mmap buffers)"| v4l2["V4L2 Video Device (/dev/video*)"]
-    gc573 -->|"PCIe SG-DMA Audio (8ch LPCM)"| alsa["ALSA PCM Capture (hw:CARD=A4K)"]
+    gc573 -->|"PCIe SG-DMA Audio (LPCM)"| alsa["ALSA PCM Capture (hw:CARD=A4K)"]
     gc573 -.->|"Linux LED classdev / sysfs"| sysfs["/sys/class/leds/gc573:rgb:status<br/>sysfs: hpd_pulse"]
   end
 
@@ -140,7 +140,7 @@ flowchart TD
     game -->|"VSync off by default"| screen["120 Hz Monitor"]
 
     alsa -->|"everlive-audio (adaptive loopback)"| pw["PipeWire (60 ms safe buffer)"]
-    pw -->|Channel mixdown| speakers["Headset / Speakers"]
+    pw -->|Stereo playback| speakers["Headset / Speakers"]
   end
 ```
 
@@ -218,7 +218,7 @@ Through reverse-engineering of the official firmware and the FPGA register space
 > - **SDL backend:** The game window runs natively on Wayland only with sdl2-compat / SDL3. With classic SDL2 it runs through Xwayland (see *Highlights*). You can force a backend with `SDL_VIDEODRIVER=wayland` or `SDL_VIDEODRIVER=x11`.
 > - **Console Audio Settings (Stereo / 2-Channel LPCM Recommended):** On PlayStation 5, Xbox Series X/S, Nintendo Switch, and PC sources, configure audio output to **Linear PCM 2.0 (Stereo)**.
 >   - Multi-channel surround modes (5.1 / 7.1 LPCM) stream uncompressed 8-channel audio, which can cause micro-stutters and buffer resync clicks on desktop USB audio devices (such as wireless headsets or USB DACs) due to asynchronous clock drift between PCIe DMA and USB audio clocks.
->   - Setting the console to 2-channel Stereo guarantees completely smooth, dropout-free playback and allows console binaural engines (like PS5 Tempest 3D Audio) to deliver an optimal spatial mix for headphones.
+>   - Setting the console to 2-channel Stereo provides smooth, click-free playback and allows console binaural engines (like PS5 Tempest 3D Audio) to deliver an optimal spatial mix for headphones.
 > - **Active development:** DMA queue tuning, buffer recycling and HDMI audio compatibility across more sources are still being improved.
 >
 > **Tips for the best experience:**
