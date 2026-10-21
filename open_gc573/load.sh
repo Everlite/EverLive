@@ -11,9 +11,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 MODULE="${SCRIPT_DIR}/open_gc573.ko"
 
-if [[ ! -f "${MODULE}" ]]; then
-    echo "[*] open_gc573.ko nicht gefunden. Kompiliere..."
-    make -C "${SCRIPT_DIR}" LLVM=1 CC=clang
+CURRENT_VERMAGIC="$(modinfo -F vermagic "${MODULE}" 2>/dev/null | awk '{print $1}')"
+if [[ ! -f "${MODULE}" ]] || [[ "${CURRENT_VERMAGIC}" != "$(uname -r)" ]]; then
+    echo "[*] open_gc573.ko fehlt oder passt nicht zum laufenden Kernel (${CURRENT_VERMAGIC:-fehlt} != $(uname -r)). Kompiliere neu..."
+    make -C "${SCRIPT_DIR}" clean >/dev/null 2>&1 || true
+    if grep -q '^CONFIG_CC_IS_CLANG=y' "/usr/lib/modules/$(uname -r)/build/.config" 2>/dev/null || grep -iq 'clang' /proc/version 2>/dev/null; then
+        make -C "${SCRIPT_DIR}" -j"$(nproc)" LLVM=1 CC=clang
+    else
+        make -C "${SCRIPT_DIR}" -j"$(nproc)"
+    fi
 fi
 
 echo "[*] Prüfe und bereinige geladene Module..."

@@ -5,6 +5,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VIEWER="${SCRIPT_DIR}/tools/everlive/everlive_viewer.py"
 
+MODULE="${SCRIPT_DIR}/open_gc573/open_gc573.ko"
+CURRENT_VERMAGIC="$(modinfo -F vermagic "${MODULE}" 2>/dev/null | awk '{print $1}')"
+if [[ ! -f "${MODULE}" ]] || [[ "${CURRENT_VERMAGIC}" != "$(uname -r)" ]]; then
+    echo "[*] open_gc573.ko passt nicht zum laufenden Kernel ($(uname -r)). Kompiliere..."
+    make -C "${SCRIPT_DIR}/open_gc573" clean >/dev/null 2>&1 || true
+    if grep -q '^CONFIG_CC_IS_CLANG=y' "/usr/lib/modules/$(uname -r)/build/.config" 2>/dev/null || grep -iq 'clang' /proc/version 2>/dev/null; then
+        make -C "${SCRIPT_DIR}/open_gc573" -j"$(nproc)" LLVM=1 CC=clang >/dev/null 2>&1 || true
+    else
+        make -C "${SCRIPT_DIR}/open_gc573" -j"$(nproc)" >/dev/null 2>&1 || true
+    fi
+fi
+
 # Check if open_gc573 is loaded
 if ! grep -q "^open_gc573 " /proc/modules; then
     echo "[!] open_gc573 Treiber ist nicht geladen."

@@ -59,6 +59,7 @@ detect_and_install_deps() {
                 MISSING_PKGS+=(linux-headers)
             fi
         fi
+        ! command -v dkms >/dev/null 2>&1 && MISSING_PKGS+=(dkms)
         ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(base-devel)
         ! command -v sdl2-config >/dev/null 2>&1 && MISSING_PKGS+=(sdl2)
         ! command -v arecord >/dev/null 2>&1 && MISSING_PKGS+=(alsa-utils)
@@ -90,6 +91,7 @@ detect_and_install_deps() {
     elif command -v apt-get >/dev/null 2>&1; then
         # Ubuntu / Debian / Pop!_OS / Mint
         [ ! -d "/lib/modules/$(uname -r)/build" ] && MISSING_PKGS+=("linux-headers-$(uname -r)")
+        ! command -v dkms >/dev/null 2>&1 && MISSING_PKGS+=(dkms)
         ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(build-essential)
         ! command -v sdl2-config >/dev/null 2>&1 && MISSING_PKGS+=(libsdl2-dev)
         ! command -v arecord >/dev/null 2>&1 && MISSING_PKGS+=(alsa-utils)
@@ -112,6 +114,7 @@ detect_and_install_deps() {
     elif command -v dnf >/dev/null 2>&1; then
         # Fedora / Nobara
         [ ! -d "/usr/src/kernels/$(uname -r)" ] && MISSING_PKGS+=("kernel-devel-$(uname -r)" kernel-headers)
+        ! command -v dkms >/dev/null 2>&1 && MISSING_PKGS+=(dkms)
         ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(gcc make)
         ! command -v sdl2-config >/dev/null 2>&1 && MISSING_PKGS+=(SDL2-devel)
         ! command -v arecord >/dev/null 2>&1 && MISSING_PKGS+=(alsa-utils)
