@@ -740,6 +740,17 @@ class GameStreamer:
         if streamer_mode:
             mpv_cmd.extend(["--no-osc", "--osd-level=0", "--cursor-autohide=always"])
 
+        # Automatic HDR10 / HLG metadata bridging for mpv:
+        # Since FFmpeg's libavdevice/v4l2 demuxer does not propagate V4L2 colorimetry,
+        # detect HDR directly from V4L2 metadata and inject the exact tone-mapping pipeline.
+        hdr_type = self.hdr_label()
+        if hdr_type == "HDR10":
+            mpv_cmd.append("--vf=format=colorlevels=limited:colormatrix=bt.2020-ncl:primaries=bt.2020:gamma=pq")
+            print("[*] HDR10 (PQ BT.2020) signal detected: Auto-configured mpv tone-mapping and Limited Range filter")
+        elif hdr_type == "HLG":
+            mpv_cmd.append("--vf=format=colorlevels=limited:colormatrix=bt.2020-ncl:primaries=bt.2020:gamma=hlg")
+            print("[*] HLG (BT.2020) signal detected: Auto-configured mpv HLG tone-mapping and Limited Range filter")
+
         try:
             mpv_env = os.environ.copy()
             self.mpv_proc = subprocess.Popen(mpv_cmd, env=mpv_env, start_new_session=True)
@@ -867,6 +878,8 @@ if HAS_QT:
             self.saved_cfg = load_settings()
             if streamer_mode:
                 self.saved_cfg["streamer_mode"] = True
+            if self.saved_cfg.get("engine", "native") == "mpv":
+                self.streamer.force_mpv = True
 
             self.init_ui()
 
@@ -1294,6 +1307,31 @@ if HAS_QT:
             self.btn_resync.clicked.connect(self.force_resync)
             grid.addWidget(self.btn_resync, 1, 3)
 
+            # Row 2: Render Engine & HDR Status
+            lbl_engine = QLabel("Render Engine:")
+            lbl_engine.setStyleSheet("font-weight: 500; color: #94a3b8;")
+            lbl_engine.setToolTip("Select gaming/preview renderer:\n• Direct Native: Ultra-low latency (< 2 ms) direct SDL2 Wayland display\n• MPV Studio: Automatic HDR10/HLG tone-mapping and colorimetry")
+            grid.addWidget(lbl_engine, 2, 0)
+
+            self.combo_engine = QComboBox()
+            self.combo_engine.addItem("Direct Native (< 2ms)", "native")
+            self.combo_engine.addItem("MPV Studio (Auto HDR)", "mpv")
+            saved_engine = self.saved_cfg.get("engine", "native")
+            idx = self.combo_engine.findData(saved_engine)
+            if idx >= 0:
+                self.combo_engine.setCurrentIndex(idx)
+            self.combo_engine.currentIndexChanged.connect(self.on_engine_changed)
+            grid.addWidget(self.combo_engine, 2, 1)
+
+            lbl_hdr_mode = QLabel("HDR Processing:")
+            lbl_hdr_mode.setStyleSheet("font-weight: 500; color: #94a3b8;")
+            grid.addWidget(lbl_hdr_mode, 2, 2)
+
+            self.lbl_hdr_status = QLabel("Automatic")
+            self.lbl_hdr_status.setStyleSheet("color: #34d399; font-weight: 600; font-size: 11px;")
+            self.lbl_hdr_status.setToolTip("When HDR10 or HLG is detected, EverLive automatically configures BT.2020 / PQ tone-mapping and Limited-Range filters")
+            grid.addWidget(self.lbl_hdr_status, 2, 3)
+
             v_settings.addLayout(grid)
             root_layout.addWidget(card_settings)
 
@@ -1341,12 +1379,15 @@ if HAS_QT:
             is_fs = self.chk_fullscreen.isChecked()
             is_vsync = self.chk_vsync.isChecked()
             is_streamer = self.chk_streamer.isChecked()
+            engine = self.combo_engine.currentData() if hasattr(self, "combo_engine") else "native"
+            self.streamer.force_mpv = (engine == "mpv")
             save_settings({
                 "preset": preset,
                 "volume": vol,
                 "fullscreen": is_fs,
                 "vsync": is_vsync,
                 "streamer_mode": is_streamer,
+                "engine": engine,
             })
             success = self.streamer.start(preset_name=preset, fullscreen=is_fs, volume=vol, vsync=is_vsync, streamer_mode=is_streamer)
             if success:
@@ -1355,6 +1396,14 @@ if HAS_QT:
                 self.btn_launch.setStyle(self.btn_launch.style())
                 set_audio_volume(self.slider_vol.value())
                 QTimer.singleShot(600, lambda: set_audio_volume(self.slider_vol.value()))
+
+        def on_engine_changed(self):
+            engine = self.combo_engine.currentData()
+            self.streamer.force_mpv = (engine == "mpv")
+            save_settings({"engine": engine})
+            if self.streamer.is_running:
+                self.streamer.stop()
+                QTimer.singleShot(150, self.start_gaming_screen)
 
         def on_preset_changed(self):
             preset = self.combo_presets.currentText()
