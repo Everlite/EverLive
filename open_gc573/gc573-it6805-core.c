@@ -4269,6 +4269,7 @@ it6805_video_colorimetry(const struct it6805_runtime *runtime,
 	     runtime->avi.extended_colorimetry >= 5 &&
 	     runtime->avi.extended_colorimetry <= 6) ||
 	    runtime->drm.hdr_mode == GC555_VIDEO_HDR_HLG ||
+	    runtime->drm.hdr_mode == GC555_VIDEO_HDR_PQ ||
 	    runtime->drm.hdr_mode == GC555_VIDEO_HDR_PQ_BT2020)
 		return GC555_VIDEO_COLORIMETRY_BT2020;
 	if (it6805_video_input_class(width, height) == GC555_VIDEO_INPUT_SD)

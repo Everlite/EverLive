@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
-KDIR ?= /lib/modules/$(shell uname -r)/build
+KDIR ?= $(shell if [ -d "/lib/modules/$$(uname -r)/build" ]; then echo "/lib/modules/$$(uname -r)/build"; else ls -d /lib/modules/*/build 2>/dev/null | tail -n1; fi)
 
 # Automatically detect if the running/target kernel was built with Clang/LLVM (e.g. CachyOS)
 ifeq ($(origin LLVM),undefined)
