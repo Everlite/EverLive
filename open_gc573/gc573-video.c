@@ -175,8 +175,9 @@ gc555_video_mode_supports_rate(const struct gc555_video_mode *mode, u32 rate)
 		return false;
 	for (i = 0; i < mode->rate_count; i++) {
 		int diff = (int)mode->rates[i] - (int)rate;
+		int tolerance = mode->rates[i] >= 100 ? 5 : 2;
 
-		if (diff >= -2 && diff <= 2)
+		if (diff >= -tolerance && diff <= tolerance)
 			return true;
 	}
 
@@ -1010,9 +1011,10 @@ static int gc555_video_start_streaming(struct vb2_queue *queue,
 		goto fail;
 	if (!gc555_video_supports_signal(video->format_info, &signal)) {
 		dev_info(&gc555->pdev->dev,
-			 "stream: mode table rejects %ux%u@%u il=%d fmt=%d\n",
+			 "stream: mode table rejects %ux%u@%u il=%d req_fmt=%s(%d) in_enc=%d\n",
 			 signal.width, signal.height, signal.frame_rate_hz,
-			 signal.interlaced, video->format_info->format);
+			 signal.interlaced, video->format_info->description,
+			 video->format_info->format, signal.encoding);
 		ret = -EOPNOTSUPP;
 		goto fail;
 	}

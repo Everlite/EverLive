@@ -2632,6 +2632,8 @@ static void it6805_framerate_selfcheck(void)
 	WARN_ON(!it6805_rescale_frame_rate(51, 126457, &rate) || rate != 60);
 	WARN_ON(!it6805_rescale_frame_rate(60, 126457, &rate) || rate != 60);
 	WARN_ON(it6805_normalize_frame_rate(12200, 494440) != 120);
+	WARN_ON(it6805_normalize_frame_rate(11856, 580000) != 120);
+	WARN_ON(it6805_normalize_frame_rate(11600, 580000) != 120);
 	WARN_ON(it6805_normalize_frame_rate(18000, 445500) != 180);
 	WARN_ON(it6805_normalize_frame_rate(17900, 445500) != 180);
 }
@@ -2665,8 +2667,19 @@ static u8 it6805_normalize_frame_rate(u32 frame_rate_x100,
 		}
 	}
 
-	if (best_error <= best_rate * 3U)
-		return best_rate;
+	/*
+	 * Allow wider tolerance (up to 5%) for high-refresh modes (>= 100 Hz).
+	 * This cleanly accommodates genlocked retro scalers (e.g. RetroTINK 4K /
+	 * OSSC Pro doubling off-spec ~58-59 Hz PAL 60Hz or arcade signals to
+	 * ~116-119 Hz) without snapping into neighboring rates.
+	 */
+	if (best_rate >= 100) {
+		if (best_error <= best_rate * 5U)
+			return best_rate;
+	} else {
+		if (best_error <= best_rate * 3U)
+			return best_rate;
+	}
 
 	return min_t(u32, DIV_ROUND_CLOSEST(frame_rate_x100, 100U),
 		     U8_MAX);
