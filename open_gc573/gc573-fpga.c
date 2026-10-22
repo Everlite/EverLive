@@ -865,16 +865,17 @@ static bool gc555_fpga_is_native_hdr_p010(
 	       (config->input_colorimetry == GC555_VIDEO_COLORIMETRY_BT2020 ||
 	        config->input_colorimetry == GC555_VIDEO_COLORIMETRY_BT709) &&
 	       (config->input_hdr_mode == GC555_VIDEO_HDR_PQ_BT2020 ||
-	        config->input_hdr_mode == GC555_VIDEO_HDR_PQ) &&
+	        config->input_hdr_mode == GC555_VIDEO_HDR_PQ ||
+	        config->input_hdr_mode == GC555_VIDEO_HDR_HLG) &&
 	       config->output_format == GC555_VIDEO_FORMAT_P010;
 }
 
 /*
  * GC573: consoles and video processors (PS5, Xbox, RetroTINK 4K) frequently
- * signal BT.2020 or PQ HDR10 even when the capture side requests an 8-bit
+ * signal BT.2020 or PQ/HLG HDR even when the capture side requests an 8-bit
  * format (such as YUYV or NV12). The FPGA carries BT.2020 RGB->YUV matrices,
  * so pass such signals through cleanly instead of refusing to stream.
- * PQ content is delivered untone-mapped to userspace.
+ * PQ/HLG content is delivered untone-mapped to userspace.
  */
 static bool gc555_fpga_is_native_hdr_passthrough(
 				const struct gc555_fpga_video_config *config)
@@ -901,7 +902,8 @@ static bool gc555_fpga_is_native_hdr_passthrough(
 	return native_mode && supported_transport && !config->interlaced &&
 	       (config->input_colorimetry == GC555_VIDEO_COLORIMETRY_BT2020 ||
 	        config->input_hdr_mode == GC555_VIDEO_HDR_PQ ||
-	        config->input_hdr_mode == GC555_VIDEO_HDR_PQ_BT2020);
+	        config->input_hdr_mode == GC555_VIDEO_HDR_PQ_BT2020 ||
+	        config->input_hdr_mode == GC555_VIDEO_HDR_HLG);
 }
 
 static bool

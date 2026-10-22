@@ -3355,24 +3355,29 @@ static int it6805_release_video_tristate_locked(struct gc555_it6805 *it6805)
 	if (!ret)
 		ret = it6805_read_locked(it6805, 0xc0, &regc0);
 	if (!ret && !(regc0 & BIT(0))) {
+		bool is_10bit = (depth == 0x10 || depth == 0x50);
+		bool is_12bit = (depth == 0x20 || depth == 0x60);
+
 		reg = 0xc5;
 		switch (regc0 & 0xc0) {
 		case 0x80:
-			value = depth == 0x20 ? 0x23 :
-				depth == 0x10 ? 0x63 : 0x03;
+			value = is_12bit ? 0x23 :
+				is_10bit ? 0x63 : 0x03;
 			break;
 		case 0x40:
 		case 0x00:
-			value = depth == 0x20 ? 0x38 :
-				depth == 0x10 ? 0x78 : 0x18;
+			value = is_12bit ? 0x38 :
+				is_10bit ? 0x78 : 0x18;
 			break;
 		default:
 			write_tail = false;
 			break;
 		}
 	} else if (!ret) {
+		bool is_10bit = (depth == 0x10 || depth == 0x50);
+
 		reg = 0xc6;
-		value = depth == 0x10 ? 0x40 : 0;
+		value = is_10bit ? 0x40 : 0;
 	}
 	if (!ret && write_tail)
 		ret = it6805_write_locked(it6805, reg, value);
@@ -4260,9 +4265,11 @@ static enum gc555_video_colorimetry
 it6805_video_colorimetry(const struct it6805_runtime *runtime,
 			 u32 width, u32 height)
 {
-	if (runtime->avi.colorimetry == 3 &&
-	    runtime->avi.extended_colorimetry >= 5 &&
-	    runtime->avi.extended_colorimetry <= 6)
+	if ((runtime->avi.colorimetry == 3 &&
+	     runtime->avi.extended_colorimetry >= 5 &&
+	     runtime->avi.extended_colorimetry <= 6) ||
+	    runtime->drm.hdr_mode == GC555_VIDEO_HDR_HLG ||
+	    runtime->drm.hdr_mode == GC555_VIDEO_HDR_PQ_BT2020)
 		return GC555_VIDEO_COLORIMETRY_BT2020;
 	if (it6805_video_input_class(width, height) == GC555_VIDEO_INPUT_SD)
 		return GC555_VIDEO_COLORIMETRY_BT601;

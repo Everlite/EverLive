@@ -586,6 +586,8 @@ struct stream_ctx {
     uint32_t bytesperline;
     uint32_t sdl_format;
     bool interlaced;
+    bool is_hdr;
+    bool is_hlg;
     struct v4l2_mmap_buffer buffers[BUFFER_COUNT];
     unsigned int buffer_count;
     SDL_Texture *texture;
@@ -673,6 +675,10 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
                       fmt.fmt.pix.field == V4L2_FIELD_INTERLACED ||
                       fmt.fmt.pix.field == V4L2_FIELD_INTERLACED_TB ||
                       fmt.fmt.pix.field == V4L2_FIELD_INTERLACED_BT;
+    ctx->is_hdr = (fmt.fmt.pix.colorspace == V4L2_COLORSPACE_BT2020 ||
+                   fmt.fmt.pix.xfer_func == V4L2_XFER_FUNC_SMPTE2084);
+    ctx->is_hlg = (fmt.fmt.pix.colorspace == V4L2_COLORSPACE_BT2020 &&
+                   fmt.fmt.pix.xfer_func != V4L2_XFER_FUNC_SMPTE2084);
 
     if (ctx->width == 0 || ctx->height == 0) {
         return false;
@@ -748,9 +754,11 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
     }
 
     ctx->active = true;
-    printf("[+] HDMI Stream active: %ux%u%c [%s] (%u bytes/line)\n",
+    printf("[+] HDMI Stream active: %ux%u%c [%s%s] (%u bytes/line)\n",
            ctx->width, ctx->height, ctx->interlaced ? 'i' : 'p',
-           get_chroma_desc(ctx->pixelformat), ctx->bytesperline);
+           get_chroma_desc(ctx->pixelformat),
+           ctx->is_hdr ? (ctx->is_hlg ? " HLG" : " HDR10") : "",
+           ctx->bytesperline);
     return true;
 }
 
@@ -1580,7 +1588,7 @@ int main(int argc, char *argv[])
         if (g_show_stats && !g_streamer_mode) {
             SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
             int box_w = 200;
-            int box_h = 75;
+            int box_h = ctx.is_hdr ? 95 : 75;
             int box_x = cur_w - box_w - 20;
             int box_y = 20;
 
@@ -1590,14 +1598,20 @@ int main(int argc, char *argv[])
             SDL_SetRenderDrawColor(renderer, 45, 55, 80, 220);
             SDL_RenderDrawRect(renderer, &stats_bg);
 
-            char line1[32], line2[32], line3[32];
+            char line1[32], line2[32], line3[32], line4[32];
             snprintf(line1, sizeof(line1), "FPS: %.2f (%.2fms)", live_fps > 0.0 ? live_fps : 60.0, live_fps > 0.0 ? (1000.0 / live_fps) : 16.67);
             snprintf(line2, sizeof(line2), "LAG: %.1f ms", lat_ms);
             snprintf(line3, sizeof(line3), "JITTER: %u/s", live_jitter);
+            if (ctx.is_hdr) {
+                snprintf(line4, sizeof(line4), "HDR: %s (BT.2020)", ctx.is_hlg ? "HLG" : "PQ");
+            }
 
             draw_string(renderer, line1, box_x + 12, box_y + 12, 1, (SDL_Color){63, 185, 80, 255});
             draw_string(renderer, line2, box_x + 12, box_y + 32, 1, (SDL_Color){88, 166, 255, 255});
             draw_string(renderer, line3, box_x + 12, box_y + 52, 1, (live_jitter > 5) ? (SDL_Color){248, 81, 73, 255} : (SDL_Color){139, 148, 158, 255});
+            if (ctx.is_hdr) {
+                draw_string(renderer, line4, box_x + 12, box_y + 72, 1, (SDL_Color){255, 215, 0, 255});
+            }
         }
 
         /* 3. Center Toast (pops up on scroll/key volume changes or HDMI re-sync) */
@@ -1637,16 +1651,20 @@ int main(int argc, char *argv[])
             last_title_time = now_ticks;
 
             char title[180];
-            snprintf(title, sizeof(title), "EverLive - %ux%u%c @ %.2f FPS [%s] | Latency: %.1f ms | Vol: %d%%%s",
+            snprintf(title, sizeof(title), "EverLive - %ux%u%c @ %.2f FPS [%s%s] | Latency: %.1f ms | Vol: %d%%%s",
                      ctx.width, ctx.height, ctx.interlaced ? 'i' : 'p', live_fps,
-                     get_chroma_desc(ctx.pixelformat), lat_ms, g_muted ? 0 : (int)(g_volume * 100.0f),
+                     get_chroma_desc(ctx.pixelformat),
+                     ctx.is_hdr ? (ctx.is_hlg ? " HLG" : " HDR10") : "",
+                     lat_ms, g_muted ? 0 : (int)(g_volume * 100.0f),
                      g_streamer_mode ? " [STREAMER MODE]" : "");
             if (g_embed_wid == 0) {
                 SDL_SetWindowTitle(window, title);
             }
-            printf("[*] Stream: %ux%u%c @ %.2f FPS [%s] | Latency: %.1f ms | Jitter: %u/s%s\n",
+            printf("[*] Stream: %ux%u%c @ %.2f FPS [%s%s] | Latency: %.1f ms | Jitter: %u/s%s\n",
                    ctx.width, ctx.height, ctx.interlaced ? 'i' : 'p', live_fps,
-                   get_chroma_desc(ctx.pixelformat), lat_ms, live_jitter,
+                   get_chroma_desc(ctx.pixelformat),
+                   ctx.is_hdr ? (ctx.is_hlg ? " HLG" : " HDR10") : "",
+                   lat_ms, live_jitter,
                    g_streamer_mode ? " [STREAMER MODE]" : "");
             fflush(stdout);
         }

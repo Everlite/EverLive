@@ -379,9 +379,11 @@ gc555_video_set_colorimetry(const struct gc555_video_format_info *format,
 
 	if (format->format == GC555_VIDEO_FORMAT_P010 && signal &&
 	    (signal->hdr_mode == GC555_VIDEO_HDR_PQ ||
-	     signal->hdr_mode == GC555_VIDEO_HDR_PQ_BT2020)) {
+	     signal->hdr_mode == GC555_VIDEO_HDR_PQ_BT2020 ||
+	     signal->hdr_mode == GC555_VIDEO_HDR_HLG)) {
 		pix->colorspace = V4L2_COLORSPACE_BT2020;
-		pix->xfer_func = V4L2_XFER_FUNC_SMPTE2084;
+		pix->xfer_func = (signal->hdr_mode == GC555_VIDEO_HDR_HLG) ?
+			V4L2_XFER_FUNC_DEFAULT : V4L2_XFER_FUNC_SMPTE2084;
 		pix->ycbcr_enc = V4L2_YCBCR_ENC_BT2020;
 		pix->quantization = V4L2_QUANTIZATION_LIM_RANGE;
 		return;
@@ -407,10 +409,11 @@ gc555_video_set_colorimetry(const struct gc555_video_format_info *format,
 		pix->ycbcr_enc = V4L2_YCBCR_ENC_709;
 		break;
 	}
-	pix->xfer_func = (signal &&
-			  (signal->hdr_mode == GC555_VIDEO_HDR_PQ ||
-			   signal->hdr_mode == GC555_VIDEO_HDR_PQ_BT2020)) ?
-		V4L2_XFER_FUNC_SMPTE2084 : V4L2_XFER_FUNC_DEFAULT;
+	if (signal && (signal->hdr_mode == GC555_VIDEO_HDR_PQ ||
+		       signal->hdr_mode == GC555_VIDEO_HDR_PQ_BT2020))
+		pix->xfer_func = V4L2_XFER_FUNC_SMPTE2084;
+	else
+		pix->xfer_func = V4L2_XFER_FUNC_DEFAULT;
 	pix->quantization = V4L2_QUANTIZATION_FULL_RANGE;
 }
 
