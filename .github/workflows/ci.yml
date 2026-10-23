@@ -24,6 +24,7 @@ jobs:
             linux-headers-generic \
             libsdl2-dev \
             libx11-dev \
+            libgl-dev \
             python3
 
       - name: Locate Generic Kernel Headers
@@ -59,9 +60,9 @@ jobs:
 
       - name: Compile EverLive direct display renderer (GCC & Clang)
         run: |
-          gcc -O3 -Wall -Wextra tools/everlive/everlive_display.c -o tools/everlive/everlive_display $(sdl2-config --cflags --libs) -lX11 -lpthread -lm
+          gcc -O3 -Wall -Wextra tools/everlive/everlive_display.c -o tools/everlive/everlive_display $(sdl2-config --cflags --libs) -lGL -lX11 -lpthread -lm
           rm tools/everlive/everlive_display
-          clang -O3 -Wall -Wextra tools/everlive/everlive_display.c -o tools/everlive/everlive_display $(sdl2-config --cflags --libs) -lX11 -lpthread -lm
+          clang -O3 -Wall -Wextra tools/everlive/everlive_display.c -o tools/everlive/everlive_display $(sdl2-config --cflags --libs) -lGL -lX11 -lpthread -lm
           rm tools/everlive/everlive_display
 
       - name: Verify Python syntax
