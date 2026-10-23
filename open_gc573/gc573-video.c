@@ -34,6 +34,13 @@
 #define GC555_VIDEO_DEFAULT_WIDTH	1920U
 #define GC555_VIDEO_DEFAULT_HEIGHT	1080U
 #define GC555_VIDEO_DEFAULT_RATE	60U
+/*
+ * The sampled input rate wobbles by ~0.7 Hz (pixel-clock estimate, see
+ * gc555_fpga_frame_period). Reprogramming VIP_FRAME_RATE below that noise
+ * floor storms the FPGA with register writes mid-stream and damages the
+ * frame cadence, so treat rate changes below 2 Hz as measurement jitter.
+ */
+#define GC555_VIDEO_RATE_HYSTERESIS_X100 200
 
 struct gc555_video_format_info {
 	u32 fourcc;
@@ -633,13 +640,18 @@ static void gc555_video_monitor_work(struct work_struct *work)
 	if (signal_valid)
 		gc555_video_update_format_locked(video, &signal);
 	if (signal_valid && vb2_is_streaming(&video->queue)) {
-		if (signal.frame_rate_hz != video->stream_signal.frame_rate_hz &&
+		if (signal.frame_rate_x100 > 100 &&
+		    abs((int)signal.frame_rate_x100 -
+			(int)video->stream_signal.frame_rate_x100) >
+		    GC555_VIDEO_RATE_HYSTERESIS_X100 &&
 		    signal.width == video->stream_signal.width &&
 		    signal.height == video->stream_signal.height) {
-			dev_info(gc555->dev, "Input frame rate changed: %u Hz -> %u Hz\n",
-				 video->stream_signal.frame_rate_hz, signal.frame_rate_hz);
+			dev_info(gc555->dev, "Input frame rate changed: %u.%02u Hz -> %u.%02u Hz\n",
+				 video->stream_signal.frame_rate_hz, video->stream_signal.frame_rate_x100 % 100,
+				 signal.frame_rate_hz, signal.frame_rate_x100 % 100);
 			spin_lock_irqsave(&video->queue_lock, flags);
 			video->stream_signal.frame_rate_hz = signal.frame_rate_hz;
+			video->stream_signal.frame_rate_x100 = signal.frame_rate_x100;
 			video->frame_rate_hz = signal.frame_rate_hz;
 			spin_unlock_irqrestore(&video->queue_lock, flags);
 			gc555_fpga_set_frame_rate(gc555, signal.frame_rate_hz, signal.frame_rate_x100);
@@ -888,12 +900,15 @@ gc555_video_buffer_complete(void *cookie, u64 completion_ns, void *context)
 		return GC555_VIDEO_DMA_RECYCLE;
 	}
 
-	if (current_signal.frame_rate_hz &&
-	    current_signal.frame_rate_hz != stream_signal.frame_rate_hz) {
+	if (current_signal.frame_rate_x100 > 100 &&
+	    abs((int)current_signal.frame_rate_x100 - (int)stream_signal.frame_rate_x100) >
+	    GC555_VIDEO_RATE_HYSTERESIS_X100) {
 		spin_lock_irqsave(&video->queue_lock, flags);
 		video->stream_signal.frame_rate_hz = current_signal.frame_rate_hz;
+		video->stream_signal.frame_rate_x100 = current_signal.frame_rate_x100;
 		video->frame_rate_hz = current_signal.frame_rate_hz;
 		stream_signal.frame_rate_hz = current_signal.frame_rate_hz;
+		stream_signal.frame_rate_x100 = current_signal.frame_rate_x100;
 		spin_unlock_irqrestore(&video->queue_lock, flags);
 		if (video->gc555)
 			gc555_fpga_set_frame_rate(video->gc555, current_signal.frame_rate_hz,

@@ -9,6 +9,8 @@
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
 
@@ -46,6 +48,33 @@
 #define GC555_FPGA_MAX_FRAME_RATE	240U
 #define GC555_FPGA_PHASE_SHIFT		6U
 #define GC555_FPGA_CLOCK_HZ		148500000U
+
+/*
+ * The input rate fed into VIP_FRAME_PERIOD is estimated from a sampled pixel
+ * clock and can read ~0.7 % low (e.g. 119.20 Hz for a 120 Hz PS5 signal).
+ * A period longer than the real input period makes the FPGA decimate frames,
+ * so program the period slightly shorter by this margin (per mille).
+ */
+static unsigned int frame_period_margin_permille = 20;
+module_param(frame_period_margin_permille, uint, 0644);
+MODULE_PARM_DESC(frame_period_margin_permille,
+		 "VIP frame period safety margin above measured input rate in 1/1000 (default 20 = 2%, 0 = exact)");
+
+static u32 gc555_fpga_frame_period(u32 frame_rate, u32 frame_rate_x100)
+{
+	u32 margin = min_t(u32, READ_ONCE(frame_period_margin_permille), 200U);
+	u64 rate_x100;
+
+	if (frame_rate_x100 >= 500 &&
+	    frame_rate_x100 <= (GC555_FPGA_MAX_FRAME_RATE * 100))
+		rate_x100 = frame_rate_x100;
+	else
+		rate_x100 = (u64)frame_rate * 100;
+
+	/* period = clock / (rate * (1 + margin/1000)) */
+	return (u32)div64_u64((u64)GC555_FPGA_CLOCK_HZ * 100 * 1000,
+			      rate_x100 * (1000 + margin));
+}
 
 #define GC555_FPGA_COLOR_INPUT_MODE_MASK	(BIT(19) | BIT(5) | BIT(0))
 #define GC555_FPGA_OUTPUT_FORMAT_MASK	GENMASK(15, 8)
@@ -1415,12 +1444,12 @@ gc555_fpga_configure_locked(struct gc555_fpga *fpga,
 	if (!ret) {
 		u32 frame_period;
 
-		if (config->input_frame_rate_x100 >= 500 &&
-		    config->input_frame_rate_x100 <= (GC555_FPGA_MAX_FRAME_RATE * 100))
-			frame_period = div_u64((u64)GC555_FPGA_CLOCK_HZ * 100,
-					       config->input_frame_rate_x100);
-		else
-			frame_period = GC555_FPGA_CLOCK_HZ / frame_rate;
+		frame_period = gc555_fpga_frame_period(frame_rate,
+						       config->input_frame_rate_x100);
+		pr_info("open_gc573: VIP frame period %u (input %u.%02u Hz, margin %u permille)\n",
+			frame_period, config->input_frame_rate_x100 / 100,
+			config->input_frame_rate_x100 % 100,
+			READ_ONCE(frame_period_margin_permille));
 
 		ret = gc555_fpga_write(fpga, GC555_FPGA_VIP_FRAME_PERIOD,
 				       frame_period);
@@ -1566,12 +1595,7 @@ int gc555_fpga_set_frame_rate(struct gc555_dev *gc555, u32 frame_rate_hz,
 	fpga = gc555->fpga;
 	frame_rate = clamp(frame_rate_hz, 5U, GC555_FPGA_MAX_FRAME_RATE);
 
-	if (frame_rate_x100 >= 500 &&
-	    frame_rate_x100 <= (GC555_FPGA_MAX_FRAME_RATE * 100))
-		frame_period = div_u64((u64)GC555_FPGA_CLOCK_HZ * 100,
-				       frame_rate_x100);
-	else
-		frame_period = GC555_FPGA_CLOCK_HZ / frame_rate;
+	frame_period = gc555_fpga_frame_period(frame_rate, frame_rate_x100);
 
 	mutex_lock(&fpga->lock);
 	ret = gc555_fpga_update_bits(fpga, GC555_FPGA_VIP_FRAME_RATE,

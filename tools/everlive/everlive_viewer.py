@@ -745,11 +745,11 @@ class GameStreamer:
         # detect HDR directly from V4L2 metadata and inject the exact tone-mapping pipeline.
         hdr_type = self.hdr_label()
         if hdr_type == "HDR10":
-            mpv_cmd.append("--vf=format=colorlevels=limited:colormatrix=bt.2020-ncl:primaries=bt.2020:gamma=pq")
-            print("[*] HDR10 (PQ BT.2020) signal detected: Auto-configured mpv tone-mapping and Limited Range filter")
+            mpv_cmd.append("--vf=setparams=range=limited:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc")
+            print("[*] HDR10 (PQ BT.2020) signal detected: Auto-configured mpv GPU tone-mapping (zero CPU delay)")
         elif hdr_type == "HLG":
-            mpv_cmd.append("--vf=format=colorlevels=limited:colormatrix=bt.2020-ncl:primaries=bt.2020:gamma=hlg")
-            print("[*] HLG (BT.2020) signal detected: Auto-configured mpv HLG tone-mapping and Limited Range filter")
+            mpv_cmd.append("--vf=setparams=range=limited:color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc")
+            print("[*] HLG (BT.2020) signal detected: Auto-configured mpv HLG GPU tone-mapping (zero CPU delay)")
 
         # Anamorphic 3840x1080 scaling:
         # 3840x1080 is an anamorphic half-vertical 4K120 signal (e.g. RetroTINK 4K Pro)
@@ -878,7 +878,7 @@ class GameStreamer:
 
 if HAS_QT:
     class MainWindow(QMainWindow):
-        def __init__(self, streamer: GameStreamer, vsync: bool = False, streamer_mode: bool = False):
+        def __init__(self, streamer: GameStreamer, vsync: bool = True, streamer_mode: bool = False):
             super().__init__()
             self.streamer = streamer
             self.enable_vsync = vsync

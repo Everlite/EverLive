@@ -49,7 +49,7 @@ fi
 # Auto-compile native renderer if missing or source is newer
 if [ ! -f "${SCRIPT_DIR}/tools/everlive/everlive_display" ] || [ "${SCRIPT_DIR}/tools/everlive/everlive_display.c" -nt "${SCRIPT_DIR}/tools/everlive/everlive_display" ]; then
     echo "[*] Kompiliere EverLive Direct-Renderer (everlive_display)..."
-    if ! gcc -O3 -march=native -o "${SCRIPT_DIR}/tools/everlive/everlive_display" "${SCRIPT_DIR}/tools/everlive/everlive_display.c" $(sdl2-config --cflags --libs 2>/dev/null) -lX11 -lpthread; then
+    if ! gcc -O3 -march=native -o "${SCRIPT_DIR}/tools/everlive/everlive_display" "${SCRIPT_DIR}/tools/everlive/everlive_display.c" $(sdl2-config --cflags --libs 2>/dev/null) -lGL -lm -lX11 -lpthread; then
         echo "[!] Warnung: Kompilierung von everlive_display fehlgeschlagen. Starte Viewer (nutzt ggf. mpv-Fallback)..."
     fi
     ln -sf everlive_display "${SCRIPT_DIR}/tools/everlive/gc573_display" 2>/dev/null || true

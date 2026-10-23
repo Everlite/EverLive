@@ -34,9 +34,20 @@
 #include <X11/Xutil.h>
 #include <glob.h>
 #include <libgen.h>
+#define GL_GLEXT_PROTOTYPES 1
+#include <GL/gl.h>
+#include <GL/glext.h>
 #include "font8x8.h"
 
-#define BUFFER_COUNT 3
+#define BUFFER_COUNT 8
+
+static inline uint64_t diff_timespec_us(const struct timespec *end, const struct timespec *start)
+{
+    int64_t sec = (int64_t)end->tv_sec - (int64_t)start->tv_sec;
+    int64_t nsec = (int64_t)end->tv_nsec - (int64_t)start->tv_nsec;
+    int64_t total_us = sec * 1000000LL + nsec / 1000LL;
+    return (total_us > 0) ? (uint64_t)total_us : 0;
+}
 
 static const char *detect_vdev(void)
 {
@@ -128,6 +139,8 @@ static char g_toast_custom[64] = "";
 static uint32_t g_toast_time = 0;
 static uintptr_t g_embed_wid = 0;
 static uint32_t g_preferred_fmt = 0;
+static int g_hdr_mode = 0; // 0 = SDR Monitor Tone-Map (ACES), 1 = HDR Monitor Passthrough (Native), 2 = SDR Bypass
+static float g_hdr_exposure = 50.0f; // Scale factor for HDR tone mapping
 
 static pid_t g_audio_pid = 0;
 static volatile sig_atomic_t g_audio_resync_needed = 0;
@@ -312,7 +325,9 @@ static void start_audio_pipeline(const char *adev)
         printf("[Audio] Hinweis: Bitte Konsole auf 2-Kanal Linear PCM (Stereo) einstellen, um Aussetzer/Knacken zu vermeiden.\n");
 
         /* Native PipeWire loopback with adaptive resampler enabled (immune to clock drift, 60ms safe buffer).
-         * PipeWire automatically matches native channel counts and folds multi-channel into stereo when needed.
+         * IMPORTANT: no forced channel map (-c/-m). Forcing 2ch FL,FR downmixes multichannel console
+         * audio (e.g. PS5 7.1 LPCM) inside the capture stream, which attenuates the center channel and
+         * makes the output much quieter. Native channel passthrough lets the sink do its standard mix.
          */
         snprintf(cmd, sizeof(cmd),
                  "PIPEWIRE_PROPS='{ application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" }' "
@@ -332,10 +347,10 @@ static void start_audio_pipeline(const char *adev)
         }
 
         snprintf(cmd, sizeof(cmd),
-                 "{ arecord -D \"%s\" -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null || "
-                 "  arecord -D \"%s\" -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=80000 -q 2>/dev/null; } | "
+                 "{ arecord -D \"%s\" -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=250000 -q 2>/dev/null || "
+                 "  arecord -D \"%s\" -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=250000 -q 2>/dev/null; } | "
                  "PIPEWIRE_PROPS='{ application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" }' "
-                 "pw-play --latency=40ms -P '{ node.virtual = false application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"EverLive\" node.description = \"EverLive Game Audio\" media.name = \"EverLive\" media.role = \"Game\" }' - 2>/dev/null",
+                 "pw-play --latency=60ms -P '{ node.virtual = false application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"EverLive\" node.description = \"EverLive Game Audio\" media.name = \"EverLive\" media.role = \"Game\" }' - 2>/dev/null",
                  adev, plug_dev, (int)parent_pid);
     }
 
@@ -362,6 +377,27 @@ static void *audio_supervisor_thread(void *arg)
     time_t last_start_time = time(NULL);
 
     start_audio_pipeline(adev);
+
+    /* Resolve hardware capture source node ID once at startup */
+    if (g_pw_node[0] != '\0' && isdigit((unsigned char)g_pw_node[0])) {
+        source_node_id = atoi(g_pw_node);
+    }
+    if (source_node_id < 0) {
+        FILE *fp_src = popen("wpctl status 2>/dev/null | awk '/^Audio/{in_audio=1} /^Video|^Settings/{in_audio=0} in_audio && /AVerMedia Live Gamer 4K Pro/ && !/Pro 1/ {for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\\.$/) {sub(/\\./,\"\",$i); print $i; exit}}'", "r");
+        if (fp_src) {
+            char buf[32];
+            if (fgets(buf, sizeof(buf), fp_src)) {
+                int id = atoi(buf);
+                if (id > 0) {
+                    source_node_id = id;
+                    printf("[Audio] Hardware Capture Source aktiv (Node ID: %d)\n", source_node_id);
+                }
+            }
+            pclose(fp_src);
+        }
+    }
+
+    g_audio_dirty = 1;
 
     while (g_running) {
         /* Handle explicit re-sync request (from resolution change, stall recovery, or hotkey) */
@@ -398,7 +434,6 @@ static void *audio_supervisor_thread(void *arg)
                 } else if (fail_count > 2) {
                     backoff_sec = 4;
                 }
-
                 for (int s = 0; s < backoff_sec && g_running; s++) {
                     sleep(1);
                 }
@@ -588,14 +623,266 @@ struct stream_ctx {
     bool interlaced;
     bool is_hdr;
     bool is_hlg;
+    bool is_full_range;
     struct v4l2_mmap_buffer buffers[BUFFER_COUNT];
     unsigned int buffer_count;
     SDL_Texture *texture;
+    GLuint gl_prog;
+    GLuint gl_tex_y;
+    GLuint gl_tex_uv;
+    GLint u_loc_tex_y;
+    GLint u_loc_tex_uv;
+    GLint u_loc_resolution;
+    GLint u_loc_fmt_type;
+    GLint u_loc_is_hdr;
+    GLint u_loc_is_hlg;
+    GLint u_loc_is_full_range;
+    GLint u_loc_exposure;
+    GLint u_loc_tonemap_mode;
+    bool gl_ready;
 };
+
+static const char *g_hdr_vs_src =
+    "#version 130\n"
+    "in vec2 in_pos;\n"
+    "in vec2 in_uv;\n"
+    "out vec2 v_uv;\n"
+    "void main() {\n"
+    "    gl_Position = vec4(in_pos, 0.0, 1.0);\n"
+    "    v_uv = in_uv;\n"
+    "}\n";
+
+static const char *g_hdr_fs_src =
+    "#version 130\n"
+    "uniform sampler2D u_tex_y;\n"
+    "uniform sampler2D u_tex_uv;\n"
+    "uniform vec2 u_resolution;\n"
+    "uniform int u_fmt_type;\n"       // 0 = YUYV, 1 = NV12, 2 = RGB
+    "uniform int u_is_hdr;\n"         // 1 = HDR active
+    "uniform int u_is_hlg;\n"         // 1 = HLG, 0 = PQ (HDR10)
+    "uniform int u_is_full_range;\n"  // 1 = Full Range [0..255], 0 = Limited [16..235]
+    "uniform float u_exposure;\n"     // Tone mapping scale
+    "uniform int u_tonemap_mode;\n"   // 0 = SDR Tonemap (ACES), 1 = HDR Monitor Passthrough (Native)
+    "in vec2 v_uv;\n"
+    "out vec4 frag_color;\n"
+    "\n"
+    "vec3 pq_to_linear(vec3 N) {\n"
+    "    const float m1 = 0.1593017578125;\n"
+    "    const float m2 = 78.84375;\n"
+    "    const float c1 = 0.8359375;\n"
+    "    const float c2 = 18.8515625;\n"
+    "    const float c3 = 18.6875;\n"
+    "    vec3 N_inv_m2 = pow(clamp(N, 0.0, 1.0), vec3(1.0 / m2));\n"
+    "    vec3 num = max(N_inv_m2 - c1, 0.0);\n"
+    "    vec3 den = max(c2 - c3 * N_inv_m2, 0.00001);\n"
+    "    return pow(num / den, vec3(1.0 / m1));\n"
+    "}\n"
+    "\n"
+    "vec3 hlg_to_linear(vec3 E) {\n"
+    "    const float a = 0.17883277;\n"
+    "    const float b = 0.28466892;\n"
+    "    const float c = 0.55991073;\n"
+    "    vec3 lin;\n"
+    "    for (int i = 0; i < 3; i++) {\n"
+    "        float v = clamp(E[i], 0.0, 1.0);\n"
+    "        if (v <= 0.5) lin[i] = (v * v) / 3.0;\n"
+    "        else lin[i] = (exp((v - c) / a) + b) / 12.0;\n"
+    "    }\n"
+    "    return lin;\n"
+    "}\n"
+    "\n"
+    "vec3 tonemap_aces(vec3 x) {\n"
+    "    const float a = 2.51;\n"
+    "    const float b = 0.03;\n"
+    "    const float c = 2.43;\n"
+    "    const float d = 0.59;\n"
+    "    const float e = 0.14;\n"
+    "    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);\n"
+    "}\n"
+    "\n"
+    "void main() {\n"
+    "    if (u_fmt_type == 2) {\n"
+    "        vec3 col = texture(u_tex_y, v_uv).rgb;\n"
+    "        frag_color = vec4(col, 1.0);\n"
+    "        return;\n"
+    "    }\n"
+    "\n"
+    "    float y = 0.0, u = 0.5, v = 0.5;\n"
+    "    if (u_fmt_type == 0) {\n"
+    "        int col_idx = int(v_uv.x * u_resolution.x);\n"
+    "        int row_idx = int(v_uv.y * u_resolution.y);\n"
+    "        vec4 texel = texelFetch(u_tex_y, ivec2(col_idx >> 1, row_idx), 0);\n"
+    "        y = ((col_idx & 1) == 0) ? texel.r : texel.b;\n"
+    "        u = texel.g;\n"
+    "        v = texel.a;\n"
+    "    } else if (u_fmt_type == 1) {\n"
+    "        y = texture(u_tex_y, v_uv).r;\n"
+    "        vec2 uv = texture(u_tex_uv, v_uv).rg;\n"
+    "        u = uv.r;\n"
+    "        v = uv.g;\n"
+    "    }\n"
+    "\n"
+    "    float y_norm, u_norm, v_norm;\n"
+    "    if (u_is_full_range != 0) {\n"
+    "        y_norm = clamp(y, 0.0, 1.0);\n"
+    "        u_norm = clamp(u - 0.5, -0.5, 0.5);\n"
+    "        v_norm = clamp(v - 0.5, -0.5, 0.5);\n"
+    "    } else {\n"
+    "        y_norm = clamp((y - (16.0 / 255.0)) / (219.0 / 255.0), 0.0, 1.0);\n"
+    "        u_norm = clamp((u - (128.0 / 255.0)) / (224.0 / 255.0), -0.5, 0.5);\n"
+    "        v_norm = clamp((v - (128.0 / 255.0)) / (224.0 / 255.0), -0.5, 0.5);\n"
+    "    }\n"
+    "\n"
+    "    if (u_is_hdr == 0) {\n"
+    "        vec3 rgb;\n"
+    "        rgb.r = y_norm + 1.57480 * v_norm;\n"
+    "        rgb.g = y_norm - 0.18732 * u_norm - 0.46812 * v_norm;\n"
+    "        rgb.b = y_norm + 1.85560 * u_norm;\n"
+    "        frag_color = vec4(clamp(rgb, 0.0, 1.0), 1.0);\n"
+    "        return;\n"
+    "    }\n"
+    "\n"
+    "    vec3 rgb_2020;\n"
+    "    rgb_2020.r = y_norm + 1.47460 * v_norm;\n"
+    "    rgb_2020.g = y_norm - 0.16455 * u_norm - 0.57135 * v_norm;\n"
+    "    rgb_2020.b = y_norm + 1.88140 * u_norm;\n"
+    "    rgb_2020 = clamp(rgb_2020, 0.0, 1.0);\n"
+    "\n"
+    "    if (u_tonemap_mode == 1) {\n"
+    "        frag_color = vec4(rgb_2020, 1.0);\n"
+    "        return;\n"
+    "    }\n"
+    "\n"
+    "    vec3 lin_2020;\n"
+    "    if (u_is_hlg != 0) {\n"
+    "        lin_2020 = hlg_to_linear(rgb_2020);\n"
+    "    } else {\n"
+    "        lin_2020 = pq_to_linear(rgb_2020);\n"
+    "    }\n"
+    "\n"
+    "    const mat3 mat_bt2020_to_bt709 = mat3(\n"
+    "         1.6605, -0.1246, -0.0182,\n"
+    "        -0.5876,  1.1329, -0.1006,\n"
+    "        -0.0728, -0.0083,  1.1187\n"
+    "    );\n"
+    "    vec3 lin_709 = max(mat_bt2020_to_bt709 * lin_2020, vec3(0.0));\n"
+    "    vec3 mapped = tonemap_aces(lin_709 * u_exposure);\n"
+    "    vec3 sdr = pow(mapped, vec3(1.0 / 2.2));\n"
+    "    frag_color = vec4(clamp(sdr, 0.0, 1.0), 1.0);\n"
+    "}\n";
+
+static void cleanup_gl_pipeline(struct stream_ctx *ctx)
+{
+    if (ctx->gl_tex_y) {
+        glDeleteTextures(1, &ctx->gl_tex_y);
+        ctx->gl_tex_y = 0;
+    }
+    if (ctx->gl_tex_uv) {
+        glDeleteTextures(1, &ctx->gl_tex_uv);
+        ctx->gl_tex_uv = 0;
+    }
+    if (ctx->gl_prog) {
+        glDeleteProgram(ctx->gl_prog);
+        ctx->gl_prog = 0;
+    }
+    ctx->gl_ready = false;
+}
+
+static bool init_gl_pipeline(struct stream_ctx *ctx)
+{
+    if (ctx->gl_ready) return true;
+
+    GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vs, 1, &g_hdr_vs_src, NULL);
+    glCompileShader(vs);
+    GLint ok = 0;
+    glGetShaderiv(vs, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        glDeleteShader(vs);
+        return false;
+    }
+
+    GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fs, 1, &g_hdr_fs_src, NULL);
+    glCompileShader(fs);
+    glGetShaderiv(fs, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+        return false;
+    }
+
+    ctx->gl_prog = glCreateProgram();
+    glAttachShader(ctx->gl_prog, vs);
+    glAttachShader(ctx->gl_prog, fs);
+    glBindAttribLocation(ctx->gl_prog, 0, "in_pos");
+    glBindAttribLocation(ctx->gl_prog, 1, "in_uv");
+    glLinkProgram(ctx->gl_prog);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    glGetProgramiv(ctx->gl_prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        glDeleteProgram(ctx->gl_prog);
+        ctx->gl_prog = 0;
+        return false;
+    }
+
+    if (ctx->pixelformat == V4L2_PIX_FMT_YUYV) {
+        glGenTextures(1, &ctx->gl_tex_y);
+        glBindTexture(GL_TEXTURE_2D, ctx->gl_tex_y);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)(ctx->width / 2), (GLsizei)ctx->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    } else if (ctx->pixelformat == V4L2_PIX_FMT_NV12) {
+        glGenTextures(1, &ctx->gl_tex_y);
+        glBindTexture(GL_TEXTURE_2D, ctx->gl_tex_y);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, (GLsizei)ctx->width, (GLsizei)ctx->height, 0, GL_RED, GL_UNSIGNED_BYTE, NULL);
+
+        glGenTextures(1, &ctx->gl_tex_uv);
+        glBindTexture(GL_TEXTURE_2D, ctx->gl_tex_uv);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, (GLsizei)(ctx->width / 2), (GLsizei)(ctx->height / 2), 0, GL_RG, GL_UNSIGNED_BYTE, NULL);
+    } else {
+        glGenTextures(1, &ctx->gl_tex_y);
+        glBindTexture(GL_TEXTURE_2D, ctx->gl_tex_y);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        GLenum internal = (ctx->pixelformat == V4L2_PIX_FMT_RGB32) ? GL_RGBA8 : GL_RGB8;
+        GLenum fmt = (ctx->pixelformat == V4L2_PIX_FMT_RGB32) ? GL_BGRA : GL_BGR;
+        glTexImage2D(GL_TEXTURE_2D, 0, (GLint)internal, (GLsizei)ctx->width, (GLsizei)ctx->height, 0, fmt, GL_UNSIGNED_BYTE, NULL);
+    }
+
+    ctx->u_loc_tex_y = glGetUniformLocation(ctx->gl_prog, "u_tex_y");
+    ctx->u_loc_tex_uv = glGetUniformLocation(ctx->gl_prog, "u_tex_uv");
+    ctx->u_loc_resolution = glGetUniformLocation(ctx->gl_prog, "u_resolution");
+    ctx->u_loc_fmt_type = glGetUniformLocation(ctx->gl_prog, "u_fmt_type");
+    ctx->u_loc_is_hdr = glGetUniformLocation(ctx->gl_prog, "u_is_hdr");
+    ctx->u_loc_is_hlg = glGetUniformLocation(ctx->gl_prog, "u_is_hlg");
+    ctx->u_loc_is_full_range = glGetUniformLocation(ctx->gl_prog, "u_is_full_range");
+    ctx->u_loc_exposure = glGetUniformLocation(ctx->gl_prog, "u_exposure");
+    ctx->u_loc_tonemap_mode = glGetUniformLocation(ctx->gl_prog, "u_tonemap_mode");
+
+    ctx->gl_ready = true;
+    printf("[*] Zero-Latency GPU HDR Pipeline active (HDR Passthrough & ACES Tone-Mapping ready)\n");
+    return true;
+}
 
 static void stream_stop(struct stream_ctx *ctx)
 {
     if (!ctx) return;
+    cleanup_gl_pipeline(ctx);
     if (ctx->active) {
         enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         ioctl(ctx->fd, VIDIOC_STREAMOFF, &type);
@@ -679,6 +966,7 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
                    fmt.fmt.pix.xfer_func == V4L2_XFER_FUNC_SMPTE2084);
     ctx->is_hlg = (fmt.fmt.pix.colorspace == V4L2_COLORSPACE_BT2020 &&
                    fmt.fmt.pix.xfer_func != V4L2_XFER_FUNC_SMPTE2084);
+    ctx->is_full_range = (fmt.fmt.pix.quantization == V4L2_QUANTIZATION_FULL_RANGE);
 
     if (ctx->width == 0 || ctx->height == 0) {
         return false;
@@ -742,6 +1030,8 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
         return false;
     }
 
+    init_gl_pipeline(ctx);
+
     /* Drain any stale buffers from V4L2 queue for minimal latency */
     struct v4l2_buffer drain_buf = {};
     drain_buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -754,10 +1044,11 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
     }
 
     ctx->active = true;
-    printf("[+] HDMI Stream active: %ux%u%c [%s%s] (%u bytes/line)\n",
+    printf("[+] HDMI Stream active: %ux%u%c [%s%s%s] (%u bytes/line)\n",
            ctx->width, ctx->height, ctx->interlaced ? 'i' : 'p',
            get_chroma_desc(ctx->pixelformat),
            ctx->is_hdr ? (ctx->is_hlg ? " HLG" : " HDR10") : "",
+           ctx->is_full_range ? " FullRange" : " LimitedRange",
            ctx->bytesperline);
     return true;
 }
@@ -767,13 +1058,15 @@ int main(int argc, char *argv[])
     const char *vdev = NULL;
     const char *adev = NULL;
     bool start_fullscreen = false;
-    bool enable_vsync = false;
+    bool enable_vsync = true;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-f") || !strcmp(argv[i], "--fullscreen"))
             start_fullscreen = true;
         else if (!strcmp(argv[i], "--vsync"))
             enable_vsync = true;
+        else if (!strcmp(argv[i], "--no-vsync"))
+            enable_vsync = false;
         else if (!strcmp(argv[i], "-s") || !strcmp(argv[i], "--streamer-mode") || !strcmp(argv[i], "--clean"))
             g_streamer_mode = true;
         else if (!strcmp(argv[i], "-d") && i + 1 < argc)
@@ -804,8 +1097,23 @@ int main(int argc, char *argv[])
             else if (!strcasecmp(f, "rgb32") || !strcasecmp(f, "rgb4") || !strcasecmp(f, "bgrx") || !strcasecmp(f, "rgba"))
                 g_preferred_fmt = V4L2_PIX_FMT_RGB32;
         }
+        else if (!strcmp(argv[i], "--hdr") && i + 1 < argc) {
+            const char *h = argv[++i];
+            if (!strcasecmp(h, "off") || !strcasecmp(h, "sdr") || !strcasecmp(h, "0"))
+                g_hdr_mode = 2;
+            else if (!strcasecmp(h, "on") || !strcasecmp(h, "1"))
+                g_hdr_mode = 1;
+            else
+                g_hdr_mode = 0;
+        }
+        else if (!strcmp(argv[i], "--exposure") && i + 1 < argc) {
+            float exp_val = strtof(argv[++i], NULL);
+            if (exp_val >= 1.0f && exp_val <= 40.0f) {
+                g_hdr_exposure = exp_val;
+            }
+        }
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
-            printf("Usage: %s [-f|--fullscreen] [--vsync] [-s|--streamer-mode] [-F yuyv|nv12|bgr24|rgb32] [-d /dev/videoX] [-a hw:CARD,DEV|none] [--pw-node node_name] [-w wid] [--no-audio]\n", argv[0]);
+            printf("Usage: %s [-f|--fullscreen] [--vsync] [-s|--streamer-mode] [--hdr auto|on|off] [--exposure 1.0-40.0] [-F yuyv|nv12|bgr24|rgb32] [-d /dev/videoX] [-a hw:CARD,DEV|none] [--pw-node node_name] [-w wid] [--no-audio]\n", argv[0]);
             return 0;
         }
     }
@@ -913,7 +1221,7 @@ int main(int argc, char *argv[])
             win_w = 640;
             win_h = 480;
         }
-        Uint32 win_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+        Uint32 win_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_OPENGL;
         if (start_fullscreen) {
             win_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
             g_fullscreen = true;
@@ -1051,6 +1359,13 @@ int main(int argc, char *argv[])
     double live_fps = 0.0;
     uint32_t live_jitter = 0;
     uint32_t jitter_count = 0;
+
+    uint64_t sum_poll_us = 0;
+    uint64_t sum_dqbuf_us = 0;
+    uint64_t sum_upload_us = 0;
+    uint64_t sum_draw_us = 0;
+    uint64_t sum_present_us = 0;
+    uint32_t perf_samples = 0;
 
     bool dragging_volume = false;
     int cur_w = 0, cur_h = 0;
@@ -1216,7 +1531,29 @@ int main(int argc, char *argv[])
                     if (!g_streamer_mode) g_volume_toast_time = SDL_GetTicks();
                 } else if (ev.key.keysym.sym == SDLK_TAB || ev.key.keysym.sym == SDLK_i) {
                     g_show_stats = !g_show_stats;
-                } else if (ev.key.keysym.sym == SDLK_h || ev.key.keysym.sym == SDLK_r) {
+                } else if (ev.key.keysym.sym == SDLK_h) {
+                    g_hdr_mode = (g_hdr_mode + 1) % 3;
+                    if (g_hdr_mode == 0)
+                        snprintf(g_toast_custom, sizeof(g_toast_custom), "HDR: AUTO (SDR MONITOR TONEMAP)");
+                    else if (g_hdr_mode == 1)
+                        snprintf(g_toast_custom, sizeof(g_toast_custom), "HDR: PASSTHROUGH (HDR MONITOR NATIVE)");
+                    else
+                        snprintf(g_toast_custom, sizeof(g_toast_custom), "HDR: OFF (SDR DIRECT BYPASS)");
+                    g_toast_time = SDL_GetTicks();
+                } else if (ev.key.keysym.sym == SDLK_RIGHTBRACKET) {
+                    g_hdr_exposure = (g_hdr_exposure < 150.0f) ? g_hdr_exposure + 5.0f : 150.0f;
+                    snprintf(g_toast_custom, sizeof(g_toast_custom), "HDR TONEMAP EXPOSURE: %.1f", g_hdr_exposure);
+                    g_toast_time = SDL_GetTicks();
+                } else if (ev.key.keysym.sym == SDLK_LEFTBRACKET) {
+                    g_hdr_exposure = (g_hdr_exposure > 10.0f) ? g_hdr_exposure - 5.0f : 10.0f;
+                    snprintf(g_toast_custom, sizeof(g_toast_custom), "HDR TONEMAP EXPOSURE: %.1f", g_hdr_exposure);
+                    g_toast_time = SDL_GetTicks();
+                } else if (ev.key.keysym.sym == SDLK_v) {
+                    enable_vsync = !enable_vsync;
+                    SDL_GL_SetSwapInterval(enable_vsync ? 1 : 0);
+                    snprintf(g_toast_custom, sizeof(g_toast_custom), "VSYNC: %s", enable_vsync ? "ON (SMOOTH 120Hz/60Hz)" : "OFF (UNTHROTTLED)");
+                    g_toast_time = SDL_GetTicks();
+                } else if (ev.key.keysym.sym == SDLK_r) {
                     glob_t hg;
                     if (glob("/sys/bus/pci/drivers/open_gc573/*/hpd_pulse", 0, NULL, &hg) == 0 && hg.gl_pathc > 0) {
                         FILE *hf = fopen(hg.gl_pathv[0], "w");
@@ -1354,7 +1691,10 @@ int main(int argc, char *argv[])
             }
         }
 
+        struct timespec t_poll_start, t_poll_end, t_dq_end, t_up_end, t_draw_end, t_pres_end;
+        clock_gettime(CLOCK_MONOTONIC, &t_poll_start);
         int poll_ret = poll(&pfd, 1, 50);
+        clock_gettime(CLOCK_MONOTONIC, &t_poll_end);
         uint32_t now_ticks_poll = SDL_GetTicks();
         uint32_t elapsed_since_frame = (now_ticks_poll >= last_frame_ticks) ? (now_ticks_poll - last_frame_ticks) : 0;
 
@@ -1362,19 +1702,37 @@ int main(int argc, char *argv[])
             struct v4l2_event ev = {};
             while (ioctl(fd, VIDIOC_DQEVENT, &ev) == 0) {
                 if (ev.type == V4L2_EVENT_SOURCE_CHANGE) {
-                    printf("[*] Hardware source resolution change event received! Switching to standby...\n");
-                    stream_stop(&ctx);
-                    g_audio_resync_needed = 1;
+                    struct v4l2_format chk_fmt = {};
+                    chk_fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                    if (ioctl(fd, VIDIOC_G_FMT, &chk_fmt) == 0) {
+                        /* Check if resolution or pixelformat genuinely changed */
+                        if (chk_fmt.fmt.pix.width != ctx.width ||
+                            chk_fmt.fmt.pix.height != ctx.height ||
+                            chk_fmt.fmt.pix.pixelformat != ctx.pixelformat) {
+                            printf("[*] Hardware resolution change: %ux%u -> %ux%u. Re-synchronizing stream...\n",
+                                   ctx.width, ctx.height, chk_fmt.fmt.pix.width, chk_fmt.fmt.pix.height);
+                            stream_stop(&ctx);
+                            g_audio_resync_needed = 1;
+                        } else {
+                            /* Format/resolution unchanged: dynamically update HDR/color properties without dropping any frames! */
+                            ctx.bytesperline = chk_fmt.fmt.pix.bytesperline;
+                            ctx.is_full_range = (chk_fmt.fmt.pix.quantization == V4L2_QUANTIZATION_FULL_RANGE);
+                            ctx.is_hdr = (chk_fmt.fmt.pix.colorspace == V4L2_COLORSPACE_BT2020) ||
+                                         (chk_fmt.fmt.pix.xfer_func == V4L2_XFER_FUNC_SMPTE2084);
+                            ctx.is_hlg = (chk_fmt.fmt.pix.xfer_func == 10);
+                            g_audio_resync_needed = 1;
+                        }
+                    }
                 }
             }
         }
 
         if (poll_ret <= 0) {
-            if (ctx.active && elapsed_since_frame > 500) {
+            if (ctx.active && elapsed_since_frame > 2500) {
                 printf("[*] HDMI Frame-Stall detected (%u ms without frame), switching to standby...\n",
                        elapsed_since_frame);
                 stream_stop(&ctx);
-            } else if (pfd.revents & (POLLERR | POLLHUP)) {
+            } else if (poll_ret > 0 && (pfd.revents & (POLLERR | POLLHUP))) {
                 printf("[*] HDMI signal disconnected, switching to standby...\n");
                 stream_stop(&ctx);
             }
@@ -1385,9 +1743,9 @@ int main(int argc, char *argv[])
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
         if (ioctl(fd, VIDIOC_DQBUF, &buf) < 0) {
-            if (errno == EAGAIN) {
-                if (ctx.active && elapsed_since_frame > 500) {
-                    printf("[*] HDMI Frame-Stall (EAGAIN > 500 ms), switching to standby...\n");
+            if (errno == EAGAIN || errno == EINTR) {
+                if (ctx.active && elapsed_since_frame > 2500) {
+                    printf("[*] HDMI Frame-Stall (EAGAIN/EINTR > 2500 ms), switching to standby...\n");
                     stream_stop(&ctx);
                 }
                 continue;
@@ -1396,6 +1754,7 @@ int main(int argc, char *argv[])
             stream_stop(&ctx);
             continue;
         }
+        clock_gettime(CLOCK_MONOTONIC, &t_dq_end);
 
         last_frame_ticks = now_ticks_poll;
 
@@ -1408,7 +1767,10 @@ int main(int argc, char *argv[])
         if (lat_us < 0) lat_us = 0;
 
         /* Low-Latency Backlog Catch-Up:
-         * Trigger catch-up if latency exceeds > 2 full frame periods (> 18 ms at 120Hz or > 32 ms at 60Hz). */
+         * Trigger catch-up if latency exceeds > 2 full frame periods (> 18 ms at 120Hz or > 32 ms at 60Hz).
+         * At most ONE frame is dropped per iteration so latency decays gradually and the
+         * presentation cadence (VSync) stays uniform - a while-loop burst drain of whole frame
+         * batches here causes single huge skips/judder every time the queue fills up. */
         uint64_t stale_thresh_us = (live_fps > 90.0) ? 18000 : 32000;
         if ((uint64_t)lat_us > stale_thresh_us) {
             struct v4l2_buffer next_buf = {};
@@ -1424,18 +1786,52 @@ int main(int argc, char *argv[])
         }
         lat_ms = (double)lat_us / 1000.0;
 
-        /* Direct GPU texture upload from DMA buffer */
-        if (ctx.sdl_format == SDL_PIXELFORMAT_NV12) {
-            const Uint8 *pixels = (const Uint8 *)ctx.buffers[buf.index].start;
-            SDL_UpdateNVTexture(ctx.texture, NULL,
-                                pixels, (int)ctx.bytesperline,
-                                pixels + (size_t)ctx.bytesperline * ctx.height, (int)ctx.bytesperline);
+        /* Direct GPU texture upload from DMA buffer (< 0.4 ms) */
+        if (ctx.gl_ready) {
+            if (ctx.pixelformat == V4L2_PIX_FMT_YUYV) {
+                glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_y);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, (int)(ctx.bytesperline / 4));
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (int)(ctx.width / 2), (int)ctx.height,
+                                GL_RGBA, GL_UNSIGNED_BYTE, ctx.buffers[buf.index].start);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            } else if (ctx.pixelformat == V4L2_PIX_FMT_NV12) {
+                const uint8_t *pixels = (const uint8_t *)ctx.buffers[buf.index].start;
+                glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_y);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, (int)ctx.bytesperline);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (int)ctx.width, (int)ctx.height,
+                                GL_RED, GL_UNSIGNED_BYTE, pixels);
+                glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_uv);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, (int)(ctx.bytesperline / 2));
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (int)(ctx.width / 2), (int)(ctx.height / 2),
+                                GL_RG, GL_UNSIGNED_BYTE, pixels + (size_t)ctx.bytesperline * ctx.height);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            } else if (ctx.pixelformat == V4L2_PIX_FMT_BGR24) {
+                glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_y);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, (int)(ctx.bytesperline / 3));
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (int)ctx.width, (int)ctx.height,
+                                GL_BGR, GL_UNSIGNED_BYTE, ctx.buffers[buf.index].start);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            } else if (ctx.pixelformat == V4L2_PIX_FMT_RGB32) {
+                glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_y);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, (int)(ctx.bytesperline / 4));
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (int)ctx.width, (int)ctx.height,
+                                GL_BGRA, GL_UNSIGNED_BYTE, ctx.buffers[buf.index].start);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            }
         } else {
-            SDL_UpdateTexture(ctx.texture, NULL, ctx.buffers[buf.index].start, (int)ctx.bytesperline);
+            if (ctx.sdl_format == SDL_PIXELFORMAT_NV12) {
+                const Uint8 *pixels = (const Uint8 *)ctx.buffers[buf.index].start;
+                SDL_UpdateNVTexture(ctx.texture, NULL,
+                                    pixels, (int)ctx.bytesperline,
+                                    pixels + (size_t)ctx.bytesperline * ctx.height, (int)ctx.bytesperline);
+            } else {
+                SDL_UpdateTexture(ctx.texture, NULL, ctx.buffers[buf.index].start, (int)ctx.bytesperline);
+            }
         }
 
-        /* Return buffer to driver immediately so PCIe DMA never starves */
+        /* Immediately return buffer to driver DMA queue so next frame can capture without starvation */
         ioctl(fd, VIDIOC_QBUF, &buf);
+        clock_gettime(CLOCK_MONOTONIC, &t_up_end);
 
         /* Aspect-ratio preserving letterboxed scaling */
         SDL_Rect dest_rect;
@@ -1475,9 +1871,77 @@ int main(int argc, char *argv[])
             dest_rect.h = cur_h;
         }
 
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-        SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, ctx.texture, NULL, &dest_rect);
+        static int last_dest_w = 0, last_dest_h = 0;
+        if (dest_rect.w != last_dest_w || dest_rect.h != last_dest_h) {
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            last_dest_w = dest_rect.w;
+            last_dest_h = dest_rect.h;
+        }
+
+        bool active_hdr = (g_hdr_mode == 1) || (g_hdr_mode == 0 && ctx.is_hdr);
+        if (ctx.gl_ready) {
+            GLint prev_prog = 0;
+            GLint prev_array_buf = 0;
+            glGetIntegerv(GL_CURRENT_PROGRAM, &prev_prog);
+            glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prev_array_buf);
+
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            glDisable(GL_BLEND);
+
+            glUseProgram(ctx.gl_prog);
+
+            int gl_y = cur_h - (dest_rect.y + dest_rect.h);
+            glViewport(dest_rect.x, gl_y, dest_rect.w, dest_rect.h);
+
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_y);
+            glUniform1i(ctx.u_loc_tex_y, 0);
+
+            if (ctx.pixelformat == V4L2_PIX_FMT_NV12) {
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_uv);
+                glUniform1i(ctx.u_loc_tex_uv, 1);
+            }
+
+            glUniform2f(ctx.u_loc_resolution, (float)ctx.width, (float)ctx.height);
+            glUniform1i(ctx.u_loc_is_hdr, active_hdr ? 1 : 0);
+            glUniform1i(ctx.u_loc_is_hlg, (active_hdr && ctx.is_hlg) ? 1 : 0);
+            glUniform1i(ctx.u_loc_is_full_range, ctx.is_full_range ? 1 : 0);
+            glUniform1f(ctx.u_loc_exposure, g_hdr_exposure);
+            glUniform1i(ctx.u_loc_tonemap_mode, (g_hdr_mode == 1) ? 1 : 0);
+
+            int fmt_type = 0;
+            if (ctx.pixelformat == V4L2_PIX_FMT_NV12) fmt_type = 1;
+            else if (ctx.pixelformat == V4L2_PIX_FMT_BGR24 || ctx.pixelformat == V4L2_PIX_FMT_RGB32) fmt_type = 2;
+            glUniform1i(ctx.u_loc_fmt_type, fmt_type);
+
+            static const float quad_verts[] = {
+                -1.0f, -1.0f,  0.0f, 1.0f,
+                 1.0f, -1.0f,  1.0f, 1.0f,
+                -1.0f,  1.0f,  0.0f, 0.0f,
+                 1.0f,  1.0f,  1.0f, 0.0f,
+            };
+
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            glEnableVertexAttribArray(0);
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), &quad_verts[0]);
+            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), &quad_verts[2]);
+
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+            glDisableVertexAttribArray(0);
+            glDisableVertexAttribArray(1);
+
+            // Restore state for SDL2 2D HUD rendering
+            glBindBuffer(GL_ARRAY_BUFFER, prev_array_buf);
+            glUseProgram(prev_prog);
+            glViewport(0, 0, cur_w, cur_h);
+        } else {
+            SDL_RenderCopy(renderer, ctx.texture, NULL, &dest_rect);
+        }
 
         frame_count++;
 
@@ -1588,7 +2052,8 @@ int main(int argc, char *argv[])
         if (g_show_stats && !g_streamer_mode) {
             SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
             int box_w = 200;
-            int box_h = ctx.is_hdr ? 95 : 75;
+            bool active_hdr_badge = active_hdr || ctx.is_hdr;
+            int box_h = active_hdr_badge ? 95 : 75;
             int box_x = cur_w - box_w - 20;
             int box_y = 20;
 
@@ -1602,15 +2067,23 @@ int main(int argc, char *argv[])
             snprintf(line1, sizeof(line1), "FPS: %.2f (%.2fms)", live_fps > 0.0 ? live_fps : 60.0, live_fps > 0.0 ? (1000.0 / live_fps) : 16.67);
             snprintf(line2, sizeof(line2), "LAG: %.1f ms", lat_ms);
             snprintf(line3, sizeof(line3), "JITTER: %u/s", live_jitter);
-            if (ctx.is_hdr) {
-                snprintf(line4, sizeof(line4), "HDR: %s (BT.2020)", ctx.is_hlg ? "HLG" : "PQ");
+            if (active_hdr) {
+                if (g_hdr_mode == 1) {
+                    snprintf(line4, sizeof(line4), "HDR: %s (Passthrough)", ctx.is_hlg ? "HLG" : "PQ");
+                } else {
+                    snprintf(line4, sizeof(line4), "HDR: %s (Tonemap)", ctx.is_hlg ? "HLG" : "PQ");
+                }
+            } else if (ctx.is_hdr) {
+                snprintf(line4, sizeof(line4), "HDR: Off (SDR Bypass)");
             }
 
             draw_string(renderer, line1, box_x + 12, box_y + 12, 1, (SDL_Color){63, 185, 80, 255});
             draw_string(renderer, line2, box_x + 12, box_y + 32, 1, (SDL_Color){88, 166, 255, 255});
             draw_string(renderer, line3, box_x + 12, box_y + 52, 1, (live_jitter > 5) ? (SDL_Color){248, 81, 73, 255} : (SDL_Color){139, 148, 158, 255});
-            if (ctx.is_hdr) {
+            if (active_hdr) {
                 draw_string(renderer, line4, box_x + 12, box_y + 72, 1, (SDL_Color){255, 215, 0, 255});
+            } else if (ctx.is_hdr) {
+                draw_string(renderer, line4, box_x + 12, box_y + 72, 1, (SDL_Color){160, 175, 195, 255});
             }
         }
 
@@ -1640,14 +2113,30 @@ int main(int argc, char *argv[])
             draw_string(renderer, toast_msg, tx + 20, ty + 16, 1, (SDL_Color){240, 246, 252, 255});
         }
 
+        clock_gettime(CLOCK_MONOTONIC, &t_draw_end);
         SDL_RenderPresent(renderer);
+        clock_gettime(CLOCK_MONOTONIC, &t_pres_end);
+
+        sum_poll_us += diff_timespec_us(&t_poll_end, &t_poll_start);
+        sum_dqbuf_us += diff_timespec_us(&t_dq_end, &t_poll_end);
+        sum_upload_us += diff_timespec_us(&t_up_end, &t_dq_end);
+        sum_draw_us += diff_timespec_us(&t_draw_end, &t_up_end);
+        sum_present_us += diff_timespec_us(&t_pres_end, &t_draw_end);
+        perf_samples++;
 
         if (now_ticks - last_title_time >= 1000) {
             uint32_t elapsed_ms = now_ticks - last_title_time;
             live_fps = (double)frame_count * 1000.0 / (double)elapsed_ms;
             live_jitter = jitter_count;
+            double avg_poll = perf_samples ? (double)sum_poll_us / perf_samples / 1000.0 : 0.0;
+            double avg_dqbuf = perf_samples ? (double)sum_dqbuf_us / perf_samples / 1000.0 : 0.0;
+            double avg_upload = perf_samples ? (double)sum_upload_us / perf_samples / 1000.0 : 0.0;
+            double avg_draw = perf_samples ? (double)sum_draw_us / perf_samples / 1000.0 : 0.0;
+            double avg_present = perf_samples ? (double)sum_present_us / perf_samples / 1000.0 : 0.0;
             frame_count = 0;
             jitter_count = 0;
+            sum_poll_us = sum_dqbuf_us = sum_upload_us = sum_draw_us = sum_present_us = 0;
+            perf_samples = 0;
             last_title_time = now_ticks;
 
             char title[180];
@@ -1660,11 +2149,12 @@ int main(int argc, char *argv[])
             if (g_embed_wid == 0) {
                 SDL_SetWindowTitle(window, title);
             }
-            printf("[*] Stream: %ux%u%c @ %.2f FPS [%s%s] | Latency: %.1f ms | Jitter: %u/s%s\n",
+            printf("[*] Stream: %ux%u%c @ %.2f FPS [%s%s] | Latency: %.1f ms | Jitter: %u/s | Perf(ms): Poll=%.2f DQ=%.2f Up=%.2f Draw=%.2f Pres=%.2f%s\n",
                    ctx.width, ctx.height, ctx.interlaced ? 'i' : 'p', live_fps,
                    get_chroma_desc(ctx.pixelformat),
                    ctx.is_hdr ? (ctx.is_hlg ? " HLG" : " HDR10") : "",
                    lat_ms, live_jitter,
+                   avg_poll, avg_dqbuf, avg_upload, avg_draw, avg_present,
                    g_streamer_mode ? " [STREAMER MODE]" : "");
             fflush(stdout);
         }
