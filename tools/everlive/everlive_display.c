@@ -34,9 +34,6 @@
 #include <X11/Xutil.h>
 #include <glob.h>
 #include <libgen.h>
-#define GL_GLEXT_PROTOTYPES 1
-#include <GL/gl.h>
-#include <GL/glext.h>
 #include "font8x8.h"
 
 #define BUFFER_COUNT 3
@@ -131,8 +128,6 @@ static char g_toast_custom[64] = "";
 static uint32_t g_toast_time = 0;
 static uintptr_t g_embed_wid = 0;
 static uint32_t g_preferred_fmt = 0;
-static int g_hdr_mode = 0; // 0 = Auto (ACES Tonemapped), 1 = Force HDR On, 2 = Force SDR (Passthrough)
-static float g_hdr_exposure = 12.0f; // Scale factor for HDR tone mapping
 
 static pid_t g_audio_pid = 0;
 static volatile sig_atomic_t g_audio_resync_needed = 0;
@@ -593,242 +588,14 @@ struct stream_ctx {
     bool interlaced;
     bool is_hdr;
     bool is_hlg;
-    bool is_full_range;
     struct v4l2_mmap_buffer buffers[BUFFER_COUNT];
     unsigned int buffer_count;
     SDL_Texture *texture;
-    GLuint gl_prog;
-    GLuint gl_tex_y;
-    GLuint gl_tex_uv;
-    bool gl_ready;
 };
-
-static const char *g_hdr_vs_src =
-    "#version 130\n"
-    "in vec2 in_pos;\n"
-    "in vec2 in_uv;\n"
-    "out vec2 v_uv;\n"
-    "void main() {\n"
-    "    gl_Position = vec4(in_pos, 0.0, 1.0);\n"
-    "    v_uv = in_uv;\n"
-    "}\n";
-
-static const char *g_hdr_fs_src =
-    "#version 130\n"
-    "uniform sampler2D u_tex_y;\n"
-    "uniform sampler2D u_tex_uv;\n"
-    "uniform vec2 u_resolution;\n"
-    "uniform int u_fmt_type;\n"       // 0 = YUYV, 1 = NV12, 2 = RGB
-    "uniform int u_is_hdr;\n"         // 1 = HDR active
-    "uniform int u_is_hlg;\n"         // 1 = HLG, 0 = PQ (HDR10)
-    "uniform int u_is_full_range;\n"  // 1 = Full Range [0..255], 0 = Limited [16..235]
-    "uniform float u_exposure;\n"     // Tone mapping scale
-    "in vec2 v_uv;\n"
-    "out vec4 frag_color;\n"
-    "\n"
-    "vec3 pq_to_linear(vec3 N) {\n"
-    "    const float m1 = 0.1593017578125;\n"
-    "    const float m2 = 78.84375;\n"
-    "    const float c1 = 0.8359375;\n"
-    "    const float c2 = 18.8515625;\n"
-    "    const float c3 = 18.6875;\n"
-    "    vec3 N_inv_m2 = pow(clamp(N, 0.0, 1.0), vec3(1.0 / m2));\n"
-    "    vec3 num = max(N_inv_m2 - c1, 0.0);\n"
-    "    vec3 den = max(c2 - c3 * N_inv_m2, 0.00001);\n"
-    "    return pow(num / den, vec3(1.0 / m1));\n"
-    "}\n"
-    "\n"
-    "vec3 hlg_to_linear(vec3 E) {\n"
-    "    const float a = 0.17883277;\n"
-    "    const float b = 0.28466892;\n"
-    "    const float c = 0.55991073;\n"
-    "    vec3 lin;\n"
-    "    for (int i = 0; i < 3; i++) {\n"
-    "        float v = clamp(E[i], 0.0, 1.0);\n"
-    "        if (v <= 0.5) lin[i] = (v * v) / 3.0;\n"
-    "        else lin[i] = (exp((v - c) / a) + b) / 12.0;\n"
-    "    }\n"
-    "    return lin;\n"
-    "}\n"
-    "\n"
-    "vec3 tonemap_aces(vec3 x) {\n"
-    "    const float a = 2.51;\n"
-    "    const float b = 0.03;\n"
-    "    const float c = 2.43;\n"
-    "    const float d = 0.59;\n"
-    "    const float e = 0.14;\n"
-    "    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);\n"
-    "}\n"
-    "\n"
-    "void main() {\n"
-    "    if (u_fmt_type == 2) {\n"
-    "        vec3 col = texture(u_tex_y, v_uv).rgb;\n"
-    "        frag_color = vec4(col, 1.0);\n"
-    "        return;\n"
-    "    }\n"
-    "\n"
-    "    float y = 0.0, u = 0.5, v = 0.5;\n"
-    "    if (u_fmt_type == 0) {\n"
-    "        float px = v_uv.x * u_resolution.x;\n"
-    "        int col_idx = int(floor(px));\n"
-    "        int row_idx = int(floor(v_uv.y * u_resolution.y));\n"
-    "        vec4 texel = texelFetch(u_tex_y, ivec2(col_idx >> 1, row_idx), 0);\n"
-    "        y = ((col_idx & 1) == 0) ? texel.r : texel.b;\n"
-    "        u = texel.g;\n"
-    "        v = texel.a;\n"
-    "    } else if (u_fmt_type == 1) {\n"
-    "        y = texture(u_tex_y, v_uv).r;\n"
-    "        vec2 uv = texture(u_tex_uv, v_uv).rg;\n"
-    "        u = uv.r;\n"
-    "        v = uv.g;\n"
-    "    }\n"
-    "\n"
-    "    float y_norm, u_norm, v_norm;\n"
-    "    if (u_is_full_range != 0) {\n"
-    "        y_norm = clamp(y, 0.0, 1.0);\n"
-    "        u_norm = clamp(u - 0.5, -0.5, 0.5);\n"
-    "        v_norm = clamp(v - 0.5, -0.5, 0.5);\n"
-    "    } else {\n"
-    "        y_norm = clamp((y - (16.0 / 255.0)) / (219.0 / 255.0), 0.0, 1.0);\n"
-    "        u_norm = clamp((u - (128.0 / 255.0)) / (224.0 / 255.0), -0.5, 0.5);\n"
-    "        v_norm = clamp((v - (128.0 / 255.0)) / (224.0 / 255.0), -0.5, 0.5);\n"
-    "    }\n"
-    "\n"
-    "    if (u_is_hdr == 0) {\n"
-    "        vec3 rgb;\n"
-    "        rgb.r = y_norm + 1.57480 * v_norm;\n"
-    "        rgb.g = y_norm - 0.18732 * u_norm - 0.46812 * v_norm;\n"
-    "        rgb.b = y_norm + 1.85560 * u_norm;\n"
-    "        frag_color = vec4(clamp(rgb, 0.0, 1.0), 1.0);\n"
-    "        return;\n"
-    "    }\n"
-    "\n"
-    "    vec3 rgb_2020;\n"
-    "    rgb_2020.r = y_norm + 1.47460 * v_norm;\n"
-    "    rgb_2020.g = y_norm - 0.16455 * u_norm - 0.57135 * v_norm;\n"
-    "    rgb_2020.b = y_norm + 1.88140 * u_norm;\n"
-    "    rgb_2020 = clamp(rgb_2020, 0.0, 1.0);\n"
-    "\n"
-    "    vec3 lin_2020;\n"
-    "    if (u_is_hlg != 0) {\n"
-    "        lin_2020 = hlg_to_linear(rgb_2020);\n"
-    "    } else {\n"
-    "        lin_2020 = pq_to_linear(rgb_2020);\n"
-    "    }\n"
-    "\n"
-    "    const mat3 mat_bt2020_to_bt709 = mat3(\n"
-    "         1.6605, -0.1246, -0.0182,\n"
-    "        -0.5876,  1.1329, -0.1006,\n"
-    "        -0.0728, -0.0083,  1.1187\n"
-    "    );\n"
-    "    vec3 lin_709 = max(mat_bt2020_to_bt709 * lin_2020, vec3(0.0));\n"
-    "    vec3 mapped = tonemap_aces(lin_709 * u_exposure);\n"
-    "    vec3 sdr = pow(mapped, vec3(1.0 / 2.2));\n"
-    "    frag_color = vec4(clamp(sdr, 0.0, 1.0), 1.0);\n"
-    "}\n";
-
-static void cleanup_gl_pipeline(struct stream_ctx *ctx)
-{
-    if (ctx->gl_tex_y) {
-        glDeleteTextures(1, &ctx->gl_tex_y);
-        ctx->gl_tex_y = 0;
-    }
-    if (ctx->gl_tex_uv) {
-        glDeleteTextures(1, &ctx->gl_tex_uv);
-        ctx->gl_tex_uv = 0;
-    }
-    if (ctx->gl_prog) {
-        glDeleteProgram(ctx->gl_prog);
-        ctx->gl_prog = 0;
-    }
-    ctx->gl_ready = false;
-}
-
-static bool init_gl_pipeline(struct stream_ctx *ctx)
-{
-    if (ctx->gl_ready) return true;
-
-    GLuint vs = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vs, 1, &g_hdr_vs_src, NULL);
-    glCompileShader(vs);
-    GLint ok = 0;
-    glGetShaderiv(vs, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        glDeleteShader(vs);
-        return false;
-    }
-
-    GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fs, 1, &g_hdr_fs_src, NULL);
-    glCompileShader(fs);
-    glGetShaderiv(fs, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        glDeleteShader(vs);
-        glDeleteShader(fs);
-        return false;
-    }
-
-    ctx->gl_prog = glCreateProgram();
-    glAttachShader(ctx->gl_prog, vs);
-    glAttachShader(ctx->gl_prog, fs);
-    glBindAttribLocation(ctx->gl_prog, 0, "in_pos");
-    glBindAttribLocation(ctx->gl_prog, 1, "in_uv");
-    glLinkProgram(ctx->gl_prog);
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-
-    glGetProgramiv(ctx->gl_prog, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        glDeleteProgram(ctx->gl_prog);
-        ctx->gl_prog = 0;
-        return false;
-    }
-
-    if (ctx->pixelformat == V4L2_PIX_FMT_YUYV) {
-        glGenTextures(1, &ctx->gl_tex_y);
-        glBindTexture(GL_TEXTURE_2D, ctx->gl_tex_y);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)(ctx->width / 2), (GLsizei)ctx->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-    } else if (ctx->pixelformat == V4L2_PIX_FMT_NV12) {
-        glGenTextures(1, &ctx->gl_tex_y);
-        glBindTexture(GL_TEXTURE_2D, ctx->gl_tex_y);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, (GLsizei)ctx->width, (GLsizei)ctx->height, 0, GL_RED, GL_UNSIGNED_BYTE, NULL);
-
-        glGenTextures(1, &ctx->gl_tex_uv);
-        glBindTexture(GL_TEXTURE_2D, ctx->gl_tex_uv);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, (GLsizei)(ctx->width / 2), (GLsizei)(ctx->height / 2), 0, GL_RG, GL_UNSIGNED_BYTE, NULL);
-    } else {
-        glGenTextures(1, &ctx->gl_tex_y);
-        glBindTexture(GL_TEXTURE_2D, ctx->gl_tex_y);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        GLenum internal = (ctx->pixelformat == V4L2_PIX_FMT_RGB32) ? GL_RGBA8 : GL_RGB8;
-        GLenum fmt = (ctx->pixelformat == V4L2_PIX_FMT_RGB32) ? GL_BGRA : GL_BGR;
-        glTexImage2D(GL_TEXTURE_2D, 0, (GLint)internal, (GLsizei)ctx->width, (GLsizei)ctx->height, 0, fmt, GL_UNSIGNED_BYTE, NULL);
-    }
-
-    ctx->gl_ready = true;
-    printf("[*] Zero-Latency GPU HDR Pipeline active (ACES Filmic Tone-Mapping)\n");
-    return true;
-}
 
 static void stream_stop(struct stream_ctx *ctx)
 {
     if (!ctx) return;
-    cleanup_gl_pipeline(ctx);
     if (ctx->active) {
         enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         ioctl(ctx->fd, VIDIOC_STREAMOFF, &type);
@@ -912,7 +679,6 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
                    fmt.fmt.pix.xfer_func == V4L2_XFER_FUNC_SMPTE2084);
     ctx->is_hlg = (fmt.fmt.pix.colorspace == V4L2_COLORSPACE_BT2020 &&
                    fmt.fmt.pix.xfer_func != V4L2_XFER_FUNC_SMPTE2084);
-    ctx->is_full_range = (fmt.fmt.pix.quantization == V4L2_QUANTIZATION_FULL_RANGE);
 
     if (ctx->width == 0 || ctx->height == 0) {
         return false;
@@ -976,8 +742,6 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
         return false;
     }
 
-    init_gl_pipeline(ctx);
-
     /* Drain any stale buffers from V4L2 queue for minimal latency */
     struct v4l2_buffer drain_buf = {};
     drain_buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -990,11 +754,10 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
     }
 
     ctx->active = true;
-    printf("[+] HDMI Stream active: %ux%u%c [%s%s%s] (%u bytes/line)\n",
+    printf("[+] HDMI Stream active: %ux%u%c [%s%s] (%u bytes/line)\n",
            ctx->width, ctx->height, ctx->interlaced ? 'i' : 'p',
            get_chroma_desc(ctx->pixelformat),
            ctx->is_hdr ? (ctx->is_hlg ? " HLG" : " HDR10") : "",
-           ctx->is_full_range ? " FullRange" : " LimitedRange",
            ctx->bytesperline);
     return true;
 }
@@ -1041,23 +804,8 @@ int main(int argc, char *argv[])
             else if (!strcasecmp(f, "rgb32") || !strcasecmp(f, "rgb4") || !strcasecmp(f, "bgrx") || !strcasecmp(f, "rgba"))
                 g_preferred_fmt = V4L2_PIX_FMT_RGB32;
         }
-        else if (!strcmp(argv[i], "--hdr") && i + 1 < argc) {
-            const char *h = argv[++i];
-            if (!strcasecmp(h, "off") || !strcasecmp(h, "sdr") || !strcasecmp(h, "0"))
-                g_hdr_mode = 2;
-            else if (!strcasecmp(h, "on") || !strcasecmp(h, "1"))
-                g_hdr_mode = 1;
-            else
-                g_hdr_mode = 0;
-        }
-        else if (!strcmp(argv[i], "--exposure") && i + 1 < argc) {
-            float exp_val = strtof(argv[++i], NULL);
-            if (exp_val >= 1.0f && exp_val <= 40.0f) {
-                g_hdr_exposure = exp_val;
-            }
-        }
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
-            printf("Usage: %s [-f|--fullscreen] [--vsync] [-s|--streamer-mode] [--hdr auto|on|off] [--exposure 1.0-40.0] [-F yuyv|nv12|bgr24|rgb32] [-d /dev/videoX] [-a hw:CARD,DEV|none] [--pw-node node_name] [-w wid] [--no-audio]\n", argv[0]);
+            printf("Usage: %s [-f|--fullscreen] [--vsync] [-s|--streamer-mode] [-F yuyv|nv12|bgr24|rgb32] [-d /dev/videoX] [-a hw:CARD,DEV|none] [--pw-node node_name] [-w wid] [--no-audio]\n", argv[0]);
             return 0;
         }
     }
@@ -1165,7 +913,7 @@ int main(int argc, char *argv[])
             win_w = 640;
             win_h = 480;
         }
-        Uint32 win_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_OPENGL;
+        Uint32 win_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
         if (start_fullscreen) {
             win_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
             g_fullscreen = true;
@@ -1468,24 +1216,7 @@ int main(int argc, char *argv[])
                     if (!g_streamer_mode) g_volume_toast_time = SDL_GetTicks();
                 } else if (ev.key.keysym.sym == SDLK_TAB || ev.key.keysym.sym == SDLK_i) {
                     g_show_stats = !g_show_stats;
-                } else if (ev.key.keysym.sym == SDLK_h) {
-                    g_hdr_mode = (g_hdr_mode + 1) % 3;
-                    if (g_hdr_mode == 0)
-                        snprintf(g_toast_custom, sizeof(g_toast_custom), "HDR: AUTO (ACES TONEMAP)");
-                    else if (g_hdr_mode == 1)
-                        snprintf(g_toast_custom, sizeof(g_toast_custom), "HDR: FORCE ON (ACES)");
-                    else
-                        snprintf(g_toast_custom, sizeof(g_toast_custom), "HDR: PASSTHROUGH (SDR)");
-                    g_toast_time = SDL_GetTicks();
-                } else if (ev.key.keysym.sym == SDLK_RIGHTBRACKET) {
-                    g_hdr_exposure = (g_hdr_exposure < 35.0f) ? g_hdr_exposure + 1.0f : 35.0f;
-                    snprintf(g_toast_custom, sizeof(g_toast_custom), "HDR EXPOSURE: %.1f", g_hdr_exposure);
-                    g_toast_time = SDL_GetTicks();
-                } else if (ev.key.keysym.sym == SDLK_LEFTBRACKET) {
-                    g_hdr_exposure = (g_hdr_exposure > 2.0f) ? g_hdr_exposure - 1.0f : 2.0f;
-                    snprintf(g_toast_custom, sizeof(g_toast_custom), "HDR EXPOSURE: %.1f", g_hdr_exposure);
-                    g_toast_time = SDL_GetTicks();
-                } else if (ev.key.keysym.sym == SDLK_r) {
+                } else if (ev.key.keysym.sym == SDLK_h || ev.key.keysym.sym == SDLK_r) {
                     glob_t hg;
                     if (glob("/sys/bus/pci/drivers/open_gc573/*/hpd_pulse", 0, NULL, &hg) == 0 && hg.gl_pathc > 0) {
                         FILE *hf = fopen(hg.gl_pathv[0], "w");
@@ -1693,47 +1424,14 @@ int main(int argc, char *argv[])
         }
         lat_ms = (double)lat_us / 1000.0;
 
-        /* Direct GPU texture upload from DMA buffer (< 0.4 ms) */
-        if (ctx.gl_ready) {
-            if (ctx.pixelformat == V4L2_PIX_FMT_YUYV) {
-                glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_y);
-                glPixelStorei(GL_UNPACK_ROW_LENGTH, (int)(ctx.bytesperline / 4));
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (int)(ctx.width / 2), (int)ctx.height,
-                                GL_RGBA, GL_UNSIGNED_BYTE, ctx.buffers[buf.index].start);
-                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-            } else if (ctx.pixelformat == V4L2_PIX_FMT_NV12) {
-                const uint8_t *pixels = (const uint8_t *)ctx.buffers[buf.index].start;
-                glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_y);
-                glPixelStorei(GL_UNPACK_ROW_LENGTH, (int)ctx.bytesperline);
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (int)ctx.width, (int)ctx.height,
-                                GL_RED, GL_UNSIGNED_BYTE, pixels);
-                glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_uv);
-                glPixelStorei(GL_UNPACK_ROW_LENGTH, (int)(ctx.bytesperline / 2));
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (int)(ctx.width / 2), (int)(ctx.height / 2),
-                                GL_RG, GL_UNSIGNED_BYTE, pixels + (size_t)ctx.bytesperline * ctx.height);
-                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-            } else if (ctx.pixelformat == V4L2_PIX_FMT_BGR24) {
-                glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_y);
-                glPixelStorei(GL_UNPACK_ROW_LENGTH, (int)(ctx.bytesperline / 3));
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (int)ctx.width, (int)ctx.height,
-                                GL_BGR, GL_UNSIGNED_BYTE, ctx.buffers[buf.index].start);
-                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-            } else if (ctx.pixelformat == V4L2_PIX_FMT_RGB32) {
-                glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_y);
-                glPixelStorei(GL_UNPACK_ROW_LENGTH, (int)(ctx.bytesperline / 4));
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (int)ctx.width, (int)ctx.height,
-                                GL_BGRA, GL_UNSIGNED_BYTE, ctx.buffers[buf.index].start);
-                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-            }
+        /* Direct GPU texture upload from DMA buffer */
+        if (ctx.sdl_format == SDL_PIXELFORMAT_NV12) {
+            const Uint8 *pixels = (const Uint8 *)ctx.buffers[buf.index].start;
+            SDL_UpdateNVTexture(ctx.texture, NULL,
+                                pixels, (int)ctx.bytesperline,
+                                pixels + (size_t)ctx.bytesperline * ctx.height, (int)ctx.bytesperline);
         } else {
-            if (ctx.sdl_format == SDL_PIXELFORMAT_NV12) {
-                const Uint8 *pixels = (const Uint8 *)ctx.buffers[buf.index].start;
-                SDL_UpdateNVTexture(ctx.texture, NULL,
-                                    pixels, (int)ctx.bytesperline,
-                                    pixels + (size_t)ctx.bytesperline * ctx.height, (int)ctx.bytesperline);
-            } else {
-                SDL_UpdateTexture(ctx.texture, NULL, ctx.buffers[buf.index].start, (int)ctx.bytesperline);
-            }
+            SDL_UpdateTexture(ctx.texture, NULL, ctx.buffers[buf.index].start, (int)ctx.bytesperline);
         }
 
         /* Return buffer to driver immediately so PCIe DMA never starves */
@@ -1779,58 +1477,7 @@ int main(int argc, char *argv[])
 
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
-
-        bool active_hdr = (g_hdr_mode == 1) || (g_hdr_mode == 0 && ctx.is_hdr);
-        if (ctx.gl_ready) {
-            glUseProgram(ctx.gl_prog);
-
-            int gl_y = cur_h - (dest_rect.y + dest_rect.h);
-            glViewport(dest_rect.x, gl_y, dest_rect.w, dest_rect.h);
-
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_y);
-            glUniform1i(glGetUniformLocation(ctx.gl_prog, "u_tex_y"), 0);
-
-            if (ctx.pixelformat == V4L2_PIX_FMT_NV12) {
-                glActiveTexture(GL_TEXTURE1);
-                glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_uv);
-                glUniform1i(glGetUniformLocation(ctx.gl_prog, "u_tex_uv"), 1);
-            }
-
-            glUniform2f(glGetUniformLocation(ctx.gl_prog, "u_resolution"), (float)ctx.width, (float)ctx.height);
-            glUniform1i(glGetUniformLocation(ctx.gl_prog, "u_is_hdr"), active_hdr ? 1 : 0);
-            glUniform1i(glGetUniformLocation(ctx.gl_prog, "u_is_hlg"), (active_hdr && ctx.is_hlg) ? 1 : 0);
-            glUniform1i(glGetUniformLocation(ctx.gl_prog, "u_is_full_range"), ctx.is_full_range ? 1 : 0);
-            glUniform1f(glGetUniformLocation(ctx.gl_prog, "u_exposure"), g_hdr_exposure);
-
-            int fmt_type = 0;
-            if (ctx.pixelformat == V4L2_PIX_FMT_NV12) fmt_type = 1;
-            else if (ctx.pixelformat == V4L2_PIX_FMT_BGR24 || ctx.pixelformat == V4L2_PIX_FMT_RGB32) fmt_type = 2;
-            glUniform1i(glGetUniformLocation(ctx.gl_prog, "u_fmt_type"), fmt_type);
-
-            static const float quad_verts[] = {
-                -1.0f, -1.0f,  0.0f, 1.0f,
-                 1.0f, -1.0f,  1.0f, 1.0f,
-                -1.0f,  1.0f,  0.0f, 0.0f,
-                 1.0f,  1.0f,  1.0f, 0.0f,
-            };
-
-            glEnableVertexAttribArray(0);
-            glEnableVertexAttribArray(1);
-            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), &quad_verts[0]);
-            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), &quad_verts[2]);
-
-            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-            glDisableVertexAttribArray(0);
-            glDisableVertexAttribArray(1);
-            glUseProgram(0);
-
-            // Restore full viewport for SDL2 2D HUD overlays
-            glViewport(0, 0, cur_w, cur_h);
-        } else {
-            SDL_RenderCopy(renderer, ctx.texture, NULL, &dest_rect);
-        }
+        SDL_RenderCopy(renderer, ctx.texture, NULL, &dest_rect);
 
         frame_count++;
 
@@ -1941,8 +1588,7 @@ int main(int argc, char *argv[])
         if (g_show_stats && !g_streamer_mode) {
             SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
             int box_w = 200;
-            bool active_hdr_badge = active_hdr || ctx.is_hdr;
-            int box_h = active_hdr_badge ? 95 : 75;
+            int box_h = ctx.is_hdr ? 95 : 75;
             int box_x = cur_w - box_w - 20;
             int box_y = 20;
 
@@ -1956,19 +1602,15 @@ int main(int argc, char *argv[])
             snprintf(line1, sizeof(line1), "FPS: %.2f (%.2fms)", live_fps > 0.0 ? live_fps : 60.0, live_fps > 0.0 ? (1000.0 / live_fps) : 16.67);
             snprintf(line2, sizeof(line2), "LAG: %.1f ms", lat_ms);
             snprintf(line3, sizeof(line3), "JITTER: %u/s", live_jitter);
-            if (active_hdr) {
-                snprintf(line4, sizeof(line4), "HDR: %s (ACES)", ctx.is_hlg ? "HLG" : "PQ");
-            } else if (ctx.is_hdr) {
-                snprintf(line4, sizeof(line4), "HDR: Passthrough");
+            if (ctx.is_hdr) {
+                snprintf(line4, sizeof(line4), "HDR: %s (BT.2020)", ctx.is_hlg ? "HLG" : "PQ");
             }
 
             draw_string(renderer, line1, box_x + 12, box_y + 12, 1, (SDL_Color){63, 185, 80, 255});
             draw_string(renderer, line2, box_x + 12, box_y + 32, 1, (SDL_Color){88, 166, 255, 255});
             draw_string(renderer, line3, box_x + 12, box_y + 52, 1, (live_jitter > 5) ? (SDL_Color){248, 81, 73, 255} : (SDL_Color){139, 148, 158, 255});
-            if (active_hdr) {
+            if (ctx.is_hdr) {
                 draw_string(renderer, line4, box_x + 12, box_y + 72, 1, (SDL_Color){255, 215, 0, 255});
-            } else if (ctx.is_hdr) {
-                draw_string(renderer, line4, box_x + 12, box_y + 72, 1, (SDL_Color){160, 175, 195, 255});
             }
         }
 

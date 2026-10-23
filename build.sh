@@ -10,7 +10,7 @@ make -C "${SCRIPT_DIR}/open_gc573" -j"$(nproc)"
 echo "[+] open_gc573.ko erfolgreich gebaut!"
 
 echo "[*] Baue EverLive Direct-Renderer (everlive_display)..."
-gcc -O3 -march=native -o "${SCRIPT_DIR}/tools/everlive/everlive_display" "${SCRIPT_DIR}/tools/everlive/everlive_display.c" $(sdl2-config --cflags --libs) -lGL -lm -lX11 -lpthread
+gcc -O3 -march=native -o "${SCRIPT_DIR}/tools/everlive/everlive_display" "${SCRIPT_DIR}/tools/everlive/everlive_display.c" $(sdl2-config --cflags --libs) -lX11 -lpthread
 ln -sf everlive_display "${SCRIPT_DIR}/tools/everlive/gc573_display"
 chmod +x "${SCRIPT_DIR}/tools/everlive/everlive_display"
 if command -v pw-loopback >/dev/null 2>&1; then
