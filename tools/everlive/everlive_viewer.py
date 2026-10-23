@@ -901,7 +901,7 @@ if HAS_QT:
                 QTimer.singleShot(250, self.start_gaming_screen)
 
         def init_ui(self):
-            self.setWindowTitle("EverLive - Live Gamer 4K Console Hub")
+            self.setWindowTitle("EverLive - Console Hub [INTERN TEST - EXPERIMENTAL]")
             self.setFixedSize(690, 520)
 
             # Application & Window Icon

@@ -258,9 +258,9 @@ fi
 
 cat > "${APPS_DIR}/everlive.desktop" <<EOF
 [Desktop Entry]
-Name=EverLive
+Name=EverLive (Intern Test - Experimentell)
 GenericName=Console Gaming Screen
-Comment=Ultra-Low-Latency HDMI Gaming Screen für PS5 & Konsolen (AVerMedia GC573)
+Comment=Hochexperimenteller Userspace Test-Branch (Nicht zum Testen empfohlen)
 Exec=${SCRIPT_DIR}/play.sh
 Icon=everlive
 Terminal=false

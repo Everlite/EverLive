@@ -1260,7 +1260,7 @@ int main(int argc, char *argv[])
         }
 
         window = SDL_CreateWindow(
-            "EverLive - Console Gaming Screen",
+            "EverLive - Console Gaming Screen [INTERN TEST - EXPERIMENTAL]",
             SDL_WINDOWPOS_CENTERED_DISPLAY(target_display), SDL_WINDOWPOS_CENTERED_DISPLAY(target_display),
             win_w, win_h,
             win_flags
