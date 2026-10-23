@@ -751,6 +751,14 @@ class GameStreamer:
             mpv_cmd.append("--vf=format=colorlevels=limited:colormatrix=bt.2020-ncl:primaries=bt.2020:gamma=hlg")
             print("[*] HLG (BT.2020) signal detected: Auto-configured mpv HLG tone-mapping and Limited Range filter")
 
+        # Anamorphic 3840x1080 scaling:
+        # 3840x1080 is an anamorphic half-vertical 4K120 signal (e.g. RetroTINK 4K Pro)
+        # that requires 2x vertical stretching to restore the intended 16:9 aspect ratio (3840x2160).
+        active_fmt, _ = self.get_active_format()
+        if active_fmt and "3840x1080" in active_fmt:
+            mpv_cmd.append("--video-aspect-override=16:9")
+            print("[*] Anamorphic 3840x1080 signal detected: Auto-configured 16:9 aspect ratio (2x vertical stretch) in mpv")
+
         try:
             mpv_env = os.environ.copy()
             self.mpv_proc = subprocess.Popen(mpv_cmd, env=mpv_env, start_new_session=True)
