@@ -1,60 +1,64 @@
 #!/usr/bin/env bash
-# play.sh - One-click launcher for EverLive Console Gaming Screen
+# ==============================================================================
+# EverLive - One-Click Launcher for Console Gaming Suite (v1.0.0)
+# 100% Blob-Free Userspace VFIO Engine for AVerMedia Live Gamer 4K (GC573)
+# ==============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+USERD_DIR="${SCRIPT_DIR}/tools/opengc573-userd"
 VIEWER="${SCRIPT_DIR}/tools/everlive/everlive_viewer.py"
 
-MODULE="${SCRIPT_DIR}/open_gc573/open_gc573.ko"
-CURRENT_VERMAGIC="$(modinfo -F vermagic "${MODULE}" 2>/dev/null | awk '{print $1}')"
-if [[ ! -f "${MODULE}" ]] || [[ "${CURRENT_VERMAGIC}" != "$(uname -r)" ]]; then
-    echo "[*] open_gc573.ko passt nicht zum laufenden Kernel ($(uname -r)). Kompiliere..."
-    if grep -q '^CONFIG_CC_IS_CLANG=y' "/usr/lib/modules/$(uname -r)/build/.config" 2>/dev/null || grep -iq 'clang' /proc/version 2>/dev/null; then
-        make -C "${SCRIPT_DIR}/open_gc573" -j"$(nproc)" LLVM=1 CC=clang
-    else
-        make -C "${SCRIPT_DIR}/open_gc573" -j"$(nproc)"
-    fi
+# 1. Ensure userspace engine binaries are built
+if [ ! -f "${USERD_DIR}/gc573_user_streamer" ] || [ ! -f "${USERD_DIR}/everlive_userd" ]; then
+    echo "[*] Kompiliere EverLive Userspace VFIO Engine..."
+    make -C "${USERD_DIR}" -j"$(nproc)"
 fi
 
-# Check if open_gc573 is loaded
-if ! grep -q "^open_gc573 " /proc/modules; then
-    echo "[!] open_gc573 Treiber ist nicht geladen."
-    echo "[*] Lade Treiber..."
-    if [ ! -t 0 ]; then
-        # Launched from application launcher / desktop menu without a terminal
-        if command -v pkexec >/dev/null 2>&1; then
-            if ! pkexec "${SCRIPT_DIR}/open_gc573/load.sh"; then
-                if command -v kdialog >/dev/null 2>&1; then
-                    kdialog --error "Authentifizierung abgebrochen: open_gc573 Treiber konnte nicht geladen werden."
-                elif command -v zenity >/dev/null 2>&1; then
-                    zenity --error --text="Authentifizierung abgebrochen: open_gc573 Treiber konnte nicht geladen werden."
+# 2. Raise soft memlock limit to hard limit for native 4K DMA mapping
+ulimit -S -l unlimited 2>/dev/null || true
+
+# 3. Check PCI driver binding: if not bound to vfio-pci, bind seamlessly
+IS_VFIO=0
+for dev in /sys/bus/pci/devices/*; do
+    if [ -f "$dev/vendor" ] && [ -f "$dev/device" ]; then
+        vendor=$(cat "$dev/vendor" 2>/dev/null || true)
+        device=$(cat "$dev/device" 2>/dev/null || true)
+        if [ "$vendor" = "0x1461" ] && { [ "$device" = "0x0054" ] || [ "$device" = "0x0055" ]; }; then
+            if [ -L "$dev/driver" ]; then
+                drv=$(basename "$(readlink -f "$dev/driver")")
+                if [ "$drv" = "vfio-pci" ]; then
+                    IS_VFIO=1
                 fi
-                exit 1
             fi
-        elif command -v kdesu >/dev/null 2>&1; then
-            kdesu "${SCRIPT_DIR}/open_gc573/load.sh"
-        else
-            if command -v kdialog >/dev/null 2>&1; then
-                kdialog --error "Der open_gc573 Treiber ist nicht geladen. Bitte führe im Terminal einmal 'sudo ./open_gc573/load.sh' aus."
-            elif command -v zenity >/dev/null 2>&1; then
-                zenity --error --text="Der open_gc573 Treiber ist nicht geladen. Bitte führe im Terminal einmal 'sudo ./open_gc573/load.sh' aus."
-            fi
-            exit 1
+            break
         fi
-    else
-        sudo "${SCRIPT_DIR}/open_gc573/load.sh"
+    fi
+done
+
+if [ "$IS_VFIO" -eq 0 ]; then
+    if [ -f "${USERD_DIR}/vfio_pci_bind.sh" ]; then
+        echo "[!] GC573 ist noch nicht an vfio-pci gebunden. Binde an Userspace-Treiber..."
+        if [ "$EUID" -ne 0 ]; then
+            if command -v pkexec >/dev/null 2>&1 && [ ! -t 0 ]; then
+                pkexec "${USERD_DIR}/vfio_pci_bind.sh" --bind || true
+            else
+                sudo "${USERD_DIR}/vfio_pci_bind.sh" --bind || true
+            fi
+        else
+            "${USERD_DIR}/vfio_pci_bind.sh" --bind || true
+        fi
     fi
 fi
 
-# Auto-compile native renderer if missing or source is newer
-if [ ! -f "${SCRIPT_DIR}/tools/everlive/everlive_display" ] || [ "${SCRIPT_DIR}/tools/everlive/everlive_display.c" -nt "${SCRIPT_DIR}/tools/everlive/everlive_display" ]; then
-    echo "[*] Kompiliere EverLive Direct-Renderer (everlive_display)..."
-    if ! gcc -O3 -march=native -o "${SCRIPT_DIR}/tools/everlive/everlive_display" "${SCRIPT_DIR}/tools/everlive/everlive_display.c" $(sdl2-config --cflags --libs 2>/dev/null) -lGL -lm -lX11 -lpthread; then
-        echo "[!] Warnung: Kompilierung von everlive_display fehlgeschlagen. Starte Viewer (nutzt ggf. mpv-Fallback)..."
-    fi
-    ln -sf everlive_display "${SCRIPT_DIR}/tools/everlive/gc573_display" 2>/dev/null || true
+# 4. Direct CLI passthrough: if --cli is passed, launch streamer directly
+if [ "${1:-}" = "--cli" ]; then
+    shift
+    "${USERD_DIR}/gc573_user_streamer" "$@"
+    exit $?
 fi
 
+# 5. Launch EverLive Console Hub GUI
 if [ -x "${SCRIPT_DIR}/tools/everlive/.venv/bin/python3" ]; then
     exec "${SCRIPT_DIR}/tools/everlive/.venv/bin/python3" "${VIEWER}" "$@"
 elif [ -x "${SCRIPT_DIR}/tools/everlive/.venv/bin/python" ]; then

@@ -20,19 +20,20 @@ A clear and concise description of what the bug is.
 **Diagnostic Output:**
 Please run the following commands and paste the output:
 
-1. **Hardware detection:**
+1. **Hardware detection & Driver Binding:**
 ```bash
 lspci -nnk -d 1461:
 ```
 
-2. **V4L2 devices:**
+2. **VFIO Device Permissions:**
 ```bash
-v4l2-ctl --list-devices
+ls -la /dev/vfio/
 ```
 
-3. **Kernel dmesg log (relevant lines):**
+3. **Streamer CLI Output:**
+Run the streamer directly from the terminal and paste the logs:
 ```bash
-sudo dmesg | grep -iE 'gc573|open_gc573|cx511h'
+./play.sh --cli
 ```
 
 **Steps to Reproduce:**

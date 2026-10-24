@@ -1,6 +1,12 @@
 # open_gc573 — Blob-Free Open Source Linux Driver for AVerMedia Live Gamer 4K (GC573)
 
-[![Driver](https://img.shields.io/badge/driver-open__gc573-2e7d32.svg)](#)
+> [!NOTE]
+> ### 🏛️ Legacy Kernel Module (Historical Reference)
+> As of **EverLive v1.0.0**, the project has transitioned to a **100% Userspace VFIO Architecture** located in [`tools/opengc573-userd/`](../../tools/opengc573-userd/).
+> This kernel module directory is preserved for historical reference and educational study.
+> For the modern, blob-free userspace driver that requires no DKMS and works out of the box with Secure Boot, please refer to the main repository [README.md](../../README.md).
+
+[![Driver](https://img.shields.io/badge/driver-open__gc573%20(legacy)-grey.svg)](#)
 [![License](https://img.shields.io/badge/license-GPL--2.0--only-blue.svg)](#licensing--attribution)
 [![AI Assisted](https://img.shields.io/badge/code-heavily%20AI%20assisted-ff69b4.svg)](#)
 
