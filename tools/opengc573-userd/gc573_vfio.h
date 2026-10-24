@@ -8,6 +8,14 @@
 
 #include "gc573-user-compat.h"
 
+#define GC573_VFIO_MAX_DMA_REGIONS	32
+
+struct gc573_vfio_dma_region {
+	void *vaddr;
+	size_t size;
+	uint64_t iova;
+};
+
 struct gc573_vfio_ctx {
 	int container_fd;
 	int group_fd;
@@ -20,10 +28,9 @@ struct gc573_vfio_ctx {
 	size_t bar0_size;
 	uint64_t bar0_offset;
 
-	/* Userspace DMA Ring Buffer */
-	void *dma_vaddr;
-	size_t dma_size;
-	uint64_t dma_iova;
+	/* Userspace DMA regions mapped into the IOMMU */
+	struct gc573_vfio_dma_region dma_regions[GC573_VFIO_MAX_DMA_REGIONS];
+	unsigned int nr_dma_regions;
 
 	/* Interrupts */
 	int irq_efd;
@@ -43,6 +50,34 @@ int gc573_vfio_init(struct gc573_vfio_ctx *ctx, const char *pci_addr);
  * @ctx: Context structure
  */
 void gc573_vfio_cleanup(struct gc573_vfio_ctx *ctx);
+
+/**
+ * gc573_vfio_prepare_inherit - Drop DMA, IRQs and the BAR mapping, but keep
+ * the VFIO fds open across exec. Closing the last device fd function-resets
+ * the FPGA and the bitstream starts the red blink.
+ */
+void gc573_vfio_prepare_inherit(struct gc573_vfio_ctx *ctx);
+
+/**
+ * gc573_vfio_keep_fds - Clear FD_CLOEXEC on the VFIO descriptors only
+ * @ctx: Context structure
+ *
+ * Used for an early daemon handoff: the parent keeps using its DMA, IRQ and
+ * BAR while the child inherits the VFIO context.
+ */
+void gc573_vfio_keep_fds(struct gc573_vfio_ctx *ctx);
+
+/**
+ * gc573_vfio_release_irq - Disable the device IRQ and close its eventfd
+ * @ctx: Context structure
+ */
+void gc573_vfio_release_irq(struct gc573_vfio_ctx *ctx);
+
+/**
+ * gc573_vfio_unmap_bar - Unmap BAR0 but keep the VFIO descriptors open
+ * @ctx: Context structure
+ */
+void gc573_vfio_unmap_bar(struct gc573_vfio_ctx *ctx);
 
 /**
  * gc573_vfio_map_dma - Map userspace virtual buffer into IOMMU for hardware DMA

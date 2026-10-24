@@ -85,6 +85,16 @@ bind_vfio() {
         chmod 0666 "/dev/vfio/$IOMMU_GROUP"
     fi
 
+    # Grant memory locking capability for DMA page pinning (needed for >1080p frames)
+    DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if command -v setcap >/dev/null 2>&1; then
+        for bin in "$DIR/gc573_user_streamer" "$DIR/gc573_user_diag" "$DIR/gc573_user_probe" "$DIR/everlive_userd"; do
+            if [ -f "$bin" ]; then
+                setcap cap_ipc_lock=+ep "$bin" 2>/dev/null || true
+            fi
+        done
+    fi
+
     echo -e "${GREEN}[✓] GC573 successfully bound to vfio-pci in IOMMU group $IOMMU_GROUP!${NC}"
     echo -e "    You can now run userspace tests without root: ${BLUE}./tools/opengc573-userd/gc573_user_probe${NC}"
 }

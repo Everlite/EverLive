@@ -5,6 +5,7 @@
 
 #include "gc573_vfio.h"
 #include <dirent.h>
+#include <sys/resource.h>
 
 static int find_gc573_pci_device(char *out_addr, size_t max_len, int *out_group)
 {
@@ -77,6 +78,16 @@ static int find_gc573_pci_device(char *out_addr, size_t max_len, int *out_group)
 
 int gc573_vfio_init(struct gc573_vfio_ctx *ctx, const char *pci_addr)
 {
+	struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
+
+	/* Raise memlock limit so VFIO can pin large frame buffers without ENOMEM */
+	if (setrlimit(RLIMIT_MEMLOCK, &rl) < 0) {
+		if (getrlimit(RLIMIT_MEMLOCK, &rl) == 0 && rl.rlim_cur < rl.rlim_max) {
+			rl.rlim_cur = rl.rlim_max;
+			(void)setrlimit(RLIMIT_MEMLOCK, &rl);
+		}
+	}
+
 	memset(ctx, 0, sizeof(*ctx));
 	ctx->container_fd = -1;
 	ctx->group_fd = -1;
@@ -168,6 +179,29 @@ int gc573_vfio_init(struct gc573_vfio_ctx *ctx, const char *pci_addr)
 		return -errno;
 	}
 
+	/*
+	 * The kernel driver calls pci_set_master(). Without bus master the
+	 * FPGA can only DMA when something else happens to set the bit.
+	 */
+	{
+		struct vfio_region_info cfg = {
+			.argsz = sizeof(cfg),
+			.index = VFIO_PCI_CONFIG_REGION_INDEX,
+		};
+		uint16_t command = 0;
+
+		if (ioctl(ctx->device_fd, VFIO_DEVICE_GET_REGION_INFO, &cfg) == 0 &&
+		    pread(ctx->device_fd, &command, sizeof(command),
+			  cfg.offset + 0x04) == sizeof(command) &&
+		    !(command & 0x0004)) {
+			command |= 0x0006;
+			if (pwrite(ctx->device_fd, &command, sizeof(command),
+				   cfg.offset + 0x04) == sizeof(command))
+				pr_info("PCI bus master enabled (command 0x%04x)",
+					command);
+		}
+	}
+
 	/* 4. Query BAR0 MMIO Region */
 	struct vfio_region_info bar0_info = {
 		.argsz = sizeof(bar0_info),
@@ -198,16 +232,91 @@ int gc573_vfio_init(struct gc573_vfio_ctx *ctx, const char *pci_addr)
 	return 0;
 }
 
+static void gc573_vfio_keep_across_exec(int fd)
+{
+	int flags;
+
+	if (fd < 0)
+		return;
+	flags = fcntl(fd, F_GETFD);
+	if (flags >= 0)
+		fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC);
+}
+
+static void gc573_vfio_disable_irq(struct gc573_vfio_ctx *ctx)
+{
+	struct vfio_irq_set irq = {
+		.argsz = sizeof(irq),
+		.flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER,
+		.index = VFIO_PCI_MSI_IRQ_INDEX,
+		.start = 0,
+		.count = 0,
+	};
+
+	if (!ctx || ctx->device_fd < 0)
+		return;
+	if (ioctl(ctx->device_fd, VFIO_DEVICE_SET_IRQS, &irq) < 0) {
+		irq.index = VFIO_PCI_INTX_IRQ_INDEX;
+		ioctl(ctx->device_fd, VFIO_DEVICE_SET_IRQS, &irq);
+	}
+}
+
+void gc573_vfio_release_irq(struct gc573_vfio_ctx *ctx)
+{
+	if (!ctx)
+		return;
+	gc573_vfio_disable_irq(ctx);
+	if (ctx->irq_efd >= 0) {
+		close(ctx->irq_efd);
+		ctx->irq_efd = -1;
+	}
+}
+
+void gc573_vfio_unmap_bar(struct gc573_vfio_ctx *ctx)
+{
+	if (!ctx)
+		return;
+	if (ctx->bar0 && ctx->bar0_size) {
+		munmap(ctx->bar0, ctx->bar0_size);
+		ctx->bar0 = NULL;
+	}
+}
+
+void gc573_vfio_prepare_inherit(struct gc573_vfio_ctx *ctx)
+{
+	if (!ctx)
+		return;
+
+	while (ctx->nr_dma_regions) {
+		struct gc573_vfio_dma_region *region =
+			&ctx->dma_regions[ctx->nr_dma_regions - 1];
+
+		gc573_vfio_unmap_dma(ctx, region->iova, region->size);
+	}
+	gc573_vfio_release_irq(ctx);
+	gc573_vfio_unmap_bar(ctx);
+	gc573_vfio_keep_fds(ctx);
+}
+
+void gc573_vfio_keep_fds(struct gc573_vfio_ctx *ctx)
+{
+	if (!ctx)
+		return;
+	gc573_vfio_keep_across_exec(ctx->container_fd);
+	gc573_vfio_keep_across_exec(ctx->group_fd);
+	gc573_vfio_keep_across_exec(ctx->device_fd);
+}
+
 void gc573_vfio_cleanup(struct gc573_vfio_ctx *ctx)
 {
 	if (!ctx)
 		return;
 
-	if (ctx->dma_vaddr && ctx->dma_size) {
-		gc573_vfio_unmap_dma(ctx, ctx->dma_iova, ctx->dma_size);
-		free(ctx->dma_vaddr);
-		ctx->dma_vaddr = NULL;
-		ctx->dma_size = 0;
+	while (ctx->nr_dma_regions) {
+		struct gc573_vfio_dma_region *region =
+			&ctx->dma_regions[ctx->nr_dma_regions - 1];
+
+		gc573_vfio_unmap_dma(ctx, region->iova, region->size);
 	}
 
 	if (ctx->bar0 && ctx->bar0_size) {
@@ -251,18 +360,25 @@ int gc573_vfio_map_dma(struct gc573_vfio_ctx *ctx, void *vaddr, size_t size, uin
 		.size = size,
 	};
 
+	if (ctx->nr_dma_regions >= GC573_VFIO_MAX_DMA_REGIONS) {
+		pr_err("Too many IOMMU DMA regions (max %u)",
+		       GC573_VFIO_MAX_DMA_REGIONS);
+		return -ENOSPC;
+	}
+
 	if (ioctl(ctx->container_fd, VFIO_IOMMU_MAP_DMA, &dma_map) < 0) {
 		pr_err("ioctl(VFIO_IOMMU_MAP_DMA, size=%zu, iova=0x%lx) failed: %s",
 		       size, (unsigned long)iova, strerror(errno));
 		return -errno;
 	}
 
-	ctx->dma_vaddr = vaddr;
-	ctx->dma_size = size;
-	ctx->dma_iova = iova;
+	ctx->dma_regions[ctx->nr_dma_regions].vaddr = vaddr;
+	ctx->dma_regions[ctx->nr_dma_regions].size = size;
+	ctx->dma_regions[ctx->nr_dma_regions].iova = iova;
+	ctx->nr_dma_regions++;
 
-	pr_info("Mapped %zu MB DMA buffer (VA: %p -> IOVA: 0x%lx)",
-		size / (1024 * 1024), vaddr, (unsigned long)iova);
+	pr_info("Mapped %zu KB DMA buffer (VA: %p -> IOVA: 0x%lx)",
+		size / 1024, vaddr, (unsigned long)iova);
 	return 0;
 }
 
@@ -282,6 +398,17 @@ int gc573_vfio_unmap_dma(struct gc573_vfio_ctx *ctx, uint64_t iova, size_t size)
 		pr_err("ioctl(VFIO_IOMMU_UNMAP_DMA, iova=0x%lx) failed: %s",
 		       (unsigned long)iova, strerror(errno));
 		return -errno;
+	}
+
+	for (unsigned int i = 0; i < ctx->nr_dma_regions; i++) {
+		if (ctx->dma_regions[i].iova != iova ||
+		    ctx->dma_regions[i].size != size)
+			continue;
+
+		ctx->dma_regions[i] =
+			ctx->dma_regions[ctx->nr_dma_regions - 1];
+		ctx->nr_dma_regions--;
+		break;
 	}
 
 	return 0;

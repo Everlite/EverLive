@@ -41,10 +41,28 @@ static inline int gc573_i2c_subaddr_code(unsigned int len)
 
 void gc573_user_i2c_init(void *bar0)
 {
-	/* Divisor = (125000 / 400) / 2 = ~156 for 400kHz */
-	u32 divisor = 156;
-	writel(divisor, (u8 *)bar0 + 0x0180 + GC555_I2C_REG_DIVISOR);
-	writel(divisor, (u8 *)bar0 + 0x01c0 + GC555_I2C_REG_DIVISOR);
+	u8 *base = (u8 *)bar0;
+
+	/* 1. Release hardware reset for IT6805 / IT6664 HDMI chips (GPIO 3 = High) */
+	u32 gpio = readl(base + 0x00040);
+	gpio |= BIT(3);
+	writel(gpio, base + 0x00040);
+	msleep(100);
+
+	/* 2. Stop FPGA RGB hardware sequencer to disable red error blink (MMIO 0x0804 = 0) */
+	writel(0, base + 0x0804);
+
+	/* 3. Configure FPGA I2C mode and controllers */
+	writel(0x3d, base + 0x00120);
+	writel(0x00, base + 0x00124);
+	writel(0x80, base + 0x00128);
+	msleep(100);
+
+	/* Divisor = 125000 / 400 = 312 for 400kHz */
+	u32 divisor = 312;
+	writel(divisor, base + 0x00180);
+	writel(divisor, base + 0x001c0);
+	usleep(10000);
 }
 
 int gc573_user_i2c_read(void *bar0, unsigned int bus, u16 addr,

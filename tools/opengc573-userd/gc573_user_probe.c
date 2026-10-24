@@ -5,6 +5,7 @@
 
 #include "gc573_vfio.h"
 #include "gc573_user_i2c.h"
+#include "gc573_user_hw.h"
 
 #define GC555_BRIDGE_REG_VERSION	0x00000
 #define GC555_BRIDGE_REG_RESET		0x0000c
@@ -46,10 +47,13 @@ int main(int argc, char *argv[])
 	printf("  Video Engine Status   : 0x%08x\n", vid_status);
 	printf("  Reported Resolution   : %u x %u\n", vid_w, vid_h);
 
-	printf("\n--- Initializing Userspace I2C Master ---\n");
-	gc573_user_i2c_init(ctx.bar0);
+	printf("\n--- Initializing FPGA Rails, Link Reset and LED ---\n");
+	gc573_user_hw_init(ctx.bar0);
 
-	/* Probe IT6805 (HDMI Receiver) on Primary Bus (0x48) */
+	/* Set LED to solid Cyan to visually confirm Userspace control */
+	gc573_user_set_led_rgb(ctx.bar0, 0x00, 0xcc, 0xff);
+	printf("  [✓] Set Onboard RGB LED to solid Cyan (Userspace Active)\n");
+
 	printf("\n--- Probing I2C Devices ---\n");
 	u8 it6805_id[4] = {0};
 	ret = gc573_user_i2c_read(ctx.bar0, GC573_I2C_BUS_PRIMARY, GC573_I2C_ADDR_IT6805,
@@ -84,14 +88,14 @@ int main(int argc, char *argv[])
 	}
 
 	printf("\n--- Testing Userspace IOMMU DMA Buffer Allocation ---\n");
-	size_t test_dma_size = 32 * 1024 * 1024; /* 32 MB */
+	size_t test_dma_size = 4 * 1024 * 1024; /* 4 MB (fits within default 8MB user memlock limit) */
 	void *dma_buf = mmap(NULL, test_dma_size, PROT_READ | PROT_WRITE,
 			     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (dma_buf != MAP_FAILED) {
 		uint64_t test_iova = 0x20000000ULL;
 		ret = gc573_vfio_map_dma(&ctx, dma_buf, test_dma_size, test_iova);
 		if (ret == 0) {
-			printf("  [✓] IOMMU DMA Mapping succeeded (32 MB at IOVA 0x%lx)\n",
+			printf("  [✓] IOMMU DMA Mapping succeeded (4 MB at IOVA 0x%lx)\n",
 			       (unsigned long)test_iova);
 			gc573_vfio_unmap_dma(&ctx, test_iova, test_dma_size);
 		} else {
