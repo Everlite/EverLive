@@ -41,9 +41,9 @@ The following capabilities have been physically tested and verified on physical 
   - **Dynamic Hot-Switching:** Verified dynamic mode changes (e.g., 4K60 dashboard $\leftrightarrow$ 1440p120 gameplay $\leftrightarrow$ 1080p) without process crashes or window recreation.
 * **Hardware EDID Profile Injection:**
   - `Default (4K60 / 1440p120 HDR)`: Standard multi-mode EDID profile.
-  - `Force 1440p @ 120 Hz`: Enforces high-refresh 120Hz mode negotiation with consoles.
+  - `Force 1440p @ 120 Hz`: Prioritizes 1440p high-refresh modes for consoles by omitting 4K descriptors.
   - `Force 1080p @ 240 Hz`: For high-framerate PC capture.
-  - `Load Custom EDID (.bin)`: Writes arbitrary 256-byte binary EDID files directly into the IT6805 HDMI receiver chip over I2C.
+  - `Load Custom EDID (.bin)`: Writes validated 256-byte binary EDID files (header & CEA checksum verified) directly into the IT6805 HDMI receiver chip over I2C upon stream launch.
 * **Retro Scalers & Custom Modelines (RetroTINK 4K Pro):**
   - Verified on physical hardware by contributor [@haxman](https://github.com/haxman): 240p retro modes (`1440x240`, `1920x240` CRT Super-Resolution), 480i / 576i interlaced modes with automatic 4:3 aspect-ratio preservation, PAL 50Hz/100Hz, and Cinema 95.94Hz BFI modes.
 * **Hardware RGB LED Lighting:**
@@ -51,24 +51,23 @@ The following capabilities have been physically tested and verified on physical 
 * **Standby Daemon Handoff (`everlive_userd`):**
   - Closing the gaming screen hands off the active file descriptor to a lightweight background daemon without triggering a PCIe Function Level Reset (FLR), preserving the HDMI link state and LED configuration.
 
-*(Note regarding GC555: The Live Gamer BOLT GC555 (`1461:5550`) shares core register layouts, but has not been personally verified on physical hardware by the maintainer.)*
+*(Note regarding GC555: The Live Gamer BOLT GC555 (PCI `1461:0054`/`1461:0055`, Subsystem `1461:5550`) shares core register layouts, but has not been personally verified on physical hardware by the maintainer.)*
 
 ---
 
 ## 📺 Streaming with OBS
 
-Because the userspace engine uses `vfio-pci`, the card does not create a `/dev/video*` node. The recommended and lowest-latency workflow for streamers is:
+Because the userspace engine uses `vfio-pci`, the card does not create a `/dev/video*` node. The userspace streamer window runs as a clean, low-overhead direct rendering surface by default (no on-screen HUD or cursor overlays).
 
-1. **Launch EverLive in Streamer Mode:**  
-   Press <kbd>F10</kbd> (or <kbd>s</kbd>), or start with `./play.sh -s` (or enable *Streamer Mode* in the GUI).  
-   *In Streamer Mode, all stats overlays, HUD sliders, and mouse cursors are hidden, providing a clean video feed.*
-2. **Capture in OBS via PipeWire:**  
+The recommended and lowest-latency workflow for streamers is:
+
+1. **Capture in OBS via PipeWire:**  
    In OBS Studio on Wayland, add a **Window Capture (PipeWire)** source and select the **EverLive** window.
-3. **Capture Audio:**  
+2. **Capture Audio:**  
    In OBS Studio, capture the desktop or PipeWire application audio stream for EverLive.
 
 > **Why this approach?**  
-> Playing directly inside the OBS preview window introduces noticeable input lag (usually 50–100 ms+) due to OBS's internal scene compositing and frame queueing. Running EverLive's dedicated SDL2 window allows you to play with minimal display latency while simultaneously passing a clean feed to OBS.  
+> Playing directly inside an OBS preview window introduces noticeable input lag (usually 50–100 ms+) due to OBS's internal scene compositing and frame queueing. Running EverLive's dedicated SDL2 window allows you to play with minimal display latency while simultaneously passing a clean feed to OBS.  
 > *(If your use case strictly requires a raw `/dev/video*` V4L2 device node for a headless streaming rig, please use the legacy kernel driver in [`legacy/open_gc573-kernel/`](legacy/open_gc573-kernel/)).*
 
 ---
@@ -108,8 +107,8 @@ sudo ./install.sh
 ```
 
 ### What the installer does:
-1. Installs user-level development libraries (`libsdl2-dev`, `python3-pyside6`, `build-essential`, `pciutils`).
-2. Configures udev rules (`/etc/udev/rules.d/99-gc573-vfio.rules`) granting your local user read/write access to the card's VFIO group.
+1. Installs user-level development dependencies (`libsdl2-dev`, PySide6, and standard build tools).
+2. Configures udev rules (`/etc/udev/rules.d/70-everlive.rules`) granting your local user read/write access to the card's VFIO group and binding `vfio-pci`.
 3. Sets `/etc/security/limits.d/99-everlive-memlock.conf` and adds `cap_ipc_lock` capabilities so unprivileged users can pin DMA buffers required for native 4K capture.
 4. Compiles the userspace binaries (`gc573_user_streamer` and `everlive_userd`).
 5. Installs the desktop application launcher.
@@ -126,12 +125,10 @@ Or start **EverLive** directly from your desktop application launcher.
 
 | Key / Action | Function |
 |:---|:---|
-| **Mouse Wheel Up / Down** | Adjust audio volume in 5% increments |
-| <kbd>m</kbd> | Toggle audio mute |
-| <kbd>F11</kbd> or <kbd>f</kbd> (or double-click) | Toggle borderless fullscreen |
-| <kbd>s</kbd> or <kbd>F10</kbd> | Toggle **Streamer Mode (Clean Feed)** (hides cursor & HUD for OBS) |
-| <kbd>Tab</kbd> or <kbd>i</kbd> | Toggle diagnostic overlay (FPS, latency metrics, jitter) |
+| <kbd>f</kbd> | Toggle borderless fullscreen |
 | <kbd>Esc</kbd> or <kbd>q</kbd> | Exit the game window |
+
+*Volume and mute are controlled directly through your system audio mixer, PipeWire, or the EverLive Console Hub.*
 
 ---
 

@@ -27,7 +27,13 @@ jobs:
             libgl-dev \
             python3
 
-      - name: Locate Generic Kernel Headers
+      - name: Compile EverLive Userspace VFIO Engine (gc573_user_streamer & everlive_userd)
+        run: |
+          make -C tools/opengc573-userd
+          make -C tools/opengc573-userd clean
+          make -C tools/opengc573-userd -j"$(nproc)"
+
+      - name: Locate Generic Kernel Headers for Legacy Driver
         id: kdir
         run: |
           GENERIC_KDIR=$(find /usr/src -maxdepth 1 -name "linux-headers-*-generic" | sort -V | tail -n 1)
@@ -39,26 +45,12 @@ jobs:
             echo "Fallback to default build directory: /lib/modules/$(uname -r)/build"
           fi
 
-      - name: Compile open_gc573 kernel driver (GCC)
+      - name: Compile legacy open_gc573 kernel driver (GCC)
         run: |
-          make -C open_gc573 KDIR="${{ steps.kdir.outputs.kdir }}"
+          make -C legacy/open_gc573-kernel KDIR="${{ steps.kdir.outputs.kdir }}"
+          make -C legacy/open_gc573-kernel KDIR="${{ steps.kdir.outputs.kdir }}" clean
 
-      - name: Clean open_gc573 driver
-        run: |
-          make -C open_gc573 KDIR="${{ steps.kdir.outputs.kdir }}" clean
-
-      - name: Compile open_gc573 kernel driver (Clang/LLVM)
-        run: |
-          if grep -Eq "CONFIG_CC_IS_CLANG=y" "${{ steps.kdir.outputs.kdir }}/.config" "${{ steps.kdir.outputs.kdir }}/include/config/auto.conf" 2>/dev/null; then
-            echo "Kernel was built with Clang. Building module with LLVM=1 CC=clang..."
-            make -C open_gc573 KDIR="${{ steps.kdir.outputs.kdir }}" LLVM=1 CC=clang
-            make -C open_gc573 KDIR="${{ steps.kdir.outputs.kdir }}" clean
-          else
-            echo "Target kernel was compiled with GCC (CONFIG_CC_IS_GCC=y)."
-            echo "Skipping LLVM=1 kernel build as Kbuild flags include GCC-specific options (-fconserve-stack, etc.)."
-          fi
-
-      - name: Compile EverLive direct display renderer (GCC & Clang)
+      - name: Compile EverLive legacy direct display renderer (GCC & Clang)
         run: |
           gcc -O3 -Wall -Wextra tools/everlive/everlive_display.c -o tools/everlive/everlive_display $(sdl2-config --cflags --libs) -lGL -lX11 -lpthread -lm
           rm tools/everlive/everlive_display
@@ -74,5 +66,7 @@ jobs:
           bash -n install.sh
           bash -n uninstall.sh
           bash -n play.sh
-          bash -n open_gc573/load.sh
-          bash -n open_gc573/unload.sh
+          bash -n build.sh
+          bash -n tools/opengc573-userd/vfio_pci_bind.sh
+          bash -n legacy/open_gc573-kernel/load.sh
+          bash -n legacy/open_gc573-kernel/unload.sh
