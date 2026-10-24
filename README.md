@@ -1,16 +1,12 @@
 # EverLive - AVerMedia GC573 Linux Gaming Suite & Open Driver
 
-[![EverLive](https://img.shields.io/badge/project-EverLive-8a2be2.svg)](#)
 [![Version](https://img.shields.io/badge/version-v0.5-blue.svg)](https://github.com/Everlite/EverLive/releases)
-[![Sponsor](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa.svg?logo=github)](https://github.com/sponsors/Everlite)
+[![Status](https://img.shields.io/badge/status-1440p%20120FPS%20%2B%20Audio%20(Verified)-brightgreen.svg)](#highlights--verified-capabilities)
+[![Driver](https://img.shields.io/badge/driver-100%25%20Blob--Free%20VFIO-2e7d32.svg)](#-major-architecture-update-userspace-vfio-driver-in-development)
+[![Hardware Fund](https://img.shields.io/badge/Hardware%20Fund-GitHub%20Sponsors-ea4aaa.svg?logo=github)](https://github.com/sponsors/Everlite)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/D2XFhkPMmc)
-[![Status](https://img.shields.io/badge/status-low%20latency%20(experimental)-brightgreen.svg)](#highlights--verified-capabilities)
-[![open_gc573](https://img.shields.io/badge/driver-open__gc573%20(100%25%20blob--free)-2e7d32.svg)](#hardware-and-kernel-compatibility)
-[![RGB Control](https://img.shields.io/badge/RGB%20Control-On--the--Fly%20Hardware%20MMIO-blueviolet.svg)](#-hardware-rgb-led-lighting-on-the-fly-control)
-[![Gaming Suite](https://img.shields.io/badge/suite-console%20hub%20%2B%20direct%20display-blue.svg)](#-everlive-console-hub--game-window)
-[![Kernel](https://img.shields.io/badge/kernel-tested%206.19%20--%207.x%20(CachyOS%2FArch)-2e7d32.svg)](#hardware-and-kernel-compatibility)
-[![AI Assisted](https://img.shields.io/badge/code-heavily%20AI%20assisted-ff69b4.svg)](#-transparency--ai-assistance)
 [![License](https://img.shields.io/badge/license-GPL--2.0--only-blue.svg)](#legal-and-licensing)
+[![AI Assisted](https://img.shields.io/badge/transparency-heavily%20AI%20assisted-ff69b4.svg)](#-transparency--ai-assistance)
 
 **EverLive** is an all-in-one Linux console gaming suite and 100% blob-free open-source driver for the **AVerMedia Live Gamer 4K (GC573)** (PCI `1461:0054`, Subsystem `1461:5730`) and **Live Gamer BOLT (GC555)** (`1461:5550`).
 
@@ -19,8 +15,9 @@ With **EverLive**, you can play PlayStation 5, Xbox Series X, Nintendo Switch, o
 > [!NOTE]
 > ### ⚡ Major Architecture Update: Userspace VFIO Driver in Development
 > We are actively transitioning from the traditional kernel module (`open_gc573`) to a brand-new **100% Userspace VFIO Driver Architecture** (`tools/opengc573-userd/`).
-> - **Current Status:** Rock-solid **2560×1440 @ 120 FPS** capture in Ring 3 with sub-millisecond latency is already achieved and physically verified on hardware!
-> - The existing kernel module version is no longer receiving major feature additions as all active development is focused on finalizing the userspace engine. Both branches will be merged soon.
+> - **Video Milestone:** Rock-solid **2560×1440 @ 120 FPS** capture in Ring 3 with sub-millisecond latency is already achieved and physically verified on hardware!
+> - **Audio Milestone:** High-fidelity **L-PCM audio capture via PCIe DMA** is verified and runs 100% crystal clear in initial hardware tests — fully synchronized with zero crackling, dropouts, or jitter directly through SDL2!
+> - The existing kernel module version is no longer receiving major feature additions as active development is focused on finalizing the userspace engine. Both branches will be merged soon.
 
 ---
 
@@ -310,13 +307,25 @@ Join our official community on Discord:
 
 ## 💖 Support the Project & Hardware Fund
 
-EverLive is an independent, community-driven open-source project. To expand hardware support to more capture cards (such as the **AVerMedia Live Gamer DUO / GC570**, and eventually **Elgato PCIe cards** like the **4K60 Pro**), we purchase second-hand hardware on eBay for testing and reverse-engineering.
+**EverLive** is an independent, non-commercial open-source project created and maintained by **[Everlite](https://github.com/Everlite)** in his spare time. There is no corporation or venture capital behind this — just deep passion for low-level Linux graphics, FPGA register reverse-engineering, and seamless console gaming on Linux.
 
-If you would like to support this work and help fund test hardware:
+### Why is there a GitHub Sponsors link?
+Writing clean-room, open-source Linux drivers for proprietary capture cards requires having the **physical hardware on the test bench**. PCIe capture cards cannot be emulated; reverse-engineering HDMI bridge chips, I2C matrices, and DMA ring descriptors requires hands-on register sniffing, oscilloscope verification, and real hardware testing.
+
+**100% of all sponsorship funds go directly and exclusively into buying second-hand hardware** (via eBay, Kleinanzeigen, and community sales) to expand Linux support to more devices.
+
+#### 🎯 Hardware Acquisition Roadmap:
+* **AVerMedia Live Gamer DUO (GC570D) / Live Gamer HD 2 (GC570):** Dual-channel PCIe capture cards.
+* **Elgato 4K60 Pro (MK.1 & MK.2) / Cam Link Pro:** Widely requested PCIe capture cards that currently have zero native open-source driver support on modern Linux.
+* **HDMI 2.1 4K120 / 8K Capture Cards:** Future-proofing Linux support for next-gen capture hardware.
+
+Whenever a card is funded and acquired, it goes straight to the lab bench for register dumping, VFIO driver implementation, and public GPL-2.0 release in EverLive.
+
+If you want to help accelerate open-source Linux driver support for more capture hardware:
 
 👉 **[Sponsor @Everlite on GitHub Sponsors](https://github.com/sponsors/Everlite)**
 
-Every contribution directly finances test hardware to expand open-source Linux capture card support!
+Every single euro or dollar directly turns into real hardware in our hands to make Linux the premier platform for capture cards!
 
 ---
 
