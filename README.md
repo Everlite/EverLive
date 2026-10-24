@@ -55,13 +55,9 @@ The following capabilities have been physically tested and verified on physical 
 
 ## 🎬 Video Demonstration (1-Click Launch & PS5 120 FPS Gameplay)
 
-Watch EverLive v1.0.0 in action on Linux: launching directly from the desktop application launcher, transitioning to the PlayStation 5 dashboard, and loading into *The Finals* at **1440p @ 120 FPS** with low latency and synchronous audio playback:
+Watch EverLive v1.0.0 in action on Linux: launching directly from the desktop application launcher, transitioning to the PlayStation 5 dashboard, and loading into *The Finals* at **1440p @ 120 FPS** with low latency and synchronous audio playback *(embedded video below is compressed for GitHub's 10 MB web-embed limit; full-bitrate 1440p120 file available in [Releases](https://github.com/Everlite/EverLive/releases/tag/v1.0.0))*:
 
-https://github.com/Everlite/EverLive/raw/main/docs/everlive_v1_launch_demo.mp4
-
-[![EverLive v1.0.0 Launch and Gameplay Demonstration](docs/everlive_v1_launch_poster.jpg)](https://github.com/Everlite/EverLive/raw/main/docs/everlive_v1_launch_demo.mp4)
-
-*(Click the video link or preview above to view the demonstration)*
+https://github.com/user-attachments/assets/19932c79-5364-4f16-81cf-0187f741129c
 
 ---
 
