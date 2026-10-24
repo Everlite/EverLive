@@ -13,12 +13,17 @@ import time
 import argparse
 import re
 import json
+import shutil
 from typing import Optional, Tuple, Dict
 
 __version__ = "0.4.0"
 
 CONFIG_DIR = os.path.expanduser("~/.config/everlive")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
+
+GC573_VENDOR_ID = "0x1461"
+GC573_DEVICE_IDS = {"0x0054", "0x0055"}
+ENGINE_VFIO_TEXT = "● EverLive Engine: Userspace VFIO (Blob-Free Ring 3)"
 
 
 def load_settings() -> dict:
@@ -38,6 +43,128 @@ def save_settings(data: dict):
         cur.update(data)
         with open(CONFIG_FILE, "w") as f:
             json.dump(cur, f, indent=2)
+    except Exception:
+        pass
+
+
+def _read_sysfs(path: str) -> str:
+    try:
+        with open(path, "r") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def detect_gc573_driver() -> Dict[str, Optional[str]]:
+    """Return the GC573 PCI binding: vfio, kernel, or unknown.
+
+    In VFIO mode there is intentionally no /dev/video* node and no ALSA card;
+    the userspace engine owns the device instead.
+    """
+    import glob
+
+    result: Dict[str, Optional[str]] = {
+        "mode": "unknown",
+        "driver": None,
+        "pci": None,
+    }
+
+    for dev in sorted(glob.glob("/sys/bus/pci/devices/*")):
+        vendor = _read_sysfs(os.path.join(dev, "vendor")).lower()
+        device = _read_sysfs(os.path.join(dev, "device")).lower()
+        if vendor != GC573_VENDOR_ID or device not in GC573_DEVICE_IDS:
+            continue
+
+        result["pci"] = os.path.basename(dev)
+        driver_link = os.path.join(dev, "driver")
+        try:
+            if os.path.islink(driver_link):
+                driver = os.path.basename(os.path.realpath(driver_link))
+                result["driver"] = driver
+                if driver == "vfio-pci":
+                    result["mode"] = "vfio"
+                elif driver == "open_gc573":
+                    result["mode"] = "kernel"
+        except OSError:
+            pass
+        break
+
+    return result
+
+
+def _proc_running(name_prefix: str) -> bool:
+    """Match /proc/<pid>/comm (15-char safe) without relying on pgrep."""
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return False
+
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/comm", "r") as f:
+                if f.read().strip().startswith(name_prefix):
+                    return True
+        except OSError:
+            pass
+    return False
+
+
+def userd_dir() -> str:
+    return os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "..", "opengc573-userd"))
+
+
+def userd_bin(name: str) -> str:
+    return os.path.join(userd_dir(), name)
+
+
+def _stop_vfio_daemon(wait_s: float = 0.8):
+    """Release BAR0/VFIO before the userspace streamer starts."""
+    for cmd in (["systemctl", "--user", "stop", "everlive-userd"],
+                ["pkill", "-x", "everlive_userd"]):
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    deadline = time.time() + wait_s
+    while time.time() < deadline:
+        if not _proc_running("everlive_userd"):
+            return
+        time.sleep(0.05)
+
+
+def _vfio_streamer_running() -> bool:
+    # The binary name is longer than 15 chars, so /proc/<pid>/comm is
+    # truncated to "gc573_user_stre".
+    return _proc_running("gc573_user_stre")
+
+
+def _raise_memlock_limit():
+    """Native 4K frames need ~17 MB of pinned VFIO memory.
+
+    The GUI launches the streamer directly (not via play-intern.sh), so it
+    must raise its own soft limit before fork/exec.  This is best-effort;
+    the streamer reports a clean error if the hard limit is still too small.
+    """
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+        try:
+            resource.setrlimit(resource.RLIMIT_MEMLOCK,
+                               (resource.RLIM_INFINITY,
+                                resource.RLIM_INFINITY))
+            return
+        except (ValueError, OSError):
+            pass
+        if soft != hard:
+            try:
+                resource.setrlimit(resource.RLIMIT_MEMLOCK, (hard, hard))
+            except (ValueError, OSError):
+                pass
     except Exception:
         pass
 
@@ -174,9 +301,6 @@ def find_pipewire_source_node() -> Optional[str]:
     return None
 
 
-DEFAULT_VDEV = find_gc573_vdev()
-DEFAULT_ADEV = find_gc573_adev()
-
 PRESETS = {
     "Auto (HDMI Signal)": None,
     "3840x2160 @ 60 FPS":  {"width": 3840, "height": 2160, "fps": 60,  "fmt": "YUYV"},
@@ -238,6 +362,57 @@ LED_COLORS = {
     6: "#eab308",  # Gelb
     7: "#f8fafc",  # Weiß
 }
+
+# RGB values understood by everlive_userd --color.  Cyan matches the verified
+# streamer/daemon colour (0, 204, 255) rather than the kernel classdev value.
+LED_RGB_VALUES = {
+    0: (0, 0, 0),
+    1: (0, 0, 255),
+    2: (0, 255, 0),
+    3: (255, 0, 0),
+    4: (0, 204, 255),
+    5: (255, 0, 255),
+    6: (255, 255, 0),
+    7: (255, 255, 255),
+}
+
+
+def set_vfio_led(mode: int) -> bool:
+    """Apply an LED colour through everlive_userd (VFIO mode).
+
+    everlive_userd owns BAR0 in standby.  A colour change therefore restarts
+    the daemon with --color.  While the userspace streamer is running it owns
+    BAR0 and drives the verified cyan profile; in that case the choice is only
+    persisted and restored after the streamer exits.
+    """
+    mode = int(mode)
+    resolved = userd_bin("everlive_userd")
+    if not (os.path.isfile(resolved) and os.access(resolved, os.X_OK)):
+        return False
+
+    if _vfio_streamer_running():
+        save_settings({"led_mode": mode})
+        return True
+
+    _stop_vfio_daemon()
+    args = [resolved, "--daemon"]
+    if mode == 0:
+        args.append("--off")
+    else:
+        red, green, blue = LED_RGB_VALUES.get(mode, (0, 0, 0))
+        args.extend(["--color", str(red), str(green), str(blue)])
+
+    try:
+        subprocess.Popen(args, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception:
+        return False
+
+    time.sleep(0.35)
+    if _proc_running("everlive_userd"):
+        save_settings({"led_mode": mode})
+        return True
+    return False
 
 
 def create_led_icon(mode: int, size: int = 14):
@@ -454,17 +629,154 @@ def set_audio_mute(mute: bool):
 class GameStreamer:
     """Manages low-latency video and audio child processes."""
     def __init__(self, vdev: Optional[str] = None, adev: Optional[str] = None, force_mpv: bool = False):
-        self.vdev = vdev if vdev is not None else find_gc573_vdev()
-        self.adev = adev if adev is not None else find_gc573_adev()
-        self.pw_node = find_pipewire_source_node()
-        self.force_mpv = force_mpv
+        self.hw_info = detect_gc573_driver()
+        self.mode = self.hw_info.get("mode", "unknown")
+        self.vfio_mode = self.mode == "vfio"
+        self.kernel_mode = self.mode == "kernel"
+
+        if self.vfio_mode:
+            # VFIO intentionally has no V4L2 node and no ALSA card.  Never
+            # probe them, or the GUI would report misleading warnings.
+            self.vdev = vdev or ""
+            self.adev = adev or ""
+            self.pw_node = None
+        else:
+            self.vdev = vdev if vdev is not None else find_gc573_vdev()
+            self.adev = adev if adev is not None else find_gc573_adev()
+            self.pw_node = find_pipewire_source_node()
+
+        self.force_mpv = bool(force_mpv) and not self.vfio_mode
         self.mpv_proc: Optional[subprocess.Popen] = None
         self.arecord_proc: Optional[subprocess.Popen] = None
         self.pwplay_proc: Optional[subprocess.Popen] = None
         self.is_running = False
 
-    def get_signal_info(self) -> Dict[str, str]:
-        """Queries current signal status via v4l2-ctl."""
+        # Userspace VFIO engine status cache.  The streamer writes a
+        # line-buffered log which is parsed below; the last signal is also
+        # persisted so standby can show it without touching the hardware.
+        self.streamer_bin = userd_bin("gc573_user_streamer")
+        self.userd_bin = userd_bin("everlive_userd")
+        # Available for manual hardware diagnostics; standby status deliberately
+        # uses the cached streamer log instead of resetting BAR0 via the probe.
+        self.probe_bin = userd_bin("gc573_user_probe")
+        self._vfio_log_path = os.path.join(CONFIG_DIR, "streamer.log")
+        self._vfio_log_pos = 0
+        self._vfio_live = False
+        self._vfio_saw_output = False
+        saved_signal = load_settings().get("last_signal")
+        self._vfio_signal = saved_signal if isinstance(saved_signal, dict) else None
+
+    def _update_vfio_signal(self, width: int, height: int, scan: str,
+                            rate_hz: int, rate_frac: int,
+                            chroma: Optional[str] = None):
+        resolution = f"{width}x{height}{scan}"
+        framerate = f"{rate_hz}.{rate_frac:02d} FPS"
+        previous = self._vfio_signal or {}
+        if chroma is None:
+            chroma = previous.get("chroma", "")
+
+        info = {
+            "locked": True,
+            "resolution": resolution,
+            "framerate": framerate,
+            "chroma": chroma,
+            "hdr": previous.get("hdr", ""),
+        }
+        self._vfio_signal = info
+        self._vfio_live = True
+
+        if (previous.get("resolution") != resolution or
+                previous.get("framerate") != framerate or
+                previous.get("chroma") != chroma):
+            save_settings({"last_signal": {
+                "resolution": resolution,
+                "framerate": framerate,
+                "chroma": chroma,
+                "hdr": info["hdr"],
+            }})
+
+    @staticmethod
+    def _friendly_chroma(raw: str) -> str:
+        raw = (raw or "").strip()
+        return {
+            "RGB": "RGB 4:4:4",
+            "YCbCr 4:2:2": "YUV 4:2:2",
+            "YCbCr 4:4:4": "YUV 4:4:4",
+            "YCbCr 4:2:0": "YUV 4:2:0",
+        }.get(raw, raw)
+
+    def _parse_streamer_line(self, line: str):
+        if not line:
+            return
+        self._vfio_saw_output = True
+
+        # [VIDEO] Capturing 2560x1440p @ 120.00 Hz (VIP 120 Hz, RGB, pclk 483000 kHz) -> ...
+        m = re.search(
+            r"\[VIDEO\] Capturing (\d+)x(\d+)([ip]) @ (\d+)\.(\d+) Hz "
+            r"\([^,]+, ([^,]+), pclk", line)
+        if m:
+            self._update_vfio_signal(
+                int(m.group(1)), int(m.group(2)), m.group(3),
+                int(m.group(4)), int(m.group(5)),
+                self._friendly_chroma(m.group(6)))
+            return
+
+        # [STREAM] 2560x1440p @ 120.00 Hz -> 2560x1440 | FPS: 120.0 | Frames: ...
+        m = re.search(
+            r"\[STREAM\] (\d+)x(\d+)([ip]) @ (\d+)\.(\d+) Hz -> "
+            r"(\d+)x(\d+) \| FPS:", line)
+        if m:
+            self._update_vfio_signal(
+                int(m.group(1)), int(m.group(2)), m.group(3),
+                int(m.group(4)), int(m.group(5)))
+            return
+
+        if ("HDMI signal lost" in line or
+                "Signal vanished" in line or
+                "Waiting for HDMI signal" in line):
+            self._vfio_live = False
+
+    def _read_vfio_log(self):
+        if not self._vfio_log_path:
+            return
+        try:
+            with open(self._vfio_log_path, "r", errors="ignore") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                if self._vfio_log_pos > size:
+                    self._vfio_log_pos = 0
+                f.seek(self._vfio_log_pos)
+                for line in f:
+                    self._parse_streamer_line(line.strip())
+                self._vfio_log_pos = f.tell()
+        except OSError:
+            pass
+
+    def get_vfio_signal_info(self) -> Dict[str, object]:
+        """Signal snapshot for the userspace engine, without V4L2/ALSA."""
+        self._read_vfio_log()
+        sig = self._vfio_signal or {}
+        live = bool(self.is_running and self._vfio_live and sig.get("resolution"))
+        has_cache = bool(sig.get("resolution") and
+                         sig.get("resolution") != "No Signal")
+
+        return {
+            "locked": live,
+            "resolution": sig.get("resolution", "No Signal"),
+            "framerate": sig.get("framerate", ""),
+            "chroma": sig.get("chroma", ""),
+            "hdr": sig.get("hdr", ""),
+            "cached": (not live) and has_cache,
+            "starting": bool(self.is_running and not live and
+                             not self._vfio_saw_output),
+            "engine": "vfio",
+        }
+
+    def get_signal_info(self) -> Dict[str, object]:
+        """Queries current signal status via v4l2-ctl (kernel mode) or cache."""
+        if self.vfio_mode:
+            return self.get_vfio_signal_info()
+
         info = {
             "locked": False,
             "resolution": "No Signal",
@@ -522,6 +834,8 @@ class GameStreamer:
 
     def chroma_label(self) -> str:
         """Reads active driver pixel format and returns friendly chroma description."""
+        if self.vfio_mode:
+            return (self._vfio_signal or {}).get("chroma", "")
         if not self.vdev or not os.path.exists(self.vdev):
             return ""
         try:
@@ -543,6 +857,8 @@ class GameStreamer:
 
     def hdr_label(self, fallback: bool = True) -> str:
         """SDR, HDR10 or HLG from the driver's cached metadata. No HDMI I2C."""
+        if self.vfio_mode:
+            return (self._vfio_signal or {}).get("hdr", "")
         if not self.vdev or not os.path.exists(self.vdev):
             return ""
         try:
@@ -571,6 +887,11 @@ class GameStreamer:
 
     def get_active_format(self) -> Tuple[Optional[str], Optional[str]]:
         """Reads active driver streaming resolution and framerate without touching HDMI I2C."""
+        if self.vfio_mode:
+            info = self.get_vfio_signal_info()
+            if not info.get("locked"):
+                return None, None
+            return info.get("resolution"), info.get("framerate")
         if not self.vdev or not os.path.exists(self.vdev):
             return None, None
         try:
@@ -627,7 +948,10 @@ class GameStreamer:
         return res
 
     def resync(self) -> bool:
-        """Forces hardware HDMI HPD re-sync and updates timings via v4l2-ctl query."""
+        """Forces hardware HDMI HPD re-sync (kernel mode only)."""
+        if self.vfio_mode:
+            # The userspace engine handles hot-switching automatically.
+            return False
         trigger_hpd_pulse()
         time.sleep(0.35)
         if not os.path.exists(self.vdev):
@@ -641,9 +965,77 @@ class GameStreamer:
         except Exception:
             return False
 
+    def _start_vfio(self) -> bool:
+        """Launch the blob-free userspace VFIO streamer directly."""
+        if _vfio_streamer_running():
+            print("[!] A userspace streamer is already running; refusing to start a second instance.")
+            return False
+
+        if not (os.path.isfile(self.streamer_bin) and
+                os.access(self.streamer_bin, os.X_OK)):
+            print(f"[!] Userspace streamer not found: {self.streamer_bin}")
+            print("    Build it with: make -C tools/opengc573-userd")
+            return False
+
+        # everlive_userd holds BAR0/VFIO in standby; release it first.
+        _stop_vfio_daemon()
+        _raise_memlock_limit()
+
+        cmd = [self.streamer_bin]
+        if self.hw_info.get("pci"):
+            cmd.append(self.hw_info["pci"])
+
+        try:
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            log = open(self._vfio_log_path, "wb")
+        except OSError:
+            log = subprocess.DEVNULL
+
+        # The streamer's stdout carries the current signal; keep it line
+        # buffered so standby/live status can be parsed without V4L2.
+        stdbuf = shutil.which("stdbuf")
+        if stdbuf:
+            cmd = [stdbuf, "-oL", "-eL"] + cmd
+
+        try:
+            self.mpv_proc = subprocess.Popen(
+                cmd, stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True)
+        except Exception as e:
+            print(f"[!] Failed to launch userspace streamer: {e}")
+            if log is not subprocess.DEVNULL:
+                log.close()
+            return False
+        finally:
+            if log is not subprocess.DEVNULL and not log.closed:
+                log.close()
+
+        self._vfio_log_pos = 0
+        self._vfio_live = False
+        self._vfio_saw_output = False
+        self.is_running = True
+        print(f"[*] Starting Userspace VFIO engine: {' '.join(cmd)}")
+
+        # Catch immediate failures (missing VFIO permission, unbound card).
+        time.sleep(0.25)
+        if self.mpv_proc.poll() is not None:
+            self._read_vfio_log()
+            self.is_running = False
+            self.mpv_proc = None
+            print(f"[!] Userspace streamer exited at startup; see {self._vfio_log_path}")
+            return False
+        return True
+
     def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False) -> bool:
         if self.is_running:
             return True
+
+        if self.vfio_mode:
+            if (preset_name != "Auto (HDMI Signal)" or fullscreen or
+                    vsync or streamer_mode or volume != 1.0):
+                print("[*] VFIO mode: signal, fullscreen, volume and streamer options "
+                      "are handled inside the userspace engine.")
+            return self._start_vfio()
 
         self.vsync = vsync
         if not os.path.exists(self.vdev):
@@ -800,6 +1192,9 @@ class GameStreamer:
 
     def stop(self):
         self.is_running = False
+        if self.vfio_mode:
+            self._read_vfio_log()
+            self._vfio_live = False
         if self.mpv_proc:
             try:
                 pgid = os.getpgid(self.mpv_proc.pid)
@@ -810,7 +1205,9 @@ class GameStreamer:
                 except Exception:
                     pass
             try:
-                self.mpv_proc.wait(timeout=1.0)
+                # The userspace streamer performs the LED handoff and DMA
+                # teardown on SIGTERM; give it a little more time.
+                self.mpv_proc.wait(timeout=5.0 if self.vfio_mode else 1.0)
             except Exception:
                 try:
                     pgid = os.getpgid(self.mpv_proc.pid)
@@ -867,9 +1264,13 @@ class GameStreamer:
             self.arecord_proc = None
 
     def poll(self) -> bool:
-        """Returns True if mpv is still alive."""
+        """Returns True while the stream process is still alive."""
         if self.mpv_proc:
+            if self.vfio_mode:
+                self._read_vfio_log()
             if self.mpv_proc.poll() is not None:
+                if self.vfio_mode:
+                    self._read_vfio_log()
                 self.stop()
                 return False
             return True
@@ -881,12 +1282,14 @@ if HAS_QT:
         def __init__(self, streamer: GameStreamer, vsync: bool = True, streamer_mode: bool = False):
             super().__init__()
             self.streamer = streamer
+            self.vfio_mode = streamer.vfio_mode
             self.enable_vsync = vsync
             self.muted = False
             self.saved_cfg = load_settings()
+            self._vfio_notice_until = 0.0
             if streamer_mode:
                 self.saved_cfg["streamer_mode"] = True
-            if self.saved_cfg.get("engine", "native") == "mpv":
+            if not self.vfio_mode and self.saved_cfg.get("engine", "native") == "mpv":
                 self.streamer.force_mpv = True
 
             self.init_ui()
@@ -902,7 +1305,9 @@ if HAS_QT:
 
         def init_ui(self):
             self.setWindowTitle("EverLive - Console Hub [INTERN TEST - EXPERIMENTAL]")
-            self.setFixedSize(690, 520)
+            # Wider layout keeps the full userspace-engine status capsule and
+            # the VFIO device line readable without truncation.
+            self.setFixedSize(860, 540)
 
             # Application & Window Icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "everlive.png")
@@ -1145,9 +1550,12 @@ if HAS_QT:
             btn_discord.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://discord.com/invite/D2XFhkPMmc")))
             top_bar.addWidget(btn_discord)
 
-            self.lbl_pill = QLabel("○ Standby")
+            self.lbl_pill = QLabel(ENGINE_VFIO_TEXT if self.vfio_mode else "○ Standby")
             self.lbl_pill.setObjectName("pillLive")
-            self.lbl_pill.setStyleSheet("background-color: #1a202c; color: #94a3b8; border: 1px solid #2d3748;")
+            if self.vfio_mode:
+                self.lbl_pill.setStyleSheet("background-color: #0d2318; color: #34d399; border: 1px solid #164e32;")
+            else:
+                self.lbl_pill.setStyleSheet("background-color: #1a202c; color: #94a3b8; border: 1px solid #2d3748;")
             top_bar.addWidget(self.lbl_pill)
 
             root_layout.addLayout(top_bar)
@@ -1175,9 +1583,11 @@ if HAS_QT:
 
             h_sig_info.addLayout(v_sig_text, 1)
 
-            lbl_engine_badge = QLabel("Direct Wayland (< 2ms)")
-            lbl_engine_badge.setObjectName("engineBadge")
-            h_sig_info.addWidget(lbl_engine_badge, 0, Qt.AlignVCenter)
+            self.lbl_engine_badge = QLabel(
+                "Userspace VFIO • Blob-Free Ring 3" if self.vfio_mode
+                else "Direct Wayland (< 2ms)")
+            self.lbl_engine_badge.setObjectName("engineBadge")
+            h_sig_info.addWidget(self.lbl_engine_badge, 0, Qt.AlignVCenter)
 
             v_hero.addLayout(h_sig_info)
 
@@ -1214,6 +1624,20 @@ if HAS_QT:
             self.chk_streamer.toggled.connect(lambda val: save_settings({"streamer_mode": val}))
             grid_opts.addWidget(self.chk_streamer, 1, 1)
 
+            if self.vfio_mode:
+                self.chk_fullscreen.blockSignals(True)
+                self.chk_fullscreen.setChecked(False)
+                self.chk_fullscreen.blockSignals(False)
+                self.chk_fullscreen.setEnabled(False)
+                self.chk_fullscreen.setToolTip("Press F inside the userspace streamer window to toggle fullscreen.")
+                self.chk_vsync.setEnabled(False)
+                self.chk_vsync.setToolTip("The userspace engine paces its own DMA and SDL2 presentation.")
+                self.chk_streamer.blockSignals(True)
+                self.chk_streamer.setChecked(False)
+                self.chk_streamer.blockSignals(False)
+                self.chk_streamer.setEnabled(False)
+                self.chk_streamer.setToolTip("Streamer Mode applies to the MPV/kernel path only.")
+
             v_hero.addLayout(grid_opts)
             root_layout.addWidget(card_hero)
 
@@ -1244,6 +1668,10 @@ if HAS_QT:
             if "preset" in self.saved_cfg and self.saved_cfg["preset"] in PRESETS:
                 self.combo_presets.setCurrentText(self.saved_cfg["preset"])
             self.combo_presets.currentIndexChanged.connect(self.on_preset_changed)
+            if self.vfio_mode:
+                self.combo_presets.setCurrentText("Auto (HDMI Signal)")
+                self.combo_presets.setEnabled(False)
+                self.combo_presets.setToolTip("The userspace VFIO engine detects the HDMI mode and hot-switches automatically.")
             grid.addWidget(self.combo_presets, 0, 1)
 
             lbl_led = QLabel("Card LED:")
@@ -1260,19 +1688,29 @@ if HAS_QT:
                     self.combo_led.addItem(name, val)
 
             saved_led = self.saved_cfg.get("led_mode", None)
-            if saved_led is not None and isinstance(saved_led, int) and 0 <= saved_led <= 7:
-                write_led_mode(saved_led)
-                idx = self.combo_led.findData(saved_led)
+            if self.vfio_mode:
+                # everlive_userd has no readback path; use the persisted mode
+                # and default to the verified cyan profile.
+                led_mode = saved_led if isinstance(saved_led, int) and 0 <= saved_led <= 7 else 4
+                idx = self.combo_led.findData(led_mode)
                 if idx >= 0:
                     self.combo_led.setCurrentIndex(idx)
+                if isinstance(saved_led, int) and 0 <= saved_led <= 7:
+                    set_vfio_led(saved_led)
             else:
-                curr_led = read_led_mode()
-                if curr_led >= 0:
-                    idx = self.combo_led.findData(curr_led)
+                if saved_led is not None and isinstance(saved_led, int) and 0 <= saved_led <= 7:
+                    write_led_mode(saved_led)
+                    idx = self.combo_led.findData(saved_led)
                     if idx >= 0:
                         self.combo_led.setCurrentIndex(idx)
                 else:
-                    self.combo_led.setEnabled(False)
+                    curr_led = read_led_mode()
+                    if curr_led >= 0:
+                        idx = self.combo_led.findData(curr_led)
+                        if idx >= 0:
+                            self.combo_led.setCurrentIndex(idx)
+                    else:
+                        self.combo_led.setEnabled(False)
             self.combo_led.currentIndexChanged.connect(self.on_led_changed)
             grid.addWidget(self.combo_led, 0, 3)
 
@@ -1303,31 +1741,49 @@ if HAS_QT:
             self.lbl_vol.setFixedWidth(34)
             self.lbl_vol.setStyleSheet("color: #94a3b8; font-size: 11px;")
             h_vol.addWidget(self.lbl_vol)
+
+            if self.vfio_mode:
+                self.btn_mute.setEnabled(False)
+                self.btn_mute.setToolTip("HDMI audio is played directly by the userspace SDL2 engine.")
+                self.slider_vol.setEnabled(False)
+                self.slider_vol.setToolTip("Userspace audio does not expose a separate mixer; use the console/system volume.")
+                self.lbl_vol.setText("SDL2")
             grid.addLayout(h_vol, 1, 1)
 
             lbl_sync = QLabel("HDMI Sync:")
             lbl_sync.setStyleSheet("font-weight: 500; color: #94a3b8;")
             grid.addWidget(lbl_sync, 1, 2)
 
-            self.btn_resync = QPushButton("Re-sync Signal")
+            self.btn_resync = QPushButton("Restart Engine" if self.vfio_mode else "Re-sync Signal")
             self.btn_resync.setCursor(Qt.PointingHandCursor)
-            self.btn_resync.setToolTip("Trigger hardware HDMI handshake (HPD pulse) - also key 'H' in window")
+            self.btn_resync.setToolTip(
+                "Restart the userspace VFIO engine. HDMI hot-switching is automatic."
+                if self.vfio_mode else
+                "Trigger hardware HDMI handshake (HPD pulse) - also key 'H' in window")
             self.btn_resync.clicked.connect(self.force_resync)
             grid.addWidget(self.btn_resync, 1, 3)
 
             # Row 2: Render Engine & HDR Status
             lbl_engine = QLabel("Render Engine:")
             lbl_engine.setStyleSheet("font-weight: 500; color: #94a3b8;")
-            lbl_engine.setToolTip("Select gaming/preview renderer:\n• Direct Native: Ultra-low latency (< 2 ms) direct SDL2 Wayland display\n• MPV Studio: Automatic HDR10/HLG tone-mapping and colorimetry")
+            lbl_engine.setToolTip(
+                "Userspace VFIO engine: direct SDL2 video/audio, no kernel module required."
+                if self.vfio_mode else
+                "Select gaming/preview renderer:\n• Direct Native: Ultra-low latency (< 2 ms) direct SDL2 Wayland display\n• MPV Studio: Automatic HDR10/HLG tone-mapping and colorimetry")
             grid.addWidget(lbl_engine, 2, 0)
 
             self.combo_engine = QComboBox()
-            self.combo_engine.addItem("Direct Native (< 2ms)", "native")
-            self.combo_engine.addItem("MPV Studio (Auto HDR)", "mpv")
-            saved_engine = self.saved_cfg.get("engine", "native")
-            idx = self.combo_engine.findData(saved_engine)
-            if idx >= 0:
-                self.combo_engine.setCurrentIndex(idx)
+            if self.vfio_mode:
+                self.combo_engine.addItem("Userspace VFIO (Blob-Free Ring 3)", "vfio")
+                self.combo_engine.setEnabled(False)
+                self.combo_engine.setToolTip("SDL2 video and HDMI audio are handled directly by gc573_user_streamer.")
+            else:
+                self.combo_engine.addItem("Direct Native (< 2ms)", "native")
+                self.combo_engine.addItem("MPV Studio (Auto HDR)", "mpv")
+                saved_engine = self.saved_cfg.get("engine", "native")
+                idx = self.combo_engine.findData(saved_engine)
+                if idx >= 0:
+                    self.combo_engine.setCurrentIndex(idx)
             self.combo_engine.currentIndexChanged.connect(self.on_engine_changed)
             grid.addWidget(self.combo_engine, 2, 1)
 
@@ -1335,9 +1791,12 @@ if HAS_QT:
             lbl_hdr_mode.setStyleSheet("font-weight: 500; color: #94a3b8;")
             grid.addWidget(lbl_hdr_mode, 2, 2)
 
-            self.lbl_hdr_status = QLabel("Automatic")
+            self.lbl_hdr_status = QLabel("Pass-through (FPGA)" if self.vfio_mode else "Automatic")
             self.lbl_hdr_status.setStyleSheet("color: #34d399; font-weight: 600; font-size: 11px;")
-            self.lbl_hdr_status.setToolTip("When HDR10 or HLG is detected, EverLive automatically configures BT.2020 / PQ tone-mapping and Limited-Range filters")
+            self.lbl_hdr_status.setToolTip(
+                "The userspace engine programs the FPGA color matrix; HDR metadata is passed through without tone-mapping."
+                if self.vfio_mode else
+                "When HDR10 or HLG is detected, EverLive automatically configures BT.2020 / PQ tone-mapping and Limited-Range filters")
             grid.addWidget(self.lbl_hdr_status, 2, 3)
 
             v_settings.addLayout(grid)
@@ -1351,17 +1810,24 @@ if HAS_QT:
             b_layout = QHBoxLayout(bottom_box)
             b_layout.setContentsMargins(4, 2, 4, 2)
 
-            if self.streamer.pw_node:
-                audio_str = f"PipeWire ({self.streamer.pw_node})"
+            if self.vfio_mode:
+                pci = self.streamer.hw_info.get("pci") or "auto"
+                lbl_vdev = QLabel(
+                    f"VFIO: {pci} • gc573_user_streamer • Audio: SDL2 (Userspace)")
+                hints_text = "Userspace Ring 3 • Automatic hot-switch • Esc Exit"
             else:
-                audio_str = f"ALSA ({self.streamer.adev})"
-            lbl_vdev = QLabel(f"V4L2: {self.streamer.vdev} • Audio: {audio_str}")
+                if self.streamer.pw_node:
+                    audio_str = f"PipeWire ({self.streamer.pw_node})"
+                else:
+                    audio_str = f"ALSA ({self.streamer.adev})"
+                lbl_vdev = QLabel(f"V4L2: {self.streamer.vdev} • Audio: {audio_str}")
+                hints_text = "F Fullscreen • Tab Stats • S Streamer • M Mute • H Re-Sync • Esc Exit"
             lbl_vdev.setStyleSheet("color: #64748b; font-size: 11px;")
             b_layout.addWidget(lbl_vdev)
 
             b_layout.addStretch(1)
 
-            lbl_hints = QLabel("F Fullscreen • Tab Stats • S Streamer • M Mute • H Re-Sync • Esc Exit")
+            lbl_hints = QLabel(hints_text)
             lbl_hints.setStyleSheet("color: #64748b; font-size: 11px;")
             b_layout.addWidget(lbl_hints)
 
@@ -1370,18 +1836,77 @@ if HAS_QT:
             # Initial status poll
             self.update_status()
 
+        def _set_launch_running(self, running: bool):
+            self.btn_launch.setText("Stop Gaming Screen" if running else "Start Gaming Screen")
+            self.btn_launch.setObjectName("btnLaunchStop" if running else "btnLaunchStart")
+            self.btn_launch.setStyle(self.btn_launch.style())
+
+        def _restore_led_after_stream(self):
+            """The streamer hands off cyan; restore the hub's saved colour."""
+            if not self.vfio_mode:
+                return
+            mode = load_settings().get("led_mode",
+                                       self.saved_cfg.get("led_mode"))
+            if not isinstance(mode, int) or not 0 <= mode <= 7:
+                mode = 4
+            # If the streamer failed before its handoff there may be no
+            # standby daemon at all; start one even for the cyan default.
+            if _proc_running("everlive_userd") and mode == 4:
+                return
+            set_vfio_led(mode)
+
+        def apply_led(self, mode):
+            if mode is None:
+                return False
+            mode = int(mode)
+            self.saved_cfg["led_mode"] = mode
+            if self.vfio_mode:
+                ok = set_vfio_led(mode)
+                if self.streamer.is_running:
+                    print("[*] LED colour saved; the active userspace stream keeps cyan until it exits.")
+                return ok
+            return write_led_mode(mode)
+
         def toggle_stream(self):
             if self.streamer.is_running:
                 self.streamer.stop()
-                self.btn_launch.setText("Start Gaming Screen")
-                self.btn_launch.setObjectName("btnLaunchStart")
-                self.btn_launch.setStyle(self.btn_launch.style())
+                self._set_launch_running(False)
+                if self.vfio_mode:
+                    QTimer.singleShot(900, self._restore_led_after_stream)
             else:
                 self.start_gaming_screen()
+
+        def _set_vfio_notice(self, title: str, detail: str, seconds: float = 8.0):
+            self.lbl_hero_signal.setText(title)
+            self.lbl_hero_meta.setText(detail)
+            self._vfio_notice_until = time.time() + seconds
 
         def start_gaming_screen(self):
             if self.streamer.is_running:
                 return
+
+            if self.vfio_mode:
+                if not (os.path.isfile(self.streamer.streamer_bin) and
+                        os.access(self.streamer.streamer_bin, os.X_OK)):
+                    self._set_vfio_notice("Userspace Engine Missing",
+                                          "Build it with: make -C tools/opengc573-userd")
+                    return
+                if _vfio_streamer_running():
+                    self._set_vfio_notice(
+                        "Userspace Engine Active",
+                        "An external gc573_user_streamer instance already owns the device")
+                    return
+                success = self.streamer.start()
+                if success:
+                    self._set_launch_running(True)
+                    self._vfio_notice_until = 0.0
+                else:
+                    self._set_vfio_notice(
+                        "Userspace Engine Failed",
+                        "See ~/.config/everlive/streamer.log for the hardware error")
+                    QTimer.singleShot(300, self._restore_led_after_stream)
+                return
+
             preset = self.combo_presets.currentText()
             vol = self.slider_vol.value() / 100.0
             is_fs = self.chk_fullscreen.isChecked()
@@ -1399,13 +1924,13 @@ if HAS_QT:
             })
             success = self.streamer.start(preset_name=preset, fullscreen=is_fs, volume=vol, vsync=is_vsync, streamer_mode=is_streamer)
             if success:
-                self.btn_launch.setText("Stop Gaming Screen")
-                self.btn_launch.setObjectName("btnLaunchStop")
-                self.btn_launch.setStyle(self.btn_launch.style())
+                self._set_launch_running(True)
                 set_audio_volume(self.slider_vol.value())
                 QTimer.singleShot(600, lambda: set_audio_volume(self.slider_vol.value()))
 
         def on_engine_changed(self):
+            if self.vfio_mode:
+                return
             engine = self.combo_engine.currentData()
             self.streamer.force_mpv = (engine == "mpv")
             save_settings({"engine": engine})
@@ -1414,6 +1939,8 @@ if HAS_QT:
                 QTimer.singleShot(150, self.start_gaming_screen)
 
         def on_preset_changed(self):
+            if self.vfio_mode:
+                return
             preset = self.combo_presets.currentText()
             save_settings({"preset": preset})
             if self.streamer.is_running:
@@ -1423,9 +1950,11 @@ if HAS_QT:
         def on_led_changed(self, index: int):
             mode = self.combo_led.currentData()
             if mode is not None:
-                write_led_mode(mode)
+                self.apply_led(mode)
 
         def toggle_mute(self):
+            if self.vfio_mode:
+                return
             self.muted = not self.muted
             if self.muted:
                 self.btn_mute.setText("Unmute")
@@ -1436,13 +1965,24 @@ if HAS_QT:
             set_audio_mute(self.muted)
 
         def on_volume_changed(self, val: int):
+            if self.vfio_mode:
+                return
             self.lbl_vol.setText(f"{val}%")
             save_settings({"volume": val / 100.0})
             if not self.muted:
                 set_audio_volume(val)
 
         def force_resync(self, *args):
-            """Forces HDMI handshake renegotiation and restarts stream if active."""
+            """Kernel: HPD re-sync. VFIO: restart the userspace engine."""
+            if self.vfio_mode:
+                was_running = self.streamer.is_running
+                if was_running:
+                    self.streamer.stop()
+                    self._set_launch_running(False)
+                QTimer.singleShot(500 if was_running else 0, self.start_gaming_screen)
+                QTimer.singleShot(3000, self._restore_led_after_stream)
+                return
+
             if hasattr(self, "_resyncing") and self._resyncing:
                 return
             self._resyncing = True
@@ -1453,9 +1993,7 @@ if HAS_QT:
                 was_running = self.streamer.is_running
                 if was_running:
                     self.streamer.stop()
-                    self.btn_launch.setText("Start Gaming Screen")
-                    self.btn_launch.setObjectName("btnLaunchStart")
-                    self.btn_launch.setStyle(self.btn_launch.style())
+                    self._set_launch_running(False)
                 self.streamer.resync()
                 self.update_status()
                 if was_running:
@@ -1473,31 +2011,95 @@ if HAS_QT:
             if self.streamer.is_running:
                 return
             sig = self.streamer.get_signal_info()
-            if sig.get("active") or attempts <= 1:
+            if sig.get("locked") or sig.get("cached") or attempts <= 1:
                 self.start_gaming_screen()
             else:
                 QTimer.singleShot(250, lambda: self._wait_and_restart_after_resync(attempts - 1))
 
         def _show_live(self, info):
+            res = info.get("resolution", "No Signal")
+            fps = info.get("framerate", "")
+            res_clean = re.sub(r"(\d+)x(\d+)([pi]?)", r"\1 × \2\3", res)
+
+            if self.vfio_mode:
+                self.lbl_pill.setText(ENGINE_VFIO_TEXT)
+                self.lbl_pill.setStyleSheet(
+                    "background-color: #0d2318; color: #34d399; border: 1px solid #164e32;")
+                self.lbl_hero_signal.setText(f"{res_clean} @ {fps}".strip())
+                chroma_val = info.get("chroma") or "YUV 4:2:2"
+                self.lbl_hero_meta.setText(
+                    f"Signal locked • Chroma: {chroma_val} • Color: Pass-through • SDL2 HDMI Audio")
+                return
+
             hdr_str = f" • {info['hdr']}" if info.get("hdr") else ""
             chroma_str = f" • {info['chroma']}" if info.get("chroma") else ""
-            self.lbl_pill.setText(f"● {info['resolution']} @ {info['framerate']}{chroma_str}{hdr_str}")
+            self.lbl_pill.setText(f"● {res} @ {fps}{chroma_str}{hdr_str}")
             self.lbl_pill.setStyleSheet("background-color: #0d2318; color: #34d399; border: 1px solid #164e32;")
-            res_clean = re.sub(r"(\d+)x(\d+)([pi]?)", r"\1 × \2\3", info['resolution'])
-            self.lbl_hero_signal.setText(f"{res_clean} @ {info['framerate']}")
+            self.lbl_hero_signal.setText(f"{res_clean} @ {fps}".strip())
             hdr_val = info.get('hdr', 'SDR')
             chroma_val = info.get('chroma', 'YUV 4:2:2')
             self.lbl_hero_meta.setText(f"Signal locked • Chroma: {chroma_val} • Color: {hdr_val} • Stereo LPCM (PipeWire)")
 
+        def _set_vfio_standby(self, info):
+            self.lbl_pill.setText(ENGINE_VFIO_TEXT)
+            self.lbl_pill.setStyleSheet(
+                "background-color: #0d2318; color: #34d399; border: 1px solid #164e32;")
+            if info.get("cached"):
+                res = info.get("resolution", "No Signal")
+                fps = info.get("framerate", "")
+                res_clean = re.sub(r"(\d+)x(\d+)([pi]?)", r"\1 × \2\3", res)
+                self.lbl_hero_signal.setText(f"Last signal: {res_clean} @ {fps}".strip())
+                self.lbl_hero_meta.setText(
+                    "Userspace VFIO • Blob-Free Ring 3 • Ready for the next session")
+            else:
+                self.lbl_hero_signal.setText("Ready for Gaming")
+                self.lbl_hero_meta.setText(
+                    "Userspace VFIO engine ready • No V4L2/ALSA device required")
+
+        def _update_status_vfio(self):
+            if self.streamer.is_running:
+                if not self.streamer.poll():
+                    self._set_launch_running(False)
+                    QTimer.singleShot(900, self._restore_led_after_stream)
+                    if not self.streamer._vfio_saw_output:
+                        self._set_vfio_notice(
+                            "Userspace Engine Stopped",
+                            "See ~/.config/everlive/streamer.log for the hardware error")
+                    else:
+                        self._set_vfio_standby(self.streamer.get_signal_info())
+                    return
+
+                info = self.streamer.get_signal_info()
+                self._live = info
+                if info.get("locked"):
+                    self._show_live(info)
+                elif info.get("starting"):
+                    self.lbl_hero_signal.setText("Starting Userspace Engine…")
+                    self.lbl_hero_meta.setText(
+                        "VFIO DMA ring initialising • SDL2 video/audio")
+                else:
+                    self.lbl_hero_signal.setText("No HDMI Signal")
+                    self.lbl_hero_meta.setText(
+                        "Userspace engine running • waiting for stable input")
+                return
+
+            info = self.streamer.get_signal_info()
+            self._live = info
+            if time.time() < self._vfio_notice_until:
+                return
+            self._set_vfio_standby(info)
+
         def update_status(self):
+            if self.vfio_mode:
+                self._update_status_vfio()
+                return
+
             # While the gaming screen is open, only read the cached driver format and HDR control.
             # query-dv-timings hits the HDMI receiver and stalls the stream.
             if self.streamer.is_running:
                 if not self.streamer.poll():
                     # Window was closed by user
-                    self.btn_launch.setText("Start Gaming Screen")
-                    self.btn_launch.setObjectName("btnLaunchStart")
-                    self.btn_launch.setStyle(self.btn_launch.style())
+                    self._set_launch_running(False)
                     return
                 live = getattr(self, "_live", None)
                 active_res, active_fps = self.streamer.get_active_format()
@@ -1534,7 +2136,10 @@ if HAS_QT:
                 self.lbl_hero_meta.setText("Waiting for input signal (e.g. power on console or PC)...")
 
         def closeEvent(self, event):
+            was_running = self.streamer.is_running
             self.streamer.stop()
+            if self.vfio_mode and was_running:
+                self._restore_led_after_stream()
             event.accept()
 
 
@@ -1562,10 +2167,20 @@ def main():
             except ValueError:
                 pass
         if val is not None and 0 <= val <= 7:
-            if write_led_mode(val):
-                print(f"[+] GC573 LED lighting set to mode {val}.")
+            hw = detect_gc573_driver()
+            if hw.get("mode") == "vfio":
+                if _vfio_streamer_running():
+                    save_settings({"led_mode": val})
+                    print(f"[*] Userspace streamer is running; LED mode {val} saved for the next session.")
+                elif set_vfio_led(val):
+                    print(f"[+] GC573 LED lighting set to mode {val} via everlive_userd.")
+                else:
+                    print(f"[!] Failed to set GC573 LED to mode {val} via everlive_userd.")
             else:
-                print(f"[!] Failed to set GC573 LED to mode {val}.")
+                if write_led_mode(val):
+                    print(f"[+] GC573 LED lighting set to mode {val}.")
+                else:
+                    print(f"[!] Failed to set GC573 LED to mode {val}.")
         else:
             print(f"[!] Invalid LED mode '{args.led}'. Valid: {list(LED_NAME_MAP.keys())}")
         if not args.cli and not any(arg in sys.argv for arg in ["-f", "--fullscreen", "-p", "--preset"]):
@@ -1575,7 +2190,14 @@ def main():
     if args.fullscreen or args.streamer_mode:
         streamer._cli_autostart = True
 
-    print(f"[*] GC573 Hardware: Video={streamer.vdev}, Audio={streamer.adev}")
+    if streamer.vfio_mode:
+        print(f"[*] GC573: Userspace VFIO engine (PCI {streamer.hw_info.get('pci') or 'auto'}), "
+              "no V4L2/ALSA device required.")
+        if args.device or args.audio or args.mpv:
+            print("[*] Note: --device/--audio/--mpv apply only to the kernel V4L2 path.")
+    else:
+        print(f"[*] GC573 Hardware: Video={streamer.vdev}, Audio={streamer.adev} "
+              f"(driver={streamer.hw_info.get('driver') or 'unknown'})")
 
     # Graceful shutdown on Ctrl+C
     def sig_handler(sig, frame):
@@ -1586,18 +2208,26 @@ def main():
 
     if args.cli or not HAS_QT:
         print("[*] Launching Gaming Screen in low-latency mode...")
-        info = streamer.get_signal_info()
-        chroma_disp = f" [{info['chroma']}]" if info.get('chroma') else ""
-        print(f"[*] Signal: {info['resolution']} {info['framerate']}{chroma_disp}".strip())
-        if not info["locked"]:
-            print("[!] Warning: No active HDMI signal detected on GC573.")
-            print("    Please check if the video source is powered on and sending video.")
+        if streamer.vfio_mode:
+            print("[*] Userspace VFIO engine: video and HDMI audio run inside gc573_user_streamer.")
+        else:
+            info = streamer.get_signal_info()
+            chroma_disp = f" [{info['chroma']}]" if info.get('chroma') else ""
+            print(f"[*] Signal: {info['resolution']} {info['framerate']}{chroma_disp}".strip())
+            if not info["locked"]:
+                print("[!] Warning: No active HDMI signal detected on GC573.")
+                print("    Please check if the video source is powered on and sending video.")
         if not streamer.start(preset_name=args.preset, fullscreen=args.fullscreen, volume=args.volume, vsync=args.vsync, streamer_mode=args.streamer_mode):
             sys.exit(1)
         print("[+] Window opened. Press 'q' in window or Ctrl+C to exit.")
         while streamer.poll():
             time.sleep(0.5)
         streamer.stop()
+        if streamer.vfio_mode:
+            saved_led = load_settings().get("led_mode")
+            mode = saved_led if isinstance(saved_led, int) and 0 <= saved_led <= 7 else 4
+            if not (_proc_running("everlive_userd") and mode == 4):
+                set_vfio_led(mode)
     else:
         QGuiApplication.setDesktopFileName("everlive")
         app = QApplication(sys.argv)
