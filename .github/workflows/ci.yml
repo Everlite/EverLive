@@ -14,48 +14,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install userspace dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
             clang \
-            llvm \
-            linux-headers-generic \
             libsdl2-dev \
             libx11-dev \
             libgl-dev \
             python3
 
-      - name: Compile EverLive Userspace VFIO Engine (gc573_user_streamer & everlive_userd)
+      - name: Compile EverLive Userspace Engine (GCC)
         run: |
-          make -C tools/opengc573-userd
-          make -C tools/opengc573-userd clean
           make -C tools/opengc573-userd -j"$(nproc)"
+          make -C tools/opengc573-userd clean
 
-      - name: Locate Generic Kernel Headers for Legacy Driver
-        id: kdir
+      - name: Compile EverLive Userspace Engine (Clang)
         run: |
-          GENERIC_KDIR=$(find /usr/src -maxdepth 1 -name "linux-headers-*-generic" | sort -V | tail -n 1)
-          if [ -n "$GENERIC_KDIR" ] && [ -d "$GENERIC_KDIR" ]; then
-            echo "kdir=$GENERIC_KDIR" >> "$GITHUB_OUTPUT"
-            echo "Found generic kernel headers: $GENERIC_KDIR"
-          else
-            echo "kdir=/lib/modules/$(uname -r)/build" >> "$GITHUB_OUTPUT"
-            echo "Fallback to default build directory: /lib/modules/$(uname -r)/build"
-          fi
-
-      - name: Compile legacy open_gc573 kernel driver (GCC)
-        run: |
-          make -C legacy/open_gc573-kernel KDIR="${{ steps.kdir.outputs.kdir }}"
-          make -C legacy/open_gc573-kernel KDIR="${{ steps.kdir.outputs.kdir }}" clean
-
-      - name: Compile EverLive legacy direct display renderer (GCC & Clang)
-        run: |
-          gcc -O3 -Wall -Wextra tools/everlive/everlive_display.c -o tools/everlive/everlive_display $(sdl2-config --cflags --libs) -lGL -lX11 -lpthread -lm
-          rm tools/everlive/everlive_display
-          clang -O3 -Wall -Wextra tools/everlive/everlive_display.c -o tools/everlive/everlive_display $(sdl2-config --cflags --libs) -lGL -lX11 -lpthread -lm
-          rm tools/everlive/everlive_display
+          make -C tools/opengc573-userd CC=clang -j"$(nproc)"
 
       - name: Verify Python syntax
         run: |
@@ -68,5 +45,3 @@ jobs:
           bash -n play.sh
           bash -n build.sh
           bash -n tools/opengc573-userd/vfio_pci_bind.sh
-          bash -n legacy/open_gc573-kernel/load.sh
-          bash -n legacy/open_gc573-kernel/unload.sh
