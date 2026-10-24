@@ -173,7 +173,7 @@ try:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QGridLayout, QLabel, QPushButton, QComboBox, QCheckBox, QSlider, QFrame,
-        QGroupBox, QMessageBox, QStackedLayout, QSizePolicy
+        QGroupBox, QMessageBox, QStackedLayout, QSizePolicy, QFileDialog
     )
     from PySide6.QtCore import Qt, QTimer, QThread, Signal, QEvent, QUrl, QSize
     from PySide6.QtGui import QGuiApplication, QFont, QIcon, QColor, QPalette, QKeySequence, QShortcut, QDesktopServices, QPixmap, QPainter
@@ -352,6 +352,16 @@ LED_NAME_MAP = {
     "7": 7, "white": 7, "weiss": 7, "weiß": 7,
 }
 
+# Hardware EDID profiles understood by gc573_user_streamer --edid.
+# The display text is what the user sees; the key is the CLI value.
+EDID_PROFILES = [
+    ("Default (4K60 / 1440p120 HDR)", "default"),
+    ("Force 1440p @ 120 Hz", "1440p120"),
+    ("Force 1080p @ 240 Hz", "1080p240"),
+    ("Load Custom EDID (.bin)...", "custom"),
+]
+EDID_PROFILE_KEYS = {key for _, key in EDID_PROFILES if key != "custom"}
+
 LED_COLORS = {
     0: "#334155",  # Aus (Dunkel)
     1: "#3b82f6",  # Blau (Standard)
@@ -377,13 +387,19 @@ LED_RGB_VALUES = {
 }
 
 
+def led_hex_for_mode(mode: int) -> str:
+    """LED mode index -> "#rrggbb" understood by gc573_user_streamer."""
+    red, green, blue = LED_RGB_VALUES.get(int(mode), (0, 204, 255))
+    return f"#{red:02x}{green:02x}{blue:02x}"
+
+
 def set_vfio_led(mode: int) -> bool:
     """Apply an LED colour through everlive_userd (VFIO mode).
 
     everlive_userd owns BAR0 in standby.  A colour change therefore restarts
     the daemon with --color.  While the userspace streamer is running it owns
-    BAR0 and drives the verified cyan profile; in that case the choice is only
-    persisted and restored after the streamer exits.
+    BAR0 and drives the LED itself; in that case the choice is only persisted
+    and restored after the streamer exits.
     """
     mode = int(mode)
     resolved = userd_bin("everlive_userd")
@@ -543,87 +559,146 @@ def trigger_hpd_pulse() -> bool:
         return False
 
 
-def set_audio_volume(vol_pct: int):
-    """Sets stream volume for EverLive via wpctl / pactl (0-150%)."""
-    vol_float = vol_pct / 100.0
-    targets = set()
+def _is_everlive_audio_line(line: str) -> bool:
+    """Match EverLive audio streams in wpctl/pactl output.
+
+    The kernel path names its nodes after the capture source; the userspace
+    VFIO engine plays through SDL2, so its sink-input is identified by the
+    process binary instead.
+    """
+    low = line.lower()
+    if "gc573_user_streamer" in low or "sdl application" in low:
+        return True
+    if "avermedia live gamer 4k pro" in low and "pro 1" not in low:
+        return True
+    return (any(s in low for s in ("everlive", "everlive-audio", "gc573-audio"))
+            and "input." not in low)
+
+
+def _wpctl_everlive_stream_ids() -> list:
+    """PipeWire stream ids for EverLive playback, via wpctl."""
+    ids = []
     try:
-        out = subprocess.check_output(["wpctl", "status"], text=True, stderr=subprocess.DEVNULL)
-        in_audio = False
-        for line in out.splitlines():
-            line_s = line.strip()
-            if line_s.startswith("Audio"):
-                in_audio = True
-            elif in_audio and (line_s.startswith("Video") or line_s.startswith("Settings")):
-                in_audio = False
-            if in_audio:
-                # Target both the AVerMedia hardware capture source and active EverLive playback stream
-                if (("AVerMedia Live Gamer 4K Pro" in line and "Pro 1" not in line) or
-                    (any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]) and "input." not in line)):
-                    for part in line_s.split():
-                        clean = part.strip(".│*")
-                        if clean.isdigit():
-                            targets.add(clean)
-                            break
-        for target in targets:
+        out = subprocess.check_output(["wpctl", "status"], text=True,
+                                      stderr=subprocess.DEVNULL)
+    except Exception:
+        return ids
+
+    in_audio = False
+    for line in out.splitlines():
+        line_s = line.strip()
+        if line_s.startswith("Audio"):
+            in_audio = True
+        elif in_audio and (line_s.startswith("Video") or line_s.startswith("Settings")):
+            in_audio = False
+        if in_audio and _is_everlive_audio_line(line_s):
+            for part in line_s.split():
+                clean = part.strip(".│*")
+                if clean.isdigit():
+                    ids.append(clean)
+                    break
+    return ids
+
+
+def _pactl_everlive_sink_ids() -> list:
+    """PulseAudio/PipeWire-pulse sink-input ids for EverLive playback."""
+    ids = []
+    try:
+        out = subprocess.check_output(["pactl", "list", "sink-inputs"],
+                                      text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return ids
+
+    current = None
+    matches = False
+
+    def flush():
+        if current is not None and matches:
+            ids.append(current)
+
+    for line in out.splitlines():
+        line_s = line.strip()
+        if line_s.startswith("Sink-Eingabe #") or line_s.startswith("Sink Input #"):
+            flush()
+            current = line_s.split("#")[-1].strip()
+            matches = False
+        elif current is not None and _is_everlive_audio_line(line_s):
+            matches = True
+    flush()
+    return ids
+
+
+def set_audio_volume(vol_pct: int):
+    """Sets EverLive stream volume via wpctl / pactl (0-150%).
+
+    Covers both the kernel PipeWire stream and the SDL2 sink-input created by
+    gc573_user_streamer in VFIO mode.
+    """
+    vol_float = vol_pct / 100.0
+    try:
+        for target in _wpctl_everlive_stream_ids():
             subprocess.run(["wpctl", "set-volume", target, f"{vol_float:.2f}"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
     try:
-        out = subprocess.check_output(["pactl", "list", "sink-inputs"], text=True, stderr=subprocess.DEVNULL)
-        curr_id = None
-        for line in out.splitlines():
-            line = line.strip()
-            if line.startswith("Sink-Eingabe #") or line.startswith("Sink Input #"):
-                curr_id = line.split("#")[-1].strip()
-            elif any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]) and curr_id:
-                subprocess.run(["pactl", "set-sink-input-volume", curr_id, f"{vol_pct}%"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for target in _pactl_everlive_sink_ids():
+            subprocess.run(["pactl", "set-sink-input-volume", target, f"{vol_pct}%"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
 
 def set_audio_mute(mute: bool):
-    """Mutes or unmutes stream for EverLive via wpctl / pactl."""
+    """Mutes or unmutes EverLive playback via wpctl / pactl."""
     mute_arg = "1" if mute else "0"
-    targets = set()
     try:
-        out = subprocess.check_output(["wpctl", "status"], text=True, stderr=subprocess.DEVNULL)
-        in_audio = False
-        for line in out.splitlines():
-            line_s = line.strip()
-            if line_s.startswith("Audio"):
-                in_audio = True
-            elif in_audio and (line_s.startswith("Video") or line_s.startswith("Settings")):
-                in_audio = False
-            if in_audio:
-                if (("AVerMedia Live Gamer 4K Pro" in line and "Pro 1" not in line) or
-                    (any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]) and "input." not in line)):
-                    for part in line_s.split():
-                        clean = part.strip(".│*")
-                        if clean.isdigit():
-                            targets.add(clean)
-                            break
-        for target in targets:
+        for target in _wpctl_everlive_stream_ids():
             subprocess.run(["wpctl", "set-mute", target, mute_arg],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
     try:
-        out = subprocess.check_output(["pactl", "list", "sink-inputs"], text=True, stderr=subprocess.DEVNULL)
-        curr_id = None
-        for line in out.splitlines():
-            line = line.strip()
-            if line.startswith("Sink-Eingabe #") or line.startswith("Sink Input #"):
-                curr_id = line.split("#")[-1].strip()
-            elif any(s in line for s in ["EverLive", "everlive-audio", "gc573-audio"]) and curr_id:
-                subprocess.run(["pactl", "set-sink-input-mute", curr_id, mute_arg],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for target in _pactl_everlive_sink_ids():
+            subprocess.run(["pactl", "set-sink-input-mute", target, mute_arg],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+
+
+def default_sink_issue():
+    """Return a hint when the default output is muted or at 0%, else None."""
+    try:
+        out = subprocess.check_output(
+            ["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"],
+            text=True, stderr=subprocess.DEVNULL).strip()
+        vol_m = re.search(r"Volume:\s*([0-9.]+)", out)
+        if vol_m:
+            if "MUTED" in out.upper():
+                return "default audio sink is muted"
+            if float(vol_m.group(1)) <= 0.0:
+                return "default audio sink is at 0%"
+            return None
+    except Exception:
+        pass
+
+    try:
+        mute = subprocess.check_output(
+            ["pactl", "get-sink-mute", "@DEFAULT_SINK@"],
+            text=True, stderr=subprocess.DEVNULL)
+        if "yes" in mute.lower():
+            return "default audio sink is muted"
+        vol = subprocess.check_output(
+            ["pactl", "get-sink-volume", "@DEFAULT_SINK@"],
+            text=True, stderr=subprocess.DEVNULL)
+        vol_m = re.search(r"(\d+)%", vol)
+        if vol_m and int(vol_m.group(1)) == 0:
+            return "default audio sink is at 0%"
+    except Exception:
+        pass
+    return None
 
 
 class GameStreamer:
@@ -663,6 +738,8 @@ class GameStreamer:
         self._vfio_log_pos = 0
         self._vfio_live = False
         self._vfio_saw_output = False
+        # Last audio state parsed from the streamer log; shown in the capsule.
+        self._vfio_audio = {"state": "unknown", "detail": ""}
         saved_signal = load_settings().get("last_signal")
         self._vfio_signal = saved_signal if isinstance(saved_signal, dict) else None
 
@@ -731,6 +808,30 @@ class GameStreamer:
                 int(m.group(4)), int(m.group(5)))
             return
 
+        # Audio diagnostics; keep the last state for the status capsule.
+        m = re.search(r"SDL audio: playing (\d+) Hz, 2 ch, (\d+)-bit via (\S+)", line)
+        if m:
+            self._vfio_audio = {"state": "on",
+                                "detail": f"{m.group(3)} {m.group(1)} Hz"}
+            return
+        m = re.search(r"\[AUDIO\] (\d+) Hz (\d+) ch (\d+)-bit", line)
+        if m:
+            self._vfio_audio = {"state": "on",
+                                "detail": f"{m.group(1)} Hz {m.group(2)} ch"}
+            return
+        if "SDL audio unavailable" in line or "dummy driver" in line:
+            self._vfio_audio = {"state": "unavailable", "detail": ""}
+            return
+        if "receiver reports no playable stream" in line:
+            self._vfio_audio = {"state": "absent", "detail": ""}
+            return
+        if "format not playable" in line:
+            self._vfio_audio = {"state": "unsupported", "detail": ""}
+            return
+        if "HDMI audio DMA start failed" in line:
+            self._vfio_audio = {"state": "error", "detail": ""}
+            return
+
         if ("HDMI signal lost" in line or
                 "Signal vanished" in line or
                 "Waiting for HDMI signal" in line):
@@ -771,6 +872,10 @@ class GameStreamer:
                              not self._vfio_saw_output),
             "engine": "vfio",
         }
+
+    def audio_state(self) -> Dict[str, str]:
+        """Audio state parsed from the userspace streamer log."""
+        return dict(self._vfio_audio)
 
     def get_signal_info(self) -> Dict[str, object]:
         """Queries current signal status via v4l2-ctl (kernel mode) or cache."""
@@ -985,6 +1090,27 @@ class GameStreamer:
         if self.hw_info.get("pci"):
             cmd.append(self.hw_info["pci"])
 
+        # Keep the colour selected in the GUI while gaming instead of the
+        # streamer's built-in cyan default.
+        led_mode = load_settings().get("led_mode", 4)
+        if not isinstance(led_mode, int) or not 0 <= led_mode <= 7:
+            led_mode = 4
+        cmd.extend(["--led", led_hex_for_mode(led_mode)])
+
+        # Hardware EDID profile advertised to the console.
+        edid_profile = load_settings().get("edid_profile", "default")
+        edid_custom = load_settings().get("edid_custom_path", "")
+        if edid_profile == "custom":
+            if edid_custom and os.path.isfile(edid_custom):
+                cmd.extend(["--edid", edid_custom])
+            else:
+                print("[!] Custom EDID file is missing; using the default profile.")
+                cmd.extend(["--edid", "default"])
+        elif edid_profile in EDID_PROFILE_KEYS:
+            cmd.extend(["--edid", edid_profile])
+        else:
+            cmd.extend(["--edid", "default"])
+
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
             log = open(self._vfio_log_path, "wb")
@@ -1013,6 +1139,7 @@ class GameStreamer:
         self._vfio_log_pos = 0
         self._vfio_live = False
         self._vfio_saw_output = False
+        self._vfio_audio = {"state": "unknown", "detail": ""}
         self.is_running = True
         print(f"[*] Starting Userspace VFIO engine: {' '.join(cmd)}")
 
@@ -1032,8 +1159,8 @@ class GameStreamer:
 
         if self.vfio_mode:
             if (preset_name != "Auto (HDMI Signal)" or fullscreen or
-                    vsync or streamer_mode or volume != 1.0):
-                print("[*] VFIO mode: signal, fullscreen, volume and streamer options "
+                    vsync or streamer_mode):
+                print("[*] VFIO mode: signal, fullscreen and streamer options "
                       "are handled inside the userspace engine.")
             return self._start_vfio()
 
@@ -1287,6 +1414,7 @@ if HAS_QT:
             self.muted = False
             self.saved_cfg = load_settings()
             self._vfio_notice_until = 0.0
+            self._vfio_volume_applies = 0
             if streamer_mode:
                 self.saved_cfg["streamer_mode"] = True
             if not self.vfio_mode and self.saved_cfg.get("engine", "native") == "mpv":
@@ -1658,20 +1786,40 @@ if HAS_QT:
             grid.setHorizontalSpacing(14)
             grid.setVerticalSpacing(10)
 
-            # Row 0: Preset & LED
-            lbl_preset = QLabel("Format / Preset:")
+            # Row 0: Preset (kernel) / Hardware EDID profile (VFIO) & LED
+            lbl_preset = QLabel("Hardware EDID Profile:" if self.vfio_mode
+                                else "Format / Preset:")
             lbl_preset.setStyleSheet("font-weight: 500; color: #94a3b8;")
             grid.addWidget(lbl_preset, 0, 0)
 
             self.combo_presets = QComboBox()
-            self.combo_presets.addItems(list(PRESETS.keys()))
-            if "preset" in self.saved_cfg and self.saved_cfg["preset"] in PRESETS:
-                self.combo_presets.setCurrentText(self.saved_cfg["preset"])
-            self.combo_presets.currentIndexChanged.connect(self.on_preset_changed)
             if self.vfio_mode:
-                self.combo_presets.setCurrentText("Auto (HDMI Signal)")
-                self.combo_presets.setEnabled(False)
-                self.combo_presets.setToolTip("The userspace VFIO engine detects the HDMI mode and hot-switches automatically.")
+                for text, key in EDID_PROFILES:
+                    self.combo_presets.addItem(text, key)
+
+                saved_profile = self.saved_cfg.get("edid_profile", "default")
+                custom_path = self.saved_cfg.get("edid_custom_path", "")
+                if saved_profile == "custom":
+                    if custom_path and os.path.isfile(custom_path):
+                        idx = self.combo_presets.findData("custom")
+                        if idx >= 0:
+                            self.combo_presets.setItemText(
+                                idx, f"Custom: {os.path.basename(custom_path)}")
+                    else:
+                        saved_profile = "default"
+                idx = self.combo_presets.findData(saved_profile)
+                if idx >= 0:
+                    self.combo_presets.setCurrentIndex(idx)
+                self.combo_presets.setToolTip(
+                    "256-byte EDID advertised to the console. "
+                    "Applies on the next Start Gaming Screen.")
+            else:
+                self.combo_presets.addItems(list(PRESETS.keys()))
+                if "preset" in self.saved_cfg and self.saved_cfg["preset"] in PRESETS:
+                    self.combo_presets.setCurrentText(self.saved_cfg["preset"])
+            # activated (not currentIndexChanged) so re-picking the custom
+            # entry opens the file dialog again.
+            self.combo_presets.activated.connect(self.on_preset_changed)
             grid.addWidget(self.combo_presets, 0, 1)
 
             lbl_led = QLabel("Card LED:")
@@ -1743,11 +1891,8 @@ if HAS_QT:
             h_vol.addWidget(self.lbl_vol)
 
             if self.vfio_mode:
-                self.btn_mute.setEnabled(False)
-                self.btn_mute.setToolTip("HDMI audio is played directly by the userspace SDL2 engine.")
-                self.slider_vol.setEnabled(False)
-                self.slider_vol.setToolTip("Userspace audio does not expose a separate mixer; use the console/system volume.")
-                self.lbl_vol.setText("SDL2")
+                self.btn_mute.setToolTip("Mutes the SDL2 HDMI audio stream via PipeWire/PulseAudio.")
+                self.slider_vol.setToolTip("Sets the PipeWire volume of the userspace SDL2 HDMI audio stream.")
             grid.addLayout(h_vol, 1, 1)
 
             lbl_sync = QLabel("HDMI Sync:")
@@ -1812,18 +1957,19 @@ if HAS_QT:
 
             if self.vfio_mode:
                 pci = self.streamer.hw_info.get("pci") or "auto"
-                lbl_vdev = QLabel(
-                    f"VFIO: {pci} • gc573_user_streamer • Audio: SDL2 (Userspace)")
+                self.lbl_vdev = QLabel(
+                    f"VFIO: {pci} • EDID: {self._edid_profile_label()} • "
+                    "Audio: SDL2 (Userspace)")
                 hints_text = "Userspace Ring 3 • Automatic hot-switch • Esc Exit"
             else:
                 if self.streamer.pw_node:
                     audio_str = f"PipeWire ({self.streamer.pw_node})"
                 else:
                     audio_str = f"ALSA ({self.streamer.adev})"
-                lbl_vdev = QLabel(f"V4L2: {self.streamer.vdev} • Audio: {audio_str}")
+                self.lbl_vdev = QLabel(f"V4L2: {self.streamer.vdev} • Audio: {audio_str}")
                 hints_text = "F Fullscreen • Tab Stats • S Streamer • M Mute • H Re-Sync • Esc Exit"
-            lbl_vdev.setStyleSheet("color: #64748b; font-size: 11px;")
-            b_layout.addWidget(lbl_vdev)
+            self.lbl_vdev.setStyleSheet("color: #64748b; font-size: 11px;")
+            b_layout.addWidget(self.lbl_vdev)
 
             b_layout.addStretch(1)
 
@@ -1900,6 +2046,20 @@ if HAS_QT:
                 if success:
                     self._set_launch_running(True)
                     self._vfio_notice_until = 0.0
+                    self._vfio_volume_applies = 0
+                    # SDL creates its sink-input only once the first HDMI
+                    # audio format arrives, so apply volume/mute twice.
+                    for delay in (1200, 3000):
+                        QTimer.singleShot(
+                            delay, lambda: set_audio_volume(self.slider_vol.value()))
+                        QTimer.singleShot(delay, lambda: set_audio_mute(self.muted))
+                    hint = default_sink_issue()
+                    if hint:
+                        print(f"[!] Audio: {hint}; the SDL2 stream will be silent.")
+                        self._set_vfio_notice(
+                            "Audio Muted",
+                            hint.capitalize() + " — unmute the system output",
+                            seconds=4.0)
                 else:
                     self._set_vfio_notice(
                         "Userspace Engine Failed",
@@ -1938,8 +2098,9 @@ if HAS_QT:
                 self.streamer.stop()
                 QTimer.singleShot(150, self.start_gaming_screen)
 
-        def on_preset_changed(self):
+        def on_preset_changed(self, *_):
             if self.vfio_mode:
+                self._on_edid_profile_changed()
                 return
             preset = self.combo_presets.currentText()
             save_settings({"preset": preset})
@@ -1947,14 +2108,84 @@ if HAS_QT:
                 self.streamer.stop()
                 QTimer.singleShot(150, self.start_gaming_screen)
 
+        def _edid_profile_label(self) -> str:
+            profile = self.saved_cfg.get("edid_profile", "default")
+            if profile == "custom":
+                path = self.saved_cfg.get("edid_custom_path", "")
+                return os.path.basename(path) if path else "default"
+            return profile
+
+        def _update_vdev_label(self):
+            if not self.vfio_mode or not hasattr(self, "lbl_vdev"):
+                return
+            pci = self.streamer.hw_info.get("pci") or "auto"
+            self.lbl_vdev.setText(
+                f"VFIO: {pci} • EDID: {self._edid_profile_label()} • "
+                "Audio: SDL2 (Userspace)")
+
+        def _restore_edid_selection(self):
+            idx = self.combo_presets.findData(
+                self.saved_cfg.get("edid_profile", "default"))
+            if idx < 0:
+                idx = self.combo_presets.findData("default")
+            if idx >= 0:
+                self.combo_presets.blockSignals(True)
+                self.combo_presets.setCurrentIndex(idx)
+                self.combo_presets.blockSignals(False)
+
+        def _commit_edid_selection(self, profile: str, custom_path: str = ""):
+            self.saved_cfg["edid_profile"] = profile
+            settings = {"edid_profile": profile}
+            if custom_path:
+                self.saved_cfg["edid_custom_path"] = custom_path
+                settings["edid_custom_path"] = custom_path
+            save_settings(settings)
+
+            if profile == "custom":
+                idx = self.combo_presets.findData("custom")
+                if idx >= 0 and custom_path:
+                    self.combo_presets.blockSignals(True)
+                    self.combo_presets.setItemText(
+                        idx, f"Custom: {os.path.basename(custom_path)}")
+                    self.combo_presets.setCurrentIndex(idx)
+                    self.combo_presets.blockSignals(False)
+
+            self._update_vdev_label()
+            if self.streamer.is_running:
+                print("[*] EDID profile saved; restart the Gaming Screen to apply it.")
+
+        def _on_edid_profile_changed(self):
+            key = self.combo_presets.currentData()
+            if key != "custom":
+                self._commit_edid_selection(key or "default")
+                return
+
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Load custom EDID",
+                self.saved_cfg.get("edid_custom_path", ""),
+                "EDID files (*.bin *.edid);;All files (*)")
+            if not path:
+                self._restore_edid_selection()
+                return
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = 0
+            if size < 256:
+                QMessageBox.warning(
+                    self, "Invalid EDID",
+                    "The selected file must contain at least 256 bytes "
+                    "(one base block plus one CEA-861 extension block).")
+                self._restore_edid_selection()
+                return
+            self._commit_edid_selection("custom", path)
+
         def on_led_changed(self, index: int):
             mode = self.combo_led.currentData()
             if mode is not None:
                 self.apply_led(mode)
 
         def toggle_mute(self):
-            if self.vfio_mode:
-                return
             self.muted = not self.muted
             if self.muted:
                 self.btn_mute.setText("Unmute")
@@ -1963,14 +2194,17 @@ if HAS_QT:
                 self.btn_mute.setText("Mute")
                 self.btn_mute.setStyleSheet("")
             set_audio_mute(self.muted)
+            if self.vfio_mode:
+                # Re-arm the retry window if the sink-input is not there yet.
+                self._vfio_volume_applies = 0
 
         def on_volume_changed(self, val: int):
-            if self.vfio_mode:
-                return
             self.lbl_vol.setText(f"{val}%")
             save_settings({"volume": val / 100.0})
             if not self.muted:
                 set_audio_volume(val)
+                if self.vfio_mode:
+                    self._vfio_volume_applies = 0
 
         def force_resync(self, *args):
             """Kernel: HPD re-sync. VFIO: restart the userspace engine."""
@@ -2027,8 +2261,16 @@ if HAS_QT:
                     "background-color: #0d2318; color: #34d399; border: 1px solid #164e32;")
                 self.lbl_hero_signal.setText(f"{res_clean} @ {fps}".strip())
                 chroma_val = info.get("chroma") or "YUV 4:2:2"
+                audio = self.streamer.audio_state()
+                if audio.get("state") == "on":
+                    audio_str = f"SDL2 HDMI Audio ({audio.get('detail')})"
+                elif audio.get("state") in ("absent", "unavailable",
+                                            "unsupported", "error"):
+                    audio_str = "No HDMI audio"
+                else:
+                    audio_str = "SDL2 HDMI Audio"
                 self.lbl_hero_meta.setText(
-                    f"Signal locked • Chroma: {chroma_val} • Color: Pass-through • SDL2 HDMI Audio")
+                    f"Signal locked • Chroma: {chroma_val} • Color: Pass-through • {audio_str}")
                 return
 
             hdr_str = f" • {info['hdr']}" if info.get("hdr") else ""
@@ -2072,6 +2314,12 @@ if HAS_QT:
                 info = self.streamer.get_signal_info()
                 self._live = info
                 if info.get("locked"):
+                    # Re-apply a few times: the SDL sink-input appears only after
+                    # the first audio period, and the status poll is cheap.
+                    if self._vfio_volume_applies < 4:
+                        set_audio_volume(self.slider_vol.value())
+                        set_audio_mute(self.muted)
+                        self._vfio_volume_applies += 1
                     self._show_live(info)
                 elif info.get("starting"):
                     self.lbl_hero_signal.setText("Starting Userspace Engine…")
@@ -2219,6 +2467,10 @@ def main():
                 print("    Please check if the video source is powered on and sending video.")
         if not streamer.start(preset_name=args.preset, fullscreen=args.fullscreen, volume=args.volume, vsync=args.vsync, streamer_mode=args.streamer_mode):
             sys.exit(1)
+        if streamer.vfio_mode and args.volume != 1.0:
+            # The SDL2 sink-input only exists once audio starts flowing.
+            time.sleep(1.5)
+            set_audio_volume(int(args.volume * 100))
         print("[+] Window opened. Press 'q' in window or Ctrl+C to exit.")
         while streamer.poll():
             time.sleep(0.5)

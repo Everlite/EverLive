@@ -24,12 +24,14 @@
 #include "gc573_user_video.h"
 #include "gc573_user_audio.h"
 #include <SDL2/SDL.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
@@ -59,6 +61,7 @@
 #define AUDIO_DMA_POLL_MS	5U
 #define AUDIO_QUEUE_LIMIT_MS	80U
 #define AUDIO_LOST_STOP_MS	1000U
+#define AUDIO_FORMAT_WAIT_MS	3000U
 #define AUDIO_RETRY_MS		2000U
 #define AUDIO_SCRATCH_BYTES	16384U
 
@@ -66,10 +69,81 @@ static volatile sig_atomic_t g_running = 1;
 static bool g_trace_mode;
 static bool g_trace_requested;
 
+/*
+ * LED colour used while streaming.  Cyan is the verified default; it can be
+ * overridden with --led or EVERLIVE_LED so the GUI's dropdown colour is kept.
+ */
+static uint8_t g_led_r = 0x00;
+static uint8_t g_led_g = 0xcc;
+static uint8_t g_led_b = 0xff;
+
 static void sig_handler(int sig)
 {
 	(void)sig;
 	g_running = 0;
+}
+
+static bool parse_led_color(const char *spec, uint8_t *r, uint8_t *g, uint8_t *b)
+{
+	static const struct {
+		const char *name;
+		uint8_t r, g, b;
+	} names[] = {
+		{ "off",     0x00, 0x00, 0x00 },
+		{ "blue",    0x00, 0x00, 0xff },
+		{ "green",   0x00, 0xff, 0x00 },
+		{ "red",     0xff, 0x00, 0x00 },
+		{ "cyan",    0x00, 0xcc, 0xff },
+		{ "magenta", 0xff, 0x00, 0xff },
+		{ "yellow",  0xff, 0xff, 0x00 },
+		{ "white",   0xff, 0xff, 0xff },
+	};
+	const char *hex;
+	unsigned long value;
+	char *end;
+
+	if (!spec || !*spec)
+		return false;
+
+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		if (strcasecmp(spec, names[i].name) == 0) {
+			*r = names[i].r;
+			*g = names[i].g;
+			*b = names[i].b;
+			return true;
+		}
+	}
+
+	if (spec[0] == '#') {
+		hex = spec + 1;
+	} else if (spec[0] == '0' && (spec[1] == 'x' || spec[1] == 'X')) {
+		hex = spec + 2;
+	} else if (strlen(spec) == 6) {
+		hex = spec;   /* bare RRGGBB is accepted too */
+	} else {
+		return false;
+	}
+
+	if (strlen(hex) != 6 || !isxdigit((unsigned char)hex[0]))
+		return false;
+	value = strtoul(hex, &end, 16);
+	if (*end != '\0')
+		return false;
+
+	*r = (uint8_t)((value >> 16) & 0xff);
+	*g = (uint8_t)((value >> 8) & 0xff);
+	*b = (uint8_t)(value & 0xff);
+	return true;
+}
+
+static void print_usage(const char *prog)
+{
+	printf("Usage: %s [PCI_ADDRESS] [--led COLOR] [--edid PROFILE|FILE]\n", prog);
+	printf("  --led COLOR   off|blue|green|red|cyan|magenta|yellow|white|#RRGGBB\n");
+	printf("                LED colour while streaming (default: cyan #00ccff).\n");
+	printf("  --edid VALUE  default|1440p120|1080p240|/path/to/custom.edid\n");
+	printf("                EDID advertised to the source (default: default).\n");
+	printf("  EVERLIVE_LED  fallback used when --led is not given.\n");
 }
 
 static void stop_led_daemon(void)
@@ -114,6 +188,7 @@ static bool start_led_daemon(struct gc573_vfio_ctx *ctx, bool handoff)
 	char exe[PATH_MAX];
 	char container_fd[16], group_fd[16], device_fd[16];
 	char bar_offset[32], bar_size[32];
+	char led_r[4], led_g[4], led_b[4];
 	ssize_t len;
 	char *slash;
 	pid_t pid;
@@ -148,6 +223,9 @@ static bool start_led_daemon(struct gc573_vfio_ctx *ctx, bool handoff)
 	snprintf(bar_offset, sizeof(bar_offset), "%llu",
 		 (unsigned long long)ctx->bar0_offset);
 	snprintf(bar_size, sizeof(bar_size), "%zu", ctx->bar0_size);
+	snprintf(led_r, sizeof(led_r), "%u", g_led_r);
+	snprintf(led_g, sizeof(led_g), "%u", g_led_g);
+	snprintf(led_b, sizeof(led_b), "%u", g_led_b);
 
 	pid = fork();
 	if (pid < 0)
@@ -158,7 +236,8 @@ static bool start_led_daemon(struct gc573_vfio_ctx *ctx, bool handoff)
 					     ctx->device_fd);
 		execl(exe, "everlive_userd", "--inherit",
 		      container_fd, group_fd, device_fd,
-		      bar_offset, bar_size, (char *)NULL);
+		      bar_offset, bar_size, "--color",
+		      led_r, led_g, led_b, (char *)NULL);
 		_exit(127);
 	}
 
@@ -547,10 +626,10 @@ static int configure_and_start(struct gc573_vfio_ctx *ctx,
 
 	/*
 	 * The DMA reset can return the LED block to the bitstream default.
-	 * Re-arm the same verified cyan profile; profile, divider and opcode
-	 * sequence are unchanged.
+	 * Re-arm the selected colour; profile, divider and opcode sequence are
+	 * unchanged.
 	 */
-	gc573_user_led_refresh(ctx->bar0, 0x00, 0xcc, 0xff);
+	gc573_user_led_refresh(ctx->bar0, g_led_r, g_led_g, g_led_b);
 
 	if (!gc573_user_fpga_mode_known(sig->width, sig->height,
 					sig->frame_rate_hz,
@@ -778,6 +857,8 @@ struct audio_stream {
 	unsigned int format_channels;
 	unsigned int format_bits;
 	uint64_t format_lost_since;
+	uint64_t format_wait_since;
+	bool format_wait_reported;
 	uint64_t last_it6805_poll;
 	uint64_t last_dma_poll;
 	uint64_t retry_after;
@@ -847,8 +928,13 @@ static int audio_open_device(struct audio_playback *playback,
 	playback->bits = (int)sample_bits;
 	playback->bytes_per_frame = (sample_bits / 8U) * 2U;
 	SDL_PauseAudioDevice(playback->dev, 0);
-	pr_info("SDL audio: playing %u Hz, 2 ch, %u-bit",
-		rate_hz, sample_bits);
+	pr_info("SDL audio: playing %u Hz, 2 ch, %u-bit via %s",
+		rate_hz, sample_bits,
+		SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "unknown");
+	if (SDL_GetCurrentAudioDriver() &&
+	    strcmp(SDL_GetCurrentAudioDriver(), "dummy") == 0)
+		pr_warn("SDL audio: dummy driver selected; playback is silent "
+			"(fix the audio backend or set SDL_AUDIODRIVER)");
 	return 0;
 }
 
@@ -976,6 +1062,8 @@ static void audio_stop_capture(struct audio_stream *as)
 	as->format_channels = 0;
 	as->format_bits = 0;
 	as->format_lost_since = 0;
+	as->format_wait_since = 0;
+	as->format_wait_reported = false;
 	as->dma_blocks = 0;
 	as->queued_blocks = 0;
 	as->dropped_blocks = 0;
@@ -1002,10 +1090,21 @@ static void audio_handle_format(struct audio_stream *as,
 					AUDIO_LOST_STOP_MS);
 				audio_stop_capture(as);
 			}
+		} else if (!as->format_wait_since) {
+			as->format_wait_since = now;
+		} else if (!as->format_wait_reported &&
+			   now - as->format_wait_since >=
+				   AUDIO_FORMAT_WAIT_MS) {
+			pr_info("HDMI audio: receiver reports no playable stream after %u ms; "
+				"check the source's HDMI audio output (Linear PCM, 2 ch)",
+				AUDIO_FORMAT_WAIT_MS);
+			as->format_wait_reported = true;
 		}
 		return;
 	}
 
+	as->format_wait_since = 0;
+	as->format_wait_reported = false;
 	as->format_lost_since = 0;
 	channels_ok = format->channels == 2 || format->channels == 6 ||
 		      format->channels == 8;
@@ -1120,6 +1219,8 @@ static void stream_reset_audio(struct audio_stream *as)
 	as->retry_after = 0;
 	as->unsupported_reported = false;
 	as->format_lost_since = 0;
+	as->format_wait_since = 0;
+	as->format_wait_reported = false;
 	as->last_error_ms = 0;
 }
 
@@ -1349,7 +1450,7 @@ static void run_teardown_trace(struct gc573_vfio_ctx *ctx,
 
 	trace_dump(ctx, "phase 0: streaming");
 	trace_show_phase(window, renderer, 0,
-			 "TRACE 0/8 — streaming; LED should be cyan");
+			 "TRACE 0/8 — streaming; LED should show the selected colour");
 	trace_wait(6);
 
 	preview_stop();
@@ -1373,10 +1474,10 @@ static void run_teardown_trace(struct gc573_vfio_ctx *ctx,
 	trace_wait(6);
 
 	trace_show_phase(window, renderer, 3,
-			 "TRACE 3/8 — re-arming LED 20x/s; cyan?");
+			 "TRACE 3/8 — re-arming LED 20x/s; colour back?");
 	if (ctx->bar0) {
 		for (int i = 0; i < 160; i++) {
-			gc573_user_led_refresh(ctx->bar0, 0x00, 0xcc, 0xff);
+			gc573_user_led_refresh(ctx->bar0, g_led_r, g_led_g, g_led_b);
 			SDL_PumpEvents();
 			SDL_Delay(50);
 		}
@@ -1424,7 +1525,9 @@ static void run_teardown_trace(struct gc573_vfio_ctx *ctx,
 
 int main(int argc, char *argv[])
 {
-	const char *pci_addr = (argc > 1) ? argv[1] : NULL;
+	const char *pci_addr = NULL;
+	const char *led_spec = NULL;
+	const char *edid_spec = NULL;
 	struct gc573_vfio_ctx ctx;
 	struct gc573_user_video video;
 	struct audio_stream audio;
@@ -1454,6 +1557,41 @@ int main(int argc, char *argv[])
 	signal(SIGINT, sig_handler);
 	signal(SIGTERM, sig_handler);
 	g_trace_mode = getenv("GC573_TEARDOWN_TRACE") != NULL;
+
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--led") == 0 && i + 1 < argc) {
+			led_spec = argv[++i];
+		} else if (strncmp(argv[i], "--led=", 6) == 0) {
+			led_spec = argv[i] + 6;
+		} else if (strcmp(argv[i], "--edid") == 0 && i + 1 < argc) {
+			edid_spec = argv[++i];
+		} else if (strncmp(argv[i], "--edid=", 7) == 0) {
+			edid_spec = argv[i] + 7;
+		} else if (strcmp(argv[i], "-h") == 0 ||
+			   strcmp(argv[i], "--help") == 0) {
+			print_usage(argv[0]);
+			return 0;
+		} else if (argv[i][0] != '-') {
+			pci_addr = argv[i];
+		} else {
+			fprintf(stderr, "[LED] Unknown option '%s' ignored\n",
+				argv[i]);
+		}
+	}
+
+	/* --led wins; EVERLIVE_LED is the GUI-friendly fallback. */
+	if (!led_spec || !*led_spec)
+		led_spec = getenv("EVERLIVE_LED");
+	if (led_spec && *led_spec &&
+	    !parse_led_color(led_spec, &g_led_r, &g_led_g, &g_led_b)) {
+		fprintf(stderr, "[LED] Unknown colour '%s'; using default cyan #00ccff\n",
+			led_spec);
+		g_led_r = 0x00;
+		g_led_g = 0xcc;
+		g_led_b = 0xff;
+	}
+	if (!edid_spec || !*edid_spec)
+		edid_spec = GC573_EDID_PROFILE_DEFAULT;
 
 	printf("==================================================================\n");
 	printf("  EverLive Userspace VFIO Streamer [INTERN TEST - EXPERIMENTAL]  \n");
@@ -1507,10 +1645,35 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	/*
+	 * 3b. Select the EDID profile before the IT6805 init step programs the
+	 *     DDC RAM and releases its HPD.  An unusable profile falls back to
+	 *     the verified default instead of aborting the stream.
+	 */
+	if (gc573_user_edid_select(edid_spec, NULL) < 0) {
+		fprintf(stderr, "[EDID] Unknown or unusable profile '%s'; using default\n",
+			edid_spec);
+		gc573_user_edid_select(GC573_EDID_PROFILE_DEFAULT, NULL);
+	}
+	printf("[EDID] Profile: %s\n", gc573_user_edid_active_name());
+
 	/* 4. Initialize the IT6805 HDMI 2.0 receiver. */
 	ret = gc573_user_it6805_init(ctx.bar0);
 	if (ret < 0) {
 		fprintf(stderr, "[ERROR] IT6805 init failed: %d\n", ret);
+		gc573_vfio_cleanup(&ctx);
+		return 1;
+	}
+
+	/*
+	 * 4b. Program the selected profile explicitly before the source-facing
+	 *     HDMI handshake is released.  No-op when the init step above already
+	 *     latched the same table.
+	 */
+	ret = gc573_user_program_edid_by_name(ctx.bar0,
+					      gc573_user_edid_active_name(), NULL);
+	if (ret < 0) {
+		fprintf(stderr, "[ERROR] EDID programming failed: %d\n", ret);
 		gc573_vfio_cleanup(&ctx);
 		return 1;
 	}
@@ -1523,8 +1686,10 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	/* 6. Keep LED solid Cyan to indicate active userspace streaming. */
-	gc573_user_set_led_rgb(ctx.bar0, 0x00, 0xcc, 0xff);
+	/* 6. Keep the selected LED colour to indicate active userspace streaming. */
+	gc573_user_set_led_rgb(ctx.bar0, g_led_r, g_led_g, g_led_b);
+	printf("[LED] Active colour #%02x%02x%02x\n",
+	       g_led_r, g_led_g, g_led_b);
 
 	/* 7. Setup MSI Interrupt via EventFD (video DMA completion). */
 	ret = gc573_vfio_setup_msi(&ctx);
@@ -2064,7 +2229,7 @@ int main(int argc, char *argv[])
 
 	/*
 	 * Start the daemon before stopping the video DMA.  It re-arms the
-	 * existing cyan profile at 20 Hz, so the LED never has to fall back
+	 * selected colour at 20 Hz, so the LED never has to fall back
 	 * to the red blink while we tear the stream down.
 	 */
 	bool daemon_started = start_led_daemon(&ctx, false);
