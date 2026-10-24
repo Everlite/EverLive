@@ -2,6 +2,7 @@
 
 [![EverLive](https://img.shields.io/badge/project-EverLive-8a2be2.svg)](#)
 [![Version](https://img.shields.io/badge/version-v0.5-blue.svg)](https://github.com/Everlite/EverLive/releases)
+[![Sponsor](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa.svg?logo=github)](https://github.com/sponsors/Everlite)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/D2XFhkPMmc)
 [![Status](https://img.shields.io/badge/status-low%20latency%20(experimental)-brightgreen.svg)](#highlights--verified-capabilities)
 [![open_gc573](https://img.shields.io/badge/driver-open__gc573%20(100%25%20blob--free)-2e7d32.svg)](#hardware-and-kernel-compatibility)
@@ -14,6 +15,12 @@
 **EverLive** is an all-in-one Linux console gaming suite and 100% blob-free open-source driver for the **AVerMedia Live Gamer 4K (GC573)** (PCI `1461:0054`, Subsystem `1461:5730`) and **Live Gamer BOLT (GC555)** (`1461:5550`).
 
 With **EverLive**, you can play PlayStation 5, Xbox Series X, Nintendo Switch, or PCs directly on your Linux desktop (Wayland & X11) at **1440p @ 120 FPS**. HDMI capture at 1440p and 120.35 Hz is verified on a PlayStation 5. How smooth that looks on the monitor still depends on the panel clock. That part is experimental; see [Known Issues](#️-known-issues--work-in-progress). EverLive also provides synchronized low-latency audio, live volume control, hardware RGB control, and start-menu integration.
+
+> [!NOTE]
+> ### ⚡ Major Architecture Update: Userspace VFIO Driver in Development
+> We are actively transitioning from the traditional kernel module (`open_gc573`) to a brand-new **100% Userspace VFIO Driver Architecture** (`tools/opengc573-userd/`).
+> - **Current Status:** Rock-solid **2560×1440 @ 120 FPS** capture in Ring 3 with sub-millisecond latency is already achieved and physically verified on hardware!
+> - The existing kernel module version is no longer receiving major feature additions as all active development is focused on finalizing the userspace engine. Both branches will be merged soon.
 
 ---
 
@@ -298,6 +305,18 @@ Join our official community on Discord:
 * Share logs, `dmesg` outputs, and hardware configs
 * Get help setting up PS5, Xbox Series X, Switch, or RetroTINK
 * Chat about upcoming driver milestones and latency tuning
+
+---
+
+## 💖 Support the Project & Hardware Fund
+
+EverLive is an independent, community-driven open-source project. To expand hardware support to more capture cards (such as the **AVerMedia Live Gamer DUO / GC570**, and eventually **Elgato PCIe cards** like the **4K60 Pro**), we purchase second-hand hardware on eBay for testing and reverse-engineering.
+
+If you would like to support this work and help fund test hardware:
+
+👉 **[Sponsor @Everlite on GitHub Sponsors](https://github.com/sponsors/Everlite)**
+
+Every contribution directly finances test hardware to expand open-source Linux capture card support!
 
 ---
 
