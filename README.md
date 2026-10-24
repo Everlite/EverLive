@@ -51,7 +51,17 @@ The following capabilities have been physically tested and verified on physical 
 * **Standby Daemon Handoff (`everlive_userd`):**
   - Closing the gaming screen hands off the active file descriptor to a lightweight background daemon without triggering a PCIe Function Level Reset (FLR), preserving the HDMI link state and LED configuration.
 
-*(Note regarding GC555: The Live Gamer BOLT GC555 (PCI `1461:0054`/`1461:0055`, Subsystem `1461:5550`) shares core register layouts, but has not been personally verified on physical hardware by the maintainer.)*
+---
+
+## 🎬 Video Demonstration (1-Click Launch & PS5 120 FPS Gameplay)
+
+Watch EverLive v1.0.0 in action on Linux: launching directly from the desktop application launcher, transitioning to the PlayStation 5 dashboard, and loading into *The Finals* at **1440p @ 120 FPS** with low latency and synchronous audio playback:
+
+https://github.com/Everlite/EverLive/raw/main/docs/everlive_v1_launch_demo.mp4
+
+[![EverLive v1.0.0 Launch and Gameplay Demonstration](docs/everlive_v1_launch_poster.jpg)](https://github.com/Everlite/EverLive/raw/main/docs/everlive_v1_launch_demo.mp4)
+
+*(Click the video link or preview above to view the demonstration)*
 
 ---
 

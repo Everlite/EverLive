@@ -1432,7 +1432,7 @@ if HAS_QT:
                 QTimer.singleShot(250, self.start_gaming_screen)
 
         def init_ui(self):
-            self.setWindowTitle("EverLive - Console Hub [INTERN TEST - EXPERIMENTAL]")
+            self.setWindowTitle("EverLive - Console Hub")
             # Wider layout keeps the full userspace-engine status capsule and
             # the VFIO device line readable without truncation.
             self.setFixedSize(860, 540)
