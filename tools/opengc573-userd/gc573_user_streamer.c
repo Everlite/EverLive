@@ -1348,10 +1348,11 @@ static int preview_start(struct gc573_user_video *video, size_t bytes,
 	g_preview.taken_age_us = 0;
 	g_preview.stop = false;
 	g_preview.stalled = false;
-	if (pthread_create(&g_preview.thread, NULL, preview_thread,
-			   &g_preview) != 0) {
+	int err = pthread_create(&g_preview.thread, NULL, preview_thread,
+				 &g_preview);
+	if (err != 0) {
 		preview_free_buffers();
-		return -errno;
+		return -err;
 	}
 	g_preview.started = true;
 	return 0;
