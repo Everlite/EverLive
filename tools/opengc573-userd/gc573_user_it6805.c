@@ -1723,6 +1723,8 @@ static int it6805_read_video_timing(void *bar0,
 			else
 				tmds_factor = 0x0500;
 			g_tmds_clock_khz = g_reference_khz * tmds_factor / tmds_sum;
+			/* Retained for TMDS diagnostics; timing uses the pclk path. */
+			(void)g_tmds_clock_khz;
 		}
 	}
 

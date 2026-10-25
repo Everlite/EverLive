@@ -41,6 +41,8 @@
 #define DEFAULT_WINDOW_WIDTH	1280U
 #define DEFAULT_WINDOW_HEIGHT	720U
 #define VIDEO_BUFFERS		4U
+/* Rotating frame buffers between the DMA thread and the SDL renderer. */
+#define PREVIEW_BUFFERS		3U
 
 /* Cheap timing/AVI probe cadence while streaming. */
 #define STATUS_POLL_STREAM_MS	50U
@@ -62,6 +64,8 @@
 #define AUDIO_IT6805_POLL_MS	100U
 #define AUDIO_DMA_POLL_MS	5U
 #define AUDIO_QUEUE_LIMIT_MS	200U
+/* Pre-roll cushion before the SDL device is unpaused (~3 x 20 ms blocks). */
+#define AUDIO_CUSHION_MS	60U
 #define AUDIO_LOST_STOP_MS	1000U
 #define AUDIO_FORMAT_WAIT_MS	3000U
 #define AUDIO_RETRY_MS		2000U
@@ -1122,10 +1126,16 @@ static void render_standby(SDL_Window *window, SDL_Renderer *renderer,
 }
 
 /*
- * SDL_RenderPresent waits on the monitor. Doing that in the DMA poll loop
+ * SDL_RenderPresent waits on the monitor.  Doing that in the DMA poll loop
  * lets a second frame finish before its channel code is read, the ring
- * sticks, and 120 Hz input is counted at the display rate. This thread
+ * sticks, and 120 Hz input is counted at the display rate.  This thread
  * only retires DMA buffers.
+ *
+ * Three buffers are rotated between the DMA thread and the renderer: the
+ * DMA thread copies into a free slot, the renderer takes the newest
+ * published slot and marks it busy until SDL_UpdateTexture() has copied it.
+ * No large memcpy runs under the mutex, and a slow present cannot corrupt
+ * or overwrite the frame currently being displayed.
  */
 struct frame_preview {
 	pthread_t thread;
@@ -1135,11 +1145,13 @@ struct frame_preview {
 	bool stop;
 	bool stalled;
 	struct gc573_user_video *video;
-	uint8_t *shadow;
-	uint8_t *local;
+	uint8_t *buffers[PREVIEW_BUFFERS];
+	bool busy[PREVIEW_BUFFERS];
+	int latest;
 	size_t bytes;
 	uint64_t seq;
 	uint64_t consumed;
+	uint64_t dropped;
 };
 
 static struct frame_preview g_preview;
@@ -1150,6 +1162,7 @@ static void *preview_thread(void *arg)
 
 	while (!preview->stop) {
 		int index = gc573_user_video_poll(preview->video, 5);
+		int slot = -1;
 
 		if (index == -2) {
 			preview->stalled = true;
@@ -1173,79 +1186,123 @@ static void *preview_thread(void *arg)
 		}
 
 		pthread_mutex_lock(&preview->lock);
-		memcpy(preview->shadow,
+		for (unsigned int i = 0; i < PREVIEW_BUFFERS; i++) {
+			if (!preview->busy[i] && (int)i != preview->latest) {
+				slot = (int)i;
+				break;
+			}
+		}
+		pthread_mutex_unlock(&preview->lock);
+
+		if (slot < 0) {
+			preview->dropped++;
+			gc573_user_video_release(preview->video, index);
+			continue;
+		}
+
+		/* Not published and not busy: this slot belongs to this thread. */
+		memcpy(preview->buffers[slot],
 		       preview->video->buffers[index].vaddr, preview->bytes);
+
+		pthread_mutex_lock(&preview->lock);
+		preview->latest = slot;
 		preview->seq++;
 		pthread_mutex_unlock(&preview->lock);
+
 		gc573_user_video_release(preview->video, index);
 	}
 	return NULL;
 }
 
+static void preview_free_buffers(void)
+{
+	for (unsigned int i = 0; i < PREVIEW_BUFFERS; i++) {
+		free(g_preview.buffers[i]);
+		g_preview.buffers[i] = NULL;
+		g_preview.busy[i] = false;
+	}
+	g_preview.latest = -1;
+}
+
 static void preview_stop(void)
 {
-	if (!g_preview.started)
-		return;
-	g_preview.stop = true;
-	pthread_join(g_preview.thread, NULL);
-	g_preview.started = false;
-	free(g_preview.shadow);
-	free(g_preview.local);
-	g_preview.shadow = NULL;
-	g_preview.local = NULL;
+	if (g_preview.started) {
+		g_preview.stop = true;
+		pthread_join(g_preview.thread, NULL);
+		g_preview.started = false;
+	}
+	preview_free_buffers();
 }
 
 static int preview_start(struct gc573_user_video *video, size_t bytes)
 {
-	uint8_t *shadow;
-	uint8_t *local;
-
 	preview_stop();
-	shadow = malloc(bytes);
-	local = malloc(bytes);
-	if (!shadow || !local) {
-		free(shadow);
-		free(local);
-		return -ENOMEM;
+	for (unsigned int i = 0; i < PREVIEW_BUFFERS; i++) {
+		g_preview.buffers[i] = malloc(bytes);
+		if (!g_preview.buffers[i]) {
+			preview_free_buffers();
+			return -ENOMEM;
+		}
+		g_preview.busy[i] = false;
 	}
 	if (!g_preview.lock_ready) {
 		pthread_mutex_init(&g_preview.lock, NULL);
 		g_preview.lock_ready = true;
 	}
 	g_preview.video = video;
-	g_preview.shadow = shadow;
-	g_preview.local = local;
 	g_preview.bytes = bytes;
 	g_preview.seq = 0;
 	g_preview.consumed = 0;
+	g_preview.dropped = 0;
+	g_preview.latest = -1;
 	g_preview.stop = false;
 	g_preview.stalled = false;
 	if (pthread_create(&g_preview.thread, NULL, preview_thread,
 			   &g_preview) != 0) {
-		free(shadow);
-		free(local);
-		g_preview.shadow = NULL;
-		g_preview.local = NULL;
+		preview_free_buffers();
 		return -errno;
 	}
 	g_preview.started = true;
 	return 0;
 }
 
+/*
+ * Returns a handle (>0) for the newest frame and points @pixels at its
+ * buffer.  The caller must call preview_release() once SDL_UpdateTexture()
+ * has copied the data.  Returns 0 when no new frame is available.
+ */
 static int preview_take(void **pixels)
 {
+	int slot;
+
 	if (!g_preview.started)
 		return 0;
+
 	pthread_mutex_lock(&g_preview.lock);
-	if (g_preview.seq == g_preview.consumed) {
+	if (g_preview.latest < 0 || g_preview.seq == g_preview.consumed) {
 		pthread_mutex_unlock(&g_preview.lock);
 		return 0;
 	}
-	memcpy(g_preview.local, g_preview.shadow, g_preview.bytes);
+	slot = g_preview.latest;
+	g_preview.latest = -1;
+	g_preview.busy[slot] = true;
 	g_preview.consumed = g_preview.seq;
 	pthread_mutex_unlock(&g_preview.lock);
-	*pixels = g_preview.local;
-	return 1;
+
+	*pixels = g_preview.buffers[slot];
+	return slot + 1;
+}
+
+static void preview_release(int handle)
+{
+	int slot = handle - 1;
+
+	if (slot < 0 || slot >= (int)PREVIEW_BUFFERS)
+		return;
+
+	pthread_mutex_lock(&g_preview.lock);
+	g_preview.busy[slot] = false;
+	pthread_mutex_unlock(&g_preview.lock);
 }
 
 struct audio_playback {
@@ -1256,6 +1313,7 @@ struct audio_playback {
 	uint8_t *scratch;
 	size_t scratch_size;
 	bool queue_error_reported;
+	bool primed;
 };
 
 enum audio_bitstream_kind {
@@ -1302,8 +1360,16 @@ struct audio_stream {
 	uint64_t last_dma_blocks;
 	uint64_t last_queued_blocks;
 	uint64_t last_dropped_blocks;
+	uint64_t underruns;
 	uint32_t peak;
 	struct audio_playback playback;
+
+	/* Dedicated DMA drain thread: SDL_RenderPresent must never starve it. */
+	pthread_t worker;
+	pthread_mutex_t lock;
+	bool lock_ready;
+	bool worker_started;
+	bool worker_stop;
 };
 
 static void audio_close_device(struct audio_playback *playback)
@@ -1317,6 +1383,7 @@ static void audio_close_device(struct audio_playback *playback)
 	playback->bits = 0;
 	playback->bytes_per_frame = 0;
 	playback->queue_error_reported = false;
+	playback->primed = false;
 }
 
 static int audio_open_device(struct audio_playback *playback,
@@ -1359,10 +1426,13 @@ static int audio_open_device(struct audio_playback *playback,
 	playback->rate = want.freq;
 	playback->bits = (int)sample_bits;
 	playback->bytes_per_frame = (sample_bits / 8U) * 2U;
-	SDL_PauseAudioDevice(playback->dev, 0);
-	pr_info("SDL audio: playing %u Hz, 2 ch, %u-bit via %s",
+	playback->primed = false;
+	/* Stay paused until audio_queue_pcm_bytes() has built the cushion. */
+	SDL_PauseAudioDevice(playback->dev, 1);
+	pr_info("SDL audio: opened %u Hz, 2 ch, %u-bit via %s (cushion %u ms)",
 		rate_hz, sample_bits,
-		SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "unknown");
+		SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "unknown",
+		AUDIO_CUSHION_MS);
 	if (SDL_GetCurrentAudioDriver() &&
 	    strcmp(SDL_GetCurrentAudioDriver(), "dummy") == 0)
 		pr_warn("SDL audio: dummy driver selected; playback is silent "
@@ -1548,6 +1618,7 @@ static void audio_queue_pcm_bytes(struct audio_stream *as, const void *data,
 {
 	struct audio_playback *playback = &as->playback;
 	uint32_t max_queued;
+	uint32_t target_queued;
 	uint32_t queued;
 
 	if (!playback->dev || !bytes)
@@ -1556,7 +1627,21 @@ static void audio_queue_pcm_bytes(struct audio_stream *as, const void *data,
 	max_queued = (uint32_t)((uint64_t)playback->rate *
 				playback->bytes_per_frame *
 				AUDIO_QUEUE_LIMIT_MS / 1000U);
+	target_queued = (uint32_t)((uint64_t)playback->rate *
+				   playback->bytes_per_frame *
+				   AUDIO_CUSHION_MS / 1000U);
 	queued = SDL_GetQueuedAudioSize(playback->dev);
+
+	/*
+	 * Drift/underrun protection: if the device ran dry, pause it and rebuild
+	 * the cushion instead of restarting from an empty queue (audible hitch).
+	 */
+	if (playback->primed && queued == 0) {
+		SDL_PauseAudioDevice(playback->dev, 1);
+		playback->primed = false;
+		as->underruns++;
+	}
+
 	if (queued >= max_queued) {
 		as->dropped_blocks++;
 		return;
@@ -1568,8 +1653,17 @@ static void audio_queue_pcm_bytes(struct audio_stream *as, const void *data,
 				SDL_GetError());
 			playback->queue_error_reported = true;
 		}
-	} else {
-		as->queued_blocks++;
+		return;
+	}
+
+	as->queued_blocks++;
+
+	if (!playback->primed) {
+		queued = SDL_GetQueuedAudioSize(playback->dev);
+		if (target_queued && queued >= target_queued) {
+			SDL_PauseAudioDevice(playback->dev, 0);
+			playback->primed = true;
+		}
 	}
 }
 
@@ -1803,7 +1897,7 @@ static void audio_queue_block(struct audio_stream *as, const void *data,
 	audio_queue_pcm_bytes(as, playback->scratch, out_bytes);
 }
 
-static void audio_stop_capture(struct audio_stream *as)
+static void audio_stop_capture_locked(struct audio_stream *as)
 {
 	/* Drop transitional samples immediately, before the DMA stop wait. */
 	if (as->playback.dev)
@@ -1836,10 +1930,20 @@ static void audio_stop_capture(struct audio_stream *as)
 	as->dma_blocks = 0;
 	as->queued_blocks = 0;
 	as->dropped_blocks = 0;
+	as->underruns = 0;
 	as->last_dma_blocks = 0;
 	as->last_queued_blocks = 0;
 	as->last_dropped_blocks = 0;
 	as->peak = 0;
+}
+
+static void audio_stop_capture(struct audio_stream *as)
+{
+	if (as->lock_ready)
+		pthread_mutex_lock(&as->lock);
+	audio_stop_capture_locked(as);
+	if (as->lock_ready)
+		pthread_mutex_unlock(&as->lock);
 }
 
 static void audio_handle_format(struct audio_stream *as,
@@ -1940,6 +2044,8 @@ static void audio_handle_format(struct audio_stream *as,
 		return;
 	}
 
+	if (as->lock_ready)
+		pthread_mutex_lock(&as->lock);
 	as->streaming = true;
 	as->non_pcm = bitstream;
 	as->lpcm_verified = false;
@@ -1950,6 +2056,8 @@ static void audio_handle_format(struct audio_stream *as,
 	as->format_channels = format->channels;
 	as->format_bits = format->sample_bits;
 	as->retry_after = 0;
+	if (as->lock_ready)
+		pthread_mutex_unlock(&as->lock);
 
 	if (bitstream)
 		printf("[AUDIO] Bitstream stream active (%u Hz, non-PCM); decoding to stereo\n",
@@ -1997,8 +2105,64 @@ static void audio_drain_dma(struct audio_stream *as)
 	}
 }
 
+/*
+ * The FPGA has only two 20 ms audio ping-pong slots.  Draining them from the
+ * render loop lets SDL_RenderPresent() (VSync/compositor) starve the ring and
+ * produce audible dropouts, so a dedicated worker polls every few ms.
+ */
+static void *audio_worker_thread(void *arg)
+{
+	struct audio_stream *as = arg;
+	const struct timespec delay = {
+		.tv_sec = 0,
+		.tv_nsec = (long)AUDIO_DMA_POLL_MS * 1000000L,
+	};
+
+	for (;;) {
+		pthread_mutex_lock(&as->lock);
+		if (as->worker_stop) {
+			pthread_mutex_unlock(&as->lock);
+			break;
+		}
+		audio_drain_dma(as);
+		pthread_mutex_unlock(&as->lock);
+		nanosleep(&delay, NULL);
+	}
+
+	return NULL;
+}
+
+static int audio_worker_start(struct audio_stream *as)
+{
+	if (!as->lock_ready) {
+		if (pthread_mutex_init(&as->lock, NULL) != 0)
+			return -1;
+		as->lock_ready = true;
+	}
+
+	as->worker_stop = false;
+	if (pthread_create(&as->worker, NULL, audio_worker_thread, as) != 0)
+		return -1;
+
+	as->worker_started = true;
+	return 0;
+}
+
+static void audio_worker_stop(struct audio_stream *as)
+{
+	if (!as->worker_started)
+		return;
+
+	pthread_mutex_lock(&as->lock);
+	as->worker_stop = true;
+	pthread_mutex_unlock(&as->lock);
+	pthread_join(as->worker, NULL);
+	as->worker_started = false;
+}
+
 static void audio_cleanup(struct audio_stream *as)
 {
+	audio_worker_stop(as);
 	audio_stop_capture(as);
 	free(as->playback.scratch);
 	as->playback.scratch = NULL;
@@ -2600,7 +2764,10 @@ int main(int argc, char *argv[])
 		gc573_vfio_cleanup(&ctx);
 		return 1;
 	}
-	SDL_RenderSetVSync(renderer, g_vsync ? 1 : 0);
+	if (SDL_RenderSetVSync(renderer, g_vsync ? 1 : 0) < 0 && g_vsync) {
+		pr_warn("VSync not available on this renderer; using present-on-new-frame pacing");
+		g_vsync = false;
+	}
 
 	if (g_fullscreen)
 		SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
@@ -2626,6 +2793,11 @@ int main(int argc, char *argv[])
 	}
 	if (gc573_user_audio_init(&audio.dma, &ctx, ctx.bar0) == 0) {
 		audio.dma_ready = true;
+		if (audio_worker_start(&audio) < 0)
+			pr_warn("Audio worker thread failed; using render-loop DMA polling");
+		else
+			pr_info("Audio worker: draining DMA every %u ms",
+				AUDIO_DMA_POLL_MS);
 	} else {
 		pr_warn("Audio DMA mapping failed; continuing video-only");
 	}
@@ -2746,8 +2918,10 @@ int main(int argc, char *argv[])
 				 * the full 80 ms cushion while the measurement runs.
 				 */
 				if (kind == GC573_USER_SIGNAL_PROBE_RATE) {
-					audio_drain_dma(&audio);
-					audio.last_dma_poll = now;
+					if (!audio.worker_started) {
+						audio_drain_dma(&audio);
+						audio.last_dma_poll = now;
+					}
 				}
 
 				ret = gc573_user_it6805_poll_signal_ex(ctx.bar0,
@@ -3029,22 +3203,36 @@ int main(int argc, char *argv[])
 
 		if (streaming) {
 			void *pixels = NULL;
+			int ph = preview_take(&pixels);
+			bool have_frame = false;
 
-			if (preview_take(&pixels) && texture) {
-				int uret = SDL_UpdateTexture(texture, NULL,
-							     pixels,
-							     output_width * 2);
+			if (ph > 0) {
+				if (texture) {
+					int uret = SDL_UpdateTexture(texture, NULL,
+								     pixels,
+								     output_width * 2);
 
-				if (uret < 0) {
-					static bool reported = false;
+					if (uret < 0) {
+						static bool reported = false;
 
-					if (!reported) {
-						printf("[SDL-ERR] SDL_UpdateTexture failed: %s\n",
-						       SDL_GetError());
-						reported = true;
+						if (!reported) {
+							printf("[SDL-ERR] SDL_UpdateTexture failed: %s\n",
+							       SDL_GetError());
+							reported = true;
+						}
 					}
+					have_frame = true;
 				}
+				preview_release(ph);
+			}
 
+			/*
+			 * With VSync, present once per display refresh even when no new
+			 * source frame is ready.  A frame arriving just after a refresh
+			 * then repeats the previous frame instead of producing a 33 ms
+			 * hitch (the 60.03 vs 60.00 Hz phase drift).
+			 */
+			if (texture && (have_frame || g_vsync)) {
 				{
 					char audio_text[64];
 					const char *audio_desc;
@@ -3098,7 +3286,8 @@ int main(int argc, char *argv[])
 				audio.last_it6805_poll = now;
 				audio_poll_format(&audio, ctx.bar0, now);
 			}
-			if (now - audio.last_dma_poll >= AUDIO_DMA_POLL_MS) {
+			if (!audio.worker_started &&
+			    now - audio.last_dma_poll >= AUDIO_DMA_POLL_MS) {
 				audio.last_dma_poll = now;
 				audio_drain_dma(&audio);
 			}
@@ -3156,13 +3345,14 @@ int main(int argc, char *argv[])
 					uint64_t dropped_delta = audio.dropped_blocks -
 								 audio.last_dropped_blocks;
 
-					printf("[AUDIO] %u Hz %u ch %u-bit | DMA %lu blocks/s | queued %lu/s | dropped %lu/s | SDL %u B | peak %u\n",
+					printf("[AUDIO] %u Hz %u ch %u-bit | DMA %lu blocks/s | queued %lu/s | dropped %lu/s | underruns %lu | SDL %u B | peak %u\n",
 					       audio.format_rate,
 					       audio.format_channels,
 					       audio.format_bits,
 					       (unsigned long)dma_delta,
 					       (unsigned long)queued_delta,
 					       (unsigned long)dropped_delta,
+					       (unsigned long)audio.underruns,
 					       SDL_GetQueuedAudioSize(audio.playback.dev),
 					       audio.peak);
 					audio.last_dma_blocks = audio.dma_blocks;
