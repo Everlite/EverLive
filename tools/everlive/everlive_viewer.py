@@ -16,7 +16,7 @@ import json
 import shutil
 from typing import Optional, Tuple, Dict
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 CONFIG_DIR = os.path.expanduser("~/.config/everlive")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
@@ -356,6 +356,7 @@ LED_NAME_MAP = {
 # The display text is what the user sees; the key is the CLI value.
 EDID_PROFILES = [
     ("Default (4K60 / 1440p120 HDR)", "default"),
+    ("Bitstream (Dolby Digital / DTS 5.1)", "bitstream"),
     ("Force 1440p @ 120 Hz", "1440p120"),
     ("Force 1080p @ 240 Hz", "1080p240"),
     ("Load Custom EDID (.bin)...", "custom"),

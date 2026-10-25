@@ -139,6 +139,7 @@ struct it6805_audio_runtime {
 	bool change_pending;
 	bool output_enabled;
 	bool ready_wait_reported;
+	bool non_pcm;
 };
 
 static struct it6805_audio_runtime g_audio;
@@ -2446,6 +2447,7 @@ static int it6805_start_audio_output(void *bar0)
 	ret = it6805_read_audio_format(bar0, &b0, &b1, &b2);
 	if (ret < 0)
 		goto fail;
+	g_audio.non_pcm = (b0 & BIT(6)) != 0;
 	g_audio.channel_count = it6805_audio_channel_count(
 		b0, b1, g_audio.channel_count);
 	ret = it6805_reset_audio_logic(bar0);
@@ -2549,6 +2551,7 @@ static int it6805_refresh_audio_format(void *bar0)
 	g_audio.format_b0 = b0 & 0xf0;
 	g_audio.format_b1 = b1;
 	g_audio.format_b2 = b2 & BIT(1);
+	g_audio.non_pcm = (b0 & BIT(6)) != 0;
 	g_audio.channel_count = it6805_audio_channel_count(
 		b0, b1, g_audio.channel_count);
 	g_audio.format_valid = true;
@@ -2713,6 +2716,7 @@ static void it6805_snapshot_audio_format(
 	format->sample_bits = (g_audio.format_b2 & BIT(1)) ? 24 : 16;
 	format->channel_allocation = g_audio.format_b1 & 0x3f;
 	format->transport = g_audio.format_b0 >> 4;
+	format->non_pcm = g_audio.non_pcm;
 	format->valid = true;
 }
 

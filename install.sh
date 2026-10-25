@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive v1.0.0 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573)
+# EverLive v1.1.0 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573)
 # ==============================================================================
 # Installiert den 100% blob-freien Userspace VFIO-Treiber, udev-Hardware-Rechte,
 # Speicher-Locking-Limits und die EverLive Desktop-App für HDMI Console Gaming.
@@ -22,7 +22,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}===================================================================${NC}"
-echo -e "${BLUE}     EverLive v1.0.0 - GC573 Userspace Gaming Suite Installer     ${NC}"
+echo -e "${BLUE}     EverLive v1.1.0 - GC573 Userspace Gaming Suite Installer     ${NC}"
 echo -e "${BLUE}===================================================================${NC}"
 
 # 1. Root-Prüfung / Sudo
@@ -51,6 +51,7 @@ detect_and_install_deps() {
         # Arch / CachyOS / Manjaro
         ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(base-devel)
         ! command -v sdl2-config >/dev/null 2>&1 && MISSING_PKGS+=(sdl2)
+        ! pkg-config --exists libavcodec libswresample >/dev/null 2>&1 && MISSING_PKGS+=(ffmpeg)
         ! command -v setcap >/dev/null 2>&1 && MISSING_PKGS+=(libcap)
         ! command -v wpctl >/dev/null 2>&1 && MISSING_PKGS+=(wireplumber)
         ! pacman -Q xcb-util-cursor >/dev/null 2>&1 && MISSING_PKGS+=(xcb-util-cursor)
@@ -62,8 +63,9 @@ detect_and_install_deps() {
         fi
     elif command -v apt-get >/dev/null 2>&1; then
         # Ubuntu / Debian / Pop!_OS / Mint
-        ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(build-essential)
+        ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(build-essential pkg-config)
         ! command -v sdl2-config >/dev/null 2>&1 && MISSING_PKGS+=(libsdl2-dev)
+        ! pkg-config --exists libavcodec libswresample >/dev/null 2>&1 && MISSING_PKGS+=(libavcodec-dev libswresample-dev libavutil-dev)
         ! command -v setcap >/dev/null 2>&1 && MISSING_PKGS+=(libcap2-bin)
         ! command -v wpctl >/dev/null 2>&1 && MISSING_PKGS+=(wireplumber)
         ! dpkg -s libxcb-cursor0 >/dev/null 2>&1 && MISSING_PKGS+=(libxcb-cursor0)
@@ -76,8 +78,9 @@ detect_and_install_deps() {
         fi
     elif command -v dnf >/dev/null 2>&1; then
         # Fedora / Nobara
-        ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(gcc make)
+        ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(gcc make pkgconf-pkg-config)
         ! command -v sdl2-config >/dev/null 2>&1 && MISSING_PKGS+=(SDL2-devel)
+        ! pkg-config --exists libavcodec libswresample >/dev/null 2>&1 && MISSING_PKGS+=(ffmpeg-devel)
         ! command -v setcap >/dev/null 2>&1 && MISSING_PKGS+=(libcap)
         ! command -v wpctl >/dev/null 2>&1 && MISSING_PKGS+=(wireplumber)
         ! rpm -q xcb-util-cursor >/dev/null 2>&1 && MISSING_PKGS+=(xcb-util-cursor)
@@ -122,8 +125,10 @@ if command -v dkms >/dev/null 2>&1; then
     dkms remove -m everlive --all 2>/dev/null || true
     rm -rf /usr/src/everlive-* 2>/dev/null || true
 fi
-modprobe -r open_gc573 2>/dev/null || true
-echo -e "${GREEN}[+] Altes Kernel-Modul deregistriert (DKMS-frei).${NC}"
+modprobe -r open_gc573 2>/dev/null || rmmod open_gc573 2>/dev/null || true
+mkdir -p /etc/modprobe.d
+echo "blacklist open_gc573" > /etc/modprobe.d/blacklist-everlive-legacy.conf
+echo -e "${GREEN}[+] Altes Kernel-Modul deregistriert & geblacklistet.${NC}"
 
 # 5. Udev-Rechte für vfio-pci & unbegrenzten Memlock einrichten
 echo -e "\n${BLUE}[4/5] Richte VFIO Hardware-Zugriffsrechte (udev) & Memlock ein...${NC}"
@@ -194,7 +199,7 @@ chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive.desktop" 2>/dev/n
 rm -f "${APPS_DIR}/everlive-intern.desktop" 2>/dev/null || true
 
 echo -e "\n${GREEN}===================================================================${NC}"
-echo -e "${GREEN}      EverLive v1.0.0 erfolgreich installiert & einsatzbereit!      ${NC}"
+echo -e "${GREEN}      EverLive v1.1.0 erfolgreich installiert & einsatzbereit!      ${NC}"
 echo -e "${GREEN}===================================================================${NC}"
 echo -e "Du kannst EverLive ab sofort direkt über dein Startmenü starten,"
 echo -e "oder im Terminal mit: ${BLUE}./play.sh${NC}"

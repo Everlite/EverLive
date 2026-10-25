@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive - Deinstaller (v1.0.0)
+# EverLive - Deinstaller (v1.1.0)
 # ==============================================================================
 set -euo pipefail
 
@@ -30,6 +30,7 @@ if command -v dkms >/dev/null 2>&1; then
     rm -rf /usr/src/everlive-* 2>/dev/null || true
 fi
 rm -f /etc/modules-load.d/everlive.conf 2>/dev/null || true
+rm -f /etc/modprobe.d/blacklist-everlive-legacy.conf 2>/dev/null || true
 rm -f /etc/udev/rules.d/70-everlive.rules 2>/dev/null || true
 rm -f /usr/local/bin/everlive-audio 2>/dev/null || true
 

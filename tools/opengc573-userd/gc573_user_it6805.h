@@ -147,6 +147,7 @@ struct gc573_user_audio_format {
 	uint8_t channel_allocation;
 	uint8_t transport;	/* 0 = L-PCM samples */
 	bool valid;
+	bool non_pcm;		/* IEC 61937 compressed stream (b0 bit 6) */
 };
 
 /**

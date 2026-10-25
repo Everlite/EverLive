@@ -139,6 +139,122 @@ static int edid_validate(const u8 *edid)
 	return 0;
 }
 
+/*
+ * Bitstream profile: the default video/colour blocks plus AC-3 and DTS short
+ * audio descriptors in the CTA-861 Audio Data Block.  The audio block grows
+ * by two SADs (6 bytes), so the remaining data blocks shift and the CTA DTD
+ * offset moves with them.  The trailing 1080p144 detailed timing no longer
+ * fits in the 128-byte extension and is dropped; 4K60, 1440p120, 1440p144 and
+ * all CTA VICs (including 1080p120) stay advertised.
+ */
+static const u8 g_gc573_edid_bitstream_sads[] = {
+	0x0f, 0x07, 0x07,	/* LPCM, 8 ch, 32/44.1/48 kHz, 24-bit */
+	0x15, 0x07, 0x50,	/* AC-3, 6 ch, 32/44.1/48 kHz, 640 kbit/s */
+	0x3d, 0x06, 0xc0,	/* DTS, 6 ch, 44.1/48 kHz, 1536 kbit/s */
+};
+
+static u8 g_gc573_edid_bitstream[GC573_EDID_SIZE];
+static bool g_gc573_edid_bitstream_built;
+
+#define EDID_CTA_OFFSET		128U
+#define EDID_CTA_DATA_OFFSET	132U
+#define EDID_CTA_CHECKSUM_OFFSET	255U
+#define EDID_CTA_AUDIO_TAG	1U
+#define EDID_CTA_AUDIO_LEN	(sizeof(g_gc573_edid_bitstream_sads))
+#define EDID_CTA_BLOCK_LEN(len)	(1U + (len))
+#define EDID_DTD_SIZE		18U
+
+static int edid_build_bitstream_profile(void)
+{
+	const u8 *src = g_gc573_default_edid;
+	u8 *dst = g_gc573_edid_bitstream;
+	unsigned int dtd_offset;
+	unsigned int data_end;
+	unsigned int audio_off = 0;
+	unsigned int audio_len = 0;
+	unsigned int audio_end;
+	unsigned int new_block_len;
+	unsigned int delta;
+	unsigned int src_off;
+	unsigned int dst_off;
+	unsigned int sum = 0;
+
+	if (g_gc573_edid_bitstream_built)
+		return 0;
+
+	memcpy(dst, src, GC573_EDID_SIZE);
+
+	dtd_offset = src[EDID_CTA_OFFSET + 2];
+	data_end = EDID_CTA_OFFSET + dtd_offset;
+	if (dtd_offset < 4 || data_end > EDID_CTA_CHECKSUM_OFFSET)
+		return -EINVAL;
+
+	/* Locate the Audio Data Block (tag 1) in the data block collection. */
+	for (unsigned int off = EDID_CTA_DATA_OFFSET; off < data_end;) {
+		unsigned int tag = src[off] >> 5;
+		unsigned int len = src[off] & 0x1f;
+
+		if (off + 1 + len > data_end)
+			return -EINVAL;
+		if (tag == EDID_CTA_AUDIO_TAG) {
+			audio_off = off;
+			audio_len = len;
+			break;
+		}
+		off += 1 + len;
+	}
+	if (!audio_off || audio_len > EDID_CTA_AUDIO_LEN)
+		return -EINVAL;
+
+	new_block_len = EDID_CTA_BLOCK_LEN(EDID_CTA_AUDIO_LEN);
+	delta = new_block_len - EDID_CTA_BLOCK_LEN(audio_len);
+	if (data_end + delta > EDID_CTA_CHECKSUM_OFFSET)
+		return -EINVAL;
+
+	audio_end = audio_off + 1 + audio_len;
+
+	/* Keep the data blocks before the audio block in place. */
+	memcpy(dst + EDID_CTA_DATA_OFFSET, src + EDID_CTA_DATA_OFFSET,
+	       audio_off - EDID_CTA_DATA_OFFSET);
+
+	/* Write the enlarged Audio Data Block. */
+	dst[audio_off] = (u8)((EDID_CTA_AUDIO_TAG << 5) |
+			      (EDID_CTA_AUDIO_LEN & 0x1f));
+	memcpy(dst + audio_off + 1, g_gc573_edid_bitstream_sads,
+	       EDID_CTA_AUDIO_LEN);
+
+	/* Move the remaining data blocks behind the larger audio block. */
+	memcpy(dst + audio_off + new_block_len, src + audio_end,
+	       data_end - audio_end);
+
+	/* New DTD offset, then clear the DTD area. */
+	dst[EDID_CTA_OFFSET + 2] = (u8)(dtd_offset + delta);
+	memset(dst + data_end + delta, 0,
+	       EDID_CTA_CHECKSUM_OFFSET - (data_end + delta));
+
+	/* Copy as many detailed timings as still fit before the checksum. */
+	src_off = data_end;
+	dst_off = data_end + delta;
+	while (src_off + EDID_DTD_SIZE <= EDID_CTA_CHECKSUM_OFFSET &&
+	       dst_off + EDID_DTD_SIZE <= EDID_CTA_CHECKSUM_OFFSET &&
+	       (src[src_off] || src[src_off + 1])) {
+		memcpy(dst + dst_off, src + src_off, EDID_DTD_SIZE);
+		src_off += EDID_DTD_SIZE;
+		dst_off += EDID_DTD_SIZE;
+	}
+
+	for (unsigned int i = EDID_CTA_OFFSET;
+	     i < EDID_CTA_CHECKSUM_OFFSET; i++)
+		sum += dst[i];
+	dst[EDID_CTA_CHECKSUM_OFFSET] = (u8)(0x100U - (sum & 0xff));
+
+	if (edid_validate(dst) < 0)
+		return -EINVAL;
+
+	g_gc573_edid_bitstream_built = true;
+	return 0;
+}
+
 static int edid_load_file(const char *path)
 {
 	u8 buffer[GC573_EDID_SIZE];
@@ -204,6 +320,17 @@ int gc573_user_edid_select(const char *profile_name, const char *custom_path)
 	    !strcasecmp(name, "1080p"))
 		return edid_use_profile(g_gc573_edid_1080p240,
 					GC573_EDID_PROFILE_1080P240);
+	if (!strcasecmp(name, GC573_EDID_PROFILE_BITSTREAM) ||
+	    !strcasecmp(name, "ac3") || !strcasecmp(name, "dts")) {
+		int ret = edid_build_bitstream_profile();
+
+		if (ret < 0) {
+			pr_err("EDID: cannot build bitstream profile");
+			return ret;
+		}
+		return edid_use_profile(g_gc573_edid_bitstream,
+					GC573_EDID_PROFILE_BITSTREAM);
+	}
 
 	/* Anything that looks like a file is treated as a custom EDID. */
 	if (strchr(name, '/') || strstr(name, ".bin") || strstr(name, ".edid"))

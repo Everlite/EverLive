@@ -14,6 +14,7 @@
 #define GC573_EDID_PROFILE_DEFAULT	"default"
 #define GC573_EDID_PROFILE_1440P120	"1440p120"
 #define GC573_EDID_PROFILE_1080P240	"1080p240"
+#define GC573_EDID_PROFILE_BITSTREAM	"bitstream"
 
 /**
  * gc573_user_program_edid - Write the selected EDID table to IT6805 DDC RAM
@@ -22,14 +23,16 @@
  * Programs the active 256-byte EDID (see gc573_user_edid_select()) into the
  * IT6805 receiver and asserts HPD so the console immediately locks on.  The
  * default profile advertises 4K60, 1440p120, 1080p240, HDR10 and 8-channel
- * LPCM.  Repeated calls in the same process are no-ops once the same table
- * has been latched.
+ * LPCM.  The "bitstream" profile additionally advertises AC-3 and DTS 5.1
+ * so a console emits IEC 61937 bursts instead of decoded LPCM.  Repeated
+ * calls in the same process are no-ops once the same table has been latched.
  */
 int gc573_user_program_edid(void *bar0);
 
 /**
  * gc573_user_edid_select - Resolve and select an EDID profile
- * @profile_name: "default", "1440p120", "1080p240" or a path to a .bin/.edid
+ * @profile_name: "default", "1440p120", "1080p240", "bitstream" or a path
+ *                to a .bin/.edid
  * @custom_path: Optional explicit path to a 256-byte EDID file (wins over
  *               @profile_name)
  *

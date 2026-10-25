@@ -23,6 +23,7 @@
 #include "gc573_user_fpga.h"
 #include "gc573_user_video.h"
 #include "gc573_user_audio.h"
+#include "gc573_user_bitstream.h"
 #include "gc573_user_font8x8.h"
 #include <SDL2/SDL.h>
 #include <ctype.h>
@@ -60,11 +61,19 @@
 
 #define AUDIO_IT6805_POLL_MS	100U
 #define AUDIO_DMA_POLL_MS	5U
-#define AUDIO_QUEUE_LIMIT_MS	80U
+#define AUDIO_QUEUE_LIMIT_MS	200U
 #define AUDIO_LOST_STOP_MS	1000U
 #define AUDIO_FORMAT_WAIT_MS	3000U
 #define AUDIO_RETRY_MS		2000U
 #define AUDIO_SCRATCH_BYTES	16384U
+/* Compact 16-bit IEC words extracted from an S16/S24 HDMI carrier. */
+#define AUDIO_BITSTREAM_BYTES	16384U
+/*
+ * Consecutive preamble-free blocks before a PCM-flagged stream is trusted
+ * again.  At 20 ms per block this is ~800 ms: long enough to cover the
+ * 200-300 ms of silence the PS5 emits while switching to bitstream.
+ */
+#define AUDIO_LPCM_CONFIRM_BLOCKS	40U
 
 static volatile sig_atomic_t g_running = 1;
 static bool g_trace_mode;
@@ -77,6 +86,13 @@ static bool g_trace_requested;
 static uint8_t g_led_r = 0x00;
 static uint8_t g_led_g = 0xcc;
 static uint8_t g_led_b = 0xff;
+
+/*
+ * Set when the "bitstream" EDID profile is active.  The PS5 leaves the
+ * receiver's non-PCM channel-status bit clear even while sending AC-3, so in
+ * this mode no block may reach SDL before it has been verified preamble-free.
+ */
+static bool g_bitstream_edid;
 
 /* Presentation options; the GUI forwards its checkboxes as CLI flags. */
 enum stream_aspect {
@@ -269,7 +285,8 @@ static void print_usage(const char *prog)
 	printf("Usage: %s [PCI_ADDRESS] [OPTIONS]\n", prog);
 	printf("  --led COLOR       off|blue|green|red|cyan|magenta|yellow|white|#RRGGBB\n");
 	printf("                    LED colour while streaming (default: cyan #00ccff).\n");
-	printf("  --edid VALUE      default|1440p120|1080p240|/path/to/custom.edid\n");
+	printf("  --edid VALUE      default|1440p120|1080p240|bitstream|/path/to/custom.edid\n");
+	printf("                    'bitstream' adds AC-3/DTS 5.1 SADs (passthrough).\n");
 	printf("                    EDID advertised to the source (default: default).\n");
 	printf("  -f, --fullscreen  Start the SDL2 window in fullscreen (F toggles).\n");
 	printf("  --vsync           Pace presentation to the display refresh rate.\n");
@@ -573,12 +590,13 @@ static int compute_output_and_buffers(
 	}
 
 	/*
-	 * One buffer already sustains 1440p120 (the verified configuration),
-	 * and a 4K ring would otherwise pin ~66 MiB.  Keep large frames at one
-	 * buffer and use the extra ring depth only for 720p-class modes.
+	 * Triple buffering: the CPU copies a finished frame while the FPGA must
+	 * already have another free channel armed.  A one-buffer ring drops the
+	 * next hardware frame (visible as 1440p/50/120 Hz micro-stutter).  Larger
+	 * rings only waste memlock.
 	 */
-	if (frame_map > 4U * 1024U * 1024U && buffers > 1U)
-		buffers = 1U;
+	if (buffers > 3U)
+		buffers = 3U;
 
 	*out_width = width;
 	*out_height = height;
@@ -1240,11 +1258,33 @@ struct audio_playback {
 	bool queue_error_reported;
 };
 
+enum audio_bitstream_kind {
+	AUDIO_BITSTREAM_NONE,
+	AUDIO_BITSTREAM_AC3,
+	AUDIO_BITSTREAM_DTS,
+	AUDIO_BITSTREAM_OTHER,
+};
+
 struct audio_stream {
 	struct gc573_user_audio dma;
 	bool dma_ready;
 	bool sdl_ready;
 	bool streaming;
+	bool non_pcm;
+	bool preamble_muted;
+	bool lpcm_verified;
+	unsigned int clean_blocks;
+	enum audio_bitstream_kind bitstream;
+	uint8_t bitstream_type;
+	struct gc573_bitstream_decoder bt;
+	bool bt_ready;
+	bool bt_playing;
+	enum gc573_bitstream_codec bt_codec;
+	bool bt_error_reported;
+	uint8_t *bitstream_buf;
+	size_t bitstream_buf_size;
+	enum gc573_bitstream_word_align word_align;
+	bool word_align_known;
 	uint32_t format_rate;
 	unsigned int format_channels;
 	unsigned int format_bits;
@@ -1381,20 +1421,357 @@ static size_t audio_convert_pcm(const struct gc573_user_audio *dma,
 	return out_bytes;
 }
 
-static void audio_queue_block(struct audio_stream *as, const void *data,
-			      size_t bytes)
+static const char *audio_bitstream_name(enum audio_bitstream_kind kind)
+{
+	switch (kind) {
+	case AUDIO_BITSTREAM_AC3:
+		return "Dolby Digital AC-3 (5.1)";
+	case AUDIO_BITSTREAM_DTS:
+		return "DTS (5.1)";
+	case AUDIO_BITSTREAM_OTHER:
+		return "unknown compressed stream";
+	default:
+		return "non-PCM";
+	}
+}
+
+static const char *audio_bitstream_osd_name(enum audio_bitstream_kind kind)
+{
+	switch (kind) {
+	case AUDIO_BITSTREAM_AC3:
+		return "Dolby Digital";
+	case AUDIO_BITSTREAM_DTS:
+		return "DTS";
+	default:
+		return "Bitstream";
+	}
+}
+
+static bool audio_output_muted(const struct audio_stream *as)
+{
+	if (as->bt_playing && as->playback.dev)
+		return false;
+	if (as->non_pcm || as->preamble_muted)
+		return true;
+	/* 8-channel/16-bit LPCM is unambiguous and safe to play. */
+	if (as->format_channels >= 8 && as->format_bits == 16)
+		return false;
+	return g_bitstream_edid && !as->lpcm_verified;
+}
+
+/*
+ * IEC 61937 bursts start with Pa = 0xF872 and Pb = 0x4E1F, followed by the
+ * 16-bit Pc burst-info word.  Pc[4:0] carries the data type (0x01 AC-3,
+ * 0x0b DTS); a few implementations use Pc[12:8] instead.  The FPGA delivers
+ * little-endian 16-bit words; accept the big-endian byte order as well so a
+ * different packing cannot hide the stream.
+ */
+static bool audio_parse_iec61937_preamble(const uint8_t *p, uint8_t *type)
+{
+	uint16_t pc;
+	uint8_t value;
+
+	if (p[0] == 0x72 && p[1] == 0xf8 && p[2] == 0x1f && p[3] == 0x4e)
+		pc = (uint16_t)(p[4] | (p[5] << 8));
+	else if (p[0] == 0xf8 && p[1] == 0x72 && p[2] == 0x4e && p[3] == 0x1f)
+		pc = (uint16_t)((p[4] << 8) | p[5]);
+	else
+		return false;
+
+	value = (uint8_t)(pc & 0x1f);
+	if (value != 0x01 && value != 0x0b) {
+		uint8_t alt = (uint8_t)((pc >> 8) & 0x1f);
+
+		if (alt == 0x01 || alt == 0x0b)
+			value = alt;
+	}
+	*type = value;
+	return true;
+}
+
+static bool audio_scan_bitstream(struct audio_stream *as, const uint8_t *data,
+				 size_t bytes)
+{
+	for (size_t i = 0; i + 6 <= bytes; i++) {
+		enum audio_bitstream_kind kind;
+		uint8_t type = 0;
+
+		if (!audio_parse_iec61937_preamble(data + i, &type))
+			continue;
+
+		/*
+		 * Type 0x00 is a NULL/padding burst.  It is still a valid IEC 61937
+		 * preamble and MUST count as bitstream, otherwise a run of padding
+		 * bursts looks like clean LPCM.  Optionally name the codec from the
+		 * AC-3 sync word that follows an unreliable Pc word.
+		 */
+		if (type == 0x00) {
+			/* Payload words are LSB-first: AC-3 sync 0x0B77 reads 77 0B. */
+			if (i + 10 <= bytes && data[i + 8] == 0x77 &&
+			    data[i + 9] == 0x0b) {
+				if (as->bitstream != AUDIO_BITSTREAM_AC3) {
+					as->bitstream = AUDIO_BITSTREAM_AC3;
+					as->bitstream_type = 0x01;
+					printf("[AUDIO] Bitstream detected: %s (NULL burst with AC-3 sync, muted)\n",
+					       audio_bitstream_name(AUDIO_BITSTREAM_AC3));
+				}
+			}
+			return true;
+		}
+
+		switch (type) {
+		case 0x01:
+			kind = AUDIO_BITSTREAM_AC3;
+			break;
+		case 0x0b:
+			kind = AUDIO_BITSTREAM_DTS;
+			break;
+		default:
+			kind = AUDIO_BITSTREAM_OTHER;
+			break;
+		}
+
+		if (kind != as->bitstream || type != as->bitstream_type) {
+			as->bitstream = kind;
+			as->bitstream_type = type;
+			printf("[AUDIO] Bitstream detected: %s (IEC 61937 type 0x%02x, muted)\n",
+			       audio_bitstream_name(kind), type);
+		}
+		return true;
+	}
+
+	return false;
+}
+
+static void audio_queue_pcm_bytes(struct audio_stream *as, const void *data,
+				  size_t bytes)
 {
 	struct audio_playback *playback = &as->playback;
 	uint32_t max_queued;
 	uint32_t queued;
+
+	if (!playback->dev || !bytes)
+		return;
+
+	max_queued = (uint32_t)((uint64_t)playback->rate *
+				playback->bytes_per_frame *
+				AUDIO_QUEUE_LIMIT_MS / 1000U);
+	queued = SDL_GetQueuedAudioSize(playback->dev);
+	if (queued >= max_queued) {
+		as->dropped_blocks++;
+		return;
+	}
+
+	if (SDL_QueueAudio(playback->dev, data, (Uint32)bytes) < 0) {
+		if (!playback->queue_error_reported) {
+			pr_warn("SDL audio: SDL_QueueAudio failed: %s",
+				SDL_GetError());
+			playback->queue_error_reported = true;
+		}
+	} else {
+		as->queued_blocks++;
+	}
+}
+
+static enum gc573_bitstream_codec audio_bitstream_codec_for_kind(
+		enum audio_bitstream_kind kind)
+{
+	switch (kind) {
+	case AUDIO_BITSTREAM_AC3:
+		return GC573_BITSTREAM_CODEC_AC3;
+	case AUDIO_BITSTREAM_DTS:
+		return GC573_BITSTREAM_CODEC_DTS;
+	default:
+		return GC573_BITSTREAM_CODEC_NONE;
+	}
+}
+
+static bool audio_bitstream_prepare(struct audio_stream *as)
+{
+	enum gc573_bitstream_codec codec =
+		audio_bitstream_codec_for_kind(as->bitstream);
+
+	if (codec == GC573_BITSTREAM_CODEC_NONE)
+		return false;
+
+	if (!as->bt_ready || as->bt_codec != codec) {
+		if (as->bt_ready) {
+			gc573_bitstream_decoder_close(&as->bt);
+			as->bt_ready = false;
+		}
+		if (gc573_bitstream_decoder_init(&as->bt, codec, 48000, 2) < 0) {
+			if (!as->bt_error_reported) {
+				pr_warn("Bitstream: libavcodec has no usable %s decoder; output stays muted",
+					codec == GC573_BITSTREAM_CODEC_AC3 ?
+					"AC-3" : "DTS");
+				as->bt_error_reported = true;
+			}
+			return false;
+		}
+		as->bt_ready = true;
+		as->bt_codec = codec;
+		as->bt_error_reported = false;
+		pr_info("Bitstream: %s decoder ready -> 48000 Hz stereo S16",
+			codec == GC573_BITSTREAM_CODEC_AC3 ? "AC-3" : "DTS");
+	}
+
+	/* Decoded audio is always 48 kHz S16 stereo. */
+	if (as->playback.dev &&
+	    (as->playback.rate != 48000 || as->playback.bits != 16))
+		audio_close_device(&as->playback);
+	if (!as->playback.dev &&
+	    audio_open_device(&as->playback, 48000, 16) < 0)
+		return false;
+
+	return true;
+}
+
+static void audio_bitstream_decode(struct audio_stream *as,
+				   const void *data, size_t bytes)
+{
 	size_t out_bytes;
+
+	if (!as->bt_ready || !as->playback.dev ||
+	    !as->playback.scratch || !as->playback.scratch_size)
+		return;
+
+	out_bytes = as->playback.scratch_size;
+	if (gc573_bitstream_decoder_feed(&as->bt, data, bytes,
+					 as->playback.scratch,
+					 &out_bytes) < 0)
+		return;
+	if (!out_bytes)
+		return;
+
+	as->bt_playing = true;
+	audio_queue_pcm_bytes(as, as->playback.scratch, out_bytes);
+}
+
+static size_t audio_unpack_block(struct audio_stream *as, const void *data,
+				 size_t bytes,
+				 enum gc573_bitstream_word_align align)
+{
+	unsigned int frame_bytes;
+
+	if (!as->bitstream_buf || !as->bitstream_buf_size)
+		return 0;
+
+	frame_bytes = as->dma.dma_channels * as->dma.sample_bytes;
+	return gc573_bitstream_unpack_iec_words(
+		data, bytes, frame_bytes, as->dma.sample_bytes, align,
+		as->bitstream_buf, as->bitstream_buf_size);
+}
+
+static void audio_queue_block(struct audio_stream *as, const void *data,
+			      size_t bytes)
+{
+	struct audio_playback *playback = &as->playback;
+	const uint8_t *scan_data = data;
+	size_t scan_bytes = bytes;
+	bool unambiguous_lpcm;
+	bool decode_mode;
+	bool preamble;
+	size_t out_bytes;
+
+	/*
+	 * HDMI carries IEC 61937 in the first two channels.  An S24_3LE carrier
+	 * stores the 16-bit words MSB-aligned, so Pa and Pb are separated by a
+	 * padding byte.  Compact the words into a plain 16-bit stream first;
+	 * S16 carriers only need the first two channels copied.
+	 */
+	if (as->dma.sample_bytes >= 2 && as->dma.dma_channels >= 2 &&
+	    as->bitstream_buf && as->bitstream_buf_size) {
+		if (as->dma.sample_bytes == 3) {
+			if (!as->word_align_known) {
+				size_t n = audio_unpack_block(as, data, bytes,
+						GC573_BITSTREAM_WORD_MSB);
+
+				if (gc573_bitstream_has_preamble(as->bitstream_buf, n)) {
+					as->word_align = GC573_BITSTREAM_WORD_MSB;
+					as->word_align_known = true;
+				} else {
+					n = audio_unpack_block(as, data, bytes,
+						GC573_BITSTREAM_WORD_LSB);
+					if (gc573_bitstream_has_preamble(as->bitstream_buf, n)) {
+						as->word_align = GC573_BITSTREAM_WORD_LSB;
+						as->word_align_known = true;
+					}
+				}
+			}
+			scan_bytes = audio_unpack_block(as, data, bytes,
+					as->word_align_known ? as->word_align :
+					GC573_BITSTREAM_WORD_MSB);
+		} else {
+			scan_bytes = audio_unpack_block(as, data, bytes,
+					GC573_BITSTREAM_WORD_MSB);
+		}
+		if (scan_bytes)
+			scan_data = as->bitstream_buf;
+		else
+			scan_bytes = bytes;
+	}
+
+	/*
+	 * Inspect every block first.  Any IEC 61937 preamble - including type
+	 * 0x00 NULL/padding bursts - switches the stream into decoder mode and
+	 * must never be mistaken for clean LPCM.
+	 */
+	preamble = audio_scan_bitstream(as, scan_data, scan_bytes);
+	unambiguous_lpcm = as->format_channels >= 8 &&
+			   as->format_bits == 16;
+
+	if (preamble) {
+		if (!as->preamble_muted) {
+			printf("[AUDIO] IEC 61937 preamble found; routing through the compressed decoder\n");
+			if (playback->dev)
+				SDL_ClearQueuedAudio(playback->dev);
+		}
+		as->preamble_muted = true;
+		as->lpcm_verified = false;
+		as->clean_blocks = 0;
+	} else if (as->preamble_muted) {
+		if (unambiguous_lpcm) {
+			if (++as->clean_blocks >= AUDIO_LPCM_CONFIRM_BLOCKS) {
+				as->preamble_muted = false;
+				as->lpcm_verified = true;
+				as->bt_playing = false;
+				if (as->bt_ready) {
+					gc573_bitstream_decoder_close(&as->bt);
+					as->bt_ready = false;
+					as->bt_codec = GC573_BITSTREAM_CODEC_NONE;
+				}
+				printf("[AUDIO] LPCM confirmed after %u clean blocks; switching back to PCM\n",
+				       as->clean_blocks);
+			}
+		} else {
+			/* 2ch/24 is the compressed carrier; never counts as LPCM. */
+			as->clean_blocks = 0;
+		}
+	}
+
+	decode_mode = as->non_pcm ||
+		      (g_bitstream_edid && !unambiguous_lpcm) ||
+		      (as->preamble_muted && !unambiguous_lpcm);
+
+	if (decode_mode) {
+		/* S24: do not feed a wrong word alignment into the decoder. */
+		if (as->dma.sample_bytes == 3 && !as->word_align_known)
+			return;
+		if (audio_bitstream_prepare(as))
+			audio_bitstream_decode(as, scan_data, scan_bytes);
+		return;
+	}
+
+	/* Unambiguous LPCM may still be inside its verification window. */
+	if (as->preamble_muted)
+		return;
 
 	if (!playback->dev)
 		return;
 
 	out_bytes = audio_convert_pcm(&as->dma, data, bytes,
-				      playback->scratch,
-				      playback->scratch_size);
+					      playback->scratch,
+					      playback->scratch_size);
 	if (!out_bytes)
 		return;
 
@@ -1423,33 +1800,33 @@ static void audio_queue_block(struct audio_stream *as, const void *data,
 		}
 	}
 
-	max_queued = (uint32_t)((uint64_t)playback->rate *
-				playback->bytes_per_frame *
-				AUDIO_QUEUE_LIMIT_MS / 1000U);
-	queued = SDL_GetQueuedAudioSize(playback->dev);
-	if (queued >= max_queued) {
-		as->dropped_blocks++;
-		return;
-	}
-
-	if (SDL_QueueAudio(playback->dev, playback->scratch,
-			   (Uint32)out_bytes) < 0) {
-		if (!playback->queue_error_reported) {
-			pr_warn("SDL audio: SDL_QueueAudio failed: %s",
-				SDL_GetError());
-			playback->queue_error_reported = true;
-		}
-	} else {
-		as->queued_blocks++;
-	}
+	audio_queue_pcm_bytes(as, playback->scratch, out_bytes);
 }
 
 static void audio_stop_capture(struct audio_stream *as)
 {
+	/* Drop transitional samples immediately, before the DMA stop wait. */
+	if (as->playback.dev)
+		SDL_ClearQueuedAudio(as->playback.dev);
 	if (as->dma_ready && as->dma.streaming)
 		gc573_user_audio_stop(&as->dma);
 	audio_close_device(&as->playback);
 	as->streaming = false;
+	as->non_pcm = false;
+	as->lpcm_verified = false;
+	as->clean_blocks = 0;
+	as->bt_playing = false;
+	as->word_align_known = false;
+	if (as->bt_ready) {
+		gc573_bitstream_decoder_close(&as->bt);
+		as->bt_ready = false;
+		as->bt_codec = GC573_BITSTREAM_CODEC_NONE;
+	}
+	/*
+	 * preamble_muted and the detected codec deliberately survive a format
+	 * change.  The PS5 reports b0 bit6 = 0 even for AC-3, so a restart must
+	 * never fall back to unverified PCM playback.
+	 */
 	as->format_rate = 0;
 	as->format_channels = 0;
 	as->format_bits = 0;
@@ -1469,6 +1846,8 @@ static void audio_handle_format(struct audio_stream *as,
 				const struct gc573_user_audio_format *format,
 				uint64_t now)
 {
+	bool bitstream = format->non_pcm;
+	bool decode_capable;
 	bool channels_ok;
 	bool rate_ok;
 
@@ -1502,13 +1881,15 @@ static void audio_handle_format(struct audio_stream *as,
 		      format->channels == 8;
 	rate_ok = format->rate_hz == 32000 || format->rate_hz == 44100 ||
 		  format->rate_hz == 48000;
-	if (!channels_ok || !rate_ok || format->transport != 0 ||
-	    (format->sample_bits != 16 && format->sample_bits != 24)) {
+	if (!channels_ok || !rate_ok ||
+	    (format->sample_bits != 16 && format->sample_bits != 24) ||
+	    (!bitstream && format->transport != 0)) {
 		if (!as->unsupported_reported) {
 			pr_warn("HDMI audio format not playable: %u Hz, %u ch, "
-				"%u-bit, transport %u; audio disabled",
+				"%u-bit, transport %u%s; audio disabled",
 				format->rate_hz, format->channels,
-				format->sample_bits, format->transport);
+				format->sample_bits, format->transport,
+				bitstream ? " (non-PCM)" : "");
 			as->unsupported_reported = true;
 		}
 		if (as->streaming)
@@ -1519,7 +1900,8 @@ static void audio_handle_format(struct audio_stream *as,
 
 	if (as->streaming && as->format_rate == format->rate_hz &&
 	    as->format_channels == format->channels &&
-	    as->format_bits == format->sample_bits)
+	    as->format_bits == format->sample_bits &&
+	    as->non_pcm == bitstream)
 		return;
 
 	if (as->streaming) {
@@ -1530,8 +1912,19 @@ static void audio_handle_format(struct audio_stream *as,
 	if (!as->sdl_ready || !as->dma_ready || now < as->retry_after)
 		return;
 
-	if (audio_open_device(&as->playback, format->rate_hz,
-			      format->sample_bits) < 0) {
+	/*
+	 * Compressed audio is decoded to 48 kHz S16 stereo.  In bitstream-EDID
+	 * mode an ambiguous carrier (anything but 8ch/16-bit LPCM) is routed
+	 * through the decoder as well, so open the output at the decoded format.
+	 */
+	decode_capable = bitstream ||
+		(g_bitstream_edid &&
+		 (format->channels < 8 || format->sample_bits != 16)) ||
+		(as->preamble_muted &&
+		 (format->channels < 8 || format->sample_bits != 16));
+	if (audio_open_device(&as->playback,
+			      decode_capable ? 48000 : format->rate_hz,
+			      decode_capable ? 16 : format->sample_bits) < 0) {
 		as->retry_after = now + AUDIO_RETRY_MS;
 		return;
 	}
@@ -1548,10 +1941,22 @@ static void audio_handle_format(struct audio_stream *as,
 	}
 
 	as->streaming = true;
+	as->non_pcm = bitstream;
+	as->lpcm_verified = false;
+	as->clean_blocks = 0;
+	if (bitstream)
+		as->preamble_muted = true;
 	as->format_rate = format->rate_hz;
 	as->format_channels = format->channels;
 	as->format_bits = format->sample_bits;
 	as->retry_after = 0;
+
+	if (bitstream)
+		printf("[AUDIO] Bitstream stream active (%u Hz, non-PCM); decoding to stereo\n",
+		       format->rate_hz);
+	else if (decode_capable)
+		printf("[AUDIO] Ambiguous HDMI carrier: %u ch / %u-bit; routing through the decoder\n",
+		       format->channels, format->sample_bits);
 }
 
 static void audio_poll_format(struct audio_stream *as, void *bar0,
@@ -1598,6 +2003,9 @@ static void audio_cleanup(struct audio_stream *as)
 	free(as->playback.scratch);
 	as->playback.scratch = NULL;
 	as->playback.scratch_size = 0;
+	free(as->bitstream_buf);
+	as->bitstream_buf = NULL;
+	as->bitstream_buf_size = 0;
 	if (as->dma_ready) {
 		gc573_user_audio_cleanup(&as->dma);
 		as->dma_ready = false;
@@ -2094,6 +2502,15 @@ int main(int argc, char *argv[])
 		gc573_user_edid_select(GC573_EDID_PROFILE_DEFAULT, NULL);
 	}
 	printf("[EDID] Profile: %s\n", gc573_user_edid_active_name());
+	/*
+	 * The bitstream EDID advertises compressed audio.  In that mode the
+	 * receiver's non-PCM bit is not trustworthy (the PS5 keeps b0 bit6 at 0
+	 * for AC-3), so audio is only released after a content check.
+	 */
+	g_bitstream_edid = strcmp(gc573_user_edid_active_name(),
+				  GC573_EDID_PROFILE_BITSTREAM) == 0;
+	if (g_bitstream_edid)
+		printf("[AUDIO] Bitstream EDID active; SDL output stays muted until LPCM is verified.\n");
 
 	/* 4. Initialize the IT6805 HDMI 2.0 receiver. */
 	ret = gc573_user_it6805_init(ctx.bar0);
@@ -2199,6 +2616,13 @@ int main(int argc, char *argv[])
 			pr_warn("Audio scratch allocation failed; continuing video-only");
 			audio.sdl_ready = false;
 		}
+	}
+	if (audio.sdl_ready) {
+		audio.bitstream_buf = malloc(AUDIO_BITSTREAM_BYTES);
+		if (audio.bitstream_buf)
+			audio.bitstream_buf_size = AUDIO_BITSTREAM_BYTES;
+		else
+			pr_warn("Bitstream scratch allocation failed; compressed audio stays muted");
 	}
 	if (gc573_user_audio_init(&audio.dma, &ctx, ctx.bar0) == 0) {
 		audio.dma_ready = true;
@@ -2626,9 +3050,24 @@ int main(int argc, char *argv[])
 					const char *audio_desc;
 
 					if (audio.streaming) {
-						snprintf(audio_text, sizeof(audio_text),
-							 "L-PCM %ukHz",
-							 (audio.format_rate + 500U) / 1000U);
+						if (audio.bt_playing) {
+							snprintf(audio_text, sizeof(audio_text),
+								 "%s 5.1 -> Stereo",
+								 audio_bitstream_osd_name(audio.bitstream));
+						} else if (audio_output_muted(&audio)) {
+							if (audio.non_pcm ||
+							    audio.preamble_muted)
+								snprintf(audio_text, sizeof(audio_text),
+									 "%s (Muted)",
+									 audio_bitstream_osd_name(audio.bitstream));
+							else
+								snprintf(audio_text, sizeof(audio_text),
+									 "Audio (Muted)");
+						} else {
+							snprintf(audio_text, sizeof(audio_text),
+								 "L-PCM %ukHz",
+								 (audio.format_rate + 500U) / 1000U);
+						}
 						audio_desc = audio_text;
 					} else if (audio.sdl_ready && audio.dma_ready) {
 						audio_desc = "No HDMI audio";
@@ -2693,7 +3132,23 @@ int main(int argc, char *argv[])
 				       input_rate_x100 / 100, input_rate_x100 % 100,
 				       output_width, output_height,
 				       fps, (unsigned long)frames);
-				if (audio.streaming && audio.playback.dev) {
+				if (audio.streaming && audio.bt_playing) {
+					printf("[AUDIO] Decoding %s -> Stereo | bursts %lu | frames %lu | errors %lu\n",
+					       audio_bitstream_name(audio.bitstream),
+					       (unsigned long)audio.bt.bursts,
+					       (unsigned long)audio.bt.frames_decoded,
+					       (unsigned long)audio.bt.decode_errors);
+				} else if (audio.streaming && audio_output_muted(&audio)) {
+					uint64_t dma_delta = audio.dma_blocks -
+							     audio.last_dma_blocks;
+
+					printf("[AUDIO] %s (muted) | DMA %lu blocks/s | SDL output disabled\n",
+					       audio.non_pcm || audio.preamble_muted ?
+					       audio_bitstream_name(audio.bitstream) :
+					       "LPCM verification",
+					       (unsigned long)dma_delta);
+					audio.last_dma_blocks = audio.dma_blocks;
+				} else if (audio.streaming && audio.playback.dev) {
 					uint64_t dma_delta = audio.dma_blocks -
 							     audio.last_dma_blocks;
 					uint64_t queued_delta = audio.queued_blocks -

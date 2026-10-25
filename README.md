@@ -1,6 +1,6 @@
 # EverLive - AVerMedia GC573 Linux Gaming Suite & Userspace Driver
 
-[![Version](https://img.shields.io/badge/version-v1.0.1-blue.svg)](https://github.com/Everlite/EverLive/releases)
+[![Version](https://img.shields.io/badge/version-v1.1.0-blue.svg)](https://github.com/Everlite/EverLive/releases)
 [![Status](https://img.shields.io/badge/status-1440p120%20%2B%204K60%20%2B%20Audio%20(Hardware%20Verified)-brightgreen.svg)](#hardware-verified-capabilities)
 [![Driver](https://img.shields.io/badge/driver-Userspace%20VFIO%20(Blob--Free)-2e7d32.svg)](#architecture--design)
 [![Kernel Modules](https://img.shields.io/badge/DKMS-None%20Required-success.svg)](#architecture--design)
@@ -87,7 +87,39 @@ Ensure virtualization and IOMMU support are enabled in your motherboard settings
 * **Intel:** Enable **VT-d** (Virtualization Technology for Directed I/O).
 * **AMD:** Enable **AMD-Vi** or **IOMMU**.
 
-### 2. Check IOMMU Grouping
+### 2. Enable IOMMU in the Linux Kernel Command Line
+Enabling VT-d / AMD-Vi in your UEFI/BIOS is necessary, but **not always sufficient**. Many Linux distributions leave secondary PCIe slots unmanaged by the IOMMU unless explicitly commanded at boot.
+
+Add the following parameter to your bootloader (e.g. GRUB):
+* **Intel:** `intel_iommu=on iommu=pt`
+* **AMD:** `amd_iommu=on iommu=pt`
+
+#### How to configure GRUB:
+1. Edit `/etc/default/grub`:
+   ```bash
+   sudo nano /etc/default/grub
+   ```
+2. Append the parameter to `GRUB_CMDLINE_LINUX_DEFAULT`:
+   ```text
+   GRUB_CMDLINE_LINUX_DEFAULT="... intel_iommu=on iommu=pt"
+   ```
+3. Update GRUB and reboot:
+   ```bash
+   # Ubuntu / Debian / Mint
+   sudo update-grub
+
+   # Arch / Fedora / CachyOS
+   sudo grub-mkconfig -o /boot/grub/grub.cfg
+
+   sudo reboot
+   ```
+
+> [!TIP]
+> **Symptom if missing:** The card blinks red, and running `dmesg | grep -i vfio` shows:  
+> `vfio-pci ...: probe with driver vfio-pci failed with error -22`  
+> *(Error -22 / -EINVAL means the Linux kernel has not allocated an IOMMU group for this PCIe slot).*
+
+### 3. Check IOMMU Grouping
 On modern motherboards, PCIe slots are usually isolated into individual IOMMU groups. You can verify your card's group isolation with this command:
 
 ```bash
