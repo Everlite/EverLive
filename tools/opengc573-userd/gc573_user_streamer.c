@@ -693,6 +693,13 @@ static bool signal_parameters_equal(const struct gc573_user_video_signal *a,
 static float display_aspect_for_signal(
 			const struct gc573_user_video_signal *sig)
 {
+	/*
+	 * 3840x1080 is RetroTINK-4K Pro anamorphic 16:9 4K120 BFI mode.
+	 * Automatically stretch 2x vertically to fill 16:9 without requiring manual overrides.
+	 */
+	if (sig->width == 3840 && sig->height == 1080)
+		return 16.0f / 9.0f;
+
 	/* 240p/288p super-resolution and 480i/576i are presented as 4:3. */
 	switch (sig->height) {
 	case 240:

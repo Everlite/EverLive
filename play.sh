@@ -52,12 +52,18 @@ if [ "$IS_VFIO" -eq 0 ]; then
     fi
 fi
 
-# 4. Direct CLI passthrough: if --cli is passed, launch streamer directly
+# 4. Direct CLI passthrough: if --cli or streamer-specific flags are passed, launch streamer directly
 if [ "${1:-}" = "--cli" ]; then
     shift
     "${USERD_DIR}/gc573_user_streamer" "$@"
     exit $?
 fi
+
+for arg in "$@"; do
+    if [ "$arg" = "--aspect" ] || [ "$arg" = "--edid" ]; then
+        exec "${USERD_DIR}/gc573_user_streamer" "$@"
+    fi
+done
 
 # 5. Launch EverLive Console Hub GUI
 if [ -x "${SCRIPT_DIR}/tools/everlive/.venv/bin/python3" ]; then

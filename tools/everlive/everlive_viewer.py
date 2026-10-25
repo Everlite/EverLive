@@ -741,6 +741,7 @@ class GameStreamer:
         self._vfio_saw_output = False
         # Last audio state parsed from the streamer log; shown in the capsule.
         self._vfio_audio = {"state": "unknown", "detail": ""}
+        self.aspect = "auto"
         saved_signal = load_settings().get("last_signal")
         self._vfio_signal = saved_signal if isinstance(saved_signal, dict) else None
 
@@ -1118,6 +1119,8 @@ class GameStreamer:
             cmd.append("--fullscreen")
         cmd.append("--vsync" if vsync else "--no-vsync")
         cmd.append("--streamer-mode" if streamer_mode else "--osd")
+        if hasattr(self, "aspect") and self.aspect and self.aspect != "auto":
+            cmd.extend(["--aspect", self.aspect])
 
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -2418,6 +2421,7 @@ def main():
     parser.add_argument("-v", "--volume", type=float, default=1.0, help="Audio volume (0.0 to 1.5)")
     parser.add_argument("-d", "--device", default=None, help="V4L2 video device (e.g. /dev/video0, default: auto-detect)")
     parser.add_argument("-a", "--audio", default=None, help="ALSA audio device (e.g. hw:CARD=A4K,DEV=0, default: auto-detect)")
+    parser.add_argument("--aspect", choices=["auto", "16:9", "4:3", "stretch"], default="auto", help="Aspect ratio override")
     args = parser.parse_args()
 
     if args.led is not None:
@@ -2449,6 +2453,7 @@ def main():
             sys.exit(0)
 
     streamer = GameStreamer(vdev=args.device, adev=args.audio, force_mpv=args.mpv)
+    streamer.aspect = args.aspect
     if args.fullscreen or args.streamer_mode:
         streamer._cli_autostart = True
 
