@@ -92,7 +92,9 @@ if [ "$WANT_V4L2" -eq 1 ]; then
             VIDEO_NR=10
         fi
         echo "[*] V4L2-Loopback ${V4L2_DEV} nicht gefunden; lade v4l2loopback (video_nr=${VIDEO_NR})..."
-        MODPROBE_ARGS=(v4l2loopback "video_nr=${VIDEO_NR}" "card_label=EverLive Capture" "exclusive_caps=1")
+        # exclusive_caps=0 keeps VIDEO_CAPTURE advertised even without an active
+        # writer, so OBS never drops the node from its device list.
+        MODPROBE_ARGS=(v4l2loopback "video_nr=${VIDEO_NR}" "card_label=EverLive Capture" "exclusive_caps=0")
         if [ "$EUID" -eq 0 ]; then
             if ! modprobe "${MODPROBE_ARGS[@]}"; then
                 echo "[!] v4l2loopback konnte nicht geladen werden." >&2
@@ -112,7 +114,7 @@ if [ "$WANT_V4L2" -eq 1 ]; then
         done
         if [ ! -e "$V4L2_DEV" ]; then
             echo "[!] ${V4L2_DEV} existiert weiterhin nicht." >&2
-            echo "    Prüfe: sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback video_nr=${VIDEO_NR} card_label=\"EverLive Capture\" exclusive_caps=1" >&2
+            echo "    Prüfe: sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback video_nr=${VIDEO_NR} card_label=\"EverLive Capture\" exclusive_caps=0" >&2
             exit 1
         fi
     fi
@@ -122,8 +124,16 @@ if [ "$WANT_V4L2" -eq 1 ]; then
         V4L2_CARD_NAME="$(cat "$V4L2_SYS_NAME")"
         if [ "$V4L2_CARD_NAME" != "EverLive Capture" ]; then
             echo "[!] ${V4L2_DEV} meldet sich als '${V4L2_CARD_NAME}', nicht 'EverLive Capture'." >&2
-            echo "    Für den korrekten Namen: sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback video_nr=${VIDEO_NR} card_label=\"EverLive Capture\" exclusive_caps=1" >&2
+            echo "    Für den korrekten Namen: sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback video_nr=${VIDEO_NR} card_label=\"EverLive Capture\" exclusive_caps=0" >&2
         fi
+    fi
+
+    # A module instance loaded by an older EverLive release still hides the
+    # capture caps until a writer appears, which drops the node in OBS.
+    V4L2_CAPS_PARAM="/sys/module/v4l2loopback/parameters/exclusive_caps"
+    if [ -r "$V4L2_CAPS_PARAM" ] && [ "$(cat "$V4L2_CAPS_PARAM")" = "1" ]; then
+        echo "[!] v4l2loopback läuft mit exclusive_caps=1; ${V4L2_DEV} verschwindet in OBS ohne aktiven Writer." >&2
+        echo "    Neu laden: sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback video_nr=${VIDEO_NR} card_label=\"EverLive Capture\" exclusive_caps=0" >&2
     fi
 fi
 

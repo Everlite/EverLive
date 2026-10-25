@@ -4,6 +4,7 @@
 
 | Version / Branch | Supported |
 |:---|:---|
+| `v1.2.x` | :white_check_mark: |
 | `v1.1.x` | :white_check_mark: |
 | `main` | :white_check_mark: |
 | `v1.0.x` | :white_check_mark: |

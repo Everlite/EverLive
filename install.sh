@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive v1.1.0 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573)
+# EverLive v1.2.0 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573)
 # ==============================================================================
 # Installiert den 100% blob-freien Userspace VFIO-Treiber, udev-Hardware-Rechte,
 # Speicher-Locking-Limits und die EverLive Desktop-App für HDMI Console Gaming.
 #
-# Kein DKMS, keine Kernel-Header, kein Kernel-Neukompilieren bei Updates!
+# Kein DKMS, keine Kernel-Header, kein Kernel-Neukompilieren für EverLive selbst!
+# Optional (nur Virtual Camera): v4l2loopback aus dem Distributions-Repo.
 # 100% Secure Boot & Anti-Cheat (EAC v2) kompatibel.
 # ==============================================================================
 set -euo pipefail
@@ -22,7 +23,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}===================================================================${NC}"
-echo -e "${BLUE}     EverLive v1.1.0 - GC573 Userspace Gaming Suite Installer     ${NC}"
+echo -e "${BLUE}     EverLive v1.2.0 - GC573 Userspace Gaming Suite Installer     ${NC}"
 echo -e "${BLUE}===================================================================${NC}"
 
 # 1. Root-Prüfung / Sudo
@@ -42,6 +43,59 @@ echo -e "[*] Linux Kernel : ${GREEN}$(uname -r)${NC}"
 echo -e "[*] Architektur  : ${GREEN}100% Userspace VFIO (Blob-Free Ring 3)${NC}"
 
 # 2. Paketmanager & Abhängigkeiten erkennen
+
+# Optionales Virtual-Camera-Modul. Ohne v4l2loopback funktioniert EverLive
+# vollständig, nur der /dev/video10-Ausgang bleibt deaktiviert; der Installer
+# darf daran niemals scheitern (set -e).
+ensure_v4l2loopback() {
+    echo -e "\n${BLUE}[*] Prüfe Virtual-Camera-Modul (v4l2loopback)...${NC}"
+
+    if modinfo v4l2loopback >/dev/null 2>&1; then
+        echo -e "${GREEN}[+] v4l2loopback ist bereits verfügbar.${NC}"
+        return 0
+    fi
+
+    if command -v pacman >/dev/null 2>&1; then
+        if pacman -Si v4l2loopback-dkms >/dev/null 2>&1; then
+            local -a V4L2_PKGS=(v4l2loopback-dkms)
+            # DKMS needs headers matching the running kernel flavour.
+            for kernel_pkg in linux linux-lts linux-zen linux-hardened; do
+                if pacman -Q "${kernel_pkg}" >/dev/null 2>&1 &&
+                   ! pacman -Q "${kernel_pkg}-headers" >/dev/null 2>&1 &&
+                   pacman -Si "${kernel_pkg}-headers" >/dev/null 2>&1; then
+                    V4L2_PKGS+=("${kernel_pkg}-headers")
+                fi
+            done
+            pacman -S --needed --noconfirm "${V4L2_PKGS[@]}" || true
+        elif command -v yay >/dev/null 2>&1; then
+            sudo -u "${TARGET_USER}" yay -S --needed --noconfirm v4l2loopback-dkms || true
+        elif command -v paru >/dev/null 2>&1; then
+            sudo -u "${TARGET_USER}" paru -S --needed --noconfirm v4l2loopback-dkms || true
+        fi
+    elif command -v apt-get >/dev/null 2>&1; then
+        local -a V4L2_PKGS=(v4l2loopback-dkms v4l2loopback-utils)
+        if apt-cache show "linux-headers-$(uname -r)" >/dev/null 2>&1; then
+            V4L2_PKGS+=("linux-headers-$(uname -r)")
+        fi
+        apt-get install -y "${V4L2_PKGS[@]}" || true
+    elif command -v dnf >/dev/null 2>&1; then
+        # akmod-v4l2loopback kommt aus RPM Fusion.
+        dnf install -y akmod-v4l2loopback || true
+    fi
+
+    if modinfo v4l2loopback >/dev/null 2>&1; then
+        echo -e "${GREEN}[+] v4l2loopback installiert.${NC}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}[!] v4l2loopback konnte nicht automatisch installiert werden.${NC}"
+    echo -e "${YELLOW}    EverLive läuft vollständig, nur die Virtual Camera (/dev/video10) bleibt aus.${NC}"
+    echo -e "${YELLOW}    Debian/Ubuntu: sudo apt install v4l2loopback-dkms v4l2loopback-utils linux-headers-\$(uname -r)${NC}"
+    echo -e "${YELLOW}    Fedora:        sudo dnf install akmod-v4l2loopback   (RPM Fusion)${NC}"
+    echo -e "${YELLOW}    Arch:          yay -S v4l2loopback-dkms${NC}"
+    return 0
+}
+
 detect_and_install_deps() {
     echo -e "\n${BLUE}[1/5] Prüfe Software-Abhängigkeiten...${NC}"
     
@@ -92,6 +146,8 @@ detect_and_install_deps() {
         fi
     fi
     echo -e "${GREEN}[+] Alle benötigten Bibliotheken vorhanden!${NC}"
+
+    ensure_v4l2loopback
 }
 
 detect_and_install_deps
@@ -118,8 +174,8 @@ if ! sudo -u "${TARGET_USER}" python3 -c 'import PySide6' >/dev/null 2>&1; then
 fi
 echo -e "${GREEN}[+] Python GUI-Umgebung bereit!${NC}"
 
-# 4. Alte Kernel-Treiber Artefakte bereinigen (Migration)
-echo -e "\n${BLUE}[3/5] Bereinige Legacy Kernel-Artefakte...${NC}"
+# 4. Alte Kernel-Treiber Artefakte bereinigen (Migration) & Virtual Camera konfigurieren
+echo -e "\n${BLUE}[3/5] Bereinige Legacy-Artefakte & konfiguriere Virtual Camera...${NC}"
 rm -f /etc/modules-load.d/everlive.conf
 if command -v dkms >/dev/null 2>&1; then
     dkms remove -m everlive --all 2>/dev/null || true
@@ -129,6 +185,33 @@ modprobe -r open_gc573 2>/dev/null || rmmod open_gc573 2>/dev/null || true
 mkdir -p /etc/modprobe.d
 echo "blacklist open_gc573" > /etc/modprobe.d/blacklist-everlive-legacy.conf
 echo -e "${GREEN}[+] Altes Kernel-Modul deregistriert & geblacklistet.${NC}"
+
+# Virtual Camera: fester Node /dev/video10 mit dauerhaft sichtbaren Caps.
+if modinfo v4l2loopback >/dev/null 2>&1; then
+    mkdir -p /etc/modules-load.d /etc/modprobe.d
+    echo "v4l2loopback" > /etc/modules-load.d/everlive-v4l2loopback.conf
+    cat > /etc/modprobe.d/everlive-v4l2loopback.conf <<EOF
+# Managed by EverLive: virtual camera node for OBS / Discord / FFmpeg.
+# exclusive_caps=0 keeps VIDEO_CAPTURE advertised while no writer is active,
+# so OBS never drops the device from its list.
+options v4l2loopback video_nr=10 card_label="EverLive Capture" exclusive_caps=0
+EOF
+    if ! lsmod | grep -q '^v4l2loopback'; then
+        modprobe v4l2loopback 2>/dev/null || true
+    fi
+    if [ -e /dev/video10 ]; then
+        if [ "$(cat /sys/module/v4l2loopback/parameters/exclusive_caps 2>/dev/null || echo 0)" = "1" ]; then
+            echo -e "${YELLOW}[!] /dev/video10 existiert, aber die laufende Instanz nutzt noch exclusive_caps=1.${NC}"
+            echo -e "${YELLOW}    Nach einem Neustart (oder 'sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback') gilt exclusive_caps=0.${NC}"
+        else
+            echo -e "${GREEN}[+] /dev/video10 'EverLive Capture' bereit (exclusive_caps=0).${NC}"
+        fi
+    else
+        echo -e "${YELLOW}[!] v4l2loopback konfiguriert, aber /dev/video10 fehlt noch (Neustart nötig).${NC}"
+    fi
+else
+    echo -e "${YELLOW}[!] v4l2loopback nicht verfügbar; Virtual Camera bleibt bis zur Installation aus.${NC}"
+fi
 
 # 5. Udev-Rechte für vfio-pci & unbegrenzten Memlock einrichten
 echo -e "\n${BLUE}[4/5] Richte VFIO Hardware-Zugriffsrechte (udev) & Memlock ein...${NC}"
@@ -200,7 +283,7 @@ chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive.desktop" 2>/dev/n
 rm -f "${APPS_DIR}/everlive-intern.desktop" 2>/dev/null || true
 
 echo -e "\n${GREEN}===================================================================${NC}"
-echo -e "${GREEN}      EverLive v1.1.0 erfolgreich installiert & einsatzbereit!      ${NC}"
+echo -e "${GREEN}      EverLive v1.2.0 erfolgreich installiert & einsatzbereit!      ${NC}"
 echo -e "${GREEN}===================================================================${NC}"
 echo -e "Du kannst EverLive ab sofort direkt über dein Startmenü starten,"
 echo -e "oder im Terminal mit: ${BLUE}./play.sh${NC}"

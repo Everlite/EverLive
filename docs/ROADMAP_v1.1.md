@@ -1,9 +1,15 @@
 # EverLive v1.1 Internal Engineering Roadmap ("The Zero-Friction Era")
 
-> **Internal Working Document for EverLive Development & AI-Assisted Architecture Review**  
-> Target: EverLive v1.1.0  
-> Maintainer: @Everlite  
+> **Internal Working Document for EverLive Development & AI-Assisted Architecture Review**
+> Target: EverLive v1.1.0
+> Maintainer: @Everlite
 > Collaborator / Review: DeepSeek & Community (PolygonPrincess, haxman, nepnep)
+>
+> **STATUS: HISTORICAL — v1.1.0 shipped.** Work Package 1 (`libeverlive-v4l2.so`)
+> was **not** implemented; virtual-camera support was solved in v1.2.0 with a
+> bundled `v4l2loopback` sink (`--v4l2` / `--headless`). The remaining work
+> packages shipped across v1.1.0 and v1.2.0. See [`CHANGELOG.md`](../CHANGELOG.md)
+> and [`TODO.md`](../TODO.md) for the current state.
 
 ---
 

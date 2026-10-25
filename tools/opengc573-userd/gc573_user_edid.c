@@ -106,8 +106,8 @@ static const u8 g_gc573_edid_1080p240[GC573_EDID_SIZE] = {
 	0x00, 0x00, 0x00, 0xf4,
 };
 
-/* Active profile; the built-in default is used until one is selected. */
-static const u8 *g_active_edid = g_gc573_default_edid;
+/* Active profile; resolved (and materialised) on first use. */
+static const u8 *g_active_edid;
 static const char *g_active_edid_name = GC573_EDID_PROFILE_DEFAULT;
 static u8 g_custom_edid[GC573_EDID_SIZE];
 static bool g_edid_programmed;
@@ -140,119 +140,139 @@ static int edid_validate(const u8 *edid)
 }
 
 /*
- * Bitstream profile: the default video/colour blocks plus AC-3 and DTS short
- * audio descriptors in the CTA-861 Audio Data Block.  The audio block grows
- * by two SADs (6 bytes), so the remaining data blocks shift and the CTA DTD
- * offset moves with them.  The trailing 1080p144 detailed timing no longer
- * fits in the 128-byte extension and is dropped; 4K60, 1440p120, 1440p144 and
- * all CTA VICs (including 1080p120) stay advertised.
+ * Every built-in profile advertises L-PCM (8 ch) plus Dolby Digital (AC-3)
+ * and DTS 5.1 in the CTA-861 Audio Data Block.  A console may therefore emit
+ * decoded LPCM or IEC 61937 bursts at any time without a manual profile
+ * switch; gc573_user_streamer decides per block what the carrier holds.
  */
-static const u8 g_gc573_edid_bitstream_sads[] = {
+static const u8 g_gc573_edid_audio_sads[] = {
 	0x0f, 0x07, 0x07,	/* LPCM, 8 ch, 32/44.1/48 kHz, 24-bit */
 	0x15, 0x07, 0x50,	/* AC-3, 6 ch, 32/44.1/48 kHz, 640 kbit/s */
 	0x3d, 0x06, 0xc0,	/* DTS, 6 ch, 44.1/48 kHz, 1536 kbit/s */
 };
 
-static u8 g_gc573_edid_bitstream[GC573_EDID_SIZE];
-static bool g_gc573_edid_bitstream_built;
+static u8 g_gc573_default_edid_unified[GC573_EDID_SIZE];
+static u8 g_gc573_edid_1440p120_unified[GC573_EDID_SIZE];
+static u8 g_gc573_edid_1080p240_unified[GC573_EDID_SIZE];
+static bool g_gc573_default_edid_ready;
+static bool g_gc573_edid_1440p120_ready;
+static bool g_gc573_edid_1080p240_ready;
 
-#define EDID_CTA_OFFSET		128U
-#define EDID_CTA_DATA_OFFSET	132U
+#define EDID_CTA_OFFSET			128U
+#define EDID_CTA_DATA_OFFSET		132U
 #define EDID_CTA_CHECKSUM_OFFSET	255U
-#define EDID_CTA_AUDIO_TAG	1U
-#define EDID_CTA_AUDIO_LEN	(sizeof(g_gc573_edid_bitstream_sads))
-#define EDID_CTA_BLOCK_LEN(len)	(1U + (len))
-#define EDID_DTD_SIZE		18U
+#define EDID_CTA_AUDIO_TAG		1U
+#define EDID_CTA_EXTENDED_TAG		7U
+#define EDID_CTA_EXT_VIDEO_CAPABILITY	0x00U
+#define EDID_CTA_AUDIO_LEN		(sizeof(g_gc573_edid_audio_sads))
+#define EDID_CTA_BLOCK_LEN(len)		(1U + (len))
+#define EDID_DTD_SIZE			18U
 
-static int edid_build_bitstream_profile(void)
+/*
+ * Rewrite the CTA-861 data block collection of @src into @dst with the
+ * unified audio block; every other block keeps its order and content.
+ *
+ * The audio block grows by six bytes (two extra SADs), which shifts the
+ * following data blocks and the detailed timings.  The default profile has
+ * only five spare bytes, so when a DTD would no longer fit the optional Video
+ * Capability Data Block (extended tag 0x00) is dropped to reclaim three bytes.
+ * Should even that be insufficient, the trailing DTD is skipped.
+ */
+static int edid_build_unified_profile(const u8 *src, u8 *dst)
 {
-	const u8 *src = g_gc573_default_edid;
-	u8 *dst = g_gc573_edid_bitstream;
-	unsigned int dtd_offset;
-	unsigned int data_end;
+	unsigned int src_dtd_offset = src[EDID_CTA_OFFSET + 2];
+	unsigned int data_end = EDID_CTA_OFFSET + src_dtd_offset;
+	unsigned int new_audio_len = EDID_CTA_BLOCK_LEN(EDID_CTA_AUDIO_LEN);
 	unsigned int audio_off = 0;
 	unsigned int audio_len = 0;
-	unsigned int audio_end;
-	unsigned int new_block_len;
-	unsigned int delta;
+	unsigned int vcdb_off = 0;
+	unsigned int num_dtds = 0;
 	unsigned int src_off;
 	unsigned int dst_off;
-	unsigned int sum = 0;
+	unsigned int dtd;
+	unsigned int sum;
+	bool drop_vcdb = false;
 
-	if (g_gc573_edid_bitstream_built)
-		return 0;
-
-	memcpy(dst, src, GC573_EDID_SIZE);
-
-	dtd_offset = src[EDID_CTA_OFFSET + 2];
-	data_end = EDID_CTA_OFFSET + dtd_offset;
-	if (dtd_offset < 4 || data_end > EDID_CTA_CHECKSUM_OFFSET)
+	if (src_dtd_offset < 4 || data_end > EDID_CTA_CHECKSUM_OFFSET)
 		return -EINVAL;
 
-	/* Locate the Audio Data Block (tag 1) in the data block collection. */
-	for (unsigned int off = EDID_CTA_DATA_OFFSET; off < data_end;) {
-		unsigned int tag = src[off] >> 5;
-		unsigned int len = src[off] & 0x1f;
+	for (src_off = EDID_CTA_DATA_OFFSET; src_off < data_end; ) {
+		unsigned int tag = src[src_off] >> 5;
+		unsigned int len = src[src_off] & 0x1f;
 
-		if (off + 1 + len > data_end)
+		if (src_off + 1 + len > data_end)
 			return -EINVAL;
 		if (tag == EDID_CTA_AUDIO_TAG) {
-			audio_off = off;
+			audio_off = src_off;
 			audio_len = len;
-			break;
+		} else if (tag == EDID_CTA_EXTENDED_TAG && len >= 1 &&
+			   src[src_off + 1] == EDID_CTA_EXT_VIDEO_CAPABILITY) {
+			vcdb_off = src_off;
 		}
-		off += 1 + len;
+		src_off += 1 + len;
 	}
 	if (!audio_off || audio_len > EDID_CTA_AUDIO_LEN)
 		return -EINVAL;
 
-	new_block_len = EDID_CTA_BLOCK_LEN(EDID_CTA_AUDIO_LEN);
-	delta = new_block_len - EDID_CTA_BLOCK_LEN(audio_len);
-	if (data_end + delta > EDID_CTA_CHECKSUM_OFFSET)
+	/* Count the detailed timings that follow the data block collection. */
+	for (dtd = data_end; dtd + EDID_DTD_SIZE <= EDID_CTA_CHECKSUM_OFFSET;
+	     dtd += EDID_DTD_SIZE) {
+		if (!src[dtd] && !src[dtd + 1])
+			break;
+		num_dtds++;
+	}
+
+	if (data_end + new_audio_len - EDID_CTA_BLOCK_LEN(audio_len) +
+	    num_dtds * EDID_DTD_SIZE > EDID_CTA_CHECKSUM_OFFSET) {
+		if (!vcdb_off)
+			return -EINVAL;
+		drop_vcdb = true;
+	}
+
+	memcpy(dst, src, GC573_EDID_SIZE);
+
+	/* Rebuild the collection so the audio block can change length. */
+	dst_off = EDID_CTA_DATA_OFFSET;
+	for (src_off = EDID_CTA_DATA_OFFSET; src_off < data_end; ) {
+		unsigned int len = src[src_off] & 0x1f;
+
+		if (src_off == audio_off) {
+			dst[dst_off] = (u8)((EDID_CTA_AUDIO_TAG << 5) |
+					    (EDID_CTA_AUDIO_LEN & 0x1f));
+			memcpy(dst + dst_off + 1, g_gc573_edid_audio_sads,
+			       EDID_CTA_AUDIO_LEN);
+			dst_off += new_audio_len;
+		} else if (drop_vcdb && src_off == vcdb_off) {
+			/* Optional block dropped to keep every detailed timing. */
+		} else {
+			memcpy(dst + dst_off, src + src_off, 1 + len);
+			dst_off += 1 + len;
+		}
+		src_off += 1 + len;
+	}
+
+	if (dst_off > EDID_CTA_CHECKSUM_OFFSET)
 		return -EINVAL;
 
-	audio_end = audio_off + 1 + audio_len;
+	dst[EDID_CTA_OFFSET + 2] = (u8)(dst_off - EDID_CTA_OFFSET);
+	memset(dst + dst_off, 0, EDID_CTA_CHECKSUM_OFFSET - dst_off);
 
-	/* Keep the data blocks before the audio block in place. */
-	memcpy(dst + EDID_CTA_DATA_OFFSET, src + EDID_CTA_DATA_OFFSET,
-	       audio_off - EDID_CTA_DATA_OFFSET);
-
-	/* Write the enlarged Audio Data Block. */
-	dst[audio_off] = (u8)((EDID_CTA_AUDIO_TAG << 5) |
-			      (EDID_CTA_AUDIO_LEN & 0x1f));
-	memcpy(dst + audio_off + 1, g_gc573_edid_bitstream_sads,
-	       EDID_CTA_AUDIO_LEN);
-
-	/* Move the remaining data blocks behind the larger audio block. */
-	memcpy(dst + audio_off + new_block_len, src + audio_end,
-	       data_end - audio_end);
-
-	/* New DTD offset, then clear the DTD area. */
-	dst[EDID_CTA_OFFSET + 2] = (u8)(dtd_offset + delta);
-	memset(dst + data_end + delta, 0,
-	       EDID_CTA_CHECKSUM_OFFSET - (data_end + delta));
-
-	/* Copy as many detailed timings as still fit before the checksum. */
-	src_off = data_end;
-	dst_off = data_end + delta;
-	while (src_off + EDID_DTD_SIZE <= EDID_CTA_CHECKSUM_OFFSET &&
-	       dst_off + EDID_DTD_SIZE <= EDID_CTA_CHECKSUM_OFFSET &&
-	       (src[src_off] || src[src_off + 1])) {
-		memcpy(dst + dst_off, src + src_off, EDID_DTD_SIZE);
-		src_off += EDID_DTD_SIZE;
+	for (dtd = data_end; dtd + EDID_DTD_SIZE <= EDID_CTA_CHECKSUM_OFFSET;
+	     dtd += EDID_DTD_SIZE) {
+		if (!src[dtd] && !src[dtd + 1])
+			break;
+		if (dst_off + EDID_DTD_SIZE > EDID_CTA_CHECKSUM_OFFSET)
+			break;
+		memcpy(dst + dst_off, src + dtd, EDID_DTD_SIZE);
 		dst_off += EDID_DTD_SIZE;
 	}
 
-	for (unsigned int i = EDID_CTA_OFFSET;
-	     i < EDID_CTA_CHECKSUM_OFFSET; i++)
+	sum = 0;
+	for (unsigned int i = EDID_CTA_OFFSET; i < EDID_CTA_CHECKSUM_OFFSET; i++)
 		sum += dst[i];
 	dst[EDID_CTA_CHECKSUM_OFFSET] = (u8)(0x100U - (sum & 0xff));
 
-	if (edid_validate(dst) < 0)
-		return -EINVAL;
-
-	g_gc573_edid_bitstream_built = true;
-	return 0;
+	return edid_validate(dst);
 }
 
 static int edid_load_file(const char *path)
@@ -298,6 +318,37 @@ static int edid_use_profile(const u8 *table, const char *name)
 	return 0;
 }
 
+static int edid_use_unified(const u8 *base, u8 *table, bool *built,
+			    const char *name)
+{
+	int ret;
+
+	if (!*built) {
+		ret = edid_build_unified_profile(base, table);
+		if (ret < 0) {
+			pr_err("EDID: cannot build unified profile '%s'", name);
+			return ret;
+		}
+		*built = true;
+	}
+
+	return edid_use_profile(table, name);
+}
+
+/* Resolve the active table, materialising the unified default on first use. */
+static const u8 *edid_current(void)
+{
+	if (!g_active_edid) {
+		if (edid_use_unified(g_gc573_default_edid,
+				     g_gc573_default_edid_unified,
+				     &g_gc573_default_edid_ready,
+				     GC573_EDID_PROFILE_DEFAULT) < 0)
+			return g_gc573_default_edid;
+	}
+
+	return g_active_edid;
+}
+
 int gc573_user_edid_select(const char *profile_name, const char *custom_path)
 {
 	const char *name = profile_name;
@@ -305,31 +356,41 @@ int gc573_user_edid_select(const char *profile_name, const char *custom_path)
 	if (custom_path && *custom_path)
 		return edid_load_file(custom_path);
 	if (!name || !*name)
-		return edid_use_profile(g_gc573_default_edid,
+		return edid_use_unified(g_gc573_default_edid,
+					g_gc573_default_edid_unified,
+					&g_gc573_default_edid_ready,
 					GC573_EDID_PROFILE_DEFAULT);
 
 	if (!strcasecmp(name, "default") || !strcasecmp(name, "auto") ||
 	    !strcasecmp(name, "4k60"))
-		return edid_use_profile(g_gc573_default_edid,
+		return edid_use_unified(g_gc573_default_edid,
+					g_gc573_default_edid_unified,
+					&g_gc573_default_edid_ready,
 					GC573_EDID_PROFILE_DEFAULT);
 	if (!strcasecmp(name, GC573_EDID_PROFILE_1440P120) ||
 	    !strcasecmp(name, "1440p"))
-		return edid_use_profile(g_gc573_edid_1440p120,
+		return edid_use_unified(g_gc573_edid_1440p120,
+					g_gc573_edid_1440p120_unified,
+					&g_gc573_edid_1440p120_ready,
 					GC573_EDID_PROFILE_1440P120);
 	if (!strcasecmp(name, GC573_EDID_PROFILE_1080P240) ||
 	    !strcasecmp(name, "1080p"))
-		return edid_use_profile(g_gc573_edid_1080p240,
+		return edid_use_unified(g_gc573_edid_1080p240,
+					g_gc573_edid_1080p240_unified,
+					&g_gc573_edid_1080p240_ready,
 					GC573_EDID_PROFILE_1080P240);
 	if (!strcasecmp(name, GC573_EDID_PROFILE_BITSTREAM) ||
 	    !strcasecmp(name, "ac3") || !strcasecmp(name, "dts")) {
-		int ret = edid_build_bitstream_profile();
-
-		if (ret < 0) {
-			pr_err("EDID: cannot build bitstream profile");
-			return ret;
-		}
-		return edid_use_profile(g_gc573_edid_bitstream,
-					GC573_EDID_PROFILE_BITSTREAM);
+		/*
+		 * Backward compatibility: AC-3/DTS are advertised by every
+		 * profile now, so the legacy alias selects the unified default.
+		 */
+		pr_info("EDID: '%s' is a legacy alias; using the unified default profile",
+			name);
+		return edid_use_unified(g_gc573_default_edid,
+					g_gc573_default_edid_unified,
+					&g_gc573_default_edid_ready,
+					GC573_EDID_PROFILE_DEFAULT);
 	}
 
 	/* Anything that looks like a file is treated as a custom EDID. */
@@ -629,6 +690,7 @@ int gc573_user_edid_compare(const u8 *edid, size_t size,
 			    unsigned int *mismatches,
 			    unsigned int *first_offset)
 {
+	const u8 *active = edid_current();
 	unsigned int count = 0;
 	unsigned int first = 0;
 
@@ -639,7 +701,7 @@ int gc573_user_edid_compare(const u8 *edid, size_t size,
 		/* The IT6805 generates the block checksums itself. */
 		if ((i & 0x7f) == 0x7f)
 			continue;
-		if (edid[i] == g_active_edid[i])
+		if (edid[i] == active[i])
 			continue;
 		if (!count)
 			first = i;
@@ -670,5 +732,37 @@ int gc573_user_verify_edid(void *bar0, unsigned int *mismatches,
 
 const u8 *gc573_user_edid_data(void)
 {
-	return g_active_edid;
+	return edid_current();
+}
+
+bool gc573_user_edid_advertises_bitstream(void)
+{
+	const u8 *edid = edid_current();
+	unsigned int dtd_offset = edid[EDID_CTA_OFFSET + 2];
+	unsigned int data_end = EDID_CTA_OFFSET + dtd_offset;
+
+	if (edid[EDID_CTA_OFFSET] != 0x02 || edid[EDID_CTA_OFFSET + 1] < 3 ||
+	    dtd_offset < 4 || data_end > EDID_CTA_CHECKSUM_OFFSET)
+		return false;
+
+	for (unsigned int off = EDID_CTA_DATA_OFFSET; off < data_end; ) {
+		unsigned int tag = edid[off] >> 5;
+		unsigned int len = edid[off] & 0x1f;
+
+		if (off + 1 + len > data_end)
+			return false;
+		if (tag != EDID_CTA_AUDIO_TAG) {
+			off += 1 + len;
+			continue;
+		}
+
+		/* Format code 1 is L-PCM; anything else is compressed audio. */
+		for (unsigned int sad = 0; sad + 3 <= len; sad += 3) {
+			if ((edid[off + 1 + sad] >> 3) != 0x01)
+				return true;
+		}
+		return false;
+	}
+
+	return false;
 }

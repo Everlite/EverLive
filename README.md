@@ -1,7 +1,7 @@
 # EverLive - AVerMedia GC573 Linux Gaming Suite & Userspace Driver
 
-[![Version](https://img.shields.io/badge/version-v1.1.0-blue.svg)](https://github.com/Everlite/EverLive/releases)
-[![Status](https://img.shields.io/badge/status-1440p120%20%2B%204K60%20%2B%20Audio%20(Hardware%20Verified)-brightgreen.svg)](#hardware-verified-capabilities)
+[![Version](https://img.shields.io/badge/version-v1.2.0-blue.svg)](https://github.com/Everlite/EverLive/releases)
+[![Status](https://img.shields.io/badge/status-1440p120%20%2B%204K60%20%2B%20V4L2%20%2B%20Audio%20(Hardware%20Verified)-brightgreen.svg)](#hardware-verified-capabilities)
 [![Driver](https://img.shields.io/badge/driver-Userspace%20VFIO%20(Blob--Free)-2e7d32.svg)](#architecture--design)
 [![Kernel Modules](https://img.shields.io/badge/DKMS-None%20Required-success.svg)](#architecture--design)
 [![Hardware Fund](https://img.shields.io/badge/Hardware%20Fund-GitHub%20Sponsors-ea4aaa.svg?logo=github)](https://github.com/sponsors/Everlite)
@@ -11,22 +11,22 @@
 
 **EverLive** is a Linux console gaming suite and open-source userspace driver for the **AVerMedia Live Gamer 4K (GC573)** (`PCI 1461:0054`, Subsystem `1461:5730`).
 
-It is designed to let you play console games (PlayStation 5, Xbox Series X, Nintendo Switch, retro scalers, or secondary PCs) directly on your Linux desktop (Wayland & X11) with low presentation overhead, synchronized uncompressed L-PCM audio, on-the-fly hardware EDID switching, and custom hardware RGB LED control.
+It is designed to let you play console games (PlayStation 5, Xbox Series X, Nintendo Switch, retro scalers, or secondary PCs) directly on your Linux desktop (Wayland & X11) with low presentation overhead, synchronized audio (**Linear PCM** as well as **Dolby Digital / DTS 5.1** decoded to stereo), a native **V4L2 virtual camera** for OBS/Discord, on-the-fly hardware EDID switching, and custom hardware RGB LED control.
 
 ---
 
-## Architecture & Design (v1.0.0)
+## Architecture & Design
 
 Starting with version 1.0.0, EverLive transitions from an out-of-tree kernel module (`open_gc573`) to a **userspace driver running in Ring 3** via the Linux standard `vfio-pci` subsystem (`tools/opengc573-userd/`).
 
 ### Technical Characteristics & Trade-offs
-* **No DKMS or Kernel Header Dependencies:** The driver code runs as a standard userspace process. Linux kernel updates (e.g., 6.12 $\rightarrow$ 6.13 $\rightarrow$ 7.x) do not require rebuilding kernel modules.
+* **No DKMS or Kernel Header Dependencies:** The driver code runs as a standard userspace process. Linux kernel updates (e.g., 6.12 $\rightarrow$ 6.13 $\rightarrow$ 7.x) do not require rebuilding kernel modules. Only the *optional* Virtual Camera relies on the distribution's `v4l2loopback` module; EverLive itself never ships or builds a kernel module.
 * **In-Tree Kernel Module (`vfio-pci`):** Uses the standard, upstream `vfio-pci` module shipped and signed by your distribution. It does not load unsigned out-of-tree `.ko` drivers, avoiding kernel-taint flags and custom Machine Owner Key (MOK) enrollment under UEFI Secure Boot.
 * **Direct Hardware DMA in Userspace:** Video and audio Scatter-Gather DMA descriptors are mapped directly into userspace process memory via VFIO IOMMU containers, then uploaded directly to an SDL2 OpenGL rendering context.
-* **Exclusive Hardware Access (Trade-off):** VFIO requires exclusive binding to the PCI device. When EverLive is running, the card is not exposed as a standard `/dev/video*` (V4L2) or ALSA node to the rest of the system. (See [Streaming with OBS](#-streaming-with-obs) below for the recommended capture workflow).
+* **Exclusive Hardware Access & Virtual Camera:** VFIO requires exclusive binding to the PCI device. Starting in v1.2.0, EverLive includes a native virtual camera sink (`/dev/video10` labeled `"EverLive Capture"` via `v4l2loopback`), delivering clean, unscaled raw frames to OBS, Discord, and FFmpeg simultaneously with the gaming screen or in Headless Studio mode.
 * **System Requirements:** Requires IOMMU hardware support (`Intel VT-d` or `AMD-Vi / IOMMU`) enabled in your motherboard's UEFI/BIOS. (See [IOMMU & PCIe Groups](#-iommu--pcie-group-requirements)).
 
-> *Note: The legacy kernel module is archived in [`legacy/open_gc573-kernel/`](legacy/open_gc573-kernel/) for historical reference and for setups strictly requiring a native V4L2 device node.*
+> *Note: The legacy kernel module is archived in [`legacy/open_gc573-kernel/`](legacy/open_gc573-kernel/) for historical reference.*
 
 ---
 
@@ -34,14 +34,22 @@ Starting with version 1.0.0, EverLive transitions from an out-of-tree kernel mod
 
 The following capabilities have been physically tested and verified on physical hardware:
 
+> Items marked **(v1.2.0)** were verified on physical hardware with a PlayStation 5:
+> 1440p120 capture, the OBS virtual camera (`/dev/video10`), the Gaming $\leftrightarrow$ Studio
+> handover, and Dolby Digital / DTS decoding.
+
 * **PlayStation 5:**
   - **2560×1440 @ 120 FPS:** Verified in 120 Hz titles (*The Finals*, *Fortnite 120Hz Mode*, PS5 Dashboard). Stable frame pacing matching display refresh intervals.
   - **3840×2160 @ 60 FPS (Native 4K):** Verified native 4K capture without downscaling stalls.
-  - **Audio DMA & Real-Time Bitstream Decoding:** High-fidelity audio captured over PCIe DMA and played back via SDL2 into PipeWire. Supports both uncompressed **Linear PCM** (up to 8 channels) and compressed **Dolby Digital (AC-3 5.1)** and **DTS (5.1)** bitstreams decoded in real time via `libavcodec` and downmixed to stereo (ITU-R BS.775 compliant). Failsafe mute-guard prevents digital noise during mode transitions.
-  - **Dynamic Hot-Switching:** Verified dynamic mode changes (e.g., 4K60 dashboard $\leftrightarrow$ 1440p120 gameplay $\leftrightarrow$ 1080p) without process crashes or window recreation.
-* **Hardware EDID Profile Injection:**
+  - **Audio DMA & Universal Bitstream Decoding:** High-fidelity audio captured over PCIe DMA and played back via SDL2 into PipeWire. Supports both uncompressed **Linear PCM** (up to 8 channels) and compressed **Dolby Digital (AC-3 5.1)** and **DTS (5.1)** bitstreams decoded in real time via `libavcodec` and downmixed to stereo with `libswresample`. Failsafe mute-guard prevents digital noise during mode transitions.
+  - **Dynamic Hot-Switching:** Verified dynamic mode changes (e.g. 4K60 dashboard $\leftrightarrow$ 1440p120 gameplay $\leftrightarrow$ 1080p) without process crashes or window recreation.
+* **Virtual Camera & Studio Mode (v1.2.0):**
+  - **Native V4L2 output:** Verified with a PS5 at 1440p120 feeding OBS through `/dev/video10` (`"EverLive Capture"`) while the interactive gaming window is open.
+  - **Headless Studio:** The same 1440p120 feed without an SDL window; switching between Gaming Screen and Studio Mode completes without restarting EverLive.
+  - **OBS-safe renegotiation:** Resolution changes while OBS holds its buffers resume automatically once OBS renegotiates.
+* **Hardware EDID Profile Injection (Universal Audio Support — v1.2.0):**
+  - All standard built-in profiles natively advertise **Linear PCM**, **Dolby Digital (AC-3)**, and **DTS 5.1** Short Audio Descriptors (SADs), allowing consoles to output surround audio automatically without manual profile switching.
   - `Default (4K60 / 1440p120 HDR)`: Standard multi-mode EDID profile.
-  - `Bitstream (Dolby Digital / DTS 5.1)`: Advertises AC-3 and DTS 5.1 CTA-861 Short Audio Descriptors (SADs) so consoles emit bitstream surround audio.
   - `Force 1440p @ 120 Hz`: Prioritizes 1440p high-refresh modes for consoles by omitting 4K descriptors.
   - `Force 1080p @ 240 Hz`: For high-framerate PC capture.
   - `Load Custom EDID (.bin)`: Writes validated 256-byte binary EDID files (header & CEA checksum verified) directly into the IT6805 HDMI receiver chip over I2C upon stream launch.
@@ -62,20 +70,31 @@ https://github.com/user-attachments/assets/19932c79-5364-4f16-81cf-0187f741129c
 
 ---
 
-## 📺 Streaming with OBS
+## 📺 Streaming & Recording with OBS
 
-Because the userspace engine uses `vfio-pci`, the card does not create a `/dev/video*` node. The userspace streamer window runs as a clean, low-overhead direct rendering surface by default (no on-screen HUD or cursor overlays).
+Starting with version 1.2.0, EverLive supports **native V4L2 Loopback output** directly from its blob-free userspace engine, giving you three distinct workflows:
 
-The recommended and lowest-latency workflow for streamers is:
+### Option 1: Native Virtual Camera (`/dev/video10`) — *Recommended*
+EverLive can stream raw, unscaled YUYV capture frames directly to a virtual video device node (`/dev/video10` labeled `"EverLive Capture"`):
+1. **Enable in Control Hub:** Check the `Virtual Camera (OBS /dev/video10)` checkbox in EverLive Hub (or launch with `./play.sh --loopback`).
+2. **Add to OBS Studio:** Add a standard **Video Capture Device (V4L2)** source, select `EverLive Capture (/dev/video10)`, and set Resolution to **Device Default**.
+3. **Capture Audio:** Add an **Audio Input Capture (PulseAudio/PipeWire)** source and select the EverLive HDMI audio stream.
 
-1. **Capture in OBS via PipeWire:**  
-   In OBS Studio on Wayland, add a **Window Capture (PipeWire)** source and select the **EverLive** window.
-2. **Capture Audio:**  
-   In OBS Studio, capture the desktop or PipeWire application audio stream for EverLive.
+> [!NOTE]
+> **Prerequisite:** `install.sh` installs `v4l2loopback` where your distribution packages it and preconfigures it (`/etc/modprobe.d/everlive-v4l2loopback.conf` + `/etc/modules-load.d/`). If the module is not packaged (e.g. Fedora without RPM Fusion), install your distribution's `v4l2loopback-dkms` once — `play.sh` loads it with `video_nr=10 card_label="EverLive Capture" exclusive_caps=0` when the node is missing.
 
-> **Why this approach?**  
-> Playing directly inside an OBS preview window introduces noticeable input lag (usually 50–100 ms+) due to OBS's internal scene compositing and frame queueing. Running EverLive's dedicated SDL2 window allows you to play with minimal display latency while simultaneously passing a clean feed to OBS.  
-> *(If your use case strictly requires a raw `/dev/video*` V4L2 device node for a headless streaming rig, please use the legacy kernel driver in [`legacy/open_gc573-kernel/`](legacy/open_gc573-kernel/)).*
+> [!TIP]
+> **Simultaneous 1440p120 Gaming & 4K OBS Recording:**  
+> If you game at 1440p @ 120 FPS, set your OBS canvas/output to 4K (3840×2160) and right-click the EverLive V4L2 source $\to$ *Transform $\to$ Fit to Screen*. OBS will hardware-upscale the native 1440p120 feed to 4K in real time for crisp YouTube uploads with the high-bitrate VP9/AV1 codec!
+
+### Option 2: Studio / Headless Mode (Zero Display Overhead)
+If you play directly on a TV or secondary monitor connected to the GC573's **HDMI OUT (Hardware Passthrough)**, you do not need an open game window on your PC desktop:
+* Click **`Start Studio / Headless (OBS)`** in the Hub (or run `./play.sh --loopback --headless`).
+* EverLive runs silently in the background, consuming minimal CPU/GPU resources while delivering unscaled frames to OBS and playing HDMI audio.
+* Seamlessly toggle between Gaming Screen and Studio Mode at any time using the on-the-fly mode switcher.
+
+### Option 3: Direct Wayland Window Capture (PipeWire)
+If you prefer not to use `v4l2loopback`, you can still capture the interactive game window directly in OBS Studio via **Window Capture (PipeWire)**.
 
 ---
 
@@ -146,11 +165,13 @@ sudo ./install.sh
 ```
 
 ### What the installer does:
-1. Installs user-level development dependencies (`libsdl2-dev`, PySide6, and standard build tools).
+1. Installs the build/runtime dependencies: SDL2, FFmpeg development libraries (`libavcodec`/`libswresample`/`libavutil`), `libcap` (`setcap`), WirePlumber (`wpctl`), `xcb-util-cursor`, PySide6, standard build tools, and `v4l2loopback` where the distribution packages it.
 2. Configures udev rules (`/etc/udev/rules.d/70-everlive.rules`) granting your local user read/write access to the card's VFIO group and binding `vfio-pci`.
 3. Sets `/etc/security/limits.d/99-everlive-memlock.conf` and adds `cap_ipc_lock` capabilities so unprivileged users can pin DMA buffers required for native 4K capture.
-4. Compiles the userspace binaries (`gc573_user_streamer` and `everlive_userd`).
-5. Installs the desktop application launcher.
+4. Blacklists the legacy out-of-tree `open_gc573` module (`/etc/modprobe.d/blacklist-everlive-legacy.conf`) so it cannot race with `vfio-pci` at boot.
+5. Compiles the userspace binaries (`gc573_user_streamer`, `everlive_userd`, `gc573_user_probe`).
+6. Installs the desktop application launcher and icon.
+7. Configures the Virtual Camera: `/etc/modprobe.d/everlive-v4l2loopback.conf` (`video_nr=10 card_label="EverLive Capture" exclusive_caps=0`) and loads the module at boot via `/etc/modules-load.d/`.
 
 ### Launching:
 ```bash
@@ -171,14 +192,14 @@ git pull
 
 | Key / Action | Function |
 |:---|:---|
-| <kbd>f</kbd> | Toggle borderless fullscreen |
-| <kbd>v</kbd> | Toggle VSync (`vsync=on` $\leftrightarrow$ `vsync=off`) |
+| <kbd>f</kbd> or <kbd>F11</kbd> | Toggle borderless fullscreen |
 | <kbd>a</kbd> | Cycle Aspect Ratio (`auto` $\to$ `16:9` $\to$ `4:3` $\to$ `stretch`) |
-| <kbd>p</kbd> | Cycle OSD Position (Top-Right $\to$ Bottom-Right $\to$ Bottom-Left $\to$ Top-Left) |
-| <kbd>o</kbd> or <kbd>Tab</kbd> | Toggle On-Screen Display (OSD live hardware stats overlay) |
+| <kbd>p</kbd> | Cycle OSD position (Top-Right $\to$ Bottom-Right $\to$ Bottom-Left $\to$ Top-Left; default Top-Right) |
+| <kbd>o</kbd>, <kbd>i</kbd> or <kbd>Tab</kbd> | Toggle the on-screen stats overlay |
+| <kbd>s</kbd> or <kbd>F10</kbd> | Toggle overlay and mouse cursor (Streamer Mode toggle; `--streamer-mode` starts with both hidden) |
 | <kbd>Esc</kbd> or <kbd>q</kbd> | Exit the game window |
 
-*Volume and mute are controlled directly through your system audio mixer, PipeWire, or the EverLive Console Hub.*
+*VSync is a launch option (`--vsync` / Hub checkbox) and cannot be toggled while streaming. Volume and mute are controlled through the EverLive Console Hub, your system audio mixer, or PipeWire.*
 
 ---
 
@@ -194,22 +215,25 @@ flowchart TD
 
   subgraph Kernel["Linux Kernel (Ring 0)"]
     vfio["vfio-pci (Standard Upstream Driver)<br/>IOMMU Container & DMA Remapping"]
+    v4l2dev["v4l2loopback<br/>/dev/video10 'EverLive Capture'"]
     pcie --> vfio
   end
 
   subgraph Userspace["EverLive Userspace Engine (Ring 3)"]
     direction TB
-    vfio -->|"Userspace DMA Mapping"| streamer["gc573_user_streamer (C Engine)<br/>- Scatter-Gather Video DMA (Triple Buffered)<br/>- L-PCM & Dolby/DTS Bitstream Audio Engine<br/>- IT6805 I2C Matrix & EDID Programmer<br/>- Artix-7 24-bit RGB Control"]
+    vfio -->|"Userspace DMA Mapping"| streamer["gc573_user_streamer (C Engine)<br/>- Scatter-Gather Video DMA (3-6 buffers)<br/>- L-PCM + AC-3/DTS Decoder (libavcodec)<br/>- IT6805 I2C Matrix & EDID Programmer<br/>- Artix-7 24-bit RGB Control<br/>- OSD, Aspect Ratio & V4L2 Sink"]
     
     streamer -->|"OpenGL / SDL2 Direct Scanout"| window["Game Window (1440p120 / 4K60)"]
+    streamer -->|"Native YUYV Frames"| v4l2dev
     streamer -->|"SDL2 Audio / PipeWire"| audio["Headset / Speakers (Stereo Downmix)"]
 
-    gui["EverLive Console Hub (Qt / Python)<br/>EDID Profiles, Signal Status, LED, Volume"] -.->|Manages| streamer
+    gui["EverLive Console Hub (Qt / Python)<br/>Launch Modes, EDID, Aspect, LED, Volume"] -.->|Manages| streamer
     streamer -.->|"FD Handoff"| daemon["everlive_userd (Standby Daemon)<br/>Maintains state & LED without FLR"]
   end
 
   subgraph OBS["Broadcasting (Optional)"]
-    window -.->|"PipeWire Window Capture"| obspw["OBS Studio (Clean Feed)"]
+    window -.->|"PipeWire Window Capture"| obspw["OBS Studio (Window)"]
+    v4l2dev -->|"Video Capture Device (V4L2)"| obsv4l2["OBS Studio / Discord (Virtual Camera)"]
   end
 ```
 

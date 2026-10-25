@@ -14,6 +14,10 @@
 #define GC573_EDID_PROFILE_DEFAULT	"default"
 #define GC573_EDID_PROFILE_1440P120	"1440p120"
 #define GC573_EDID_PROFILE_1080P240	"1080p240"
+/*
+ * Legacy alias: every built-in profile advertises AC-3 and DTS 5.1 next to
+ * multi-channel L-PCM, so "bitstream" now resolves to the unified default.
+ */
 #define GC573_EDID_PROFILE_BITSTREAM	"bitstream"
 
 /**
@@ -21,11 +25,11 @@
  * @bar0: Pointer to mapped BAR0 memory
  *
  * Programs the active 256-byte EDID (see gc573_user_edid_select()) into the
- * IT6805 receiver and asserts HPD so the console immediately locks on.  The
- * default profile advertises 4K60, 1440p120, 1080p240, HDR10 and 8-channel
- * LPCM.  The "bitstream" profile additionally advertises AC-3 and DTS 5.1
- * so a console emits IEC 61937 bursts instead of decoded LPCM.  Repeated
- * calls in the same process are no-ops once the same table has been latched.
+ * IT6805 receiver and asserts HPD so the console immediately locks on.  Every
+ * built-in profile advertises 4K60, 1440p120, 1080p240, HDR10, 8-channel
+ * L-PCM, Dolby Digital (AC-3) and DTS 5.1, so the source may send either
+ * decoded PCM or IEC 61937 bursts.  Repeated calls in the same process are
+ * no-ops once the same table has been latched.
  */
 int gc573_user_program_edid(void *bar0);
 
@@ -102,5 +106,14 @@ int gc573_user_edid_compare(const u8 *edid, size_t size,
  * The returned pointer is valid for the lifetime of the process.
  */
 const u8 *gc573_user_edid_data(void);
+
+/**
+ * gc573_user_edid_advertises_bitstream - Active EDID advertises compressed audio?
+ *
+ * Scans the CTA-861 Audio Data Block for Short Audio Descriptors whose format
+ * code is not L-PCM (AC-3, DTS, ...).  Built-in profiles always return true;
+ * a custom EDID only when it really advertises a compressed format.
+ */
+bool gc573_user_edid_advertises_bitstream(void);
 
 #endif /* GC573_USER_EDID_H */

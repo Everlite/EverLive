@@ -23,17 +23,45 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
 
 GC573_VENDOR_ID = "0x1461"
 GC573_DEVICE_IDS = {"0x0054", "0x0055"}
-ENGINE_VFIO_TEXT = "● EverLive Engine: Userspace VFIO (Blob-Free Ring 3)"
+ENGINE_VFIO_TEXT = "● Userspace VFIO"
+V4L2_DEFAULT_DEVICE = "/dev/video10"
+
+ASPECT_OPTIONS = [
+    ("Auto (Native HDMI)", "auto"),
+    ("16:9 Anamorphic (RetroTINK / OSSC)", "16:9"),
+    ("4:3 Retro", "4:3"),
+    ("Stretch to Fill", "stretch"),
+]
+ASPECT_KEYS = {key for _, key in ASPECT_OPTIONS}
+
+DEFAULT_SETTINGS = {
+    "v4l2_loopback": True,
+    "aspect_ratio": "auto",
+}
 
 
 def load_settings() -> dict:
+    data = {}
     if os.path.isfile(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
-                return json.load(f)
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
         except Exception:
             pass
-    return {}
+
+    settings = dict(DEFAULT_SETTINGS)
+    settings.update(data)
+    if not isinstance(settings.get("v4l2_loopback"), bool):
+        settings["v4l2_loopback"] = True
+    if settings.get("aspect_ratio") not in ASPECT_KEYS:
+        settings["aspect_ratio"] = "auto"
+    # "bitstream" used to be a separate EDID profile.  Every built-in profile
+    # now advertises AC-3/DTS, so old settings migrate to the unified default.
+    if settings.get("edid_profile") == "bitstream":
+        settings["edid_profile"] = "default"
+    return settings
 
 
 def save_settings(data: dict):
@@ -354,9 +382,10 @@ LED_NAME_MAP = {
 
 # Hardware EDID profiles understood by gc573_user_streamer --edid.
 # The display text is what the user sees; the key is the CLI value.
+# Every built-in profile advertises L-PCM, Dolby Digital (AC-3) and DTS 5.1,
+# so compressed audio is detected and decoded without a profile switch.
 EDID_PROFILES = [
     ("Default (4K60 / 1440p120 HDR)", "default"),
-    ("Bitstream (Dolby Digital / DTS 5.1)", "bitstream"),
     ("Force 1440p @ 120 Hz", "1440p120"),
     ("Force 1080p @ 240 Hz", "1080p240"),
     ("Load Custom EDID (.bin)...", "custom"),
@@ -740,8 +769,11 @@ class GameStreamer:
         self._vfio_live = False
         self._vfio_saw_output = False
         # Last audio state parsed from the streamer log; shown in the capsule.
-        self._vfio_audio = {"state": "unknown", "detail": ""}
-        self.aspect = "auto"
+        self._vfio_audio = {"state": "unknown", "detail": "", "kind": ""}
+        saved_aspect = load_settings().get("aspect_ratio", "auto")
+        self.aspect = saved_aspect if saved_aspect in ASPECT_KEYS else "auto"
+        self.headless = False
+        self.v4l2_device: Optional[str] = None
         saved_signal = load_settings().get("last_signal")
         self._vfio_signal = saved_signal if isinstance(saved_signal, dict) else None
 
@@ -810,28 +842,62 @@ class GameStreamer:
                 int(m.group(4)), int(m.group(5)))
             return
 
-        # Audio diagnostics; keep the last state for the status capsule.
+        # Audio diagnostics; keep the last state for the status capsule and
+        # the Audio Format label.
+        m = re.search(r"\[AUDIO\] Decoding (.+?) -> Stereo", line)
+        if m:
+            self._vfio_audio = {"state": "on",
+                                "detail": f"{m.group(1).strip()} -> Stereo",
+                                "kind": "bitstream"}
+            return
+        m = re.search(r"\[AUDIO\] Bitstream detected: (.+)", line)
+        if m:
+            # Streamer appends ", muted)" while it cannot decode the burst
+            # (Phase 1 guard) and omits it once decoding is active.
+            detail = m.group(1).strip()
+            state = "detecting"
+            if detail.endswith(", muted)"):
+                detail = detail[:-len(", muted)")] + ") (Muted)"
+                state = "muted"
+            self._vfio_audio = {"state": state,
+                                "detail": detail,
+                                "kind": "bitstream"}
+            return
+        m = re.search(r"\[AUDIO\] (.+?) \(muted\)", line)
+        if m:
+            self._vfio_audio = {"state": "muted",
+                                "detail": f"{m.group(1).strip()} (Muted)",
+                                "kind": "bitstream"}
+            return
+        m = re.search(r"SDL audio: opened (\d+) Hz, (\d+) ch, (\d+)-bit", line)
+        if m:
+            self._vfio_audio = {"state": "on",
+                                "detail": f"{m.group(1)} Hz {m.group(2)} ch",
+                                "kind": "lpcm"}
+            return
         m = re.search(r"SDL audio: playing (\d+) Hz, 2 ch, (\d+)-bit via (\S+)", line)
         if m:
             self._vfio_audio = {"state": "on",
-                                "detail": f"{m.group(3)} {m.group(1)} Hz"}
+                                "detail": f"{m.group(1)} Hz 2 ch",
+                                "kind": "lpcm"}
             return
         m = re.search(r"\[AUDIO\] (\d+) Hz (\d+) ch (\d+)-bit", line)
         if m:
             self._vfio_audio = {"state": "on",
-                                "detail": f"{m.group(1)} Hz {m.group(2)} ch"}
+                                "detail": f"{m.group(1)} Hz {m.group(2)} ch",
+                                "kind": "lpcm"}
             return
         if "SDL audio unavailable" in line or "dummy driver" in line:
-            self._vfio_audio = {"state": "unavailable", "detail": ""}
+            self._vfio_audio = {"state": "unavailable", "detail": "", "kind": ""}
             return
         if "receiver reports no playable stream" in line:
-            self._vfio_audio = {"state": "absent", "detail": ""}
+            self._vfio_audio = {"state": "absent", "detail": "", "kind": ""}
             return
         if "format not playable" in line:
-            self._vfio_audio = {"state": "unsupported", "detail": ""}
+            self._vfio_audio = {"state": "unsupported", "detail": "", "kind": ""}
             return
         if "HDMI audio DMA start failed" in line:
-            self._vfio_audio = {"state": "error", "detail": ""}
+            self._vfio_audio = {"state": "error", "detail": "", "kind": ""}
             return
 
         if ("HDMI signal lost" in line or
@@ -878,6 +944,32 @@ class GameStreamer:
     def audio_state(self) -> Dict[str, str]:
         """Audio state parsed from the userspace streamer log."""
         return dict(self._vfio_audio)
+
+    def audio_format_label(self) -> str:
+        """Human-readable HDMI audio format for the hub status row."""
+        state = self._vfio_audio.get("state", "unknown")
+        detail = (self._vfio_audio.get("detail") or "").strip()
+        kind = self._vfio_audio.get("kind", "")
+
+        if state == "detecting" and detail:
+            return f"{detail} (detecting)"
+        if state in ("unknown", "absent", "unavailable", "unsupported", "error"):
+            return "No Audio"
+        if kind == "bitstream" or "-> Stereo" in detail or "Muted" in detail:
+            return detail or "Bitstream"
+
+        m = re.search(r"(\d+) Hz (\d+) ch", detail)
+        if m:
+            khz = int(m.group(1)) / 1000.0
+            channels = int(m.group(2))
+            channel_label = {
+                1: "Mono",
+                2: "Stereo",
+                6: "5.1",
+                8: "7.1",
+            }.get(channels, f"{channels} ch")
+            return f"L-PCM {khz:g}kHz ({channel_label})"
+        return "No Audio"
 
     def get_signal_info(self) -> Dict[str, object]:
         """Queries current signal status via v4l2-ctl (kernel mode) or cache."""
@@ -1073,7 +1165,10 @@ class GameStreamer:
             return False
 
     def _start_vfio(self, fullscreen: bool = False, vsync: bool = False,
-                    streamer_mode: bool = False) -> bool:
+                    streamer_mode: bool = False,
+                    v4l2_device: Optional[str] = None,
+                    headless: bool = False,
+                    aspect: Optional[str] = None) -> bool:
         """Launch the blob-free userspace VFIO streamer directly."""
         if _vfio_streamer_running():
             print("[!] A userspace streamer is already running; refusing to start a second instance.")
@@ -1114,13 +1209,28 @@ class GameStreamer:
         else:
             cmd.extend(["--edid", "default"])
 
-        # Presentation options from the hub checkboxes.
-        if fullscreen:
-            cmd.append("--fullscreen")
-        cmd.append("--vsync" if vsync else "--no-vsync")
-        cmd.append("--streamer-mode" if streamer_mode else "--osd")
-        if hasattr(self, "aspect") and self.aspect and self.aspect != "auto":
-            cmd.extend(["--aspect", self.aspect])
+        # Presentation options only matter for the interactive SDL2 window.
+        if not headless:
+            if fullscreen:
+                cmd.append("--fullscreen")
+            cmd.append("--vsync" if vsync else "--no-vsync")
+            cmd.append("--streamer-mode" if streamer_mode else "--osd")
+
+        if aspect is None:
+            aspect = getattr(self, "aspect", "auto")
+        if aspect not in ASPECT_KEYS:
+            aspect = "auto"
+        self.aspect = aspect
+        if aspect != "auto":
+            cmd.extend(["--aspect", aspect])
+
+        if v4l2_device:
+            cmd.extend(["--v4l2", v4l2_device])
+        if headless:
+            cmd.append("--headless")
+
+        self.headless = bool(headless)
+        self.v4l2_device = v4l2_device
 
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -1140,6 +1250,8 @@ class GameStreamer:
                 start_new_session=True)
         except Exception as e:
             print(f"[!] Failed to launch userspace streamer: {e}")
+            self.headless = False
+            self.v4l2_device = None
             if log is not subprocess.DEVNULL:
                 log.close()
             return False
@@ -1150,7 +1262,7 @@ class GameStreamer:
         self._vfio_log_pos = 0
         self._vfio_live = False
         self._vfio_saw_output = False
-        self._vfio_audio = {"state": "unknown", "detail": ""}
+        self._vfio_audio = {"state": "unknown", "detail": "", "kind": ""}
         self.is_running = True
         print(f"[*] Starting Userspace VFIO engine: {' '.join(cmd)}")
 
@@ -1160,11 +1272,13 @@ class GameStreamer:
             self._read_vfio_log()
             self.is_running = False
             self.mpv_proc = None
+            self.headless = False
+            self.v4l2_device = None
             print(f"[!] Userspace streamer exited at startup; see {self._vfio_log_path}")
             return False
         return True
 
-    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False) -> bool:
+    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None) -> bool:
         if self.is_running:
             return True
 
@@ -1173,7 +1287,16 @@ class GameStreamer:
                 print("[*] VFIO mode: the input mode comes from the HDMI "
                       "source and the selected EDID profile.")
             return self._start_vfio(fullscreen=fullscreen, vsync=vsync,
-                                    streamer_mode=streamer_mode)
+                                    streamer_mode=streamer_mode,
+                                    v4l2_device=v4l2_device,
+                                    headless=headless,
+                                    aspect=aspect)
+
+        if headless:
+            print("[!] Headless/Studio mode requires the userspace VFIO engine.")
+            return False
+        if v4l2_device:
+            print("[*] Note: --v4l2 is only used by the userspace VFIO engine.")
 
         self.vsync = vsync
         if not os.path.exists(self.vdev):
@@ -1401,6 +1524,9 @@ class GameStreamer:
                         pass
             self.arecord_proc = None
 
+        self.headless = False
+        self.v4l2_device = None
+
     def poll(self) -> bool:
         """Returns True while the stream process is still alive."""
         if self.mpv_proc:
@@ -1426,6 +1552,11 @@ if HAS_QT:
             self.saved_cfg = load_settings()
             self._vfio_notice_until = 0.0
             self._vfio_volume_applies = 0
+            self._launch_mode: Optional[str] = None
+            self._last_launch_mode = "gaming"
+            # Target mode of an in-flight gaming <-> studio handover.
+            self._switch_pending: Optional[str] = None
+            self._handoff_tries = 0
             if streamer_mode:
                 self.saved_cfg["streamer_mode"] = True
             if not self.vfio_mode and self.saved_cfg.get("engine", "native") == "mpv":
@@ -1446,7 +1577,7 @@ if HAS_QT:
             self.setWindowTitle("EverLive - Console Hub")
             # Wider layout keeps the full userspace-engine status capsule and
             # the VFIO device line readable without truncation.
-            self.setFixedSize(860, 540)
+            self.setFixedSize(900, 650)
 
             # Application & Window Icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "everlive.png")
@@ -1627,6 +1758,60 @@ if HAS_QT:
                 QPushButton#btnLaunchStop:hover {
                     background-color: #dc2626;
                 }
+                QPushButton#btnStudioStart {
+                    background-color: #1d4ed8;
+                    color: #ffffff;
+                    border: none;
+                    font-size: 13px;
+                    font-weight: 600;
+                    border-radius: 6px;
+                    padding: 9px 16px;
+                }
+                QPushButton#btnStudioStart:hover {
+                    background-color: #2563eb;
+                }
+                QPushButton#btnStudioStop {
+                    background-color: #ef4444;
+                    color: #ffffff;
+                    border: none;
+                    font-size: 13px;
+                    font-weight: 600;
+                    border-radius: 6px;
+                    padding: 9px 16px;
+                }
+                QPushButton#btnStudioStop:hover {
+                    background-color: #dc2626;
+                }
+                QPushButton#btnLaunchSwitch, QPushButton#btnStudioSwitch {
+                    background-color: #0891b2;
+                    color: #ffffff;
+                    border: none;
+                    font-weight: 600;
+                    border-radius: 6px;
+                }
+                QPushButton#btnLaunchSwitch {
+                    font-size: 14px;
+                    padding: 11px 18px;
+                }
+                QPushButton#btnStudioSwitch {
+                    font-size: 13px;
+                    padding: 9px 16px;
+                }
+                QPushButton#btnLaunchSwitch:hover, QPushButton#btnStudioSwitch:hover {
+                    background-color: #06b6d4;
+                }
+                QPushButton#btnLaunchSwitch:pressed, QPushButton#btnStudioSwitch:pressed {
+                    background-color: #0e7490;
+                }
+                QPushButton#btnLaunchSwitch:disabled, QPushButton#btnStudioSwitch:disabled {
+                    background-color: #334155;
+                    color: #94a3b8;
+                }
+                QLabel#audioFormat {
+                    color: #34d399;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
                 QSlider::groove:horizontal {
                     height: 4px;
                     background: #1e2537;
@@ -1723,45 +1908,77 @@ if HAS_QT:
             h_sig_info.addLayout(v_sig_text, 1)
 
             self.lbl_engine_badge = QLabel(
-                "Userspace VFIO • Blob-Free Ring 3" if self.vfio_mode
+                "Userspace VFIO" if self.vfio_mode
                 else "Direct Wayland (< 2ms)")
             self.lbl_engine_badge.setObjectName("engineBadge")
+            if self.vfio_mode:
+                self.lbl_engine_badge.setToolTip(
+                    "Blob-free Ring-3 VFIO engine • SDL2 video and HDMI audio")
             h_sig_info.addWidget(self.lbl_engine_badge, 0, Qt.AlignVCenter)
 
             v_hero.addLayout(h_sig_info)
 
-            # Confident Action Button
+            # Dual launch actions: interactive gaming window + headless studio.
             self.btn_launch = QPushButton("Start Gaming Screen")
             self.btn_launch.setObjectName("btnLaunchStart")
             self.btn_launch.setCursor(Qt.PointingHandCursor)
             self.btn_launch.clicked.connect(self.toggle_stream)
             v_hero.addWidget(self.btn_launch)
 
-            # Launch Options (2x2 Grid)
+            self.btn_studio = QPushButton("Start Studio / Headless (OBS)")
+            self.btn_studio.setObjectName("btnStudioStart")
+            self.btn_studio.setCursor(Qt.PointingHandCursor)
+            self.btn_studio.setToolTip(
+                "Runs the userspace engine headless and publishes native YUYV "
+                f"frames to {V4L2_DEFAULT_DEVICE} for OBS, Discord or ffmpeg.")
+            self.btn_studio.clicked.connect(self.toggle_studio)
+            if not self.vfio_mode:
+                self.btn_studio.setEnabled(False)
+                self.btn_studio.setToolTip(
+                    "Studio / headless mode requires the userspace VFIO engine.")
+            v_hero.addWidget(self.btn_studio)
+
+            # Launch options (3x2 grid)
             grid_opts = QGridLayout()
             grid_opts.setHorizontalSpacing(24)
             grid_opts.setVerticalSpacing(8)
 
+            self.chk_v4l2 = QCheckBox(
+                f"Virtual Camera (OBS {V4L2_DEFAULT_DEVICE})")
+            self.chk_v4l2.setChecked(bool(self.saved_cfg.get("v4l2_loopback", True)))
+            self.chk_v4l2.toggled.connect(
+                lambda val: save_settings({"v4l2_loopback": val}))
+            if self.vfio_mode:
+                self.chk_v4l2.setToolTip(
+                    "Publishes native YUYV frames to the v4l2loopback node while "
+                    "the Gaming Screen runs. OBS sees it as 'EverLive Capture'.")
+            else:
+                self.chk_v4l2.setChecked(False)
+                self.chk_v4l2.setEnabled(False)
+                self.chk_v4l2.setToolTip(
+                    "Virtual camera output requires the userspace VFIO engine.")
+            grid_opts.addWidget(self.chk_v4l2, 0, 0, 1, 2)
+
             self.chk_fullscreen = QCheckBox("Start in Fullscreen")
             self.chk_fullscreen.setChecked(self.saved_cfg.get("fullscreen", True))
             self.chk_fullscreen.toggled.connect(lambda val: save_settings({"fullscreen": val}))
-            grid_opts.addWidget(self.chk_fullscreen, 0, 0)
+            grid_opts.addWidget(self.chk_fullscreen, 1, 0)
 
             self.chk_vsync = QCheckBox("Enable VSync (120 Hz)")
             self.chk_vsync.setChecked(self.saved_cfg.get("vsync", self.enable_vsync))
             self.chk_vsync.toggled.connect(lambda val: save_settings({"vsync": val}))
-            grid_opts.addWidget(self.chk_vsync, 0, 1)
+            grid_opts.addWidget(self.chk_vsync, 1, 1)
 
             self.chk_autostart = QCheckBox("Auto-start on launch")
             self.chk_autostart.setChecked(self.saved_cfg.get("autostart", False))
             self.chk_autostart.toggled.connect(lambda val: save_settings({"autostart": val}))
-            grid_opts.addWidget(self.chk_autostart, 1, 0)
+            grid_opts.addWidget(self.chk_autostart, 2, 0)
 
             self.chk_streamer = QCheckBox("Streamer Mode (Clean Feed)")
             self.chk_streamer.setToolTip("Hides mouse control bar, HUD, and overlays for clean recordings (Hotkey: 'S')")
             self.chk_streamer.setChecked(self.saved_cfg.get("streamer_mode", False))
             self.chk_streamer.toggled.connect(lambda val: save_settings({"streamer_mode": val}))
-            grid_opts.addWidget(self.chk_streamer, 1, 1)
+            grid_opts.addWidget(self.chk_streamer, 2, 1)
 
             if self.vfio_mode:
                 # Fullscreen and VSync are forwarded to gc573_user_streamer.
@@ -1820,7 +2037,9 @@ if HAS_QT:
                 if idx >= 0:
                     self.combo_presets.setCurrentIndex(idx)
                 self.combo_presets.setToolTip(
-                    "256-byte EDID advertised to the console. "
+                    "256-byte EDID advertised to the console. Every profile "
+                    "supports L-PCM, Dolby Digital (AC-3) and DTS 5.1; "
+                    "compressed audio is decoded automatically. "
                     "Applies on the next Start Gaming Screen.")
             else:
                 self.combo_presets.addItems(list(PRESETS.keys()))
@@ -1917,29 +2136,26 @@ if HAS_QT:
             self.btn_resync.clicked.connect(self.force_resync)
             grid.addWidget(self.btn_resync, 1, 3)
 
-            # Row 2: Render Engine & HDR Status
-            lbl_engine = QLabel("Render Engine:")
-            lbl_engine.setStyleSheet("font-weight: 500; color: #94a3b8;")
-            lbl_engine.setToolTip(
-                "Userspace VFIO engine: direct SDL2 video/audio, no kernel module required."
-                if self.vfio_mode else
-                "Select gaming/preview renderer:\n• Direct Native: Ultra-low latency (< 2 ms) direct SDL2 Wayland display\n• MPV Studio: Automatic HDR10/HLG tone-mapping and colorimetry")
-            grid.addWidget(lbl_engine, 2, 0)
+            # Row 2: Aspect ratio override & HDR status
+            lbl_aspect = QLabel("Aspect Ratio Override:")
+            lbl_aspect.setStyleSheet("font-weight: 500; color: #94a3b8;")
+            lbl_aspect.setToolTip(
+                "Overrides SDL2 presentation. Auto follows the native HDMI "
+                "timing; 16:9 fixes anamorphic RetroTINK/OSSC modes.")
+            grid.addWidget(lbl_aspect, 2, 0)
 
-            self.combo_engine = QComboBox()
-            if self.vfio_mode:
-                self.combo_engine.addItem("Userspace VFIO (Blob-Free Ring 3)", "vfio")
-                self.combo_engine.setEnabled(False)
-                self.combo_engine.setToolTip("SDL2 video and HDMI audio are handled directly by gc573_user_streamer.")
-            else:
-                self.combo_engine.addItem("Direct Native (< 2ms)", "native")
-                self.combo_engine.addItem("MPV Studio (Auto HDR)", "mpv")
-                saved_engine = self.saved_cfg.get("engine", "native")
-                idx = self.combo_engine.findData(saved_engine)
-                if idx >= 0:
-                    self.combo_engine.setCurrentIndex(idx)
-            self.combo_engine.currentIndexChanged.connect(self.on_engine_changed)
-            grid.addWidget(self.combo_engine, 2, 1)
+            self.combo_aspect = QComboBox()
+            for text, key in ASPECT_OPTIONS:
+                self.combo_aspect.addItem(text, key)
+            saved_aspect = self.saved_cfg.get("aspect_ratio", "auto")
+            idx = self.combo_aspect.findData(saved_aspect)
+            if idx >= 0:
+                self.combo_aspect.setCurrentIndex(idx)
+            self.combo_aspect.setToolTip(
+                "Forwarded as --aspect to gc573_user_streamer unless "
+                "'Auto (Native HDMI)' is selected.")
+            self.combo_aspect.currentIndexChanged.connect(self.on_aspect_changed)
+            grid.addWidget(self.combo_aspect, 2, 1)
 
             lbl_hdr_mode = QLabel("HDR Processing:")
             lbl_hdr_mode.setStyleSheet("font-weight: 500; color: #94a3b8;")
@@ -1952,6 +2168,18 @@ if HAS_QT:
                 if self.vfio_mode else
                 "When HDR10 or HLG is detected, EverLive automatically configures BT.2020 / PQ tone-mapping and Limited-Range filters")
             grid.addWidget(self.lbl_hdr_status, 2, 3)
+
+            # Row 3: Detected HDMI audio format
+            lbl_audio_fmt_title = QLabel("Audio Format:")
+            lbl_audio_fmt_title.setStyleSheet("font-weight: 500; color: #94a3b8;")
+            grid.addWidget(lbl_audio_fmt_title, 3, 0)
+
+            self.lbl_audio_fmt = QLabel("No Audio")
+            self.lbl_audio_fmt.setObjectName("audioFormat")
+            self.lbl_audio_fmt.setToolTip(
+                "Audio format detected by the userspace engine from the "
+                "IT6805 / SDL2 stream log.")
+            grid.addWidget(self.lbl_audio_fmt, 3, 1, 1, 3)
 
             v_settings.addLayout(grid)
             root_layout.addWidget(card_settings)
@@ -1991,10 +2219,105 @@ if HAS_QT:
             # Initial status poll
             self.update_status()
 
-        def _set_launch_running(self, running: bool):
-            self.btn_launch.setText("Stop Gaming Screen" if running else "Start Gaming Screen")
-            self.btn_launch.setObjectName("btnLaunchStop" if running else "btnLaunchStart")
-            self.btn_launch.setStyle(self.btn_launch.style())
+        def _set_launch_running(self, running: bool, mode: Optional[str] = None):
+            if running:
+                self._launch_mode = mode or "gaming"
+                self._last_launch_mode = self._launch_mode
+            else:
+                self._launch_mode = None
+
+            studio_idle_tip = (
+                "Runs the userspace engine headless and publishes native YUYV "
+                f"frames to {V4L2_DEFAULT_DEVICE} for OBS, Discord or ffmpeg."
+                if self.vfio_mode else
+                "Studio / headless mode requires the userspace VFIO engine.")
+
+            if self._launch_mode == "studio":
+                # Studio keeps capturing; the gaming window can be opened on
+                # top of the running headless engine without dropping OBS.
+                self.btn_launch.setText("Switch to Gaming Screen")
+                self.btn_launch.setObjectName("btnLaunchSwitch")
+                self.btn_launch.setEnabled(True)
+                self.btn_launch.setToolTip(
+                    "Seamlessly open the interactive SDL2 gaming window "
+                    "(V4L2 loopback feed to OBS remains uninterrupted).")
+                self.btn_studio.setText("Stop Studio")
+                self.btn_studio.setObjectName("btnStudioStop")
+                self.btn_studio.setEnabled(True)
+                self.btn_studio.setToolTip(
+                    "Stop the headless streamer and release the capture card.")
+            elif self._launch_mode == "gaming":
+                self.btn_launch.setText("Stop Gaming Screen")
+                self.btn_launch.setObjectName("btnLaunchStop")
+                self.btn_launch.setEnabled(True)
+                self.btn_launch.setToolTip(
+                    "Close the gaming window and stop the streamer.")
+                self.btn_studio.setText("Switch to Studio (Headless)")
+                self.btn_studio.setObjectName("btnStudioSwitch")
+                self.btn_studio.setEnabled(self.vfio_mode)
+                self.btn_studio.setToolTip(
+                    "Seamlessly close the gaming window and continue streaming "
+                    "native frames in the background for OBS."
+                    if self.vfio_mode else studio_idle_tip)
+            else:
+                self.btn_launch.setText("Start Gaming Screen")
+                self.btn_launch.setObjectName("btnLaunchStart")
+                self.btn_launch.setEnabled(True)
+                self.btn_launch.setToolTip("")
+                self.btn_studio.setText("Start Studio / Headless (OBS)")
+                self.btn_studio.setObjectName("btnStudioStart")
+                self.btn_studio.setEnabled(self.vfio_mode)
+                self.btn_studio.setToolTip(studio_idle_tip)
+
+            for button in (self.btn_launch, self.btn_studio):
+                button.setStyle(button.style())
+
+            if hasattr(self, "lbl_engine_badge"):
+                if self._launch_mode == "studio":
+                    self.lbl_engine_badge.setText("Studio / Headless")
+                elif self._launch_mode == "gaming":
+                    self.lbl_engine_badge.setText("Gaming Mode")
+                elif self.vfio_mode:
+                    self.lbl_engine_badge.setText("Userspace VFIO")
+                else:
+                    self.lbl_engine_badge.setText("Direct Wayland (< 2ms)")
+            self._update_vdev_label()
+
+        def _retry_audio_props(self):
+            # SDL creates its sink-input only once the first HDMI audio
+            # format arrives, so apply volume/mute twice.
+            for delay in (1200, 3000):
+                QTimer.singleShot(
+                    delay, lambda: set_audio_volume(self.slider_vol.value()))
+                QTimer.singleShot(delay, lambda: set_audio_mute(self.muted))
+
+        def _check_audio_sink(self):
+            hint = default_sink_issue()
+            if hint:
+                print(f"[!] Audio: {hint}; the SDL2 stream will be silent.")
+                self._set_vfio_notice(
+                    "Audio Muted",
+                    hint.capitalize() + " — unmute the system output",
+                    seconds=4.0)
+
+        def _vfio_preflight(self) -> bool:
+            if not self.vfio_mode:
+                self._set_vfio_notice(
+                    "Userspace Engine Required",
+                    "Studio / virtual camera output needs the VFIO userspace engine")
+                return False
+            if not (os.path.isfile(self.streamer.streamer_bin) and
+                    os.access(self.streamer.streamer_bin, os.X_OK)):
+                self._set_vfio_notice(
+                    "Userspace Engine Missing",
+                    "Build it with: make -C tools/opengc573-userd")
+                return False
+            if _vfio_streamer_running():
+                self._set_vfio_notice(
+                    "Userspace Engine Active",
+                    "An external gc573_user_streamer instance already owns the device")
+                return False
+            return True
 
         def _restore_led_after_stream(self):
             """The streamer hands off cyan; restore the hub's saved colour."""
@@ -2023,13 +2346,105 @@ if HAS_QT:
             return write_led_mode(mode)
 
         def toggle_stream(self):
-            if self.streamer.is_running:
-                self.streamer.stop()
-                self._set_launch_running(False)
-                if self.vfio_mode:
-                    QTimer.singleShot(900, self._restore_led_after_stream)
+            if self._switch_pending:
+                return
+            if self._launch_mode == "studio":
+                # Studio is capturing: hand the card over to the SDL window.
+                self._switch_mode("gaming")
+            elif self._launch_mode == "gaming" or self.streamer.is_running:
+                self._stop_stream()
             else:
                 self.start_gaming_screen()
+
+        def toggle_studio(self):
+            if self._switch_pending:
+                return
+            if self._launch_mode == "gaming":
+                # Gaming window is open: keep capturing without it.
+                self._switch_mode("studio")
+            elif self._launch_mode == "studio" or self.streamer.is_running:
+                self._stop_stream()
+            else:
+                self.start_studio()
+
+        def _switch_mode(self, target: str):
+            """Restart the streamer in the other mode without a manual stop.
+
+            ``GameStreamer.stop()`` blocks until the child has exited (SIGTERM,
+            LED handoff and DMA teardown), so the VFIO group is free again
+            before the next instance claims it.  The restart is deferred so Qt
+            can repaint the button row in between.
+            """
+            if self._launch_mode == target or self._switch_pending:
+                return
+            if target == "studio" and not self.vfio_mode:
+                return
+
+            self._switch_pending = target
+            self._handoff_tries = 0
+            self.streamer.stop()
+            self._set_launch_running(False)
+            if hasattr(self, "lbl_engine_badge"):
+                self.lbl_engine_badge.setText("Switching Mode…")
+
+            # Freeze the row during the handover so the transient idle labels
+            # cannot be clicked twice.
+            self.btn_launch.setEnabled(False)
+            self.btn_studio.setEnabled(False)
+            if target == "studio":
+                self.btn_studio.setText("Switching to Studio…")
+                self._set_vfio_notice(
+                    "Switching to Studio",
+                    "Closing the gaming window; the OBS feed keeps running",
+                    seconds=5.0)
+            else:
+                self.btn_launch.setText("Switching to Gaming…")
+                self._set_vfio_notice(
+                    "Switching to Gaming Screen",
+                    "Opening the interactive SDL2 window",
+                    seconds=5.0)
+            QTimer.singleShot(250, lambda: self._handoff_launch(target))
+
+        def _handoff_launch(self, target: str):
+            """Start the target mode once the old streamer released the card."""
+            if self._switch_pending != target:
+                return  # superseded by an explicit stop/start
+
+            if _vfio_streamer_running() and self._handoff_tries < 8:
+                # The previous instance is still tearing down; retry shortly.
+                self._handoff_tries += 1
+                QTimer.singleShot(150, lambda: self._handoff_launch(target))
+                return
+
+            timed_out = _vfio_streamer_running()
+            self._switch_pending = None
+            self._handoff_tries = 0
+
+            # Restore an enabled, idle button row: start_* re-labels it on
+            # success and leaves it usable if its preflight refuses.
+            self._set_launch_running(False)
+
+            if timed_out:
+                print("[!] Mode switch timed out; the previous streamer still owns the card.")
+                self._set_vfio_notice(
+                    "Handover Failed",
+                    "Previous streamer still owns the VFIO device",
+                    seconds=8.0)
+                return
+
+            if target == "studio":
+                self.start_studio()
+            else:
+                self.start_gaming_screen()
+
+        def _stop_stream(self):
+            # Cancel any in-flight mode handover so its timer cannot relaunch.
+            self._switch_pending = None
+            self._handoff_tries = 0
+            self.streamer.stop()
+            self._set_launch_running(False)
+            if self.vfio_mode:
+                QTimer.singleShot(900, self._restore_led_after_stream)
 
         def _set_vfio_notice(self, title: str, detail: str, seconds: float = 8.0):
             self.lbl_hero_signal.setText(title)
@@ -2041,42 +2456,47 @@ if HAS_QT:
                 return
 
             if self.vfio_mode:
-                if not (os.path.isfile(self.streamer.streamer_bin) and
-                        os.access(self.streamer.streamer_bin, os.X_OK)):
-                    self._set_vfio_notice("Userspace Engine Missing",
-                                          "Build it with: make -C tools/opengc573-userd")
+                if not self._vfio_preflight():
                     return
-                if _vfio_streamer_running():
-                    self._set_vfio_notice(
-                        "Userspace Engine Active",
-                        "An external gc573_user_streamer instance already owns the device")
-                    return
+
                 want_fullscreen = self.chk_fullscreen.isChecked()
                 want_vsync = self.chk_vsync.isChecked()
                 want_streamer = self.chk_streamer.isChecked()
-                save_settings({"fullscreen": want_fullscreen,
-                               "vsync": want_vsync,
-                               "streamer_mode": want_streamer})
-                success = self.streamer.start(fullscreen=want_fullscreen,
-                                              vsync=want_vsync,
-                                              streamer_mode=want_streamer)
+                want_v4l2 = self.chk_v4l2.isChecked()
+                v4l2_device = V4L2_DEFAULT_DEVICE if want_v4l2 else None
+                aspect = self.combo_aspect.currentData() or "auto"
+                if aspect not in ASPECT_KEYS:
+                    aspect = "auto"
+
+                if v4l2_device and not os.path.exists(v4l2_device):
+                    self._set_vfio_notice(
+                        "Virtual Camera Missing",
+                        f"{v4l2_device} not found — load v4l2loopback or "
+                        "uncheck Virtual Camera",
+                        seconds=10.0)
+                    return
+
+                save_settings({
+                    "fullscreen": want_fullscreen,
+                    "vsync": want_vsync,
+                    "streamer_mode": want_streamer,
+                    "v4l2_loopback": want_v4l2,
+                    "aspect_ratio": aspect,
+                })
+                self.streamer.aspect = aspect
+                success = self.streamer.start(
+                    fullscreen=want_fullscreen,
+                    vsync=want_vsync,
+                    streamer_mode=want_streamer,
+                    v4l2_device=v4l2_device,
+                    headless=False,
+                    aspect=aspect)
                 if success:
-                    self._set_launch_running(True)
+                    self._set_launch_running(True, "gaming")
                     self._vfio_notice_until = 0.0
                     self._vfio_volume_applies = 0
-                    # SDL creates its sink-input only once the first HDMI
-                    # audio format arrives, so apply volume/mute twice.
-                    for delay in (1200, 3000):
-                        QTimer.singleShot(
-                            delay, lambda: set_audio_volume(self.slider_vol.value()))
-                        QTimer.singleShot(delay, lambda: set_audio_mute(self.muted))
-                    hint = default_sink_issue()
-                    if hint:
-                        print(f"[!] Audio: {hint}; the SDL2 stream will be silent.")
-                        self._set_vfio_notice(
-                            "Audio Muted",
-                            hint.capitalize() + " — unmute the system output",
-                            seconds=4.0)
+                    self._retry_audio_props()
+                    self._check_audio_sink()
                 else:
                     self._set_vfio_notice(
                         "Userspace Engine Failed",
@@ -2089,8 +2509,7 @@ if HAS_QT:
             is_fs = self.chk_fullscreen.isChecked()
             is_vsync = self.chk_vsync.isChecked()
             is_streamer = self.chk_streamer.isChecked()
-            engine = self.combo_engine.currentData() if hasattr(self, "combo_engine") else "native"
-            self.streamer.force_mpv = (engine == "mpv")
+            engine = "mpv" if self.streamer.force_mpv else "native"
             save_settings({
                 "preset": preset,
                 "volume": vol,
@@ -2099,21 +2518,69 @@ if HAS_QT:
                 "streamer_mode": is_streamer,
                 "engine": engine,
             })
-            success = self.streamer.start(preset_name=preset, fullscreen=is_fs, volume=vol, vsync=is_vsync, streamer_mode=is_streamer)
+            success = self.streamer.start(
+                preset_name=preset, fullscreen=is_fs, volume=vol,
+                vsync=is_vsync, streamer_mode=is_streamer)
             if success:
-                self._set_launch_running(True)
+                self._set_launch_running(True, "gaming")
                 set_audio_volume(self.slider_vol.value())
                 QTimer.singleShot(600, lambda: set_audio_volume(self.slider_vol.value()))
 
-        def on_engine_changed(self):
-            if self.vfio_mode:
-                return
-            engine = self.combo_engine.currentData()
-            self.streamer.force_mpv = (engine == "mpv")
-            save_settings({"engine": engine})
+        def start_studio(self):
             if self.streamer.is_running:
-                self.streamer.stop()
-                QTimer.singleShot(150, self.start_gaming_screen)
+                return
+            if not self._vfio_preflight():
+                return
+
+            if not os.path.exists(V4L2_DEFAULT_DEVICE):
+                self._set_vfio_notice(
+                    "Virtual Camera Missing",
+                    f"{V4L2_DEFAULT_DEVICE} not found — load v4l2loopback first",
+                    seconds=10.0)
+                return
+
+            aspect = self.combo_aspect.currentData() or "auto"
+            if aspect not in ASPECT_KEYS:
+                aspect = "auto"
+            self.chk_v4l2.setChecked(True)
+            self.streamer.aspect = aspect
+            save_settings({
+                "v4l2_loopback": True,
+                "aspect_ratio": aspect,
+            })
+            success = self.streamer.start(
+                fullscreen=False,
+                vsync=False,
+                streamer_mode=True,
+                v4l2_device=V4L2_DEFAULT_DEVICE,
+                headless=True,
+                aspect=aspect)
+            if success:
+                self._set_launch_running(True, "studio")
+                self._vfio_notice_until = 0.0
+                self._vfio_volume_applies = 0
+                self._retry_audio_props()
+                self._set_vfio_notice(
+                    "Studio Mode Active",
+                    f"Headless capture → {V4L2_DEFAULT_DEVICE} "
+                    "('EverLive Capture')",
+                    seconds=6.0)
+                self._check_audio_sink()
+            else:
+                self._set_vfio_notice(
+                    "Studio Engine Failed",
+                    "See ~/.config/everlive/streamer.log for the hardware error")
+                QTimer.singleShot(300, self._restore_led_after_stream)
+
+        def on_aspect_changed(self, *_):
+            aspect = self.combo_aspect.currentData() or "auto"
+            if aspect not in ASPECT_KEYS:
+                aspect = "auto"
+            self.saved_cfg["aspect_ratio"] = aspect
+            self.streamer.aspect = aspect
+            save_settings({"aspect_ratio": aspect})
+            if self.streamer.is_running:
+                print("[*] Aspect ratio saved; restart the stream to apply it.")
 
         def on_preset_changed(self, *_):
             if self.vfio_mode:
@@ -2136,9 +2603,11 @@ if HAS_QT:
             if not self.vfio_mode or not hasattr(self, "lbl_vdev"):
                 return
             pci = self.streamer.hw_info.get("pci") or "auto"
+            loop = (f" • Out: {self.streamer.v4l2_device}"
+                    if getattr(self.streamer, "v4l2_device", None) else "")
             self.lbl_vdev.setText(
                 f"VFIO: {pci} • EDID: {self._edid_profile_label()} • "
-                "Audio: SDL2 (Userspace)")
+                f"Audio: SDL2 (Userspace){loop}")
 
         def _restore_edid_selection(self):
             idx = self.combo_presets.findData(
@@ -2230,7 +2699,10 @@ if HAS_QT:
                 if was_running:
                     self.streamer.stop()
                     self._set_launch_running(False)
-                QTimer.singleShot(500 if was_running else 0, self.start_gaming_screen)
+                restart = (self.start_studio
+                           if self._last_launch_mode == "studio"
+                           else self.start_gaming_screen)
+                QTimer.singleShot(500 if was_running else 0, restart)
                 QTimer.singleShot(3000, self._restore_led_after_stream)
                 return
 
@@ -2286,8 +2758,13 @@ if HAS_QT:
                     audio_str = "No HDMI audio"
                 else:
                     audio_str = "SDL2 HDMI Audio"
+                route = (f" • OBS: {self.streamer.v4l2_device}"
+                         if getattr(self.streamer, "v4l2_device", None) else "")
                 self.lbl_hero_meta.setText(
-                    f"Signal locked • Chroma: {chroma_val} • Color: Pass-through • {audio_str}")
+                    f"Signal locked • Chroma: {chroma_val}{route} • "
+                    f"Color: Pass-through • {audio_str}")
+                if hasattr(self, "lbl_audio_fmt"):
+                    self.lbl_audio_fmt.setText(self.streamer.audio_format_label())
                 return
 
             hdr_str = f" • {info['hdr']}" if info.get("hdr") else ""
@@ -2309,13 +2786,19 @@ if HAS_QT:
                 res_clean = re.sub(r"(\d+)x(\d+)([pi]?)", r"\1 × \2\3", res)
                 self.lbl_hero_signal.setText(f"Last signal: {res_clean} @ {fps}".strip())
                 self.lbl_hero_meta.setText(
-                    "Userspace VFIO • Blob-Free Ring 3 • Ready for the next session")
+                    "Userspace VFIO engine ready • Waiting for HDMI input")
             else:
                 self.lbl_hero_signal.setText("Ready for Gaming")
                 self.lbl_hero_meta.setText(
-                    "Userspace VFIO engine ready • No V4L2/ALSA device required")
+                    "Userspace VFIO engine ready • Waiting for HDMI input")
+            if hasattr(self, "lbl_audio_fmt"):
+                self.lbl_audio_fmt.setText("No Audio")
 
         def _update_status_vfio(self):
+            if hasattr(self, "lbl_audio_fmt"):
+                self.lbl_audio_fmt.setText(
+                    self.streamer.audio_format_label()
+                    if self.streamer.is_running else "No Audio")
             if self.streamer.is_running:
                 if not self.streamer.poll():
                     self._set_launch_running(False)
@@ -2392,6 +2875,10 @@ if HAS_QT:
 
             info = self.streamer.get_signal_info()
             self._live = info
+            if hasattr(self, "lbl_audio_fmt"):
+                self.lbl_audio_fmt.setText(
+                    info.get("audio", "No Audio")
+                    if info.get("locked") else "No Audio")
             if info["locked"]:
                 self._show_live(info)
             else:
@@ -2401,6 +2888,8 @@ if HAS_QT:
                 self.lbl_hero_meta.setText("Waiting for input signal (e.g. power on console or PC)...")
 
         def closeEvent(self, event):
+            # Do not let a pending handover timer relaunch the streamer.
+            self._switch_pending = None
             was_running = self.streamer.is_running
             self.streamer.stop()
             if self.vfio_mode and was_running:
@@ -2422,7 +2911,18 @@ def main():
     parser.add_argument("-d", "--device", default=None, help="V4L2 video device (e.g. /dev/video0, default: auto-detect)")
     parser.add_argument("-a", "--audio", default=None, help="ALSA audio device (e.g. hw:CARD=A4K,DEV=0, default: auto-detect)")
     parser.add_argument("--aspect", choices=["auto", "16:9", "4:3", "stretch"], default="auto", help="Aspect ratio override")
+    parser.add_argument("--v4l2", "--loopback", dest="v4l2", nargs="?",
+                        const=V4L2_DEFAULT_DEVICE, default=None,
+                        help="Publish native YUYV frames to a v4l2loopback device "
+                             f"(default: {V4L2_DEFAULT_DEVICE})")
+    parser.add_argument("--headless", action="store_true",
+                        help="Capture and publish/play without an SDL window")
     args = parser.parse_args()
+
+    # Headless and virtual-camera launches are streamer-only: never open the
+    # control hub just to ignore those flags.
+    if args.headless or args.v4l2:
+        args.cli = True
 
     if args.led is not None:
         key = args.led.lower().strip()
@@ -2484,7 +2984,7 @@ def main():
             if not info["locked"]:
                 print("[!] Warning: No active HDMI signal detected on GC573.")
                 print("    Please check if the video source is powered on and sending video.")
-        if not streamer.start(preset_name=args.preset, fullscreen=args.fullscreen, volume=args.volume, vsync=args.vsync, streamer_mode=args.streamer_mode):
+        if not streamer.start(preset_name=args.preset, fullscreen=args.fullscreen, volume=args.volume, vsync=args.vsync, streamer_mode=args.streamer_mode, v4l2_device=args.v4l2, headless=args.headless, aspect=args.aspect):
             sys.exit(1)
         if streamer.vfio_mode and args.volume != 1.0:
             # The SDL2 sink-input only exists once audio starts flowing.

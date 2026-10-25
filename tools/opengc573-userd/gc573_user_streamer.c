@@ -91,6 +91,13 @@
  * 200-300 ms of silence the PS5 emits while switching to bitstream.
  */
 #define AUDIO_LPCM_CONFIRM_BLOCKS	40U
+/*
+ * Ambiguous carriers (2ch / non-16-bit) are verified before playback so a
+ * streamer that starts mid-burst cannot leak compressed data.  A 48 kHz AC-3
+ * burst lasts ~19 ms and the DMA delivers ~48 blocks/s, so four clean blocks
+ * (~83 ms) cannot hide an active bitstream.
+ */
+#define AUDIO_LPCM_START_BLOCKS		4U
 
 static volatile sig_atomic_t g_running = 1;
 static bool g_trace_mode;
@@ -107,11 +114,12 @@ static uint8_t g_led_g = 0xcc;
 static uint8_t g_led_b = 0xff;
 
 /*
- * Set when the "bitstream" EDID profile is active.  The PS5 leaves the
- * receiver's non-PCM channel-status bit clear even while sending AC-3, so in
- * this mode no block may reach SDL before it has been verified preamble-free.
+ * Set when the active EDID advertises compressed audio.  Built-in profiles
+ * always do (L-PCM + AC-3 + DTS), so the receiver can deliver IEC 61937
+ * bursts with any profile; the PS5 leaves the non-PCM channel-status bit
+ * clear even while sending AC-3, so content - not the format - decides.
  */
-static bool g_bitstream_edid;
+static bool g_bitstream_enabled;
 
 /* Presentation options; the GUI forwards its checkboxes as CLI flags. */
 enum stream_aspect {
@@ -304,8 +312,9 @@ static void print_usage(const char *prog)
 	printf("Usage: %s [PCI_ADDRESS] [OPTIONS]\n", prog);
 	printf("  --led COLOR       off|blue|green|red|cyan|magenta|yellow|white|#RRGGBB\n");
 	printf("                    LED colour while streaming (default: cyan #00ccff).\n");
-	printf("  --edid VALUE      default|1440p120|1080p240|bitstream|/path/to/custom.edid\n");
-	printf("                    'bitstream' adds AC-3/DTS 5.1 SADs (passthrough).\n");
+	printf("  --edid VALUE      default|1440p120|1080p240|/path/to/custom.edid\n");
+	printf("                    Every built-in profile advertises L-PCM, AC-3 and\n");
+	printf("                    DTS 5.1; 'bitstream' is a legacy alias for default.\n");
 	printf("                    EDID advertised to the source (default: default).\n");
 	printf("  -f, --fullscreen  Start the SDL2 window in fullscreen (F toggles).\n");
 	printf("  --vsync           Pace presentation to the display refresh rate.\n");
@@ -1429,11 +1438,25 @@ struct v4l2_sink {
 	unsigned int width;
 	unsigned int height;
 	size_t frame_bytes;
+	/*
+	 * Geometry that still has to reach the driver.  While a reader (OBS)
+	 * holds the previous resolution, v4l2loopback rejects VIDIOC_S_FMT with
+	 * -EBUSY; the target stays recorded and the write path retries until the
+	 * reader releases or renegotiates its buffers.
+	 */
+	unsigned int target_width;
+	unsigned int target_height;
+	enum v4l2_colorspace target_colorspace;
+	uint64_t last_retry_ms;
 	bool configured;
 	bool write_error_reported;
+	bool reopen_error_reported;
 	uint64_t frames;
 	uint64_t dropped;
 };
+
+/* Re-attempt an EBUSY format renegotiation at most four times per second. */
+#define V4L2_SINK_RETRY_MS	250U
 
 static enum v4l2_colorspace v4l2_colorspace_for_signal(
 				const struct gc573_user_video_signal *sig)
@@ -1451,6 +1474,7 @@ static int v4l2_sink_open(struct v4l2_sink *sink, const char *path)
 {
 	memset(sink, 0, sizeof(*sink));
 	sink->fd = -1;
+	sink->target_colorspace = V4L2_COLORSPACE_SRGB;
 
 	if (!path || !*path)
 		return -EINVAL;
@@ -1466,16 +1490,62 @@ static int v4l2_sink_open(struct v4l2_sink *sink, const char *path)
 	return 0;
 }
 
+/*
+ * Reopen the loopback node.  A fresh writer fd drops stale loopback state
+ * left behind by a failed renegotiation, and lets the retry path recover when
+ * the node was temporarily unavailable.
+ */
+static int v4l2_sink_reopen(struct v4l2_sink *sink)
+{
+	int fd;
+
+	if (!sink || !sink->path[0])
+		return -EINVAL;
+
+	/* A new fd starts without any negotiated format. */
+	sink->configured = false;
+
+	if (sink->fd >= 0) {
+		close(sink->fd);
+		sink->fd = -1;
+	}
+
+	fd = open(sink->path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0) {
+		if (!sink->reopen_error_reported) {
+			pr_warn("V4L2 sink: cannot reopen %s: %s",
+				sink->path, strerror(errno));
+			sink->reopen_error_reported = true;
+		}
+		return -errno;
+	}
+
+	sink->fd = fd;
+	sink->reopen_error_reported = false;
+	return 0;
+}
+
 static int v4l2_sink_configure(struct v4l2_sink *sink,
 			       unsigned int width, unsigned int height,
 			       const struct gc573_user_video_signal *sig)
 {
 	struct v4l2_format fmt;
 	size_t frame_bytes;
-	int ret;
+	int err;
 
-	if (!sink || sink->fd < 0 || !width || !height || (width & 1U))
+	if (!sink || !width || !height || (width & 1U) || !sink->path[0])
 		return -EINVAL;
+
+	/* Remember what the stream needs, even if the driver refuses it now. */
+	if (sink->target_width != width || sink->target_height != height)
+		sink->last_retry_ms = 0;
+	sink->target_width = width;
+	sink->target_height = height;
+	if (sig)
+		sink->target_colorspace = v4l2_colorspace_for_signal(sig);
+
+	if (sink->fd < 0 && v4l2_sink_reopen(sink) < 0)
+		return -EBADF;
 
 	frame_bytes = (size_t)width * height * 2U;
 	if (sink->configured && sink->width == width &&
@@ -1490,14 +1560,22 @@ static int v4l2_sink_configure(struct v4l2_sink *sink,
 	fmt.fmt.pix.bytesperline = width * 2U;
 	fmt.fmt.pix.sizeimage = (uint32_t)frame_bytes;
 	fmt.fmt.pix.field = V4L2_FIELD_NONE;
-	fmt.fmt.pix.colorspace = v4l2_colorspace_for_signal(sig);
+	fmt.fmt.pix.colorspace = sink->target_colorspace;
 
-	ret = ioctl(sink->fd, VIDIOC_S_FMT, &fmt);
-	if (ret < 0) {
-		pr_err("V4L2 sink: VIDIOC_S_FMT %ux%u YUYV failed on %s: %s",
-		       width, height, sink->path, strerror(errno));
+	if (ioctl(sink->fd, VIDIOC_S_FMT, &fmt) < 0) {
+		err = errno;
 		sink->configured = false;
-		return -errno;
+		if (err == EBUSY) {
+			pr_warn("V4L2 sink: %s reader (OBS) is holding the previous "
+				"resolution; will auto-retry VIDIOC_S_FMT once the "
+				"reader releases buffers...", sink->path);
+			/* Drop stale loopback state on the writer side. */
+			(void)v4l2_sink_reopen(sink);
+			return -EBUSY;
+		}
+		pr_err("V4L2 sink: VIDIOC_S_FMT %ux%u YUYV failed on %s: %s",
+		       width, height, sink->path, strerror(err));
+		return -err;
 	}
 
 	/* Use the geometry the driver actually accepted. */
@@ -1508,6 +1586,7 @@ static int v4l2_sink_configure(struct v4l2_sink *sink,
 	if (!sink->frame_bytes)
 		sink->frame_bytes = frame_bytes;
 	sink->configured = true;
+	sink->write_error_reported = false;
 
 	pr_info("V4L2 sink: %ux%u YUYV, %zu KB/frame on %s",
 		sink->width, sink->height, sink->frame_bytes / 1024U,
@@ -1519,8 +1598,32 @@ static void v4l2_sink_write(struct v4l2_sink *sink, const void *data,
 			    size_t bytes)
 {
 	ssize_t written;
+	uint64_t now;
 
-	if (!sink || sink->fd < 0 || !sink->configured || !data)
+	if (!sink || !data)
+		return;
+
+	if (!sink->configured) {
+		/*
+		 * A reader (OBS) rejected the new geometry with -EBUSY.  Keep
+		 * retrying while frames keep arriving: as soon as OBS releases or
+		 * renegotiates its buffers, VIDIOC_S_FMT succeeds and delivery
+		 * resumes without restarting the streamer.
+		 */
+		if (!sink->target_width || !sink->target_height)
+			return;
+
+		now = now_ms();
+		if (now - sink->last_retry_ms < V4L2_SINK_RETRY_MS)
+			return;
+		sink->last_retry_ms = now;
+
+		(void)v4l2_sink_configure(sink, sink->target_width,
+					  sink->target_height, NULL);
+		return;
+	}
+
+	if (sink->fd < 0)
 		return;
 	if (bytes != sink->frame_bytes) {
 		sink->dropped++;
@@ -1773,12 +1876,8 @@ static bool audio_output_muted(const struct audio_stream *as)
 {
 	if (as->bt_playing && as->playback.dev)
 		return false;
-	if (as->non_pcm || as->preamble_muted)
-		return true;
-	/* 8-channel/16-bit LPCM is unambiguous and safe to play. */
-	if (as->format_channels >= 8 && as->format_bits == 16)
-		return false;
-	return g_bitstream_edid && !as->lpcm_verified;
+	/* Compressed carriers and the LPCM verification window stay silent. */
+	return as->non_pcm || !as->lpcm_verified;
 }
 
 /*
@@ -2075,28 +2174,39 @@ static void audio_queue_block(struct audio_stream *as, const void *data,
 		as->preamble_muted = true;
 		as->lpcm_verified = false;
 		as->clean_blocks = 0;
-	} else if (as->preamble_muted) {
-		if (unambiguous_lpcm) {
-			if (++as->clean_blocks >= AUDIO_LPCM_CONFIRM_BLOCKS) {
-				as->preamble_muted = false;
-				as->lpcm_verified = true;
-				as->bt_playing = false;
-				if (as->bt_ready) {
-					gc573_bitstream_decoder_close(&as->bt);
-					as->bt_ready = false;
-					as->bt_codec = GC573_BITSTREAM_CODEC_NONE;
-				}
+	} else if (!as->lpcm_verified) {
+		/*
+		 * No preamble in this block, so it is a candidate for LPCM.  The
+		 * 8ch/16-bit carrier is unambiguous and trusted at once; ambiguous
+		 * carriers (2ch, 24-bit) stay silent for a confirmation window so a
+		 * streamer that starts mid-burst cannot leak compressed data.  After a
+		 * detected bitstream the window is longer, because some sources send
+		 * a few hundred ms of digital silence before LPCM resumes.
+		 */
+		unsigned int verify_blocks =
+			as->preamble_muted ? AUDIO_LPCM_CONFIRM_BLOCKS :
+					     AUDIO_LPCM_START_BLOCKS;
+
+		as->clean_blocks++;
+		if (unambiguous_lpcm || as->clean_blocks >= verify_blocks) {
+			bool was_muted = as->preamble_muted;
+
+			as->preamble_muted = false;
+			as->lpcm_verified = true;
+			as->bt_playing = false;
+			if (as->bt_ready) {
+				gc573_bitstream_decoder_close(&as->bt);
+				as->bt_ready = false;
+				as->bt_codec = GC573_BITSTREAM_CODEC_NONE;
+			}
+			if (was_muted)
 				printf("[AUDIO] LPCM confirmed after %u clean blocks; switching back to PCM\n",
 				       as->clean_blocks);
-			}
-		} else {
-			/* 2ch/24 is the compressed carrier; never counts as LPCM. */
 			as->clean_blocks = 0;
 		}
 	}
 
-	decode_mode = as->non_pcm ||
-		      (g_bitstream_edid && !unambiguous_lpcm) ||
+	decode_mode = as->non_pcm || preamble ||
 		      (as->preamble_muted && !unambiguous_lpcm);
 
 	if (decode_mode) {
@@ -2108,8 +2218,8 @@ static void audio_queue_block(struct audio_stream *as, const void *data,
 		return;
 	}
 
-	/* Unambiguous LPCM may still be inside its verification window. */
-	if (as->preamble_muted)
+	/* Ambiguous carriers stay silent until the LPCM window confirmed. */
+	if (!as->lpcm_verified)
 		return;
 
 	if (!playback->dev)
@@ -2269,15 +2379,13 @@ static void audio_handle_format(struct audio_stream *as,
 		return;
 
 	/*
-	 * Compressed audio is decoded to 48 kHz S16 stereo.  In bitstream-EDID
-	 * mode an ambiguous carrier (anything but 8ch/16-bit LPCM) is routed
-	 * through the decoder as well, so open the output at the decoded format.
+	 * Compressed audio is decoded to 48 kHz S16 stereo.  Only a non-PCM
+	 * channel status pre-opens the device in the decoder format; ordinary
+	 * LPCM keeps the source rate so nothing plays at the wrong pitch.
+	 * audio_bitstream_prepare() reopens the device at 48 kHz/16-bit as soon
+	 * as the first IEC 61937 preamble is detected.
 	 */
-	decode_capable = bitstream ||
-		(g_bitstream_edid &&
-		 (format->channels < 8 || format->sample_bits != 16)) ||
-		(as->preamble_muted &&
-		 (format->channels < 8 || format->sample_bits != 16));
+	decode_capable = bitstream;
 	if (audio_open_device(&as->playback,
 			      decode_capable ? 48000 : format->rate_hz,
 			      decode_capable ? 16 : format->sample_bits) < 0) {
@@ -2314,9 +2422,6 @@ static void audio_handle_format(struct audio_stream *as,
 	if (bitstream)
 		printf("[AUDIO] Bitstream stream active (%u Hz, non-PCM); decoding to stereo\n",
 		       format->rate_hz);
-	else if (decode_capable)
-		printf("[AUDIO] Ambiguous HDMI carrier: %u ch / %u-bit; routing through the decoder\n",
-		       format->channels, format->sample_bits);
 }
 
 static void audio_poll_format(struct audio_stream *as, void *bar0,
@@ -3060,14 +3165,14 @@ int main(int argc, char *argv[])
 	}
 	printf("[EDID] Profile: %s\n", gc573_user_edid_active_name());
 	/*
-	 * The bitstream EDID advertises compressed audio.  In that mode the
-	 * receiver's non-PCM bit is not trustworthy (the PS5 keeps b0 bit6 at 0
-	 * for AC-3), so audio is only released after a content check.
+	 * Every built-in profile advertises AC-3 and DTS next to multi-channel
+	 * L-PCM, so compressed bursts may arrive with any profile.  Detection is
+	 * content-driven: preambles go through the decoder, clean blocks play as
+	 * LPCM.  A custom EDID is scanned for compressed SADs.
 	 */
-	g_bitstream_edid = strcmp(gc573_user_edid_active_name(),
-				  GC573_EDID_PROFILE_BITSTREAM) == 0;
-	if (g_bitstream_edid)
-		printf("[AUDIO] Bitstream EDID active; SDL output stays muted until LPCM is verified.\n");
+	g_bitstream_enabled = gc573_user_edid_advertises_bitstream();
+	if (g_bitstream_enabled)
+		printf("[AUDIO] EDID advertises AC-3/DTS; bitstream auto-detection enabled.\n");
 
 	/* 4. Initialize the IT6805 HDMI 2.0 receiver. */
 	ret = gc573_user_it6805_init(ctx.bar0);
@@ -3477,7 +3582,7 @@ int main(int argc, char *argv[])
 										     &texture,
 										     new_out_w,
 										     new_out_h);
-							if (ret == 0 && v4l2_sink.fd >= 0)
+							if (ret == 0 && v4l2_sink.path[0])
 								(void)v4l2_sink_configure(&v4l2_sink,
 											  new_out_w,
 											  new_out_h,
@@ -3567,7 +3672,7 @@ int main(int argc, char *argv[])
 									     &texture,
 									     new_out_w,
 									     new_out_h);
-						if (ret == 0 && v4l2_sink.fd >= 0)
+						if (ret == 0 && v4l2_sink.path[0])
 							(void)v4l2_sink_configure(&v4l2_sink,
 										  new_out_w,
 										  new_out_h,
@@ -3657,7 +3762,7 @@ int main(int argc, char *argv[])
 
 			if (ph > 0) {
 				have_frame = true;
-				if (v4l2_sink.fd >= 0)
+				if (v4l2_sink.path[0])
 					v4l2_sink_write(&v4l2_sink, pixels,
 							g_preview.bytes);
 				if (texture) {
@@ -3796,11 +3901,18 @@ int main(int argc, char *argv[])
 				       (unsigned long)__atomic_load_n(&g_preview.dropped,
 							      __ATOMIC_RELAXED),
 				       (double)g_preview.taken_age_us / 1000.0);
-				if (v4l2_sink.fd >= 0) {
-					printf("[V4L2] %ux%u YUYV | written %lu | dropped %lu\n",
-					       v4l2_sink.width, v4l2_sink.height,
-					       (unsigned long)v4l2_sink.frames,
-					       (unsigned long)v4l2_sink.dropped);
+				if (v4l2_sink.path[0]) {
+					if (v4l2_sink.configured)
+						printf("[V4L2] %ux%u YUYV | written %lu | dropped %lu\n",
+						       v4l2_sink.width, v4l2_sink.height,
+						       (unsigned long)v4l2_sink.frames,
+						       (unsigned long)v4l2_sink.dropped);
+					else
+						printf("[V4L2] waiting for reader to release %ux%u -> %ux%u | dropped %lu\n",
+						       v4l2_sink.width, v4l2_sink.height,
+						       v4l2_sink.target_width,
+						       v4l2_sink.target_height,
+						       (unsigned long)v4l2_sink.dropped);
 				}
 				if (audio.streaming && audio.bt_playing) {
 					printf("[AUDIO] Decoding %s -> Stereo | bursts %lu | frames %lu | errors %lu\n",
