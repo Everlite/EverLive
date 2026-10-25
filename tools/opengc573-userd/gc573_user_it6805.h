@@ -64,8 +64,8 @@ int gc573_user_it6805_init(void *bar0);
  *
  * Only reads the cheap status registers (bank 0 0x13/0x14/0x15/0x19) and
  * follows the HDMI 2.0 PHY selector.  This is safe to call from a streaming
- * loop: unlike gc573_user_it6805_poll_signal() it does not spend ~175 ms on
- * the TMDS/pixel-clock sampling.
+ * loop: unlike gc573_user_it6805_poll_signal() it does not spend several
+ * hundred milliseconds on the TMDS/pixel-clock sampling.
  *
  * Returns 0 on success, negative errno on failure.
  */
@@ -93,8 +93,9 @@ enum gc573_user_signal_probe {
  * TIMING is cheap enough for the streaming hot path: it reads the latched
  * timing registers and AVI InfoFrame but does not sample the pixel clock,
  * so frame_rate_hz/frame_rate_x100 are left zero.  RATE adds a short
- * pixel-clock sample and fills the frame rate.  FULL matches
- * gc573_user_it6805_poll_signal() and blocks for roughly 175 ms.
+ * pixel-clock sample and fills the frame rate.  FULL waits for the post-lock
+ * settle window and then performs a long, outlier-trimmed pixel-clock
+ * average; it blocks for roughly 450 ms.
  *
  * Returns 0 on success, negative errno on failure.
  */
@@ -108,7 +109,9 @@ int gc573_user_it6805_poll_signal_ex(void *bar0,
  * @sig: Pointer to signal struct to receive status
  *
  * Performs the full timing measurement and AVI InfoFrame read.  This blocks
- * for roughly 175 ms because the IT6805 timing sampler needs that long.
+ * for roughly 450 ms: the IT6805 needs a 150 ms post-lock settle window and a
+ * long pixel-clock average so that 59.72/59.93 Hz retro-scaler modes are not
+ * rounded up to 60 Hz.
  *
  * Returns 0 on success, negative errno on failure.
  */

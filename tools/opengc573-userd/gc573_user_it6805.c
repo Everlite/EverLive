@@ -44,11 +44,23 @@
 #define IT6805_TMDS_SAMPLE_COUNT	10
 #define IT6805_TMDS_SAMPLE_DELAY_MS	10
 #define IT6805_TMDS_SAMPLE_BIAS		10
-#define IT6805_PCLK_SAMPLE_COUNT	25
+/*
+ * The pixel-clock counter only resolves ~65 counts per sample at 1080p60.
+ * Use enough samples for a stable mean and drop outliers in the helper below.
+ */
+#define IT6805_PCLK_SAMPLE_COUNT	64
 /* Short sample window used by the streaming hot path. */
 #define IT6805_PCLK_QUICK_SAMPLE_COUNT	8
+#define IT6805_PCLK_MAX_SAMPLES		96U
 #define IT6805_PCLK_SAMPLE_DELAY_MS	3
 #define IT6805_PCLK_SAMPLE_SCALE	0x200
+/*
+ * The kernel waits IT6805_VIDEO_CONFIRM_POLLS * fast interval (6 * 20 ms)
+ * after SCDT asserts before trusting the timing registers.  Measuring during
+ * that window makes 59.72 Hz retro-scaler modes read as 60.00 Hz often enough
+ * to program a wrong VIP frame period.
+ */
+#define IT6805_LOCK_SETTLE_MS		150U
 
 #define IT6805_AUDIO_REQUEST_DELAY_POLLS	4
 #define IT6805_AUDIO_MONITOR_DELAY_POLLS	3
@@ -1667,13 +1679,75 @@ int gc573_user_it6805_unmute(void *bar0)
 	return 0;
 }
 
+/*
+ * Average the per-sample reference-clock counts after sorting and dropping the
+ * lowest/highest 12.5%.  The counter is quantised to whole reference clocks,
+ * so the mean provides sub-count resolution while the trim rejects a still
+ * settling or glitched sample that would otherwise bias the frame rate.
+ */
+static u32 it6805_pclk_trimmed_mean_khz(u16 *counts, unsigned int count)
+{
+	unsigned int trim;
+	unsigned int kept;
+	unsigned int i;
+	unsigned int j;
+	u32 sum = 0;
+
+	if (!count)
+		return 0;
+
+	/* Insertion sort; count is bounded by IT6805_PCLK_MAX_SAMPLES. */
+	for (i = 1; i < count; i++) {
+		u16 key = counts[i];
+
+		j = i;
+		while (j > 0 && counts[j - 1] > key) {
+			counts[j] = counts[j - 1];
+			j--;
+		}
+		counts[j] = key;
+	}
+
+	trim = count >= 8 ? count / 8 : 0;
+	if (trim * 2 >= count)
+		trim = 0;
+	kept = count - 2 * trim;
+
+	for (i = trim; i < count - trim; i++)
+		sum += counts[i];
+
+	if (!sum || !kept)
+		return 0;
+
+	return (u32)(((u64)g_reference_khz * IT6805_PCLK_SAMPLE_SCALE * kept) /
+		     sum);
+}
+
+/*
+ * Convert a measured pixel clock and total frame geometry into 1/100 Hz.
+ * Round once over the full htotal*vtotal product: two successive truncating
+ * divisions could bias the result low by 1/100 Hz and push a genuine 59.72 Hz
+ * mode across a nominal-rate boundary.
+ */
+static u32 it6805_frame_rate_x100(u32 pixel_clock_khz, u16 htotal, u16 vtotal)
+{
+	u64 total_pixels = (u64)htotal * vtotal;
+
+	if (!pixel_clock_khz || !total_pixels)
+		return 0;
+
+	return (u32)((((u64)pixel_clock_khz * 100000) + total_pixels / 2) /
+		     total_pixels);
+}
+
 static int it6805_read_video_timing(void *bar0,
 				    struct gc573_user_video_signal *sig,
 				    unsigned int pclk_samples, bool sample_tmds)
 {
 	u32 tmds_sum = IT6805_TMDS_SAMPLE_BIAS;
-	u32 pclk_sum = 0;
 	u32 pclk_khz;
+	u16 pclk_counts[IT6805_PCLK_MAX_SAMPLES];
+	unsigned int pclk_count = 0;
 	u16 htotal = 0, hactive = 0, vtotal = 0, vactive = 0;
 	u8 reg43 = 0, reg98 = 0;
 	u8 high = 0, low = 0, sample = 0;
@@ -1683,6 +1757,8 @@ static int it6805_read_video_timing(void *bar0,
 
 	if (measure_rate && !g_reference_khz)
 		return -EAGAIN;
+	if (pclk_samples > IT6805_PCLK_MAX_SAMPLES)
+		pclk_samples = IT6805_PCLK_MAX_SAMPLES;
 
 	ret = gc573_user_it6805_set_bank(bar0, IT6805_BANK_0);
 	if (ret < 0)
@@ -1740,7 +1816,13 @@ static int it6805_read_video_timing(void *bar0,
 		ret = it6805_read_reg(bar0, 0x99, &low);
 		if (ret < 0)
 			return ret;
-		pclk_sum += (((u32)high << 8) | low) & 0x7ff;
+		{
+			u32 count = (((u32)high << 8) | low) & 0x7ff;
+
+			/* A zeroed/aborted latch must not bias the pixel clock. */
+			if (count && pclk_count < IT6805_PCLK_MAX_SAMPLES)
+				pclk_counts[pclk_count++] = (u16)count;
+		}
 		ret = it6805_update_bits(bar0, 0x9a, BIT(7), BIT(7));
 		if (ret < 0)
 			return ret;
@@ -1794,19 +1876,21 @@ static int it6805_read_video_timing(void *bar0,
 
 	/*
 	 * The timing-only probe stops here.  It is used by the streaming hot
-	 * path, which must not spend the IT6805's ~175 ms pixel-clock sample
+	 * path, which must not spend the IT6805's ~200 ms pixel-clock sample
 	 * window on every poll.
 	 */
 	if (!measure_rate)
 		return (hactive && vactive) ? 0 : -EAGAIN;
 
-	if (!pclk_sum || !htotal || !vtotal || !hactive || !vactive)
+	if (!pclk_count || !htotal || !vtotal || !hactive || !vactive)
 		return -EAGAIN;
 
-	pclk_khz = (u32)(((u64)g_reference_khz * IT6805_PCLK_SAMPLE_SCALE *
-			  pclk_samples) / pclk_sum);
+	pclk_khz = it6805_pclk_trimmed_mean_khz(pclk_counts, pclk_count);
+	if (!pclk_khz)
+		return -EAGAIN;
+
 	sig->pixel_clock_khz = pclk_khz;
-	sig->frame_rate_x100 = (u32)(((u64)pclk_khz * 100000) / htotal / vtotal);
+	sig->frame_rate_x100 = it6805_frame_rate_x100(pclk_khz, htotal, vtotal);
 	sig->frame_rate_hz = it6805_normalize_frame_rate(sig->frame_rate_x100,
 							 pclk_khz);
 	if (sig->interlaced && sig->frame_rate_hz)
@@ -1879,6 +1963,21 @@ int gc573_user_it6805_poll_signal_ex(void *bar0,
 	if (!sig->scdt_locked)
 		return 0;
 
+	/*
+	 * A fresh SCDT assertion needs the same settling window the kernel uses
+	 * (IT6805_VIDEO_CONFIRM_POLLS * 20 ms) before the timing registers and
+	 * the pixel-clock sampler are trustworthy.  Only the full measurement
+	 * pays this cost; TIMING/RATE remain cheap for the streaming loop.
+	 */
+	if (probe == GC573_USER_SIGNAL_PROBE_FULL) {
+		msleep(IT6805_LOCK_SETTLE_MS);
+		ret = gc573_user_it6805_poll_status(bar0, sig);
+		if (ret < 0)
+			return ret;
+		if (!sig->scdt_locked)
+			return 0;
+	}
+
 	if (probe == GC573_USER_SIGNAL_PROBE_FULL)
 		pclk_samples = IT6805_PCLK_SAMPLE_COUNT;
 	else if (probe == GC573_USER_SIGNAL_PROBE_RATE)
@@ -1910,12 +2009,14 @@ int gc573_user_it6805_poll_signal_ex(void *bar0,
 			/*
 			 * A 1440p120 source often still carries a 60 Hz VIC. The
 			 * measured pixel clock is the rate the VIP must run at.
+			 * Never let the VIC raise an over-read rate: doing so turned
+			 * genuine 59.72/59.93 Hz retro-scaler modes into 60 Hz and
+			 * programmed a too-short VIP frame period.
 			 */
 			vic_x100 = (u32)frame_rate * 100U;
 			if (frame_rate && sig->frame_rate_x100 &&
-			    (vic_x100 > sig->frame_rate_x100 ?
-			     vic_x100 - sig->frame_rate_x100 :
-			     sig->frame_rate_x100 - vic_x100) <= 500)
+			    vic_x100 <= sig->frame_rate_x100 &&
+			    sig->frame_rate_x100 - vic_x100 <= 500)
 				sig->frame_rate_hz = frame_rate;
 		}
 		if (sig->colorspace == GC573_USER_COLORSPACE_YCBCR420)

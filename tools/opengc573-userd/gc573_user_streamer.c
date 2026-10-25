@@ -66,12 +66,6 @@
 #define STATUS_POLL_WAIT_MS	200U
 /* Splitter service and AVMute release cadence. */
 #define STATUS_SERVICE_MS	500U
-/*
- * Pixel-clock sampling blocks for ~24 ms and must not run in the render loop
- * at high refresh rates.  It is only used when a geometry/colorspace change
- * is already pending, or as a slow background safety net.
- */
-#define FRAME_RATE_PROBE_MS	10000U
 /* Bounded DMA stop wait for a hot switch; the following DMA reset is safe. */
 #define VIDEO_STOP_HOT_MS	150U
 /* Audio mapping plus descriptor pages and allocator slack. */
@@ -845,10 +839,10 @@ static int configure_and_start(struct gc573_vfio_ctx *ctx,
 			sig->width, sig->height, sig->interlaced ? "i" : "p",
 			sig->frame_rate_x100 / 100, sig->frame_rate_x100 % 100);
 
-	printf("[VIDEO] Capturing %ux%u%s @ %u.%02u Hz (VIP %u Hz, %s, pclk %u kHz) -> %ux%u YUYV%s\n",
+	printf("[VIDEO] Capturing %ux%u%s @ %u.%02u Hz (VIP period %.2f Hz, %s, pclk %u kHz) -> %ux%u YUYV%s\n",
 	       sig->width, sig->height, sig->interlaced ? "i" : "p",
 	       sig->frame_rate_x100 / 100, sig->frame_rate_x100 % 100,
-	       sig->frame_rate_hz,
+	       (double)sig->frame_rate_x100 / 100.0,
 	       colorspace_name(sig->colorspace), sig->pixel_clock_khz,
 	       out_width, out_height,
 	       (out_width != sig->width || out_height != sig->height) ?
@@ -2729,7 +2723,6 @@ int main(int argc, char *argv[])
 	SDL_Texture *texture = NULL;
 	uint64_t last_status_poll = 0;
 	uint64_t last_service = 0;
-	uint64_t last_frame_rate_probe = 0;
 	uint64_t last_stats = 0;
 	uint64_t last_stats_us = 0;
 	uint64_t last_frames = 0;
@@ -3041,7 +3034,6 @@ int main(int argc, char *argv[])
 	last_stats_us = now_us();
 	last_status_poll = 0;
 	last_service = 0;
-	last_frame_rate_probe = 0;
 
 	while (g_running) {
 		SDL_Event event;
@@ -3111,9 +3103,10 @@ int main(int argc, char *argv[])
 
 		/*
 		 * Cheap signal probe: reads status, the latched timing registers and
-		 * the AVI InfoFrame.  The 24 ms pixel-clock sample is only used when
-		 * a candidate change is already pending, or as a slow 10 s safety
-		 * net, so the 120 Hz render loop is never blocked periodically.
+		 * the AVI InfoFrame.  The pixel-clock sample is only taken when a
+		 * candidate change is already pending or SCDT just re-locked.  A
+		 * periodic rate probe would block the render loop for ~24 ms and was
+		 * visible as a single hitch every 10 seconds on 59.72/59.93 Hz inputs.
 		 */
 		if (now - last_status_poll >=
 		    (streaming ? STATUS_POLL_STREAM_MS : STATUS_POLL_WAIT_MS)) {
@@ -3132,17 +3125,15 @@ int main(int argc, char *argv[])
 				enum gc573_user_signal_probe kind =
 					GC573_USER_SIGNAL_PROBE_TIMING;
 
-				if (watch.active || rate_probe_after_scdt ||
-				    now - last_frame_rate_probe >=
-				    FRAME_RATE_PROBE_MS) {
-					last_frame_rate_probe = now;
+				if (watch.active || rate_probe_after_scdt) {
 					kind = GC573_USER_SIGNAL_PROBE_RATE;
 				}
 
 				/*
-				 * The rate probe blocks for ~24 ms.  Pull any completed
-				 * audio period into the SDL queue first so playback has
-				 * the full 80 ms cushion while the measurement runs.
+				 * The rate probe blocks for ~24 ms and only runs for a pending
+				 * change or a fresh SCDT lock.  Pull any completed audio period
+				 * into the SDL queue first so playback has the full cushion
+				 * while the measurement runs.
 				 */
 				if (kind == GC573_USER_SIGNAL_PROBE_RATE) {
 					if (!audio.worker_started) {
