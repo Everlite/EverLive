@@ -20,7 +20,7 @@ It is designed to let you play console games (PlayStation 5, Xbox Series X, Nint
 Starting with version 1.0.0, EverLive transitions from an out-of-tree kernel module (`open_gc573`) to a **userspace driver running in Ring 3** via the Linux standard `vfio-pci` subsystem (`tools/opengc573-userd/`).
 
 ### Technical Characteristics & Trade-offs
-* **No DKMS or Kernel Header Dependencies:** The driver code runs as a standard userspace process. Linux kernel updates (e.g., 6.12 $\rightarrow$ 6.13 $\rightarrow$ 7.x) do not require rebuilding kernel modules. Only the *optional* Virtual Camera relies on the distribution's `v4l2loopback` module; EverLive itself never ships or builds a kernel module.
+* **No DKMS or Kernel Header Dependencies:** EverLive's capture engine runs 100% in userspace with zero kernel modules or DKMS rebuilds. The optional Virtual Camera sink uses your distribution's upstream `v4l2loopback` package; you can opt out during installation with `./install.sh --no-loopback` to keep your system entirely module-free.
 * **In-Tree Kernel Module (`vfio-pci`):** Uses the standard, upstream `vfio-pci` module shipped and signed by your distribution. It does not load unsigned out-of-tree `.ko` drivers, avoiding kernel-taint flags and custom Machine Owner Key (MOK) enrollment under UEFI Secure Boot.
 * **Direct Hardware DMA in Userspace:** Video and audio Scatter-Gather DMA descriptors are mapped directly into userspace process memory via VFIO IOMMU containers, then uploaded directly to an SDL2 OpenGL rendering context.
 * **Exclusive Hardware Access & Virtual Camera:** VFIO requires exclusive binding to the PCI device. Starting in v1.2.0, EverLive includes a native virtual camera sink (`/dev/video10` labeled `"EverLive Capture"` via `v4l2loopback`), delivering clean, unscaled raw frames to OBS, Discord, and FFmpeg simultaneously with the gaming screen or in Headless Studio mode.
@@ -164,8 +164,17 @@ cd EverLive
 sudo ./install.sh
 ```
 
+### 🧊 Strictly module-free setup (no loopback)
+If you chose EverLive for its module-free architecture and want to keep the system completely free of DKMS modules and kernel headers, skip the optional Virtual Camera:
+
+```bash
+sudo ./install.sh --no-loopback
+```
+
+`--skip-loopback` is an alias, and `sudo ./install.sh --help` lists all options. Without `v4l2loopback`, `/dev/video10` is unavailable — capture the game window via PipeWire instead (see [Streaming & Recording with OBS](#-streaming--recording-with-obs)). Re-running the installer without the flag re-enables the Virtual Camera.
+
 ### What the installer does:
-1. Installs the build/runtime dependencies: SDL2, FFmpeg development libraries (`libavcodec`/`libswresample`/`libavutil`), `libcap` (`setcap`), WirePlumber (`wpctl`), `xcb-util-cursor`, PySide6, standard build tools, and `v4l2loopback` where the distribution packages it.
+1. Installs the build/runtime dependencies: SDL2, FFmpeg development libraries (`libavcodec`/`libswresample`/`libavutil`), `libcap` (`setcap`), WirePlumber (`wpctl`), `xcb-util-cursor`, PySide6, standard build tools, and `v4l2loopback` where the distribution packages it (skip with `--no-loopback`).
 2. Configures udev rules (`/etc/udev/rules.d/70-everlive.rules`) granting your local user read/write access to the card's VFIO group and binding `vfio-pci`.
 3. Sets `/etc/security/limits.d/99-everlive-memlock.conf` and adds `cap_ipc_lock` capabilities so unprivileged users can pin DMA buffers required for native 4K capture.
 4. Blacklists the legacy out-of-tree `open_gc573` module (`/etc/modprobe.d/blacklist-everlive-legacy.conf`) so it cannot race with `vfio-pci` at boot.

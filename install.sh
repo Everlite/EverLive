@@ -26,6 +26,60 @@ echo -e "${BLUE}================================================================
 echo -e "${BLUE}     EverLive v1.2.0 - GC573 Userspace Gaming Suite Installer     ${NC}"
 echo -e "${BLUE}===================================================================${NC}"
 
+# Optionale Virtual Camera: standardmäßig ja, per --no-loopback abschaltbar.
+WANT_LOOPBACK=1
+
+usage() {
+    cat <<EOF
+Usage: sudo ./install.sh [OPTIONS]
+
+  --no-loopback, --skip-loopback
+      Do not install or configure v4l2loopback. The optional Virtual Camera
+      (/dev/video10 for OBS) stays disabled and the system remains free of
+      DKMS modules and kernel headers.
+
+  -h, --help
+      Show this help and exit.
+EOF
+}
+
+parse_args() {
+    for arg in "$@"; do
+        case "$arg" in
+            --no-loopback|--skip-loopback)
+                WANT_LOOPBACK=0
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "Unbekannte Option: $arg" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
+}
+
+# Interaktive Abfrage (nur mit TTY). Piped/CI-Läufe behalten den Default.
+ask_virtual_camera() {
+    if [ "$WANT_LOOPBACK" -ne 1 ] || [ ! -t 0 ]; then
+        return 0
+    fi
+
+    local answer=""
+
+    read -r -p "Install optional Virtual Camera (/dev/video10 for OBS) via distribution v4l2loopback? [Y/n] " answer || true
+    case "${answer:-y}" in
+        [nN]*) WANT_LOOPBACK=0 ;;
+    esac
+}
+
+# Vor der Root-Prüfung parsen, damit --help kein sudo benötigt. Der
+# sudo-Neustart übergibt "$@", wodurch das Kind erneut parst.
+parse_args "$@"
+
 # 1. Root-Prüfung / Sudo
 if [ "$EUID" -ne 0 ]; then
     echo -e "${YELLOW}[*] Für die System- und Hardware-Rechte-Installation werden Root-Rechte benötigt.${NC}"
@@ -41,6 +95,11 @@ TARGET_HOME="$(getent passwd "${TARGET_USER}" 2>/dev/null | cut -d: -f6)"
 echo -e "[*] Ziel-Benutzer: ${GREEN}${TARGET_USER}${NC}"
 echo -e "[*] Linux Kernel : ${GREEN}$(uname -r)${NC}"
 echo -e "[*] Architektur  : ${GREEN}100% Userspace VFIO (Blob-Free Ring 3)${NC}"
+
+ask_virtual_camera
+if [ "$WANT_LOOPBACK" -eq 0 ]; then
+    echo -e "${GREEN}[*] Virtual Camera installation skipped. EverLive remains 100% module-free.${NC}"
+fi
 
 # 2. Paketmanager & Abhängigkeiten erkennen
 
@@ -147,7 +206,9 @@ detect_and_install_deps() {
     fi
     echo -e "${GREEN}[+] Alle benötigten Bibliotheken vorhanden!${NC}"
 
-    ensure_v4l2loopback
+    if [ "$WANT_LOOPBACK" -eq 1 ]; then
+        ensure_v4l2loopback
+    fi
 }
 
 detect_and_install_deps
@@ -187,7 +248,14 @@ echo "blacklist open_gc573" > /etc/modprobe.d/blacklist-everlive-legacy.conf
 echo -e "${GREEN}[+] Altes Kernel-Modul deregistriert & geblacklistet.${NC}"
 
 # Virtual Camera: fester Node /dev/video10 mit dauerhaft sichtbaren Caps.
-if modinfo v4l2loopback >/dev/null 2>&1; then
+if [ "$WANT_LOOPBACK" -eq 0 ]; then
+    # --no-loopback: keine Konfiguration hinterlassen, damit der nächste Boot
+    # wirklich ohne das Modul startet.
+    rm -f /etc/modules-load.d/everlive-v4l2loopback.conf
+    rm -f /etc/modprobe.d/everlive-v4l2loopback.conf
+    echo -e "${GREEN}[*] v4l2loopback-Konfiguration entfernt (module-free Setup).${NC}"
+    echo -e "${YELLOW}    Ein bereits geladenes Modul wird erst beim nächsten Neustart freigegeben.${NC}"
+elif modinfo v4l2loopback >/dev/null 2>&1; then
     mkdir -p /etc/modules-load.d /etc/modprobe.d
     echo "v4l2loopback" > /etc/modules-load.d/everlive-v4l2loopback.conf
     cat > /etc/modprobe.d/everlive-v4l2loopback.conf <<EOF

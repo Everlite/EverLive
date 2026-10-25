@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Native unscaled feed for OBS Studio, Discord, or FFmpeg simultaneously with the interactive gaming window or completely headless.
   - Automatic module loading in `play.sh` with `exclusive_caps=0` so `/dev/video10` permanently remains visible in OBS.
   - `install.sh` now installs `v4l2loopback` where the distribution packages it and preconfigures the node via `/etc/modprobe.d/everlive-v4l2loopback.conf` (`video_nr=10 card_label="EverLive Capture" exclusive_caps=0`) and `/etc/modules-load.d/`; `uninstall.sh` removes both again.
+  - New `install.sh --no-loopback` (`--skip-loopback`) opt-out for strictly module-free systems: skips the `v4l2loopback` package, removes any leftover EverLive loopback configuration, and leaves no DKMS module or kernel headers behind.
   - Robust auto-retry for `VIDIOC_S_FMT` (throttled to one attempt per 250 ms) when the input resolution changes while an active reader (OBS) still holds buffers. The writer fd is reopened on `-EBUSY` and frame delivery resumes automatically once OBS renegotiates.
 - **Headless Studio Mode:**
   - Added `--headless` CLI flag and dedicated Control Hub action ("Start Studio / Headless (OBS)").
