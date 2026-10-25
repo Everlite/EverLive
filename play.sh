@@ -52,6 +52,81 @@ if [ "$IS_VFIO" -eq 0 ]; then
     fi
 fi
 
+# 3b. Optional V4L2 loopback sink (--v4l2 / --loopback)
+V4L2_DEV=""
+WANT_V4L2=0
+ARGS=("$@")
+for ((i = 0; i < ${#ARGS[@]}; i++)); do
+    arg="${ARGS[$i]}"
+    case "$arg" in
+        --v4l2)
+            WANT_V4L2=1
+            if [ $((i + 1)) -lt ${#ARGS[@]} ] && [[ "${ARGS[$((i + 1))]}" == /dev/* ]]; then
+                V4L2_DEV="${ARGS[$((i + 1))]}"
+            fi
+            ;;
+        --v4l2=*)
+            WANT_V4L2=1
+            V4L2_DEV="${arg#--v4l2=}"
+            ;;
+        --loopback)
+            WANT_V4L2=1
+            if [ $((i + 1)) -lt ${#ARGS[@]} ] && [[ "${ARGS[$((i + 1))]}" == /dev/* ]]; then
+                V4L2_DEV="${ARGS[$((i + 1))]}"
+            fi
+            ;;
+        --loopback=*)
+            WANT_V4L2=1
+            V4L2_DEV="${arg#--loopback=}"
+            ;;
+    esac
+done
+
+if [ "$WANT_V4L2" -eq 1 ]; then
+    if [ -z "$V4L2_DEV" ]; then
+        V4L2_DEV="/dev/video10"
+    fi
+    if [ ! -e "$V4L2_DEV" ]; then
+        VIDEO_NR="${V4L2_DEV##*/video}"
+        if ! [[ "$VIDEO_NR" =~ ^[0-9]+$ ]]; then
+            VIDEO_NR=10
+        fi
+        echo "[*] V4L2-Loopback ${V4L2_DEV} nicht gefunden; lade v4l2loopback (video_nr=${VIDEO_NR})..."
+        MODPROBE_ARGS=(v4l2loopback "video_nr=${VIDEO_NR}" "card_label=EverLive Capture" "exclusive_caps=1")
+        if [ "$EUID" -eq 0 ]; then
+            if ! modprobe "${MODPROBE_ARGS[@]}"; then
+                echo "[!] v4l2loopback konnte nicht geladen werden." >&2
+                exit 1
+            fi
+        else
+            if ! sudo modprobe "${MODPROBE_ARGS[@]}"; then
+                echo "[!] v4l2loopback konnte nicht geladen werden (sudo)." >&2
+                exit 1
+            fi
+        fi
+        for ((try = 0; try < 10; try++)); do
+            if [ -e "$V4L2_DEV" ]; then
+                break
+            fi
+            sleep 0.1
+        done
+        if [ ! -e "$V4L2_DEV" ]; then
+            echo "[!] ${V4L2_DEV} existiert weiterhin nicht." >&2
+            echo "    Prüfe: sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback video_nr=${VIDEO_NR} card_label=\"EverLive Capture\" exclusive_caps=1" >&2
+            exit 1
+        fi
+    fi
+
+    V4L2_SYS_NAME="/sys/class/video4linux/$(basename "$V4L2_DEV")/name"
+    if [ -r "$V4L2_SYS_NAME" ]; then
+        V4L2_CARD_NAME="$(cat "$V4L2_SYS_NAME")"
+        if [ "$V4L2_CARD_NAME" != "EverLive Capture" ]; then
+            echo "[!] ${V4L2_DEV} meldet sich als '${V4L2_CARD_NAME}', nicht 'EverLive Capture'." >&2
+            echo "    Für den korrekten Namen: sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback video_nr=${VIDEO_NR} card_label=\"EverLive Capture\" exclusive_caps=1" >&2
+        fi
+    fi
+fi
+
 # 4. Direct CLI passthrough: if --cli or streamer-specific flags are passed, launch streamer directly
 if [ "${1:-}" = "--cli" ]; then
     shift
@@ -60,9 +135,11 @@ if [ "${1:-}" = "--cli" ]; then
 fi
 
 for arg in "$@"; do
-    if [ "$arg" = "--aspect" ] || [ "$arg" = "--edid" ]; then
-        exec "${USERD_DIR}/gc573_user_streamer" "$@"
-    fi
+    case "$arg" in
+        --aspect|--edid|--v4l2|--loopback|--headless|--v4l2=*|--loopback=*)
+            exec "${USERD_DIR}/gc573_user_streamer" "$@"
+            ;;
+    esac
 done
 
 # 5. Launch EverLive Console Hub GUI

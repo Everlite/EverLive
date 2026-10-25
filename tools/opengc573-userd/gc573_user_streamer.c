@@ -30,6 +30,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/videodev2.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +46,7 @@
 
 #define DEFAULT_WINDOW_WIDTH	1280U
 #define DEFAULT_WINDOW_HEIGHT	720U
+#define DEFAULT_V4L2_DEVICE	"/dev/video10"
 /*
  * Video DMA ring depth.  The old kernel viewer ran an 8-buffer ring and all
  * four FPGA channels; the userspace engine derives the channel count from the
@@ -93,6 +95,8 @@
 static volatile sig_atomic_t g_running = 1;
 static bool g_trace_mode;
 static bool g_trace_requested;
+/* --headless: no SDL window/renderer, capture and V4L2/audio output only. */
+static bool g_headless;
 
 /*
  * LED colour used while streaming.  Cyan is the verified default; it can be
@@ -311,6 +315,11 @@ static void print_usage(const char *prog)
 	printf("  --no-osd          Hide the overlay (same as --streamer-mode).\n");
 	printf("  --osd-pos POS     tr|br|bl|tl (default: tr, 'p' cycles).\n");
 	printf("  -s, --streamer-mode  Clean feed: no OSD, cursor hidden.\n");
+	printf("  --v4l2 DEVICE     Write native YUYV frames to a v4l2loopback output.\n");
+	printf("                    Example: --v4l2 /dev/video10\n");
+	printf("  --loopback [DEV]  Shorthand for --v4l2 (default: %s).\n",
+	       DEFAULT_V4L2_DEVICE);
+	printf("  --headless        No SDL window/video output; capture, V4L2 and audio only.\n");
 	printf("  EVERLIVE_LED      fallback used when --led is not given.\n");
 }
 
@@ -1162,6 +1171,10 @@ static void render_frame(SDL_Window *window, SDL_Renderer *renderer,
 static void render_standby(SDL_Window *window, SDL_Renderer *renderer,
 			   const char *message)
 {
+	/* Headless sessions have no window or renderer. */
+	if (!window || !renderer)
+		return;
+
 	SDL_SetRenderDrawColor(renderer, 15, 17, 26, 255);
 	SDL_RenderClear(renderer);
 	SDL_SetWindowTitle(window, message);
@@ -1401,6 +1414,147 @@ static void preview_release(int handle)
 	pthread_mutex_lock(&g_preview.lock);
 	g_preview.busy[slot] = false;
 	pthread_mutex_unlock(&g_preview.lock);
+}
+
+/*
+ * v4l2loopback output sink.  Frames are pushed with write(), so the device
+ * appears as a normal V4L2 capture source (OBS, Discord, browsers, ffmpeg)
+ * independently of the host display resolution.  The fd is non-blocking: if
+ * no consumer drains the loopback device, frames are dropped instead of
+ * stalling the render or DMA path.
+ */
+struct v4l2_sink {
+	int fd;
+	char path[PATH_MAX];
+	unsigned int width;
+	unsigned int height;
+	size_t frame_bytes;
+	bool configured;
+	bool write_error_reported;
+	uint64_t frames;
+	uint64_t dropped;
+};
+
+static enum v4l2_colorspace v4l2_colorspace_for_signal(
+				const struct gc573_user_video_signal *sig)
+{
+	if (sig && sig->colorimetry == GC573_USER_COLORIMETRY_BT2020)
+		return V4L2_COLORSPACE_BT2020;
+	if (sig && sig->height >= 720)
+		return V4L2_COLORSPACE_REC709;
+	if (sig)
+		return V4L2_COLORSPACE_SMPTE170M;
+	return V4L2_COLORSPACE_SRGB;
+}
+
+static int v4l2_sink_open(struct v4l2_sink *sink, const char *path)
+{
+	memset(sink, 0, sizeof(*sink));
+	sink->fd = -1;
+
+	if (!path || !*path)
+		return -EINVAL;
+
+	snprintf(sink->path, sizeof(sink->path), "%s", path);
+	sink->fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+	if (sink->fd < 0) {
+		pr_err("V4L2 sink: cannot open %s: %s", path, strerror(errno));
+		return -errno;
+	}
+
+	pr_info("V4L2 sink: %s opened", path);
+	return 0;
+}
+
+static int v4l2_sink_configure(struct v4l2_sink *sink,
+			       unsigned int width, unsigned int height,
+			       const struct gc573_user_video_signal *sig)
+{
+	struct v4l2_format fmt;
+	size_t frame_bytes;
+	int ret;
+
+	if (!sink || sink->fd < 0 || !width || !height || (width & 1U))
+		return -EINVAL;
+
+	frame_bytes = (size_t)width * height * 2U;
+	if (sink->configured && sink->width == width &&
+	    sink->height == height && sink->frame_bytes == frame_bytes)
+		return 0;
+
+	memset(&fmt, 0, sizeof(fmt));
+	fmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+	fmt.fmt.pix.width = width;
+	fmt.fmt.pix.height = height;
+	fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+	fmt.fmt.pix.bytesperline = width * 2U;
+	fmt.fmt.pix.sizeimage = (uint32_t)frame_bytes;
+	fmt.fmt.pix.field = V4L2_FIELD_NONE;
+	fmt.fmt.pix.colorspace = v4l2_colorspace_for_signal(sig);
+
+	ret = ioctl(sink->fd, VIDIOC_S_FMT, &fmt);
+	if (ret < 0) {
+		pr_err("V4L2 sink: VIDIOC_S_FMT %ux%u YUYV failed on %s: %s",
+		       width, height, sink->path, strerror(errno));
+		sink->configured = false;
+		return -errno;
+	}
+
+	/* Use the geometry the driver actually accepted. */
+	sink->width = fmt.fmt.pix.width;
+	sink->height = fmt.fmt.pix.height;
+	sink->frame_bytes = (size_t)fmt.fmt.pix.bytesperline *
+			    fmt.fmt.pix.height;
+	if (!sink->frame_bytes)
+		sink->frame_bytes = frame_bytes;
+	sink->configured = true;
+
+	pr_info("V4L2 sink: %ux%u YUYV, %zu KB/frame on %s",
+		sink->width, sink->height, sink->frame_bytes / 1024U,
+		sink->path);
+	return 0;
+}
+
+static void v4l2_sink_write(struct v4l2_sink *sink, const void *data,
+			    size_t bytes)
+{
+	ssize_t written;
+
+	if (!sink || sink->fd < 0 || !sink->configured || !data)
+		return;
+	if (bytes != sink->frame_bytes) {
+		sink->dropped++;
+		return;
+	}
+
+	do {
+		written = write(sink->fd, data, bytes);
+	} while (written < 0 && errno == EINTR);
+
+	if (written == (ssize_t)bytes) {
+		sink->frames++;
+		return;
+	}
+
+	sink->dropped++;
+	if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+	    !sink->write_error_reported) {
+		pr_warn("V4L2 sink: write failed: %s", strerror(errno));
+		sink->write_error_reported = true;
+	}
+}
+
+static void v4l2_sink_close(struct v4l2_sink *sink)
+{
+	if (!sink || sink->fd < 0)
+		return;
+
+	pr_info("V4L2 sink: closing %s (%lu frames, %lu dropped)",
+		sink->path, (unsigned long)sink->frames,
+		(unsigned long)sink->dropped);
+	close(sink->fd);
+	sink->fd = -1;
+	sink->configured = false;
 }
 
 struct audio_playback {
@@ -2714,8 +2868,10 @@ int main(int argc, char *argv[])
 	const char *edid_spec = NULL;
 	const char *aspect_spec = NULL;
 	const char *osd_pos_spec = NULL;
+	const char *v4l2_device = NULL;
 	struct gc573_vfio_ctx ctx;
 	struct gc573_user_video video;
+	struct v4l2_sink v4l2_sink = { .fd = -1 };
 	struct audio_stream audio;
 	bool video_ready = false;
 	bool streaming = false;
@@ -2754,6 +2910,25 @@ int main(int argc, char *argv[])
 			edid_spec = argv[++i];
 		} else if (strncmp(argv[i], "--edid=", 7) == 0) {
 			edid_spec = argv[i] + 7;
+		} else if (strcmp(argv[i], "--v4l2") == 0) {
+			if (i + 1 >= argc || argv[i + 1][0] == '-') {
+				fprintf(stderr, "[V4L2] --v4l2 requires a device path (e.g. %s)\n",
+					DEFAULT_V4L2_DEVICE);
+				return 1;
+			}
+			v4l2_device = argv[++i];
+		} else if (strncmp(argv[i], "--v4l2=", 7) == 0) {
+			v4l2_device = argv[i] + 7;
+		} else if (strcmp(argv[i], "--loopback") == 0) {
+			if (i + 1 < argc &&
+			    strncmp(argv[i + 1], "/dev/", 5) == 0)
+				v4l2_device = argv[++i];
+			else
+				v4l2_device = DEFAULT_V4L2_DEVICE;
+		} else if (strncmp(argv[i], "--loopback=", 11) == 0) {
+			v4l2_device = argv[i] + 11;
+		} else if (strcmp(argv[i], "--headless") == 0) {
+			g_headless = true;
 		} else if (strcmp(argv[i], "-f") == 0 ||
 			   strcmp(argv[i], "--fullscreen") == 0) {
 			g_fullscreen = true;
@@ -2783,10 +2958,17 @@ int main(int argc, char *argv[])
 		} else if (argv[i][0] != '-') {
 			pci_addr = argv[i];
 		} else {
-			fprintf(stderr, "[LED] Unknown option '%s' ignored\n",
+			fprintf(stderr, "[CLI] Unknown option '%s' ignored\n",
 				argv[i]);
 		}
 	}
+
+	if (g_headless && g_trace_mode) {
+		fprintf(stderr, "[ERROR] --headless cannot be combined with GC573_TEARDOWN_TRACE\n");
+		return 1;
+	}
+	if (g_headless)
+		g_vsync = false;
 
 	/* --led wins; EVERLIVE_LED is the GUI-friendly fallback. */
 	if (!led_spec || !*led_spec)
@@ -2933,8 +3115,9 @@ int main(int argc, char *argv[])
 	 */
 	apply_app_identity();
 
-	/* 8. Initialize SDL2 display window and YUYV texture. */
-	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) < 0) {
+	/* 8. Initialize SDL2 (video only when a window is requested). */
+	if (SDL_Init(g_headless ? SDL_INIT_TIMER :
+		     (SDL_INIT_VIDEO | SDL_INIT_TIMER)) < 0) {
 		fprintf(stderr, "[ERROR] SDL_Init failed: %s\n", SDL_GetError());
 		gc573_vfio_cleanup(&ctx);
 		return 1;
@@ -2951,48 +3134,73 @@ int main(int argc, char *argv[])
 		       SDL_GetError());
 	}
 
-	window = SDL_CreateWindow(
-		"EverLive",
-		SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-		DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT,
-		SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
-	if (!window) {
-		fprintf(stderr, "[ERROR] SDL_CreateWindow failed: %s\n",
-			SDL_GetError());
-		SDL_Quit();
-		gc573_vfio_cleanup(&ctx);
-		return 1;
+	if (!g_headless) {
+		window = SDL_CreateWindow(
+			"EverLive",
+			SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+			DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT,
+			SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+		if (!window) {
+			fprintf(stderr, "[ERROR] SDL_CreateWindow failed: %s\n",
+				SDL_GetError());
+			SDL_Quit();
+			gc573_vfio_cleanup(&ctx);
+			return 1;
+		}
+
+		set_window_icon(window);
+
+		SDL_SetHint(SDL_HINT_RENDER_VSYNC, g_vsync ? "1" : "0");
+		Uint32 renderer_flags = SDL_RENDERER_ACCELERATED;
+
+		if (g_vsync)
+			renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
+		renderer = SDL_CreateRenderer(window, -1, renderer_flags);
+		if (!renderer && g_vsync)
+			renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+		if (!renderer)
+			renderer = SDL_CreateRenderer(window, -1, 0);
+		if (!renderer) {
+			fprintf(stderr, "[ERROR] SDL_CreateRenderer failed: %s\n",
+				SDL_GetError());
+			SDL_DestroyWindow(window);
+			SDL_Quit();
+			gc573_vfio_cleanup(&ctx);
+			return 1;
+		}
+		if (SDL_RenderSetVSync(renderer, g_vsync ? 1 : 0) < 0 && g_vsync) {
+			pr_warn("VSync not available on this renderer; using present-on-new-frame pacing");
+			g_vsync = false;
+		}
+
+		if (g_fullscreen)
+			SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
 	}
-
-	set_window_icon(window);
-
-	SDL_SetHint(SDL_HINT_RENDER_VSYNC, g_vsync ? "1" : "0");
-	Uint32 renderer_flags = SDL_RENDERER_ACCELERATED;
-
-	if (g_vsync)
-		renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
-	renderer = SDL_CreateRenderer(window, -1, renderer_flags);
-	if (!renderer && g_vsync)
-		renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-	if (!renderer)
-		renderer = SDL_CreateRenderer(window, -1, 0);
-	if (!renderer) {
-		fprintf(stderr, "[ERROR] SDL_CreateRenderer failed: %s\n",
-			SDL_GetError());
-		SDL_DestroyWindow(window);
-		SDL_Quit();
-		gc573_vfio_cleanup(&ctx);
-		return 1;
-	}
-	if (SDL_RenderSetVSync(renderer, g_vsync ? 1 : 0) < 0 && g_vsync) {
-		pr_warn("VSync not available on this renderer; using present-on-new-frame pacing");
-		g_vsync = false;
-	}
-
-	if (g_fullscreen)
-		SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
 
 	texture = NULL;
+
+	/*
+	 * Open the optional v4l2loopback sink.  Frames are written from the
+	 * preview ring, so the sink works with or without an SDL window.
+	 */
+	if (v4l2_device) {
+		if (v4l2_sink_open(&v4l2_sink, v4l2_device) < 0) {
+			fprintf(stderr, "[ERROR] V4L2 loopback sink unavailable (%s).\n",
+				v4l2_device);
+			fprintf(stderr, "        Create it with: sudo modprobe v4l2loopback video_nr=10 card_label=\"EverLive Capture\" exclusive_caps=1\n");
+			if (renderer) {
+				SDL_DestroyRenderer(renderer);
+				renderer = NULL;
+			}
+			if (window) {
+				SDL_DestroyWindow(window);
+				window = NULL;
+			}
+			SDL_Quit();
+			gc573_vfio_cleanup(&ctx);
+			return 1;
+		}
+	}
 
 	/* Map the two HDMI audio ping-pong buffers (96 KB total). */
 	if (audio.sdl_ready) {
@@ -3022,12 +3230,18 @@ int main(int argc, char *argv[])
 		pr_warn("Audio DMA mapping failed; continuing video-only");
 	}
 
-	printf("[*] Userspace streamer active. Press 'q' or ESC to exit, 'f' fullscreen, 'a' aspect, 'p' OSD position, Tab/'o' OSD.\n");
-	printf("[OSD] Start: fullscreen=%s vsync=%s aspect=%s overlay=%s pos=%s\n",
-	       g_fullscreen ? "on" : "off",
-	       g_vsync ? "on" : "off", aspect_name(g_aspect),
-	       g_osd_enabled ? "on" : "off", osd_pos_name(g_osd_pos));
-	SDL_ShowCursor(g_osd_enabled ? SDL_ENABLE : SDL_DISABLE);
+	if (g_headless) {
+		printf("[*] Userspace streamer active (headless). Send SIGINT/SIGTERM to exit.\n");
+	} else {
+		printf("[*] Userspace streamer active. Press 'q' or ESC to exit, 'f' fullscreen, 'a' aspect, 'p' OSD position, Tab/'o' OSD.\n");
+		printf("[OSD] Start: fullscreen=%s vsync=%s aspect=%s overlay=%s pos=%s\n",
+		       g_fullscreen ? "on" : "off",
+		       g_vsync ? "on" : "off", aspect_name(g_aspect),
+		       g_osd_enabled ? "on" : "off", osd_pos_name(g_osd_pos));
+		SDL_ShowCursor(g_osd_enabled ? SDL_ENABLE : SDL_DISABLE);
+	}
+	if (v4l2_sink.fd >= 0)
+		printf("[V4L2] Loopback output active on %s\n", v4l2_sink.path);
 	render_standby(window, renderer,
 		       "EverLive [USERSPACE VFIO] — Waiting for HDMI signal...");
 
@@ -3045,7 +3259,7 @@ int main(int argc, char *argv[])
 				if (g_trace_mode && streaming)
 					g_trace_requested = true;
 				g_running = 0;
-			} else if (event.type == SDL_KEYDOWN) {
+			} else if (event.type == SDL_KEYDOWN && !g_headless) {
 				if (event.key.keysym.sym == SDLK_ESCAPE ||
 				    event.key.keysym.sym == SDLK_q) {
 					if (g_trace_mode && streaming)
@@ -3258,11 +3472,16 @@ int main(int argc, char *argv[])
 											  new_out_w,
 											  new_out_h,
 											  new_buffers);
-							if (ret == 0)
+							if (ret == 0 && !g_headless)
 								ret = ensure_texture(renderer,
 										     &texture,
 										     new_out_w,
 										     new_out_h);
+							if (ret == 0 && v4l2_sink.fd >= 0)
+								(void)v4l2_sink_configure(&v4l2_sink,
+											  new_out_w,
+											  new_out_h,
+											  &fresh);
 							if (ret == 0)
 								ret = preview_start(
 									&video,
@@ -3343,11 +3562,16 @@ int main(int argc, char *argv[])
 										  new_out_w,
 										  new_out_h,
 										  new_buffers);
-						if (ret == 0)
+						if (ret == 0 && !g_headless)
 							ret = ensure_texture(renderer,
 									     &texture,
 									     new_out_w,
 									     new_out_h);
+						if (ret == 0 && v4l2_sink.fd >= 0)
+							(void)v4l2_sink_configure(&v4l2_sink,
+										  new_out_w,
+										  new_out_h,
+										  &sig);
 						if (ret == 0)
 							ret = preview_start(
 								&video,
@@ -3432,6 +3656,10 @@ int main(int argc, char *argv[])
 			bool have_frame = false;
 
 			if (ph > 0) {
+				have_frame = true;
+				if (v4l2_sink.fd >= 0)
+					v4l2_sink_write(&v4l2_sink, pixels,
+							g_preview.bytes);
 				if (texture) {
 					int uret = SDL_UpdateTexture(texture, NULL,
 								     pixels,
@@ -3446,7 +3674,6 @@ int main(int argc, char *argv[])
 							reported = true;
 						}
 					}
-					have_frame = true;
 				}
 				preview_release(ph);
 			}
@@ -3555,8 +3782,9 @@ int main(int argc, char *argv[])
 					 output_width, output_height, fps,
 					 video.num_buffers, video.num_channels,
 					 aspect_name(g_aspect),
-					 (SDL_GetWindowFlags(window) &
-					  SDL_WINDOW_FULLSCREEN_DESKTOP) ? " | FS" : "",
+					 (window &&
+					  (SDL_GetWindowFlags(window) &
+					   SDL_WINDOW_FULLSCREEN_DESKTOP)) ? " | FS" : "",
 					 g_vsync ? " | VSync" : "");
 				printf("[STREAM] %ux%u%s @ %u.%02u Hz -> %ux%u | FPS: %.2f | Frames: %lu | ring %u/%uch | preview drops: %lu | age %.1f ms\n",
 				       input_width, input_height,
@@ -3568,6 +3796,12 @@ int main(int argc, char *argv[])
 				       (unsigned long)__atomic_load_n(&g_preview.dropped,
 							      __ATOMIC_RELAXED),
 				       (double)g_preview.taken_age_us / 1000.0);
+				if (v4l2_sink.fd >= 0) {
+					printf("[V4L2] %ux%u YUYV | written %lu | dropped %lu\n",
+					       v4l2_sink.width, v4l2_sink.height,
+					       (unsigned long)v4l2_sink.frames,
+					       (unsigned long)v4l2_sink.dropped);
+				}
 				if (audio.streaming && audio.bt_playing) {
 					printf("[AUDIO] Decoding %s -> Stereo | bursts %lu | frames %lu | errors %lu\n",
 					       audio_bitstream_name(audio.bitstream),
@@ -3616,7 +3850,8 @@ int main(int argc, char *argv[])
 			if (g_trace_mode)
 				strncat(title, " | T=teardown trace",
 					sizeof(title) - strlen(title) - 1);
-			SDL_SetWindowTitle(window, title);
+			if (window)
+				SDL_SetWindowTitle(window, title);
 			last_frames = frames;
 			last_stats = now;
 			last_stats_us = stats_us;
@@ -3626,6 +3861,7 @@ int main(int argc, char *argv[])
 	if (g_trace_requested) {
 		audio_cleanup(&audio);
 		gc573_user_it6805_audio_disable(ctx.bar0);
+		v4l2_sink_close(&v4l2_sink);
 		run_teardown_trace(&ctx, &video, video_ready, window, renderer,
 				   texture);
 		return 0;
@@ -3643,6 +3879,7 @@ int main(int argc, char *argv[])
 	audio_cleanup(&audio);
 	gc573_user_it6805_audio_disable(ctx.bar0);
 	preview_stop();
+	v4l2_sink_close(&v4l2_sink);
 	if (video_ready)
 		gc573_user_video_cleanup(&video);
 	if (texture)
