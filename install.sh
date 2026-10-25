@@ -177,6 +177,7 @@ if [ -f "${VIEWER_DIR}/icons/scalable/apps/everlive.png" ]; then
     cp -f "${VIEWER_DIR}/icons/scalable/apps/everlive.png" "${ICONS_BASE}/scalable/apps/everlive.png"
     mkdir -p "/usr/share/icons/hicolor/scalable/apps" 2>/dev/null || true
     cp -f "${VIEWER_DIR}/icons/scalable/apps/everlive.png" "/usr/share/icons/hicolor/scalable/apps" 2>/dev/null || true
+    cp -f "${VIEWER_DIR}/everlive.bmp" "/usr/share/pixmaps/everlive.bmp" 2>/dev/null || true
 fi
 
 cat > "${APPS_DIR}/everlive.desktop" <<EOF

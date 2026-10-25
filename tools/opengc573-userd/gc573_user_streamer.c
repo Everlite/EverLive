@@ -38,6 +38,11 @@
 #include <time.h>
 #include <unistd.h>
 
+/* SDL_HINT_APP_NAME was added after the 2.0.20 headers some distros ship. */
+#ifndef SDL_HINT_APP_NAME
+#define SDL_HINT_APP_NAME "SDL_APP_NAME"
+#endif
+
 #define DEFAULT_WINDOW_WIDTH	1280U
 #define DEFAULT_WINDOW_HEIGHT	720U
 /*
@@ -2594,6 +2599,119 @@ static void run_teardown_trace(struct gc573_vfio_ctx *ctx,
 	fflush(stdout);
 }
 
+/*
+ * Give the SDL window and the PipeWire/PulseAudio stream a stable identity.
+ * Without this, pavucontrol and the task switcher fall back to the binary
+ * name ("Gc-573 user_streamer") and a generic placeholder icon.
+ */
+static void apply_app_identity(void)
+{
+	SDL_SetHint(SDL_HINT_APP_NAME, "EverLive");
+	SDL_SetHint("SDL_AUDIO_DEVICE_APP_NAME", "EverLive");
+	SDL_SetHint("SDL_AUDIO_DEVICE_STREAM_NAME", "EverLive Audio");
+	SDL_SetHint("SDL_AUDIO_DEVICE_STREAM_ROLE", "game");
+	SDL_SetHint("SDL_VIDEO_X11_WMCLASS", "EverLive");
+	SDL_SetHint("SDL_VIDEO_WAYLAND_WMCLASS", "EverLive");
+
+	/*
+	 * PipeWire and PulseAudio read these while creating the stream.  A
+	 * non-overwriting setenv() keeps an explicit user override intact.
+	 */
+	(void)setenv("PIPEWIRE_PROPS",
+		     "{ application.name = \"EverLive\" "
+		     "application.icon-name = \"everlive\" "
+		     "application.id = \"everlive\" media.role = \"game\" }",
+		     0);
+	(void)setenv("PULSE_PROP_application.name", "EverLive", 0);
+	(void)setenv("PULSE_PROP_application.icon_name", "everlive", 0);
+	(void)setenv("PULSE_PROP_media.role", "game", 0);
+}
+
+static bool icon_file_readable(const char *path)
+{
+	return path && path[0] && access(path, R_OK) == 0;
+}
+
+static const char *find_window_icon(void)
+{
+	static const char *const local_paths[] = {
+		"tools/everlive/everlive.bmp",
+		"everlive.bmp",
+	};
+	static const char *const system_paths[] = {
+		"/usr/share/pixmaps/everlive.bmp",
+	};
+	/* PATH_MAX for the executable directory plus the longest suffix. */
+	static char path[PATH_MAX + 64];
+	char exe_path[PATH_MAX];
+	char exe_dir[PATH_MAX];
+	ssize_t len;
+
+	len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+	if (len > 0) {
+		char *slash;
+
+		exe_path[len] = '\0';
+		slash = strrchr(exe_path, '/');
+		if (slash) {
+			*slash = '\0';
+			snprintf(exe_dir, sizeof(exe_dir), "%s", exe_path);
+		} else {
+			snprintf(exe_dir, sizeof(exe_dir), ".");
+		}
+	} else {
+		snprintf(exe_dir, sizeof(exe_dir), ".");
+	}
+
+	/* Source tree: tools/opengc573-userd/../everlive/everlive.bmp */
+	snprintf(path, sizeof(path), "%s/../everlive/everlive.bmp", exe_dir);
+	if (icon_file_readable(path))
+		return path;
+
+	/* Installed next to the binary. */
+	snprintf(path, sizeof(path), "%s/everlive.bmp", exe_dir);
+	if (icon_file_readable(path))
+		return path;
+
+	for (size_t i = 0; i < ARRAY_SIZE(local_paths); i++) {
+		if (icon_file_readable(local_paths[i]))
+			return local_paths[i];
+	}
+	for (size_t i = 0; i < ARRAY_SIZE(system_paths); i++) {
+		if (icon_file_readable(system_paths[i]))
+			return system_paths[i];
+	}
+
+	return NULL;
+}
+
+static void set_window_icon(SDL_Window *window)
+{
+	const char *icon_path;
+	SDL_Surface *icon;
+
+	if (!window)
+		return;
+
+	icon_path = find_window_icon();
+	if (!icon_path) {
+		pr_warn("Window icon everlive.bmp not found; keeping the default");
+		return;
+	}
+
+	icon = SDL_LoadBMP(icon_path);
+	if (!icon) {
+		pr_warn("Cannot load window icon %s: %s", icon_path,
+			SDL_GetError());
+		return;
+	}
+
+	/* SDL_SetWindowIcon copies the surface, so it can be freed right away. */
+	SDL_SetWindowIcon(window, icon);
+	SDL_FreeSurface(icon);
+	pr_info("Window icon: %s", icon_path);
+}
+
 int main(int argc, char *argv[])
 {
 	const char *pci_addr = NULL;
@@ -2814,6 +2932,13 @@ int main(int argc, char *argv[])
 	if (ret < 0)
 		pr_warn("Interrupt setup failed; falling back to IRQ polling");
 
+	/*
+	 * Set the application identity before SDL initializes its video and
+	 * audio backends; PipeWire/PulseAudio also read their properties when
+	 * the first stream is created.
+	 */
+	apply_app_identity();
+
 	/* 8. Initialize SDL2 display window and YUYV texture. */
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) < 0) {
 		fprintf(stderr, "[ERROR] SDL_Init failed: %s\n", SDL_GetError());
@@ -2844,6 +2969,8 @@ int main(int argc, char *argv[])
 		gc573_vfio_cleanup(&ctx);
 		return 1;
 	}
+
+	set_window_icon(window);
 
 	SDL_SetHint(SDL_HINT_RENDER_VSYNC, g_vsync ? "1" : "0");
 	Uint32 renderer_flags = SDL_RENDERER_ACCELERATED;
