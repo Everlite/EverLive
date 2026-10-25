@@ -37,10 +37,11 @@ The following capabilities have been physically tested and verified on physical 
 * **PlayStation 5:**
   - **2560×1440 @ 120 FPS:** Verified in 120 Hz titles (*The Finals*, *Fortnite 120Hz Mode*, PS5 Dashboard). Stable frame pacing matching display refresh intervals.
   - **3840×2160 @ 60 FPS (Native 4K):** Verified native 4K capture without downscaling stalls.
-  - **Audio DMA:** High-fidelity 16-bit / 48kHz L-PCM stereo audio captured over PCIe DMA and played back via SDL2 into PipeWire. No crackling, jitter, or clock drift observed during multi-hour test sessions *(Note: Source devices/consoles must be set to **Linear PCM (Stereo)** audio output; compressed bitstream formats like Dolby Digital AC-3 or DTS are not yet decoded)*.
+  - **Audio DMA & Real-Time Bitstream Decoding:** High-fidelity audio captured over PCIe DMA and played back via SDL2 into PipeWire. Supports both uncompressed **Linear PCM** (up to 8 channels) and compressed **Dolby Digital (AC-3 5.1)** and **DTS (5.1)** bitstreams decoded in real time via `libavcodec` and downmixed to stereo (ITU-R BS.775 compliant). Failsafe mute-guard prevents digital noise during mode transitions.
   - **Dynamic Hot-Switching:** Verified dynamic mode changes (e.g., 4K60 dashboard $\leftrightarrow$ 1440p120 gameplay $\leftrightarrow$ 1080p) without process crashes or window recreation.
 * **Hardware EDID Profile Injection:**
   - `Default (4K60 / 1440p120 HDR)`: Standard multi-mode EDID profile.
+  - `Bitstream (Dolby Digital / DTS 5.1)`: Advertises AC-3 and DTS 5.1 CTA-861 Short Audio Descriptors (SADs) so consoles emit bitstream surround audio.
   - `Force 1440p @ 120 Hz`: Prioritizes 1440p high-refresh modes for consoles by omitting 4K descriptors.
   - `Force 1080p @ 240 Hz`: For high-framerate PC capture.
   - `Load Custom EDID (.bin)`: Writes validated 256-byte binary EDID files (header & CEA checksum verified) directly into the IT6805 HDMI receiver chip over I2C upon stream launch.
@@ -164,6 +165,7 @@ Or start **EverLive** directly from your desktop application launcher.
 | Key / Action | Function |
 |:---|:---|
 | <kbd>f</kbd> | Toggle borderless fullscreen |
+| <kbd>v</kbd> | Toggle VSync (`vsync=on` $\leftrightarrow$ `vsync=off`) |
 | <kbd>a</kbd> | Cycle Aspect Ratio (`auto` $\to$ `16:9` $\to$ `4:3` $\to$ `stretch`) |
 | <kbd>p</kbd> | Cycle OSD Position (Top-Right $\to$ Bottom-Right $\to$ Bottom-Left $\to$ Top-Left) |
 | <kbd>o</kbd> or <kbd>Tab</kbd> | Toggle On-Screen Display (OSD live hardware stats overlay) |
@@ -190,10 +192,10 @@ flowchart TD
 
   subgraph Userspace["EverLive Userspace Engine (Ring 3)"]
     direction TB
-    vfio -->|"Userspace DMA Mapping"| streamer["gc573_user_streamer (C Engine)<br/>- Scatter-Gather Video DMA Ring<br/>- L-PCM Audio DMA Ring<br/>- IT6805 I2C Matrix & EDID Programmer<br/>- Artix-7 24-bit RGB Control"]
+    vfio -->|"Userspace DMA Mapping"| streamer["gc573_user_streamer (C Engine)<br/>- Scatter-Gather Video DMA (Triple Buffered)<br/>- L-PCM & Dolby/DTS Bitstream Audio Engine<br/>- IT6805 I2C Matrix & EDID Programmer<br/>- Artix-7 24-bit RGB Control"]
     
     streamer -->|"OpenGL / SDL2 Direct Scanout"| window["Game Window (1440p120 / 4K60)"]
-    streamer -->|"SDL2 Audio / PipeWire"| audio["Headset / Speakers"]
+    streamer -->|"SDL2 Audio / PipeWire"| audio["Headset / Speakers (Stereo Downmix)"]
 
     gui["EverLive Console Hub (Qt / Python)<br/>EDID Profiles, Signal Status, LED, Volume"] -.->|Manages| streamer
     streamer -.->|"FD Handoff"| daemon["everlive_userd (Standby Daemon)<br/>Maintains state & LED without FLR"]
