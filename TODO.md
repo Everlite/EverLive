@@ -17,14 +17,20 @@ Dieses Dokument erfasst geplante Features, architektonische Ideen und Untersuchu
 
 ---
 
-## 🚀 Geplante Features für v1.1+
+## 🚀 Geplante Features für v1.1+ (Detaillierte Roadmap in `docs/ROADMAP_v1.1.md`)
 
-### 1. Virtuelle Kamera / Loopback für Headless-Streaming (`v4l2loopback` / PipeWire SPA)
-- **Ziel:** Optionales Einspeisen des Userspace-Video-Streams in ein virtuelles `/dev/video*`-Device via `v4l2loopback` oder PipeWire SPA Video Node, damit auch native OBS V4L2-Quellen ohne GUI-Fenster genutzt werden können.
+Eine vollständige technische Spezifikation aller Module, Datenfluss-Diagramme und Implementierungs-Details ist in [docs/ROADMAP_v1.1.md](docs/ROADMAP_v1.1.md) dokumentiert.
 
-### 2. Anamorphes 2x Vertical-Scaling für MPV Studio
-- **Kontext:** Bei super-ultrawide Signalen wie `3840x1080` (oft von RetroTINK 4K bei 120Hz/BFI genutzt) streckt die Anzeige das Bild um den Faktor 2x vertikal auf das 16:9-Format (3840x2160).
-- **Ziel:** Auch für den MPV-Fallback-Pfad bei Erkennung von `3840x1080` automatisch die passende Video-Filter-Skalierung (`--vf-add=scale=3840:2160`) hinterlegen.
+### 1. Zero-DKMS Userspace V4L2-Kompatibilität (`libeverlive-v4l2.so` via `LD_PRELOAD`)
+- **Konzept:** Inspiriert von @PolygonPrincess (`libgc570d-v4l2.so`).
+- **Ziel:** Abfangen von V4L2-Systemaufrufen (`open`, `ioctl`, `mmap`) im Userspace, um Bilddaten direkt aus dem Shared Memory von `everlive_userd` zu lesen.
+- **Vorteil:** Ermöglicht native V4L2-Nutzung in Discord, Chromium und OBS ohne Kernel-Module und ohne `v4l2loopback`.
 
-### 3. Hardware-Fund: Analyse & Portierung für AVerMedia Live Gamer 4K 2.1 (GC575)
-- **Ziel:** Sobald die Karte über den GitHub Sponsors Hardware Fund beschafft ist: Register-Dumps der HDMI 2.1 PHY und I2C-Matrix anfertigen, um HDMI 2.1 (4K120/4K144 VRR) auf Linux zu unterstützen.
+### 2. RetroTINK 4K Pro & Custom Modelines
+- **Anamorphes 2x Vertical-Scaling:** Automatische 2x Vertikal-Entzerrung bei `3840x1080` RetroTINK 120Hz/BFI-Signalen.
+- **Sync Lock OSD Toast:** Dezent einblendbare Statusanzeige bei Signalerkennung und Mode-Switch.
+- **Audio-Steuerung:** Software-Mute (<kbd>m</kbd>) und Gain-Regler direkt im C-Streamer.
+
+### 3. GUI & Multi-Card Architektur (`libeverlive-core`)
+- **RGB Color Wheel:** Freie Hex-Farbwahl via `QColorDialog` in `everlive_viewer.py`.
+- **Modulare Hardware-Abstraktion:** Saubere Trennung von PCIe-DMA-Engine und karten-spezifischen Register-Tabellen (Vorbereitung für GC570D Live Gamer DUO / GC575 2.1).
