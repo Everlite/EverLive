@@ -9,10 +9,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 USERD_DIR="${SCRIPT_DIR}/tools/opengc573-userd"
 VIEWER="${SCRIPT_DIR}/tools/everlive/everlive_viewer.py"
 
-# 1. Ensure userspace engine binaries are built
-if [ ! -f "${USERD_DIR}/gc573_user_streamer" ] || [ ! -f "${USERD_DIR}/everlive_userd" ]; then
-    echo "[*] Kompiliere EverLive Userspace VFIO Engine..."
+# 1. Ensure userspace engine binaries are built and up to date
+if ! make -C "${USERD_DIR}" -q >/dev/null 2>&1; then
+    echo "[*] Aktualisiere/Kompiliere EverLive Userspace VFIO Engine..."
     make -C "${USERD_DIR}" -j"$(nproc)"
+    setcap cap_ipc_lock=+ep "${USERD_DIR}/gc573_user_streamer" 2>/dev/null || true
 fi
 
 # 2. Raise soft memlock limit to hard limit for native 4K DMA mapping

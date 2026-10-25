@@ -158,6 +158,13 @@ sudo ./install.sh
 ```
 Or start **EverLive** directly from your desktop application launcher.
 
+### 🔄 Updating EverLive:
+```bash
+git pull
+./play.sh
+```
+*EverLive's launcher (`play.sh`) automatically detects modified source files and incrementally recompiles the userspace binaries on startup.*
+
 ---
 
 ## Controls & Hotkeys
