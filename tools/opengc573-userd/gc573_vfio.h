@@ -34,7 +34,25 @@ struct gc573_vfio_ctx {
 
 	/* Interrupts */
 	int irq_efd;
+
+	/*
+	 * The DMA interrupt status register is shared by the video completion
+	 * and audio period engines.  Both run in different threads in the
+	 * streamer, so every read/acknowledge pair must be serialized or a W1C
+	 * write can swallow the other engine's pending bit.
+	 */
+	mutex_t irq_lock;
 };
+
+static inline void gc573_vfio_irq_lock(struct gc573_vfio_ctx *ctx)
+{
+	mutex_lock(&ctx->irq_lock);
+}
+
+static inline void gc573_vfio_irq_unlock(struct gc573_vfio_ctx *ctx)
+{
+	mutex_unlock(&ctx->irq_lock);
+}
 
 /**
  * gc573_vfio_init - Initialize VFIO container, group and device for GC573

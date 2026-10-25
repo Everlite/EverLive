@@ -89,6 +89,7 @@ int gc573_vfio_init(struct gc573_vfio_ctx *ctx, const char *pci_addr)
 	}
 
 	memset(ctx, 0, sizeof(*ctx));
+	mutex_init(&ctx->irq_lock);
 	ctx->container_fd = -1;
 	ctx->group_fd = -1;
 	ctx->device_fd = -1;

@@ -29,7 +29,6 @@
 #define GC573_DMA_AUDIO_MAP3		0x02c0
 #define GC573_BRIDGE_AUDIO_DIVISOR	0x010a0
 
-#define GC573_DMA_IRQ_AUDIO_COMPLETE	BIT(5)
 #define GC573_DMA_AUDIO_ENGINE_RESET	BIT(8)
 #define GC573_DMA_AUDIO_STREAM_ENABLE	BIT(1)
 
@@ -87,10 +86,12 @@ static void gc573_user_audio_clear_interrupt(struct gc573_user_audio *audio)
 	u8 *base = (u8 *)audio->bar0;
 	uint32_t pending;
 
+	gc573_vfio_irq_lock(audio->vfio);
 	pending = readl(base + GC573_DMA_INTERRUPT_STATUS);
 	if (pending & GC573_DMA_IRQ_AUDIO_COMPLETE)
 		writel(GC573_DMA_IRQ_AUDIO_COMPLETE,
 		       base + GC573_DMA_INTERRUPT_STATUS);
+	gc573_vfio_irq_unlock(audio->vfio);
 }
 
 int gc573_user_audio_init(struct gc573_user_audio *audio,
@@ -174,9 +175,11 @@ int gc573_user_audio_start(struct gc573_user_audio *audio,
 	writel(readl(base + GC573_DMA_AUDIO_STREAM_CONTROL) &
 	       ~GC573_DMA_AUDIO_STREAM_ENABLE,
 	       base + GC573_DMA_AUDIO_STREAM_CONTROL);
+	gc573_vfio_irq_lock(audio->vfio);
 	writel(readl(base + GC573_DMA_INTERRUPT_ENABLE) &
 	       ~GC573_DMA_IRQ_AUDIO_COMPLETE,
 	       base + GC573_DMA_INTERRUPT_ENABLE);
+	gc573_vfio_irq_unlock(audio->vfio);
 	gc573_user_audio_clear_interrupt(audio);
 
 	memset(audio->vaddr, 0, audio->map_size);
@@ -204,9 +207,11 @@ int gc573_user_audio_start(struct gc573_user_audio *audio,
 	/* Publish buffer contents before enabling the engine. */
 	__sync_synchronize();
 
+	gc573_vfio_irq_lock(audio->vfio);
 	pending = readl(base + GC573_DMA_INTERRUPT_ENABLE);
 	writel(pending | GC573_DMA_IRQ_AUDIO_COMPLETE,
 	       base + GC573_DMA_INTERRUPT_ENABLE);
+	gc573_vfio_irq_unlock(audio->vfio);
 
 	/*
 	 * The kernel keeps the completion IRQ armed for 100 ms before it
@@ -250,18 +255,21 @@ int gc573_user_audio_poll(struct gc573_user_audio *audio,
 		return 0;
 
 	base = (u8 *)audio->bar0;
+	gc573_vfio_irq_lock(audio->vfio);
 	status = readl(base + GC573_DMA_INTERRUPT_STATUS);
 	channel_status = readl(base + GC573_DMA_AUDIO_CHANNEL_STATUS);
 
 	if (status & GC573_DMA_IRQ_AUDIO_COMPLETE)
 		writel(GC573_DMA_IRQ_AUDIO_COMPLETE,
 		       base + GC573_DMA_INTERRUPT_STATUS);
+	gc573_vfio_irq_unlock(audio->vfio);
 
 	/*
-	 * The video path acknowledges the shared interrupt status register
-	 * with a broad mask, so the audio bit may already be gone by the time
-	 * we look.  The channel-status buffer number still identifies the
-	 * completed period; ignore a repeated value unless a fresh audio IRQ
+	 * The audio and video completions share one status register.  The IRQ
+	 * lock keeps the read/acknowledge pairs from interleaving, and the video
+	 * path masks BIT(5) out of its acknowledge, so a fresh audio interrupt is
+	 * always visible here.  The channel-status buffer number still identifies
+	 * the completed period; ignore a repeated value unless a fresh audio IRQ
 	 * was observed.
 	 */
 	code = channel_status & 0x3U;
@@ -297,9 +305,11 @@ void gc573_user_audio_stop(struct gc573_user_audio *audio)
 	writel(readl(base + GC573_DMA_AUDIO_STREAM_CONTROL) &
 	       ~GC573_DMA_AUDIO_STREAM_ENABLE,
 	       base + GC573_DMA_AUDIO_STREAM_CONTROL);
+	gc573_vfio_irq_lock(audio->vfio);
 	writel(readl(base + GC573_DMA_INTERRUPT_ENABLE) &
 	       ~GC573_DMA_IRQ_AUDIO_COMPLETE,
 	       base + GC573_DMA_INTERRUPT_ENABLE);
+	gc573_vfio_irq_unlock(audio->vfio);
 	gc573_user_audio_clear_interrupt(audio);
 
 	/* Mirror gc555_dma_quiesce_audio_locked(): reset the audio engine. */

@@ -1227,19 +1227,22 @@ static void *preview_thread(void *arg)
 		 * starves the DMA ring and produces a visible hitch every 300 frames
 		 * (exactly the ~5 s period reported on 60 Hz sources).
 		 */
-		if (g_trace_mode &&
-		    (preview->video->frames == 1 ||
-		     preview->video->frames == 60 ||
-		     preview->video->frames % 300 == 0)) {
-			const uint8_t *p =
-				(const uint8_t *)preview->video->buffers[index].vaddr;
+		if (g_trace_mode) {
+			uint64_t frame_no = __atomic_load_n(&preview->video->frames,
+							    __ATOMIC_RELAXED);
 
-			printf("[FRAME #%lu] Buf %d (vaddr=%p): %02x %02x %02x %02x %02x %02x %02x %02x | %02x %02x %02x %02x %02x %02x %02x %02x\n",
-			       (unsigned long)preview->video->frames, index,
-			       (void *)p,
-			       p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
-			       p[8], p[9], p[10], p[11], p[12], p[13], p[14],
-			       p[15]);
+			if (frame_no == 1 || frame_no == 60 ||
+			    frame_no % 300 == 0) {
+				const uint8_t *p =
+					(const uint8_t *)preview->video->buffers[index].vaddr;
+
+				printf("[FRAME #%lu] Buf %d (vaddr=%p): %02x %02x %02x %02x %02x %02x %02x %02x | %02x %02x %02x %02x %02x %02x %02x %02x\n",
+				       (unsigned long)frame_no, index,
+				       (void *)p,
+				       p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
+				       p[8], p[9], p[10], p[11], p[12], p[13], p[14],
+				       p[15]);
+			}
 		}
 
 		pthread_mutex_lock(&preview->lock);
@@ -2610,6 +2613,7 @@ int main(int argc, char *argv[])
 	uint64_t last_service = 0;
 	uint64_t last_frame_rate_probe = 0;
 	uint64_t last_stats = 0;
+	uint64_t last_stats_us = 0;
 	uint64_t last_frames = 0;
 	double displayed_fps = 0.0;
 	uint32_t input_width = 0;
@@ -2907,6 +2911,7 @@ int main(int argc, char *argv[])
 		       "EverLive [USERSPACE VFIO] — Waiting for HDMI signal...");
 
 	last_stats = now_ms();
+	last_stats_us = now_us();
 	last_status_poll = 0;
 	last_service = 0;
 	last_frame_rate_probe = 0;
@@ -3179,8 +3184,10 @@ int main(int argc, char *argv[])
 								input_height = fresh.height;
 								input_rate_x100 =
 									fresh.frame_rate_x100;
-								last_frames = video.frames;
+								last_frames = __atomic_load_n(&video.frames,
+											      __ATOMIC_RELAXED);
 								last_stats = now_ms();
+								last_stats_us = now_us();
 								stream_reset_audio(&audio);
 								printf("[VIDEO] Hot switch completed in %llu ms\n",
 								       (unsigned long long)(now_ms() -
@@ -3253,8 +3260,10 @@ int main(int argc, char *argv[])
 							input_height = sig.height;
 							input_rate_x100 =
 								sig.frame_rate_x100;
-							last_frames = video.frames;
+							last_frames = __atomic_load_n(&video.frames,
+									      __ATOMIC_RELAXED);
 							last_stats = now_ms();
+							last_stats_us = now_us();
 							stream_reset_audio(&audio);
 						}
 					} else if (ret == 0) {
@@ -3399,16 +3408,27 @@ int main(int argc, char *argv[])
 		/* Update title stats once per second. */
 		now = now_ms();
 		if (now - last_stats >= 1000) {
-			uint64_t frames = video.frames;
-			double fps = (double)(frames - last_frames) * 1000.0 /
-				     (double)(now - last_stats);
+			uint64_t frames = __atomic_load_n(&video.frames,
+							  __ATOMIC_RELAXED);
+			uint64_t stats_us = now_us();
+			double fps = 0.0;
 			char title[256];
+
+			/*
+			 * Divide by the exact monotonic interval, not by the rounded
+			 * millisecond tick.  The counter is incremented once per real
+			 * DMA completion, so a 59.93 Hz source now reports 59.9x
+			 * instead of the old ~61 fps inflated by phantom retirements.
+			 */
+			if (stats_us > last_stats_us)
+				fps = (double)(frames - last_frames) * 1000000.0 /
+				      (double)(stats_us - last_stats_us);
 
 			displayed_fps = fps;
 
 			if (streaming) {
 				snprintf(title, sizeof(title),
-					 "EverLive [USERSPACE VFIO] — %ux%u%s @ %u.%02u Hz -> %ux%u YUYV @ %.1f FPS | ring %u/%uch | AR %s%s%s",
+					 "EverLive [USERSPACE VFIO] — %ux%u%s @ %u.%02u Hz -> %ux%u YUYV @ %.2f FPS | ring %u/%uch | AR %s%s%s",
 					 input_width, input_height,
 					 current_sig.interlaced ? "i" : "p",
 					 input_rate_x100 / 100,
@@ -3419,7 +3439,7 @@ int main(int argc, char *argv[])
 					 (SDL_GetWindowFlags(window) &
 					  SDL_WINDOW_FULLSCREEN_DESKTOP) ? " | FS" : "",
 					 g_vsync ? " | VSync" : "");
-				printf("[STREAM] %ux%u%s @ %u.%02u Hz -> %ux%u | FPS: %.1f | Frames: %lu | ring %u/%uch | preview drops: %lu | age %.1f ms\n",
+				printf("[STREAM] %ux%u%s @ %u.%02u Hz -> %ux%u | FPS: %.2f | Frames: %lu | ring %u/%uch | preview drops: %lu | age %.1f ms\n",
 				       input_width, input_height,
 				       current_sig.interlaced ? "i" : "p",
 				       input_rate_x100 / 100, input_rate_x100 % 100,
@@ -3480,6 +3500,7 @@ int main(int argc, char *argv[])
 			SDL_SetWindowTitle(window, title);
 			last_frames = frames;
 			last_stats = now;
+			last_stats_us = stats_us;
 		}
 	}
 

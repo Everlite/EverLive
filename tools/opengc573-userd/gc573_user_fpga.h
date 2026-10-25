@@ -36,9 +36,17 @@
 
 #define GC573_DMA_IRQ_TERMINATED	BIT(0)
 #define GC573_DMA_IRQ_COMPLETE		BIT(1)
+#define GC573_DMA_IRQ_AUDIO_COMPLETE	BIT(5)
 #define GC573_DMA_IRQ_MASK		(GC573_DMA_IRQ_TERMINATED | \
 					 GC573_DMA_IRQ_COMPLETE)
 #define GC573_DMA_IRQ_ACK_MASK		(0x80001fffU | BIT(13))
+/*
+ * The video path may acknowledge everything except the audio period bit.
+ * Audio owns BIT(5) and clears it under the same IRQ lock, so neither engine
+ * can erase the other's completion.
+ */
+#define GC573_DMA_IRQ_VIDEO_ACK_MASK \
+	(GC573_DMA_IRQ_ACK_MASK & ~GC573_DMA_IRQ_AUDIO_COMPLETE)
 #define GC573_DMA_DESCRIPTOR_CONTROL	0x80008000U
 #define GC573_DMA_RESET_VIDEO		BIT(0)
 

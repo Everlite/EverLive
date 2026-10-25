@@ -38,7 +38,7 @@ static uint64_t gc573_now_ms(void)
 
 static void gc573_video_irq_ack(void *bar0, uint32_t status)
 {
-	uint32_t ack = status & GC573_DMA_IRQ_ACK_MASK;
+	uint32_t ack = status & GC573_DMA_IRQ_VIDEO_ACK_MASK;
 
 	if (ack)
 		writel(ack, (u8 *)bar0 + GC573_DMA_INTERRUPT_STATUS);
@@ -150,7 +150,7 @@ static void gc573_video_retire(struct gc573_user_video *video,
 	video->buffers[index].channel = -1;
 	video->last_complete_ms = gc573_now_ms();
 	video->frame_ready_us[index] = gc573_now_us();
-	video->frames++;
+	__atomic_fetch_add(&video->frames, 1, __ATOMIC_RELAXED);
 	gc573_video_push_ready(video, index);
 }
 
@@ -158,14 +158,23 @@ static void gc573_video_process_irq(struct gc573_user_video *video)
 {
 	void *bar0 = video->bar0;
 
+	/*
+	 * Serialize the read/acknowledge pair with the audio worker.  The
+	 * status register is write-one-to-clear and shared by both engines;
+	 * without the lock one thread can clear a completion the other has not
+	 * consumed yet.
+	 */
+	gc573_vfio_irq_lock(video->vfio);
+
 	for (unsigned int pass = 0; pass < 8; pass++) {
 		uint32_t status = readl((u8 *)bar0 + GC573_DMA_INTERRUPT_STATUS);
-		uint32_t channel_status = 0;
+		uint32_t ack = status & GC573_DMA_IRQ_VIDEO_ACK_MASK;
 
-		if (!(status & GC573_DMA_IRQ_ACK_MASK))
+		if (!ack)
 			break;
 
 		if (status & GC573_DMA_IRQ_COMPLETE) {
+			uint32_t channel_status;
 			uint32_t code;
 
 			channel_status = readl((u8 *)bar0 +
@@ -181,26 +190,16 @@ static void gc573_video_process_irq(struct gc573_user_video *video)
 			}
 		}
 
-		gc573_video_irq_ack(bar0, status);
+		/*
+		 * Acknowledge exactly the bits sampled above.  BIT(5) belongs to
+		 * the audio engine and is excluded from this mask.  Channels are
+		 * retired only for a real completion IRQ with a valid channel
+		 * code; GC573_DMA_CONTROL is never used as a completion oracle.
+		 */
+		writel(ack, (u8 *)bar0 + GC573_DMA_INTERRUPT_STATUS);
 	}
 
-	/*
-	 * The channel register keeps one completion code. If a second frame
-	 * finishes before we read it, that channel's enable bit is already
-	 * clear and the code is gone. Retire those too, or the ring sticks
-	 * at one buffer and 120 Hz falls to the display rate.
-	 */
-	{
-		uint32_t control = readl((u8 *)bar0 + GC573_DMA_CONTROL);
-
-		for (unsigned int channel = 0; channel < video->num_channels;
-		     channel++) {
-			int index = video->channel_buf[channel];
-
-			if (index >= 0 && !(control & BIT(channel + 1)))
-				gc573_video_retire(video, channel, index);
-		}
-	}
+	gc573_vfio_irq_unlock(video->vfio);
 }
 
 static int gc573_video_process_ready(struct gc573_user_video *video)
@@ -328,14 +327,16 @@ int gc573_user_video_start(struct gc573_user_video *video)
 
 	gc573_video_clear_controls(video->bar0);
 
+	gc573_vfio_irq_lock(video->vfio);
 	pending = readl((u8 *)video->bar0 + GC573_DMA_INTERRUPT_STATUS);
-	if (pending)
-		writel(pending & GC573_DMA_IRQ_ACK_MASK,
+	if (pending & GC573_DMA_IRQ_VIDEO_ACK_MASK)
+		writel(pending & GC573_DMA_IRQ_VIDEO_ACK_MASK,
 		       (u8 *)video->bar0 + GC573_DMA_INTERRUPT_STATUS);
 
 	control = readl((u8 *)video->bar0 + GC573_DMA_INTERRUPT_ENABLE);
 	writel(control | GC573_DMA_IRQ_MASK,
 	       (u8 *)video->bar0 + GC573_DMA_INTERRUPT_ENABLE);
+	gc573_vfio_irq_unlock(video->vfio);
 
 	for (unsigned int i = 0; i < video->num_buffers; i++) {
 		video->buffers[i].channel = -1;
@@ -478,12 +479,17 @@ void gc573_user_video_stop_timeout(struct gc573_user_video *video,
 		else
 			pr_info("Video DMA: terminated cleanly");
 	}
-	if (status)
+	if (status) {
+		gc573_vfio_irq_lock(video->vfio);
 		gc573_video_irq_ack(video->bar0, status);
+		gc573_vfio_irq_unlock(video->vfio);
+	}
 
+	gc573_vfio_irq_lock(video->vfio);
 	control = readl((u8 *)video->bar0 + GC573_DMA_INTERRUPT_ENABLE);
 	writel(control & ~GC573_DMA_IRQ_MASK,
 	       (u8 *)video->bar0 + GC573_DMA_INTERRUPT_ENABLE);
+	gc573_vfio_irq_unlock(video->vfio);
 
 	gc573_video_clear_controls(video->bar0);
 
