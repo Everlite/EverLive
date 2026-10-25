@@ -40,9 +40,21 @@
 
 #define DEFAULT_WINDOW_WIDTH	1280U
 #define DEFAULT_WINDOW_HEIGHT	720U
-#define VIDEO_BUFFERS		4U
+/*
+ * Video DMA ring depth.  The old kernel viewer ran an 8-buffer ring and all
+ * four FPGA channels; the userspace engine derives the channel count from the
+ * buffer count (num_buffers - 1, max 4).  Deep rings are cheap at small frame
+ * sizes and give the FPGA a spare channel while the CPU copies a finished
+ * frame, so a compositor hiccup cannot make the hardware drop a source frame.
+ */
+#define VIDEO_RING_720P		6U
+#define VIDEO_RING_1080P	5U
+#define VIDEO_RING_1440P	4U
+#define VIDEO_RING_4K		3U
+#define VIDEO_RING_MIN		3U
 /* Rotating frame buffers between the DMA thread and the SDL renderer. */
-#define PREVIEW_BUFFERS		3U
+#define PREVIEW_MIN_BUFFERS	3U
+#define PREVIEW_MAX_BUFFERS	4U
 
 /* Cheap timing/AVI probe cadence while streaming. */
 #define STATUS_POLL_STREAM_MS	50U
@@ -409,12 +421,17 @@ static bool start_led_daemon(struct gc573_vfio_ctx *ctx, bool handoff)
 	return true;
 }
 
-static uint64_t now_ms(void)
+static uint64_t now_us(void)
 {
 	struct timespec ts;
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+	return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+static uint64_t now_ms(void)
+{
+	return now_us() / 1000;
 }
 
 static const char *colorspace_name(uint8_t colorspace)
@@ -557,24 +574,48 @@ static int compute_output_and_buffers(
 	unsigned int width = sig->width;
 	unsigned int height = sig->height;
 	size_t frame_map;
+	size_t buffer_cost;
+	unsigned int target;
 	unsigned int buffers;
 
 	if (!width || !height || (width & 1U))
 		return -EINVAL;
 
 	frame_map = ((size_t)width * height * 2U + 4095U) & ~(size_t)4095U;
+	buffer_cost = frame_map + GC573_USER_VIDEO_DESC_TABLE_SIZE;
 
-	if (budget != SIZE_MAX && frame_map > budget) {
+	/*
+	 * Pick a ring depth that keeps at least two FPGA channels armed while one
+	 * buffer is copied in software.  Small frames get a deeper ring because
+	 * the memory cost is negligible and the extra slack absorbs render-side
+	 * jitter from the Wayland compositor.
+	 */
+	if (frame_map <= 2U * 1024U * 1024U)
+		target = VIDEO_RING_720P;
+	else if (frame_map <= 4U * 1024U * 1024U)
+		target = VIDEO_RING_1080P;
+	else if (frame_map <= 8U * 1024U * 1024U)
+		target = VIDEO_RING_1440P;
+	else
+		target = VIDEO_RING_4K;
+
+	if (target > GC573_USER_VIDEO_MAX_BUFFERS)
+		target = GC573_USER_VIDEO_MAX_BUFFERS;
+	/* Never go below three buffers while the budget allows two free channels. */
+	if (target < VIDEO_RING_MIN)
+		target = VIDEO_RING_MIN;
+
+	if (budget != SIZE_MAX && buffer_cost > budget) {
 		if (width != reported_width || height != reported_height ||
-		    frame_map != reported_need) {
-			pr_err("Cannot map native %ux%u YUYV frame (%zu KB): "
+		    buffer_cost != reported_need) {
+			pr_err("Cannot map native %ux%u YUYV frame (%zu KB) plus descriptor page: "
 			       "RLIMIT_MEMLOCK budget is %zu KB; raise it with "
 			       "'ulimit -l unlimited', LimitMEMLOCK=64M or CAP_IPC_LOCK",
 			       width, height, frame_map / 1024U,
 			       budget / 1024U);
 			reported_width = width;
 			reported_height = height;
-			reported_need = frame_map;
+			reported_need = buffer_cost;
 		}
 		return -ENOMEM;
 	}
@@ -584,23 +625,19 @@ static int compute_output_and_buffers(
 	reported_need = 0;
 
 	if (budget == SIZE_MAX) {
-		buffers = VIDEO_BUFFERS;
+		buffers = target;
 	} else {
-		buffers = (unsigned int)(budget / frame_map);
+		buffers = (unsigned int)(budget / buffer_cost);
 		if (!buffers)
 			buffers = 1U;
-		if (buffers > VIDEO_BUFFERS)
-			buffers = VIDEO_BUFFERS;
+		if (buffers > target)
+			buffers = target;
 	}
 
-	/*
-	 * Triple buffering: the CPU copies a finished frame while the FPGA must
-	 * already have another free channel armed.  A one-buffer ring drops the
-	 * next hardware frame (visible as 1440p/50/120 Hz micro-stutter).  Larger
-	 * rings only waste memlock.
-	 */
-	if (buffers > 3U)
-		buffers = 3U;
+	if (buffers < target) {
+		pr_info("RLIMIT_MEMLOCK allows %u of %u DMA buffers for %ux%u (%zu KB each)",
+			buffers, target, width, height, buffer_cost / 1024U);
+	}
 
 	*out_width = width;
 	*out_height = height;
@@ -1145,13 +1182,18 @@ struct frame_preview {
 	bool stop;
 	bool stalled;
 	struct gc573_user_video *video;
-	uint8_t *buffers[PREVIEW_BUFFERS];
-	bool busy[PREVIEW_BUFFERS];
+	uint8_t *buffers[PREVIEW_MAX_BUFFERS];
+	bool busy[PREVIEW_MAX_BUFFERS];
+	/* Completion time of the source frame stored in each slot. */
+	uint64_t ts_us[PREVIEW_MAX_BUFFERS];
+	unsigned int count;
 	int latest;
 	size_t bytes;
 	uint64_t seq;
 	uint64_t consumed;
 	uint64_t dropped;
+	/* Age of the frame handed to the renderer by the last preview_take(). */
+	uint64_t taken_age_us;
 };
 
 static struct frame_preview g_preview;
@@ -1161,19 +1203,27 @@ static void *preview_thread(void *arg)
 	struct frame_preview *preview = arg;
 
 	while (!preview->stop) {
-		int index = gc573_user_video_poll(preview->video, 5);
+		int index = gc573_user_video_poll(preview->video, 2);
 		int slot = -1;
 
 		if (index == -2) {
-			preview->stalled = true;
+			__atomic_store_n(&preview->stalled, true,
+					 __ATOMIC_RELAXED);
 			break;
 		}
 		if (index < 0)
 			continue;
 
-		if (preview->video->frames == 1 ||
-		    preview->video->frames == 60 ||
-		    preview->video->frames % 300 == 0) {
+		/*
+		 * Diagnostic frame dumps must never run on the hot path: stdout can
+		 * block for milliseconds when it is a pipe or a busy terminal, which
+		 * starves the DMA ring and produces a visible hitch every 300 frames
+		 * (exactly the ~5 s period reported on 60 Hz sources).
+		 */
+		if (g_trace_mode &&
+		    (preview->video->frames == 1 ||
+		     preview->video->frames == 60 ||
+		     preview->video->frames % 300 == 0)) {
 			const uint8_t *p =
 				(const uint8_t *)preview->video->buffers[index].vaddr;
 
@@ -1186,7 +1236,7 @@ static void *preview_thread(void *arg)
 		}
 
 		pthread_mutex_lock(&preview->lock);
-		for (unsigned int i = 0; i < PREVIEW_BUFFERS; i++) {
+		for (unsigned int i = 0; i < preview->count; i++) {
 			if (!preview->busy[i] && (int)i != preview->latest) {
 				slot = (int)i;
 				break;
@@ -1195,16 +1245,20 @@ static void *preview_thread(void *arg)
 		pthread_mutex_unlock(&preview->lock);
 
 		if (slot < 0) {
-			preview->dropped++;
+			__atomic_fetch_add(&preview->dropped, 1, __ATOMIC_RELAXED);
 			gc573_user_video_release(preview->video, index);
 			continue;
 		}
+
+		uint64_t frame_us =
+			gc573_user_video_frame_time_us(preview->video, index);
 
 		/* Not published and not busy: this slot belongs to this thread. */
 		memcpy(preview->buffers[slot],
 		       preview->video->buffers[index].vaddr, preview->bytes);
 
 		pthread_mutex_lock(&preview->lock);
+		preview->ts_us[slot] = frame_us;
 		preview->latest = slot;
 		preview->seq++;
 		pthread_mutex_unlock(&preview->lock);
@@ -1216,11 +1270,13 @@ static void *preview_thread(void *arg)
 
 static void preview_free_buffers(void)
 {
-	for (unsigned int i = 0; i < PREVIEW_BUFFERS; i++) {
+	for (unsigned int i = 0; i < PREVIEW_MAX_BUFFERS; i++) {
 		free(g_preview.buffers[i]);
 		g_preview.buffers[i] = NULL;
 		g_preview.busy[i] = false;
+		g_preview.ts_us[i] = 0;
 	}
+	g_preview.count = 0;
 	g_preview.latest = -1;
 }
 
@@ -1234,27 +1290,53 @@ static void preview_stop(void)
 	preview_free_buffers();
 }
 
-static int preview_start(struct gc573_user_video *video, size_t bytes)
+/*
+ * Ring depth between the DMA thread and the renderer.  One slot is held by
+ * the renderer while it uploads a texture, one can be pending for the next
+ * present, and at least one stays free for the copy thread.  More DMA
+ * channels therefore need one more slot, capped to keep 4K allocations sane.
+ */
+static unsigned int preview_depth(unsigned int channels, size_t bytes)
 {
+	unsigned int depth = channels + 1U;
+
+	if (depth < PREVIEW_MIN_BUFFERS)
+		depth = PREVIEW_MIN_BUFFERS;
+	/* Large frames are copied in ~1 ms; three slots are already plenty. */
+	if (bytes > 8U * 1024U * 1024U && depth > PREVIEW_MIN_BUFFERS)
+		depth = PREVIEW_MIN_BUFFERS;
+	if (depth > PREVIEW_MAX_BUFFERS)
+		depth = PREVIEW_MAX_BUFFERS;
+	return depth;
+}
+
+static int preview_start(struct gc573_user_video *video, size_t bytes,
+			 unsigned int channels)
+{
+	unsigned int depth = preview_depth(channels, bytes);
+
 	preview_stop();
-	for (unsigned int i = 0; i < PREVIEW_BUFFERS; i++) {
+	for (unsigned int i = 0; i < depth; i++) {
 		g_preview.buffers[i] = malloc(bytes);
 		if (!g_preview.buffers[i]) {
 			preview_free_buffers();
 			return -ENOMEM;
 		}
 		g_preview.busy[i] = false;
+		g_preview.ts_us[i] = 0;
 	}
 	if (!g_preview.lock_ready) {
 		pthread_mutex_init(&g_preview.lock, NULL);
 		g_preview.lock_ready = true;
 	}
+	g_preview.count = depth;
 	g_preview.video = video;
 	g_preview.bytes = bytes;
 	g_preview.seq = 0;
 	g_preview.consumed = 0;
 	g_preview.dropped = 0;
 	g_preview.latest = -1;
+	g_preview.taken_age_us = 0;
 	g_preview.stop = false;
 	g_preview.stalled = false;
 	if (pthread_create(&g_preview.thread, NULL, preview_thread,
@@ -1287,6 +1369,12 @@ static int preview_take(void **pixels)
 	g_preview.latest = -1;
 	g_preview.busy[slot] = true;
 	g_preview.consumed = g_preview.seq;
+	{
+		uint64_t now = now_us();
+
+		g_preview.taken_age_us = (now > g_preview.ts_us[slot]) ?
+			now - g_preview.ts_us[slot] : 0;
+	}
 	pthread_mutex_unlock(&g_preview.lock);
 
 	*pixels = g_preview.buffers[slot];
@@ -1297,7 +1385,7 @@ static void preview_release(int handle)
 {
 	int slot = handle - 1;
 
-	if (slot < 0 || slot >= (int)PREVIEW_BUFFERS)
+	if (slot < 0 || slot >= (int)PREVIEW_MAX_BUFFERS)
 		return;
 
 	pthread_mutex_lock(&g_preview.lock);
@@ -3048,7 +3136,8 @@ int main(int argc, char *argv[])
 								ret = preview_start(
 									&video,
 									(size_t)new_out_w *
-									new_out_h * 2U);
+									new_out_h * 2U,
+									video.num_channels);
 
 							if (ret < 0) {
 								if (ret != -ENOMEM)
@@ -3130,7 +3219,8 @@ int main(int argc, char *argv[])
 							ret = preview_start(
 								&video,
 								(size_t)new_out_w *
-								new_out_h * 2U);
+								new_out_h * 2U,
+								video.num_channels);
 
 						if (ret < 0) {
 							if (ret != -ENOMEM)
@@ -3171,7 +3261,7 @@ int main(int argc, char *argv[])
 			}
 		}
 
-		if (streaming && g_preview.stalled) {
+		if (streaming && __atomic_load_n(&g_preview.stalled, __ATOMIC_RELAXED)) {
 			u8 *b = (u8 *)ctx.bar0;
 
 			pr_err("Video DMA stalled; stopping capture. Diagnostic dump:\n"
@@ -3272,7 +3362,13 @@ int main(int argc, char *argv[])
 				render_frame(window, renderer, texture,
 					     aspect_ratio(g_aspect, video_aspect));
 			} else {
-				SDL_Delay(2);
+				/*
+				 * Present-on-new-frame pacing: poll just often enough that a
+				 * frame arriving mid-sleep is picked up within ~1 ms.  The old
+				 * 2 ms blind delay added up to a full refresh of phase error
+				 * on 59.72/60.03 Hz sources and showed up as micro-stutter.
+				 */
+				SDL_Delay(1);
 			}
 		} else {
 			SDL_Delay(20);
@@ -3305,22 +3401,27 @@ int main(int argc, char *argv[])
 
 			if (streaming) {
 				snprintf(title, sizeof(title),
-					 "EverLive [USERSPACE VFIO] — %ux%u%s @ %u.%02u Hz -> %ux%u YUYV @ %.1f FPS | AR %s%s%s",
+					 "EverLive [USERSPACE VFIO] — %ux%u%s @ %u.%02u Hz -> %ux%u YUYV @ %.1f FPS | ring %u/%uch | AR %s%s%s",
 					 input_width, input_height,
 					 current_sig.interlaced ? "i" : "p",
 					 input_rate_x100 / 100,
 					 input_rate_x100 % 100,
 					 output_width, output_height, fps,
+					 video.num_buffers, video.num_channels,
 					 aspect_name(g_aspect),
 					 (SDL_GetWindowFlags(window) &
 					  SDL_WINDOW_FULLSCREEN_DESKTOP) ? " | FS" : "",
 					 g_vsync ? " | VSync" : "");
-				printf("[STREAM] %ux%u%s @ %u.%02u Hz -> %ux%u | FPS: %.1f | Frames: %lu\n",
+				printf("[STREAM] %ux%u%s @ %u.%02u Hz -> %ux%u | FPS: %.1f | Frames: %lu | ring %u/%uch | preview drops: %lu | age %.1f ms\n",
 				       input_width, input_height,
 				       current_sig.interlaced ? "i" : "p",
 				       input_rate_x100 / 100, input_rate_x100 % 100,
 				       output_width, output_height,
-				       fps, (unsigned long)frames);
+				       fps, (unsigned long)frames,
+				       video.num_buffers, video.num_channels,
+				       (unsigned long)__atomic_load_n(&g_preview.dropped,
+							      __ATOMIC_RELAXED),
+				       (double)g_preview.taken_age_us / 1000.0);
 				if (audio.streaming && audio.bt_playing) {
 					printf("[AUDIO] Decoding %s -> Stereo | bursts %lu | frames %lu | errors %lu\n",
 					       audio_bitstream_name(audio.bitstream),

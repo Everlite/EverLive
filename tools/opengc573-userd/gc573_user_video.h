@@ -17,6 +17,8 @@
 
 #define GC573_USER_VIDEO_DESC_IOVA	0x10000000ULL
 #define GC573_USER_VIDEO_FRAME_IOVA	0x20000000ULL
+/* One descriptor page per frame buffer, also pinned against RLIMIT_MEMLOCK. */
+#define GC573_USER_VIDEO_DESC_TABLE_SIZE	(32U * 1024U)
 
 struct gc573_user_dma_desc {
 	uint32_t address_low;
@@ -60,6 +62,8 @@ struct gc573_user_video {
 	bool streaming;
 	uint64_t frames;
 	uint64_t last_complete_ms;
+	/* Monotonic completion time of the frame currently in each buffer. */
+	uint64_t frame_ready_us[GC573_USER_VIDEO_MAX_BUFFERS];
 };
 
 /**
@@ -99,6 +103,18 @@ int gc573_user_video_poll(struct gc573_user_video *video, int timeout_ms);
  * gc573_user_video_release - Return a displayed buffer to the DMA pool
  */
 void gc573_user_video_release(struct gc573_user_video *video, int index);
+
+/**
+ * gc573_user_video_frame_time_us - Completion timestamp of a ready frame
+ * @video: Video context
+ * @index: Buffer index returned by gc573_user_video_poll()
+ *
+ * Returns the CLOCK_MONOTONIC completion time in microseconds, or 0 when the
+ * index is invalid or the buffer has not completed yet.  Consumers use this
+ * to measure how stale a frame is without adding a second timestamp source.
+ */
+uint64_t gc573_user_video_frame_time_us(const struct gc573_user_video *video,
+					int index);
 
 void gc573_user_video_stop(struct gc573_user_video *video);
 

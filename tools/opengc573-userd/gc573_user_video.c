@@ -19,17 +19,21 @@
  * 16-bit dword length and cuts the list to a few dozen entries.
  */
 #define GC573_USER_VIDEO_DESC_CHUNK	(128U * 1024U)
-#define GC573_USER_VIDEO_DESC_TABLE_SIZE 32768U
 #define GC573_USER_VIDEO_MAX_DESCRIPTORS 2048U
 #define GC573_USER_VIDEO_STALL_MS	2000U
 #define GC573_USER_VIDEO_STOP_WAIT_MS	2000U
 
-static uint64_t gc573_now_ms(void)
+static uint64_t gc573_now_us(void)
 {
 	struct timespec ts;
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+	return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+static uint64_t gc573_now_ms(void)
+{
+	return gc573_now_us() / 1000;
 }
 
 static void gc573_video_irq_ack(void *bar0, uint32_t status)
@@ -145,6 +149,7 @@ static void gc573_video_retire(struct gc573_user_video *video,
 	video->channel_buf[channel] = -1;
 	video->buffers[index].channel = -1;
 	video->last_complete_ms = gc573_now_ms();
+	video->frame_ready_us[index] = gc573_now_us();
 	video->frames++;
 	gc573_video_push_ready(video, index);
 }
@@ -295,6 +300,9 @@ int gc573_user_video_init(struct gc573_user_video *video,
 		video->free_stack[i] = (int)i;
 	video->free_count = num_buffers;
 
+	for (unsigned int i = 0; i < num_buffers; i++)
+		video->frame_ready_us[i] = 0;
+
 	for (unsigned int i = 0; i < video->num_channels; i++)
 		video->channel_buf[i] = -1;
 
@@ -339,6 +347,9 @@ int gc573_user_video_start(struct gc573_user_video *video)
 	video->ready_count = 0;
 	video->frames = 0;
 	video->last_complete_ms = gc573_now_ms();
+
+	for (unsigned int i = 0; i < video->num_buffers; i++)
+		video->frame_ready_us[i] = 0;
 
 	for (unsigned int i = 0; i < video->num_channels; i++)
 		video->channel_buf[i] = -1;
@@ -413,6 +424,15 @@ void gc573_user_video_release(struct gc573_user_video *video, int index)
 		gc573_video_arm_idle_channels(video);
 }
 
+uint64_t gc573_user_video_frame_time_us(const struct gc573_user_video *video,
+					int index)
+{
+	if (!video || index < 0 || index >= (int)video->num_buffers)
+		return 0;
+
+	return video->frame_ready_us[index];
+}
+
 void gc573_user_video_stop_timeout(struct gc573_user_video *video,
 				   unsigned int timeout_ms)
 {
@@ -472,6 +492,7 @@ void gc573_user_video_stop_timeout(struct gc573_user_video *video,
 	for (unsigned int i = 0; i < video->num_buffers; i++) {
 		video->buffers[i].channel = -1;
 		video->free_stack[i] = (int)i;
+		video->frame_ready_us[i] = 0;
 	}
 	video->free_count = video->num_buffers;
 	video->ready_head = 0;
