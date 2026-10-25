@@ -23,6 +23,7 @@
 #include "gc573_user_fpga.h"
 #include "gc573_user_video.h"
 #include "gc573_user_audio.h"
+#include "gc573_user_font8x8.h"
 #include <SDL2/SDL.h>
 #include <ctype.h>
 #include <dirent.h>
@@ -76,6 +77,133 @@ static bool g_trace_requested;
 static uint8_t g_led_r = 0x00;
 static uint8_t g_led_g = 0xcc;
 static uint8_t g_led_b = 0xff;
+
+/* Presentation options; the GUI forwards its checkboxes as CLI flags. */
+enum stream_aspect {
+	ASPECT_AUTO,
+	ASPECT_16_9,
+	ASPECT_4_3,
+	ASPECT_STRETCH,
+	ASPECT_COUNT,
+};
+
+static bool g_fullscreen;
+static bool g_vsync;
+static bool g_osd_enabled = true;
+static enum stream_aspect g_aspect = ASPECT_AUTO;
+
+enum osd_position {
+	OSD_POS_TR,
+	OSD_POS_BR,
+	OSD_POS_BL,
+	OSD_POS_TL,
+	OSD_POS_COUNT,
+};
+
+static enum osd_position g_osd_pos = OSD_POS_TR;
+
+static const char *osd_pos_name(enum osd_position pos)
+{
+	switch (pos) {
+	case OSD_POS_BR:
+		return "bottom-right";
+	case OSD_POS_BL:
+		return "bottom-left";
+	case OSD_POS_TL:
+		return "top-left";
+	default:
+		return "top-right";
+	}
+}
+
+static bool parse_osd_pos(const char *value, enum osd_position *out)
+{
+	if (!value || !*value)
+		return false;
+	if (!strcasecmp(value, "tr") || !strcasecmp(value, "top-right")) {
+		*out = OSD_POS_TR;
+		return true;
+	}
+	if (!strcasecmp(value, "br") || !strcasecmp(value, "bottom-right")) {
+		*out = OSD_POS_BR;
+		return true;
+	}
+	if (!strcasecmp(value, "bl") || !strcasecmp(value, "bottom-left")) {
+		*out = OSD_POS_BL;
+		return true;
+	}
+	if (!strcasecmp(value, "tl") || !strcasecmp(value, "top-left")) {
+		*out = OSD_POS_TL;
+		return true;
+	}
+	return false;
+}
+
+static const char *aspect_label(enum stream_aspect aspect)
+{
+	switch (aspect) {
+	case ASPECT_16_9:
+		return "16:9 AR";
+	case ASPECT_4_3:
+		return "4:3 AR";
+	case ASPECT_STRETCH:
+		return "Stretch";
+	default:
+		return "Auto AR";
+	}
+}
+
+static const char *aspect_name(enum stream_aspect aspect)
+{
+	switch (aspect) {
+	case ASPECT_16_9:
+		return "16:9";
+	case ASPECT_4_3:
+		return "4:3";
+	case ASPECT_STRETCH:
+		return "stretch";
+	default:
+		return "auto";
+	}
+}
+
+/* A return value <= 0 means "fill the window" (stretch). */
+static float aspect_ratio(enum stream_aspect aspect, float auto_aspect)
+{
+	switch (aspect) {
+	case ASPECT_16_9:
+		return 16.0f / 9.0f;
+	case ASPECT_4_3:
+		return 4.0f / 3.0f;
+	case ASPECT_STRETCH:
+		return 0.0f;
+	default:
+		return auto_aspect;
+	}
+}
+
+static bool parse_aspect(const char *value, enum stream_aspect *out)
+{
+	if (!value || !*value)
+		return false;
+	if (!strcasecmp(value, "auto")) {
+		*out = ASPECT_AUTO;
+		return true;
+	}
+	if (!strcasecmp(value, "16:9") || !strcasecmp(value, "16/9")) {
+		*out = ASPECT_16_9;
+		return true;
+	}
+	if (!strcasecmp(value, "4:3") || !strcasecmp(value, "4/3")) {
+		*out = ASPECT_4_3;
+		return true;
+	}
+	if (!strcasecmp(value, "stretch") || !strcasecmp(value, "fill")) {
+		*out = ASPECT_STRETCH;
+		return true;
+	}
+	return false;
+}
 
 static void sig_handler(int sig)
 {
@@ -138,12 +266,20 @@ static bool parse_led_color(const char *spec, uint8_t *r, uint8_t *g, uint8_t *b
 
 static void print_usage(const char *prog)
 {
-	printf("Usage: %s [PCI_ADDRESS] [--led COLOR] [--edid PROFILE|FILE]\n", prog);
-	printf("  --led COLOR   off|blue|green|red|cyan|magenta|yellow|white|#RRGGBB\n");
-	printf("                LED colour while streaming (default: cyan #00ccff).\n");
-	printf("  --edid VALUE  default|1440p120|1080p240|/path/to/custom.edid\n");
-	printf("                EDID advertised to the source (default: default).\n");
-	printf("  EVERLIVE_LED  fallback used when --led is not given.\n");
+	printf("Usage: %s [PCI_ADDRESS] [OPTIONS]\n", prog);
+	printf("  --led COLOR       off|blue|green|red|cyan|magenta|yellow|white|#RRGGBB\n");
+	printf("                    LED colour while streaming (default: cyan #00ccff).\n");
+	printf("  --edid VALUE      default|1440p120|1080p240|/path/to/custom.edid\n");
+	printf("                    EDID advertised to the source (default: default).\n");
+	printf("  -f, --fullscreen  Start the SDL2 window in fullscreen (F toggles).\n");
+	printf("  --vsync           Pace presentation to the display refresh rate.\n");
+	printf("  --no-vsync        Present as soon as a frame is ready (default).\n");
+	printf("  --aspect MODE     auto|16:9|4:3|stretch (default: auto, 'a' cycles).\n");
+	printf("  --osd             Show the on-screen stats overlay (default).\n");
+	printf("  --no-osd          Hide the overlay (same as --streamer-mode).\n");
+	printf("  --osd-pos POS     tr|br|bl|tl (default: tr, 'p' cycles).\n");
+	printf("  -s, --streamer-mode  Clean feed: no OSD, cursor hidden.\n");
+	printf("  EVERLIVE_LED      fallback used when --led is not given.\n");
 }
 
 static void stop_led_daemon(void)
@@ -670,6 +806,253 @@ static int configure_and_start(struct gc573_vfio_ctx *ctx,
 	return 0;
 }
 
+/*
+ * Minimal bitmap-font OSD.  The text is rasterised into an ARGB surface only
+ * when its content or pixel scale changes, then composited over the video
+ * with a semi-transparent background.  Costs nothing in the steady state.
+ */
+#define OSD_BULLET 0x1f
+
+/* Subtle 4x4 bullet glyph; the bitmap font only covers ASCII. */
+static const uint8_t osd_bullet[8] = {
+	0x00, 0x00, 0x18, 0x3c, 0x3c, 0x18, 0x00, 0x00,
+};
+
+struct osd_overlay {
+	SDL_Texture *texture;
+	int width;
+	int height;
+	int scale;
+	char text[512];
+};
+
+static struct osd_overlay g_osd;
+
+static void osd_destroy(void)
+{
+	if (g_osd.texture) {
+		SDL_DestroyTexture(g_osd.texture);
+		g_osd.texture = NULL;
+	}
+	g_osd.width = 0;
+	g_osd.height = 0;
+	g_osd.scale = 0;
+	g_osd.text[0] = '\0';
+}
+
+static int osd_pad_for_scale(int scale)
+{
+	return 10 + (scale - 1) * 4;
+}
+
+static int osd_gap_for_scale(int scale)
+{
+	return 4 * scale;
+}
+
+static int osd_border_for_scale(int scale)
+{
+	return scale > 1 ? 2 : 1;
+}
+
+static void osd_draw_text(SDL_Surface *surface, const char *text, int scale)
+{
+	const int pad = osd_pad_for_scale(scale);
+	const int line_height = 8 * scale;
+	const int line_gap = osd_gap_for_scale(scale);
+	Uint32 fg = SDL_MapRGBA(surface->format, 235, 242, 255, 255);
+	int x = pad;
+	int y = pad;
+
+	for (const char *p = text; *p; p++) {
+		const uint8_t *bitmap;
+		unsigned char glyph;
+
+		if (*p == '\n') {
+			x = pad;
+			y += line_height + line_gap;
+			continue;
+		}
+
+		glyph = (unsigned char)*p;
+		if (glyph == (unsigned char)OSD_BULLET) {
+			bitmap = osd_bullet;
+		} else {
+			if (glyph > 127)
+				glyph = '?';
+			bitmap = font8x8_basic[glyph];
+		}
+
+		for (int row = 0; row < 8; row++) {
+			uint8_t bits = bitmap[row];
+
+			for (int col = 0; col < 8; col++) {
+				Uint32 *px;
+
+				if (!(bits & (1 << col)))
+					continue;
+				for (int sy = 0; sy < scale; sy++) {
+					px = (Uint32 *)((Uint8 *)surface->pixels +
+							(y + row * scale + sy) *
+							surface->pitch);
+					for (int sx = 0; sx < scale; sx++)
+						px[x + col * scale + sx] = fg;
+				}
+			}
+		}
+		x += 8 * scale;
+	}
+}
+
+static void osd_rebuild(SDL_Renderer *renderer, int scale, const char *text)
+{
+	const int pad = osd_pad_for_scale(scale);
+	const int line_height = 8 * scale;
+	const int line_gap = osd_gap_for_scale(scale);
+	const int border = osd_border_for_scale(scale);
+	unsigned int max_len = 0;
+	unsigned int line_len = 0;
+	unsigned int lines = 1;
+	SDL_Surface *surface;
+	SDL_Texture *texture;
+	SDL_Rect edge;
+	Uint32 bg;
+	Uint32 border_color;
+	int width;
+	int height;
+
+	for (const char *p = text;; p++) {
+		if (*p == '\n' || *p == '\0') {
+			if (line_len > max_len)
+				max_len = line_len;
+			line_len = 0;
+			if (*p == '\0')
+				break;
+			lines++;
+			continue;
+		}
+		line_len++;
+	}
+
+	width = pad * 2 + (int)max_len * 8 * scale;
+	height = pad * 2 + (int)lines * line_height +
+		 ((int)lines - 1) * line_gap;
+
+	surface = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32,
+						 SDL_PIXELFORMAT_ARGB8888);
+	if (!surface)
+		return;
+
+	bg = SDL_MapRGBA(surface->format, 12, 16, 22, 210);
+	SDL_FillRect(surface, NULL, bg);
+
+	border_color = SDL_MapRGBA(surface->format, 255, 255, 255, 30);
+	edge.x = 0;
+	edge.y = 0;
+	edge.w = width;
+	edge.h = border;
+	SDL_FillRect(surface, &edge, border_color);
+	edge.y = height - border;
+	SDL_FillRect(surface, &edge, border_color);
+	edge.y = 0;
+	edge.w = border;
+	edge.h = height;
+	SDL_FillRect(surface, &edge, border_color);
+	edge.x = width - border;
+	SDL_FillRect(surface, &edge, border_color);
+
+	osd_draw_text(surface, text, scale);
+
+	texture = SDL_CreateTextureFromSurface(renderer, surface);
+	SDL_FreeSurface(surface);
+	if (!texture)
+		return;
+	SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+
+	if (g_osd.texture)
+		SDL_DestroyTexture(g_osd.texture);
+	g_osd.texture = texture;
+	g_osd.width = width;
+	g_osd.height = height;
+	g_osd.scale = scale;
+	snprintf(g_osd.text, sizeof(g_osd.text), "%s", text);
+}
+
+static int osd_scale_for_height(int win_h)
+{
+	if (win_h >= 1800)
+		return 3;
+	if (win_h >= 1000)
+		return 2;
+	return 1;
+}
+
+static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
+		       uint32_t in_w, uint32_t in_h, bool interlaced,
+		       uint32_t rate_x100, double fps, const char *audio_text)
+{
+	char line2[256];
+	char text[512];
+	int win_h = 0;
+	int scale;
+
+	if (!g_osd_enabled || !renderer || !window)
+		return;
+
+	SDL_GetWindowSize(window, NULL, &win_h);
+	scale = osd_scale_for_height(win_h);
+
+	if (g_vsync)
+		snprintf(line2, sizeof(line2),
+			 "%.1f FPS %c %s %c VSync %c %s",
+			 fps, OSD_BULLET, aspect_label(g_aspect),
+			 OSD_BULLET, OSD_BULLET, audio_text);
+	else
+		snprintf(line2, sizeof(line2),
+			 "%.1f FPS %c %s %c %s",
+			 fps, OSD_BULLET, aspect_label(g_aspect),
+			 OSD_BULLET, audio_text);
+
+	snprintf(text, sizeof(text),
+		 "EVERLIVE %c %ux%u%s @ %.2f Hz\n%s",
+		 OSD_BULLET, in_w, in_h, interlaced ? "i" : "p",
+		 (double)rate_x100 / 100.0, line2);
+
+	if (scale == g_osd.scale && strcmp(text, g_osd.text) == 0)
+		return;
+	osd_rebuild(renderer, scale, text);
+}
+
+static void osd_destination(SDL_Rect *dst, int win_w, int win_h)
+{
+	int margin = g_osd.scale >= 3 ? 24 : (g_osd.scale == 2 ? 16 : 10);
+	bool right = g_osd_pos == OSD_POS_TR || g_osd_pos == OSD_POS_BR;
+	bool bottom = g_osd_pos == OSD_POS_BR || g_osd_pos == OSD_POS_BL;
+
+	dst->w = g_osd.width;
+	dst->h = g_osd.height;
+	dst->x = right ? win_w - margin - dst->w : margin;
+	dst->y = bottom ? win_h - margin - dst->h : margin;
+	if (dst->x < 0)
+		dst->x = 0;
+	if (dst->y < 0)
+		dst->y = 0;
+}
+
+static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
+{
+	int win_w = 0;
+	int win_h = 0;
+	SDL_Rect dst;
+
+	if (!g_osd_enabled || !g_osd.texture)
+		return;
+
+	SDL_GetWindowSize(window, &win_w, &win_h);
+	osd_destination(&dst, win_w, win_h);
+	SDL_RenderCopy(renderer, g_osd.texture, NULL, &dst);
+}
+
 static void render_frame(SDL_Window *window, SDL_Renderer *renderer,
 			 SDL_Texture *texture, float src_aspect)
 {
@@ -679,26 +1062,35 @@ static void render_frame(SDL_Window *window, SDL_Renderer *renderer,
 	float win_aspect;
 
 	SDL_GetWindowSize(window, &win_w, &win_h);
-	if (win_w <= 0 || win_h <= 0 || src_aspect <= 0.0f)
+	if (win_w <= 0 || win_h <= 0)
 		return;
 
-	win_aspect = (float)win_w / (float)win_h;
-
-	if (win_aspect > src_aspect) {
-		dst.h = win_h;
-		dst.w = (int)(win_h * src_aspect);
-		dst.x = (win_w - dst.w) / 2;
-		dst.y = 0;
-	} else {
-		dst.w = win_w;
-		dst.h = (int)(win_w / src_aspect);
+	if (src_aspect <= 0.0f) {
+		/* "stretch": use the whole window, ignoring the source aspect. */
 		dst.x = 0;
-		dst.y = (win_h - dst.h) / 2;
+		dst.y = 0;
+		dst.w = win_w;
+		dst.h = win_h;
+	} else {
+		win_aspect = (float)win_w / (float)win_h;
+
+		if (win_aspect > src_aspect) {
+			dst.h = win_h;
+			dst.w = (int)(win_h * src_aspect);
+			dst.x = (win_w - dst.w) / 2;
+			dst.y = 0;
+		} else {
+			dst.w = win_w;
+			dst.h = (int)(win_w / src_aspect);
+			dst.x = 0;
+			dst.y = (win_h - dst.h) / 2;
+		}
 	}
 
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 	SDL_RenderClear(renderer);
 	SDL_RenderCopy(renderer, texture, NULL, &dst);
+	osd_render(renderer, window);
 	SDL_RenderPresent(renderer);
 }
 
@@ -1214,6 +1606,14 @@ static void audio_cleanup(struct audio_stream *as)
 
 static void stream_reset_audio(struct audio_stream *as)
 {
+	/*
+	 * A video handshake invalidates both the FPGA audio engine and the
+	 * IT6805 audio path.  Stop the capture (and close the SDL device) so the
+	 * next valid format really restarts DMA instead of being swallowed by the
+	 * "format unchanged" early return in audio_handle_format().
+	 */
+	audio_stop_capture(as);
+
 	as->last_it6805_poll = 0;
 	as->last_dma_poll = 0;
 	as->retry_after = 0;
@@ -1510,6 +1910,7 @@ static void run_teardown_trace(struct gc573_vfio_ctx *ctx,
 
 	if (texture)
 		SDL_DestroyTexture(texture);
+	osd_destroy();
 	if (renderer)
 		SDL_DestroyRenderer(renderer);
 	if (window)
@@ -1528,6 +1929,8 @@ int main(int argc, char *argv[])
 	const char *pci_addr = NULL;
 	const char *led_spec = NULL;
 	const char *edid_spec = NULL;
+	const char *aspect_spec = NULL;
+	const char *osd_pos_spec = NULL;
 	struct gc573_vfio_ctx ctx;
 	struct gc573_user_video video;
 	struct audio_stream audio;
@@ -1541,6 +1944,7 @@ int main(int argc, char *argv[])
 	uint64_t last_frame_rate_probe = 0;
 	uint64_t last_stats = 0;
 	uint64_t last_frames = 0;
+	double displayed_fps = 0.0;
 	uint32_t input_width = 0;
 	uint32_t input_height = 0;
 	uint32_t input_rate_x100 = 0;
@@ -1567,6 +1971,28 @@ int main(int argc, char *argv[])
 			edid_spec = argv[++i];
 		} else if (strncmp(argv[i], "--edid=", 7) == 0) {
 			edid_spec = argv[i] + 7;
+		} else if (strcmp(argv[i], "-f") == 0 ||
+			   strcmp(argv[i], "--fullscreen") == 0) {
+			g_fullscreen = true;
+		} else if (strcmp(argv[i], "--vsync") == 0) {
+			g_vsync = true;
+		} else if (strcmp(argv[i], "--no-vsync") == 0) {
+			g_vsync = false;
+		} else if (strcmp(argv[i], "--osd") == 0) {
+			g_osd_enabled = true;
+		} else if (strcmp(argv[i], "--osd-pos") == 0 && i + 1 < argc) {
+			osd_pos_spec = argv[++i];
+		} else if (strncmp(argv[i], "--osd-pos=", 10) == 0) {
+			osd_pos_spec = argv[i] + 10;
+		} else if (strcmp(argv[i], "--no-osd") == 0 ||
+			   strcmp(argv[i], "-s") == 0 ||
+			   strcmp(argv[i], "--streamer-mode") == 0 ||
+			   strcmp(argv[i], "--clean") == 0) {
+			g_osd_enabled = false;
+		} else if (strcmp(argv[i], "--aspect") == 0 && i + 1 < argc) {
+			aspect_spec = argv[++i];
+		} else if (strncmp(argv[i], "--aspect=", 9) == 0) {
+			aspect_spec = argv[i] + 9;
 		} else if (strcmp(argv[i], "-h") == 0 ||
 			   strcmp(argv[i], "--help") == 0) {
 			print_usage(argv[0]);
@@ -1592,6 +2018,18 @@ int main(int argc, char *argv[])
 	}
 	if (!edid_spec || !*edid_spec)
 		edid_spec = GC573_EDID_PROFILE_DEFAULT;
+
+	if (aspect_spec && !parse_aspect(aspect_spec, &g_aspect)) {
+		fprintf(stderr, "[OSD] Unknown aspect '%s'; using auto\n",
+			aspect_spec);
+		g_aspect = ASPECT_AUTO;
+	}
+
+	if (osd_pos_spec && !parse_osd_pos(osd_pos_spec, &g_osd_pos)) {
+		fprintf(stderr, "[OSD] Unknown position '%s'; using top-right\n",
+			osd_pos_spec);
+		g_osd_pos = OSD_POS_TR;
+	}
 
 	printf("==================================================================\n");
 	printf("  EverLive Userspace VFIO Streamer [INTERN TEST - EXPERIMENTAL]  \n");
@@ -1727,8 +2165,14 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	SDL_SetHint(SDL_HINT_RENDER_VSYNC, "0");
-	renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+	SDL_SetHint(SDL_HINT_RENDER_VSYNC, g_vsync ? "1" : "0");
+	Uint32 renderer_flags = SDL_RENDERER_ACCELERATED;
+
+	if (g_vsync)
+		renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
+	renderer = SDL_CreateRenderer(window, -1, renderer_flags);
+	if (!renderer && g_vsync)
+		renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
 	if (!renderer)
 		renderer = SDL_CreateRenderer(window, -1, 0);
 	if (!renderer) {
@@ -1739,7 +2183,10 @@ int main(int argc, char *argv[])
 		gc573_vfio_cleanup(&ctx);
 		return 1;
 	}
-	SDL_RenderSetVSync(renderer, 0);
+	SDL_RenderSetVSync(renderer, g_vsync ? 1 : 0);
+
+	if (g_fullscreen)
+		SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
 
 	texture = NULL;
 
@@ -1759,7 +2206,12 @@ int main(int argc, char *argv[])
 		pr_warn("Audio DMA mapping failed; continuing video-only");
 	}
 
-	printf("[*] Userspace streamer active. Press 'q' or ESC to exit, 'f' for fullscreen.\n");
+	printf("[*] Userspace streamer active. Press 'q' or ESC to exit, 'f' fullscreen, 'a' aspect, 'p' OSD position, Tab/'o' OSD.\n");
+	printf("[OSD] Start: fullscreen=%s vsync=%s aspect=%s overlay=%s pos=%s\n",
+	       g_fullscreen ? "on" : "off",
+	       g_vsync ? "on" : "off", aspect_name(g_aspect),
+	       g_osd_enabled ? "on" : "off", osd_pos_name(g_osd_pos));
+	SDL_ShowCursor(g_osd_enabled ? SDL_ENABLE : SDL_DISABLE);
 	render_standby(window, renderer,
 		       "EverLive [USERSPACE VFIO] — Waiting for HDMI signal...");
 
@@ -1787,12 +2239,45 @@ int main(int argc, char *argv[])
 					   g_trace_mode && streaming) {
 					g_trace_requested = true;
 					g_running = 0;
-				} else if (event.key.keysym.sym == SDLK_f) {
+				} else if (event.key.keysym.sym == SDLK_f ||
+					   event.key.keysym.sym == SDLK_F11) {
 					uint32_t flags = SDL_GetWindowFlags(window);
+					bool enable =
+						!(flags & SDL_WINDOW_FULLSCREEN_DESKTOP);
 
-					SDL_SetWindowFullscreen(window,
-						(flags & SDL_WINDOW_FULLSCREEN_DESKTOP) ?
-						0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+					SDL_SetWindowFullscreen(window, enable ?
+						SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+					printf("[OSD] Fullscreen: %s\n",
+					       enable ? "on" : "off");
+					fflush(stdout);
+				} else if (event.key.keysym.sym == SDLK_a) {
+					char title[128];
+
+					g_aspect = (enum stream_aspect)
+						((g_aspect + 1) % ASPECT_COUNT);
+					printf("[OSD] Aspect: %s\n", aspect_name(g_aspect));
+					fflush(stdout);
+					snprintf(title, sizeof(title),
+						 "EverLive [USERSPACE VFIO] — Aspect: %s",
+						 aspect_name(g_aspect));
+					SDL_SetWindowTitle(window, title);
+				} else if (event.key.keysym.sym == SDLK_p) {
+					g_osd_pos = (enum osd_position)
+						((g_osd_pos + 1) % OSD_POS_COUNT);
+					printf("[OSD] Position: %s\n",
+					       osd_pos_name(g_osd_pos));
+					fflush(stdout);
+				} else if (event.key.keysym.sym == SDLK_TAB ||
+					   event.key.keysym.sym == SDLK_i ||
+					   event.key.keysym.sym == SDLK_o ||
+					   event.key.keysym.sym == SDLK_s ||
+					   event.key.keysym.sym == SDLK_F10) {
+					g_osd_enabled = !g_osd_enabled;
+					SDL_ShowCursor(g_osd_enabled ?
+						       SDL_ENABLE : SDL_DISABLE);
+					printf("[OSD] Overlay: %s\n",
+					       g_osd_enabled ? "on" : "off");
+					fflush(stdout);
 				}
 			}
 		}
@@ -2135,8 +2620,30 @@ int main(int argc, char *argv[])
 						reported = true;
 					}
 				}
+
+				{
+					char audio_text[64];
+					const char *audio_desc;
+
+					if (audio.streaming) {
+						snprintf(audio_text, sizeof(audio_text),
+							 "L-PCM %ukHz",
+							 (audio.format_rate + 500U) / 1000U);
+						audio_desc = audio_text;
+					} else if (audio.sdl_ready && audio.dma_ready) {
+						audio_desc = "No HDMI audio";
+					} else {
+						audio_desc = "Audio unavailable";
+					}
+
+					osd_update(renderer, window,
+						   input_width, input_height,
+						   current_sig.interlaced,
+						   input_rate_x100,
+						   displayed_fps, audio_desc);
+				}
 				render_frame(window, renderer, texture,
-					     video_aspect);
+					     aspect_ratio(g_aspect, video_aspect));
 			} else {
 				SDL_Delay(2);
 			}
@@ -2166,14 +2673,20 @@ int main(int argc, char *argv[])
 				     (double)(now - last_stats);
 			char title[256];
 
+			displayed_fps = fps;
+
 			if (streaming) {
 				snprintf(title, sizeof(title),
-					 "EverLive [USERSPACE VFIO] — %ux%u%s @ %u.%02u Hz -> %ux%u YUYV @ %.1f FPS",
+					 "EverLive [USERSPACE VFIO] — %ux%u%s @ %u.%02u Hz -> %ux%u YUYV @ %.1f FPS | AR %s%s%s",
 					 input_width, input_height,
 					 current_sig.interlaced ? "i" : "p",
 					 input_rate_x100 / 100,
 					 input_rate_x100 % 100,
-					 output_width, output_height, fps);
+					 output_width, output_height, fps,
+					 aspect_name(g_aspect),
+					 (SDL_GetWindowFlags(window) &
+					  SDL_WINDOW_FULLSCREEN_DESKTOP) ? " | FS" : "",
+					 g_vsync ? " | VSync" : "");
 				printf("[STREAM] %ux%u%s @ %u.%02u Hz -> %ux%u | FPS: %.1f | Frames: %lu\n",
 				       input_width, input_height,
 				       current_sig.interlaced ? "i" : "p",
@@ -2241,6 +2754,7 @@ int main(int argc, char *argv[])
 		gc573_user_video_cleanup(&video);
 	if (texture)
 		SDL_DestroyTexture(texture);
+	osd_destroy();
 	if (renderer)
 		SDL_DestroyRenderer(renderer);
 	if (window)

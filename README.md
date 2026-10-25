@@ -1,6 +1,6 @@
 # EverLive - AVerMedia GC573 Linux Gaming Suite & Userspace Driver
 
-[![Version](https://img.shields.io/badge/version-v1.0.0-blue.svg)](https://github.com/Everlite/EverLive/releases)
+[![Version](https://img.shields.io/badge/version-v1.0.1-blue.svg)](https://github.com/Everlite/EverLive/releases)
 [![Status](https://img.shields.io/badge/status-1440p120%20%2B%204K60%20%2B%20Audio%20(Hardware%20Verified)-brightgreen.svg)](#hardware-verified-capabilities)
 [![Driver](https://img.shields.io/badge/driver-Userspace%20VFIO%20(Blob--Free)-2e7d32.svg)](#architecture--design)
 [![Kernel Modules](https://img.shields.io/badge/DKMS-None%20Required-success.svg)](#architecture--design)
@@ -37,7 +37,7 @@ The following capabilities have been physically tested and verified on physical 
 * **PlayStation 5:**
   - **2560×1440 @ 120 FPS:** Verified in 120 Hz titles (*The Finals*, *Fortnite 120Hz Mode*, PS5 Dashboard). Stable frame pacing matching display refresh intervals.
   - **3840×2160 @ 60 FPS (Native 4K):** Verified native 4K capture without downscaling stalls.
-  - **Audio DMA:** High-fidelity 16-bit / 48kHz L-PCM stereo audio captured over PCIe DMA and played back via SDL2 into PipeWire. No crackling, jitter, or clock drift observed during multi-hour test sessions.
+  - **Audio DMA:** High-fidelity 16-bit / 48kHz L-PCM stereo audio captured over PCIe DMA and played back via SDL2 into PipeWire. No crackling, jitter, or clock drift observed during multi-hour test sessions *(Note: Source devices/consoles must be set to **Linear PCM (Stereo)** audio output; compressed bitstream formats like Dolby Digital AC-3 or DTS are not yet decoded)*.
   - **Dynamic Hot-Switching:** Verified dynamic mode changes (e.g., 4K60 dashboard $\leftrightarrow$ 1440p120 gameplay $\leftrightarrow$ 1080p) without process crashes or window recreation.
 * **Hardware EDID Profile Injection:**
   - `Default (4K60 / 1440p120 HDR)`: Standard multi-mode EDID profile.
@@ -132,6 +132,9 @@ Or start **EverLive** directly from your desktop application launcher.
 | Key / Action | Function |
 |:---|:---|
 | <kbd>f</kbd> | Toggle borderless fullscreen |
+| <kbd>a</kbd> | Cycle Aspect Ratio (`auto` $\to$ `16:9` $\to$ `4:3` $\to$ `stretch`) |
+| <kbd>p</kbd> | Cycle OSD Position (Top-Right $\to$ Bottom-Right $\to$ Bottom-Left $\to$ Top-Left) |
+| <kbd>o</kbd> or <kbd>Tab</kbd> | Toggle On-Screen Display (OSD live hardware stats overlay) |
 | <kbd>Esc</kbd> or <kbd>q</kbd> | Exit the game window |
 
 *Volume and mute are controlled directly through your system audio mixer, PipeWire, or the EverLive Console Hub.*

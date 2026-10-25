@@ -16,7 +16,7 @@ import json
 import shutil
 from typing import Optional, Tuple, Dict
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 CONFIG_DIR = os.path.expanduser("~/.config/everlive")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
@@ -1070,7 +1070,8 @@ class GameStreamer:
         except Exception:
             return False
 
-    def _start_vfio(self) -> bool:
+    def _start_vfio(self, fullscreen: bool = False, vsync: bool = False,
+                    streamer_mode: bool = False) -> bool:
         """Launch the blob-free userspace VFIO streamer directly."""
         if _vfio_streamer_running():
             print("[!] A userspace streamer is already running; refusing to start a second instance.")
@@ -1110,6 +1111,12 @@ class GameStreamer:
             cmd.extend(["--edid", edid_profile])
         else:
             cmd.extend(["--edid", "default"])
+
+        # Presentation options from the hub checkboxes.
+        if fullscreen:
+            cmd.append("--fullscreen")
+        cmd.append("--vsync" if vsync else "--no-vsync")
+        cmd.append("--streamer-mode" if streamer_mode else "--osd")
 
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -1158,11 +1165,11 @@ class GameStreamer:
             return True
 
         if self.vfio_mode:
-            if (preset_name != "Auto (HDMI Signal)" or fullscreen or
-                    vsync or streamer_mode):
-                print("[*] VFIO mode: signal, fullscreen and streamer options "
-                      "are handled inside the userspace engine.")
-            return self._start_vfio()
+            if preset_name != "Auto (HDMI Signal)":
+                print("[*] VFIO mode: the input mode comes from the HDMI "
+                      "source and the selected EDID profile.")
+            return self._start_vfio(fullscreen=fullscreen, vsync=vsync,
+                                    streamer_mode=streamer_mode)
 
         self.vsync = vsync
         if not os.path.exists(self.vdev):
@@ -1753,18 +1760,16 @@ if HAS_QT:
             grid_opts.addWidget(self.chk_streamer, 1, 1)
 
             if self.vfio_mode:
-                self.chk_fullscreen.blockSignals(True)
-                self.chk_fullscreen.setChecked(False)
-                self.chk_fullscreen.blockSignals(False)
-                self.chk_fullscreen.setEnabled(False)
-                self.chk_fullscreen.setToolTip("Press F inside the userspace streamer window to toggle fullscreen.")
-                self.chk_vsync.setEnabled(False)
-                self.chk_vsync.setToolTip("The userspace engine paces its own DMA and SDL2 presentation.")
-                self.chk_streamer.blockSignals(True)
-                self.chk_streamer.setChecked(False)
-                self.chk_streamer.blockSignals(False)
-                self.chk_streamer.setEnabled(False)
-                self.chk_streamer.setToolTip("Streamer Mode applies to the MPV/kernel path only.")
+                # Fullscreen and VSync are forwarded to gc573_user_streamer.
+                self.chk_fullscreen.setToolTip(
+                    "Starts the userspace SDL2 window in fullscreen. "
+                    "Press F in the game window to toggle it at runtime.")
+                self.chk_vsync.setText("Enable VSync")
+                self.chk_vsync.setToolTip(
+                    "Paces SDL2 presentation to the display refresh rate.")
+                self.chk_streamer.setToolTip(
+                    "Clean feed: hides the on-screen stats overlay and the "
+                    "mouse cursor in the game window (Tab/'o' toggles at runtime).")
 
             v_hero.addLayout(grid_opts)
             root_layout.addWidget(card_hero)
@@ -2042,7 +2047,15 @@ if HAS_QT:
                         "Userspace Engine Active",
                         "An external gc573_user_streamer instance already owns the device")
                     return
-                success = self.streamer.start()
+                want_fullscreen = self.chk_fullscreen.isChecked()
+                want_vsync = self.chk_vsync.isChecked()
+                want_streamer = self.chk_streamer.isChecked()
+                save_settings({"fullscreen": want_fullscreen,
+                               "vsync": want_vsync,
+                               "streamer_mode": want_streamer})
+                success = self.streamer.start(fullscreen=want_fullscreen,
+                                              vsync=want_vsync,
+                                              streamer_mode=want_streamer)
                 if success:
                     self._set_launch_running(True)
                     self._vfio_notice_until = 0.0

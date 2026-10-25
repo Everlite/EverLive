@@ -56,6 +56,8 @@
 #define IT6805_AUDIO_TMDS_SAMPLE_COUNT		10
 #define IT6805_AUDIO_TMDS_SAMPLE_DELAY_MS	3
 #define IT6805_AUDIO_N_TOLERANCE		32
+/* Common interrupt register 0x10 is write-one-to-clear. */
+#define IT6805_COMMON_IRQ_AUDIO		BIT(7)
 
 #define IT6805_BRIDGE_AUDIO_DIVISOR	0x010a0
 #define IT6805_BRIDGE_AUDIO_CLOCK_HZ	100000000U
@@ -136,6 +138,7 @@ struct it6805_audio_runtime {
 	bool measurement_refresh_pending;
 	bool change_pending;
 	bool output_enabled;
+	bool ready_wait_reported;
 };
 
 static struct it6805_audio_runtime g_audio;
@@ -2495,13 +2498,32 @@ static int it6805_probe_audio_ready(void *bar0)
 	ret = it6805_read_reg(bar0, 0x10, &reg10);
 	if (ret < 0)
 		return ret;
+	/*
+	 * The kernel acknowledges the latched common interrupts on every
+	 * service pass (it6805_ack_common_irq_locked()).  The userspace path
+	 * only did that inside the AVMute gate, so a pending AUDIO bit survived
+	 * a mode change and kept this readiness check failing forever.  Clear
+	 * just the audio bit (W1C) before evaluating the state.
+	 */
+	if (reg10 & IT6805_COMMON_IRQ_AUDIO) {
+		ret = it6805_write_reg(bar0, 0x10, IT6805_COMMON_IRQ_AUDIO);
+		if (ret < 0)
+			return ret;
+		reg10 &= ~IT6805_COMMON_IRQ_AUDIO;
+		pr_info("IT6805 audio: cleared latched audio IRQ");
+	}
 	ret = it6805_read_reg(bar0, 0xb1, &regb1);
 	if (ret < 0)
 		return ret;
 
 	ready = reg19 != 0xff && (reg19 & BIT(7)) &&
-		(regb1 & BIT(7)) && !(reg10 & BIT(7));
+		(regb1 & BIT(7)) && !(reg10 & IT6805_COMMON_IRQ_AUDIO);
 	if (!ready) {
+		if (!g_audio.ready_wait_reported) {
+			pr_info("IT6805 audio: readiness pending (0xb9=0x%02x 0x19=0x%02x 0x10=0x%02x 0xb1=0x%02x)",
+				regb9, reg19, reg10, regb1);
+			g_audio.ready_wait_reported = true;
+		}
 		g_audio.request_delay_polls = IT6805_AUDIO_REQUEST_DELAY_POLLS;
 		return 0;
 	}
@@ -2643,6 +2665,7 @@ static int it6805_service_audio(void *bar0)
 		g_audio.format_b2 = 0;
 		g_audio.format_valid = false;
 		g_audio.measurement_refresh_pending = true;
+		g_audio.ready_wait_reported = false;
 		g_audio.state = IT6805_AUDIO_WAIT_READY;
 		g_audio.request_delay_polls =
 			IT6805_AUDIO_REQUEST_DELAY_POLLS;

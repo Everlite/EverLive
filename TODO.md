@@ -35,3 +35,8 @@ A comprehensive engineering specification with data-flow diagrams and implementa
 ### 3. GUI Polish & Multi-Card Core Abstraction (`libeverlive-core`)
 - **RGB Color Picker:** Full 24-bit hex color wheel via `QColorDialog` in `everlive_viewer.py`.
 - **Modular Hardware Abstraction:** Decouple PCIe DMA streaming engine from card-specific register tables (laying the groundwork for GC570D Live Gamer DUO and GC575 4K 2.1).
+
+### 4. Audio Subsystem: Surround Sound Downmix & Bitstream Safety
+- **Bitstream Detection:** Detect IEC 61937 compressed audio packets (Dolby Digital AC-3, DTS) to prevent raw PCM static noise.
+- **Stereo Mixdown:** Implement software decode/downmix or native 5.1/7.1 channel playback for surround sources.
+
