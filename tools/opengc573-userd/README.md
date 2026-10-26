@@ -61,6 +61,8 @@ gc573_user_streamer [PCI_ADDRESS] [OPTIONS]
 
   --led COLOR          off|blue|green|red|cyan|magenta|yellow|white|#RRGGBB
   --edid VALUE         default|1440p120|1080p240|/path/to/custom.edid
+  --raw-edid           Load custom EDID files bit-exact (no AC-3/DTS injection)
+                       alias: --no-unify-edid
   -f, --fullscreen     Start the SDL2 window in borderless fullscreen
   --vsync/--no-vsync   Pace presentation to the display refresh (default: off)
   --aspect MODE        auto|16:9|4:3|stretch
@@ -74,3 +76,16 @@ gc573_user_streamer [PCI_ADDRESS] [OPTIONS]
 Game-window hotkeys: <kbd>f</kbd>/<kbd>F11</kbd> fullscreen, <kbd>a</kbd> aspect ratio,
 <kbd>p</kbd> OSD position, <kbd>o</kbd>/<kbd>i</kbd>/<kbd>Tab</kbd> stats overlay,
 <kbd>s</kbd>/<kbd>F10</kbd> overlay + cursor, <kbd>Esc</kbd>/<kbd>q</kbd> quit.
+
+---
+
+## Custom EDID Requirements & Audio Unification
+
+Custom EDIDs must be exactly **256 bytes** (base block + one CTA-861 extension) and pass the header/checksum check in `edid_validate()`.
+
+By default EverLive **unifies the audio block** of every custom EDID: the CTA-861 Audio Data Block is rewritten to advertise L-PCM (8 ch), AC-3 5.1 and DTS 5.1. If the file has no audio block, a complete one is appended. Replacing an L-PCM-only block needs 6 spare bytes, appending one needs 10; the optional Video Capability Data Block is dropped first if that is the only way to retain all detailed timings.
+
+If the extension block has no room at all, the unmodified file is used and the streamer logs:
+`[EDID] Using raw audio block from '<path>' (unification bypassed: no space for SADs)`
+
+Pass `--raw-edid` (alias `--no-unify-edid`) to load custom files **bit-exact** without any modification.

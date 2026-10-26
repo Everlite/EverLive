@@ -60,6 +60,16 @@ The following capabilities have been physically tested and verified on physical 
 * **Standby Daemon Handoff (`everlive_userd`):**
   - Closing the gaming screen hands off the active file descriptor to a lightweight background daemon without triggering a PCIe Function Level Reset (FLR), preserving the HDMI link state and LED configuration.
 
+### 🎧 Custom EDID Requirements & Audio Unification
+
+Custom EDIDs loaded via `--edid /path/to/custom.bin` (or the Control Hub's *Load Custom EDID (.bin)...*) must be exactly **256 bytes** — one base block plus one CTA-861 extension block — and pass EverLive's header and checksum validation.
+
+Unless `--raw-edid` is given, EverLive rewrites the CTA-861 Audio Data Block of the custom file so it advertises **L-PCM (8 ch), Dolby Digital (AC-3 5.1) and DTS 5.1**, exactly like the built-in profiles. Files that carry no audio block at all get a complete audio block appended.
+
+- **Spare budget:** replacing an existing L-PCM-only audio block needs **6 spare bytes** in the extension block; appending a new audio block needs **10 bytes**. EverLive reclaims the optional Video Capability Data Block (3 bytes) if that is the only way to keep every detailed timing.
+- **Fallback:** if the extension block is completely full, the file is used unmodified and the streamer logs `[EDID] Using raw audio block from '…' (unification bypassed: no space for SADs)`.
+- **Opt-out:** `--raw-edid` (alias `--no-unify-edid`) loads the file **bit-exact**, e.g. for debugging or vendor-specific EDIDs.
+
 ---
 
 ## 🎬 Video Demonstration (1-Click Launch & PS5 120 FPS Gameplay)

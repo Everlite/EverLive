@@ -111,6 +111,8 @@ static const u8 *g_active_edid;
 static const char *g_active_edid_name = GC573_EDID_PROFILE_DEFAULT;
 static u8 g_custom_edid[GC573_EDID_SIZE];
 static bool g_edid_programmed;
+/* --raw-edid: load custom files bit-exact instead of unifying their audio. */
+static bool g_edid_raw_custom;
 
 static int edid_validate(const u8 *edid)
 {
@@ -186,7 +188,9 @@ static int edid_build_unified_profile(const u8 *src, u8 *dst)
 	unsigned int audio_off = 0;
 	unsigned int audio_len = 0;
 	unsigned int vcdb_off = 0;
+	unsigned int vcdb_len = 0;
 	unsigned int num_dtds = 0;
+	unsigned int base_len;
 	unsigned int src_off;
 	unsigned int dst_off;
 	unsigned int dtd;
@@ -202,17 +206,21 @@ static int edid_build_unified_profile(const u8 *src, u8 *dst)
 
 		if (src_off + 1 + len > data_end)
 			return -EINVAL;
-		if (tag == EDID_CTA_AUDIO_TAG) {
+		if (tag == EDID_CTA_AUDIO_TAG && !audio_off) {
 			audio_off = src_off;
 			audio_len = len;
 		} else if (tag == EDID_CTA_EXTENDED_TAG && len >= 1 &&
 			   src[src_off + 1] == EDID_CTA_EXT_VIDEO_CAPABILITY) {
 			vcdb_off = src_off;
+			vcdb_len = len;
 		}
 		src_off += 1 + len;
 	}
-	if (!audio_off || audio_len > EDID_CTA_AUDIO_LEN)
-		return -EINVAL;
+
+	/*
+	 * A richer audio block (E-AC-3, TrueHD, ...) is replaced by the unified
+	 * one; that shrinks the collection and is always safe here.
+	 */
 
 	/* Count the detailed timings that follow the data block collection. */
 	for (dtd = data_end; dtd + EDID_DTD_SIZE <= EDID_CTA_CHECKSUM_OFFSET;
@@ -222,12 +230,32 @@ static int edid_build_unified_profile(const u8 *src, u8 *dst)
 		num_dtds++;
 	}
 
-	if (data_end + new_audio_len - EDID_CTA_BLOCK_LEN(audio_len) +
+	/*
+	 * Budget for the rebuilt collection: replace the existing audio block
+	 * (usually +6 bytes) or append a new one (10 bytes).  Custom EDIDs from
+	 * CRU or scaler tools often carry no audio block at all, so the unified
+	 * block is appended instead of rejecting the file.
+	 */
+	base_len = data_end - EDID_CTA_DATA_OFFSET;
+	if (audio_off)
+		base_len -= EDID_CTA_BLOCK_LEN(audio_len);
+	base_len += new_audio_len;
+
+	/*
+	 * Keep every detailed timing: reclaim the optional Video Capability Data
+	 * Block (extended tag 0x00) before giving up.  If the remainder still does
+	 * not fit, the caller falls back to the unmodified EDID.
+	 */
+	if (EDID_CTA_DATA_OFFSET + base_len +
 	    num_dtds * EDID_DTD_SIZE > EDID_CTA_CHECKSUM_OFFSET) {
 		if (!vcdb_off)
 			return -EINVAL;
 		drop_vcdb = true;
+		base_len -= EDID_CTA_BLOCK_LEN(vcdb_len);
 	}
+	if (EDID_CTA_DATA_OFFSET + base_len +
+	    num_dtds * EDID_DTD_SIZE > EDID_CTA_CHECKSUM_OFFSET)
+		return -EINVAL;
 
 	memcpy(dst, src, GC573_EDID_SIZE);
 
@@ -236,7 +264,7 @@ static int edid_build_unified_profile(const u8 *src, u8 *dst)
 	for (src_off = EDID_CTA_DATA_OFFSET; src_off < data_end; ) {
 		unsigned int len = src[src_off] & 0x1f;
 
-		if (src_off == audio_off) {
+		if (audio_off && src_off == audio_off) {
 			dst[dst_off] = (u8)((EDID_CTA_AUDIO_TAG << 5) |
 					    (EDID_CTA_AUDIO_LEN & 0x1f));
 			memcpy(dst + dst_off + 1, g_gc573_edid_audio_sads,
@@ -251,7 +279,17 @@ static int edid_build_unified_profile(const u8 *src, u8 *dst)
 		src_off += 1 + len;
 	}
 
-	if (dst_off > EDID_CTA_CHECKSUM_OFFSET)
+	/* No audio block in the source: append the unified one. */
+	if (!audio_off) {
+		dst[dst_off] = (u8)((EDID_CTA_AUDIO_TAG << 5) |
+				    (EDID_CTA_AUDIO_LEN & 0x1f));
+		memcpy(dst + dst_off + 1, g_gc573_edid_audio_sads,
+		       EDID_CTA_AUDIO_LEN);
+		dst_off += new_audio_len;
+	}
+
+	if (dst_off != EDID_CTA_DATA_OFFSET + base_len ||
+	    dst_off > EDID_CTA_CHECKSUM_OFFSET)
 		return -EINVAL;
 
 	dst[EDID_CTA_OFFSET + 2] = (u8)(dst_off - EDID_CTA_OFFSET);
@@ -262,7 +300,7 @@ static int edid_build_unified_profile(const u8 *src, u8 *dst)
 		if (!src[dtd] && !src[dtd + 1])
 			break;
 		if (dst_off + EDID_DTD_SIZE > EDID_CTA_CHECKSUM_OFFSET)
-			break;
+			return -EINVAL;
 		memcpy(dst + dst_off, src + dtd, EDID_DTD_SIZE);
 		dst_off += EDID_DTD_SIZE;
 	}
@@ -278,6 +316,8 @@ static int edid_build_unified_profile(const u8 *src, u8 *dst)
 static int edid_load_file(const char *path)
 {
 	u8 buffer[GC573_EDID_SIZE];
+	u8 unified[GC573_EDID_SIZE];
+	const u8 *selected = buffer;
 	FILE *file;
 	size_t bytes;
 	int ret;
@@ -299,13 +339,28 @@ static int edid_load_file(const char *path)
 	if (ret < 0)
 		return ret;
 
-	if (memcmp(buffer, g_custom_edid, sizeof(buffer)) != 0) {
-		memcpy(g_custom_edid, buffer, sizeof(buffer));
+	/*
+	 * Custom EDIDs from CRU or scaler tools usually advertise L-PCM only, so
+	 * a console greys out Dolby/DTS.  Rewrite the CTA audio block (or append
+	 * one) unless the caller asked for bit-exact passthrough.
+	 */
+	if (g_edid_raw_custom) {
+		printf("[EDID] Loading '%s' bit-exact (--raw-edid)\n", path);
+	} else if (edid_build_unified_profile(buffer, unified) == 0) {
+		selected = unified;
+		printf("[EDID] Injected unified AC-3/DTS audio descriptors into custom EDID '%s'\n",
+		       path);
+	} else {
+		printf("[EDID] Using raw audio block from '%s' (unification bypassed: no space for SADs)\n",
+		       path);
+	}
+
+	if (memcmp(selected, g_custom_edid, sizeof(buffer)) != 0) {
+		memcpy(g_custom_edid, selected, sizeof(buffer));
 		g_edid_programmed = false;
 	}
 	g_active_edid = g_custom_edid;
 	g_active_edid_name = path;
-	pr_info("EDID: loaded custom profile '%s'", path);
 	return 0;
 }
 
@@ -404,6 +459,11 @@ int gc573_user_edid_select(const char *profile_name, const char *custom_path)
 const char *gc573_user_edid_active_name(void)
 {
 	return g_active_edid_name;
+}
+
+void gc573_user_edid_set_raw_custom(bool enable)
+{
+	g_edid_raw_custom = enable;
 }
 
 static inline int it6805_write_reg(void *bar0, u8 reg, u8 val)

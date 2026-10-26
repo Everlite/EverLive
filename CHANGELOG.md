@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.1] - Unreleased
+
+### Added
+- **Custom EDID audio unification (#47):** Custom 256-byte `.bin` EDIDs now receive the unified L-PCM + Dolby Digital (AC-3 5.1) + DTS 5.1 Audio Data Block automatically, so consoles no longer grey out bitstream audio. Files without an audio block get one appended; when the CTA-861 extension has no spare bytes, EverLive keeps the file unmodified and reports the bypass in the log.
+- **`--raw-edid` (`--no-unify-edid`)** CLI opt-out for bit-exact custom EDID passthrough.
+
+### Changed
+- `edid_build_unified_profile()` appends a CTA-861 Audio Data Block instead of rejecting custom EDIDs that carry none, and falls back cleanly when the extension block is completely full.
+
+---
+
 ## [1.2.0] - 2026-10-25
 
 ### Added

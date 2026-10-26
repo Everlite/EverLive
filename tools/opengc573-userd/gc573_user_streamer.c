@@ -316,6 +316,8 @@ static void print_usage(const char *prog)
 	printf("                    Every built-in profile advertises L-PCM, AC-3 and\n");
 	printf("                    DTS 5.1; 'bitstream' is a legacy alias for default.\n");
 	printf("                    EDID advertised to the source (default: default).\n");
+	printf("  --raw-edid        Load custom EDID files bit-exact without injecting\n");
+	printf("                    AC-3/DTS descriptors (alias: --no-unify-edid).\n");
 	printf("  -f, --fullscreen  Start the SDL2 window in fullscreen (F toggles).\n");
 	printf("  --vsync           Pace presentation to the display refresh rate.\n");
 	printf("  --no-vsync        Present as soon as a frame is ready (default).\n");
@@ -3015,6 +3017,9 @@ int main(int argc, char *argv[])
 			edid_spec = argv[++i];
 		} else if (strncmp(argv[i], "--edid=", 7) == 0) {
 			edid_spec = argv[i] + 7;
+		} else if (strcmp(argv[i], "--raw-edid") == 0 ||
+			   strcmp(argv[i], "--no-unify-edid") == 0) {
+			gc573_user_edid_set_raw_custom(true);
 		} else if (strcmp(argv[i], "--v4l2") == 0) {
 			if (i + 1 >= argc || argv[i + 1][0] == '-') {
 				fprintf(stderr, "[V4L2] --v4l2 requires a device path (e.g. %s)\n",

@@ -56,6 +56,16 @@ int gc573_user_edid_select(const char *profile_name, const char *custom_path);
 const char *gc573_user_edid_active_name(void);
 
 /**
+ * gc573_user_edid_set_raw_custom - Load custom EDIDs bit-exact
+ * @enable: true disables the automatic AC-3/DTS audio unification
+ *
+ * By default every custom 256-byte EDID receives the unified L-PCM/AC-3/DTS
+ * Audio Data Block (or a newly appended one when the file carries none).
+ * Call this before gc573_user_edid_select() to keep the file untouched.
+ */
+void gc573_user_edid_set_raw_custom(bool enable);
+
+/**
  * gc573_user_program_edid_by_name - Select a profile and program it
  * @bar0: Pointer to mapped BAR0 memory
  * @profile_name: Profile name or path, see gc573_user_edid_select()
