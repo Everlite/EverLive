@@ -37,6 +37,7 @@ ASPECT_KEYS = {key for _, key in ASPECT_OPTIONS}
 DEFAULT_SETTINGS = {
     "v4l2_loopback": True,
     "aspect_ratio": "auto",
+    "minimize_to_tray": True,
 }
 
 
@@ -55,6 +56,8 @@ def load_settings() -> dict:
     settings.update(data)
     if not isinstance(settings.get("v4l2_loopback"), bool):
         settings["v4l2_loopback"] = True
+    if not isinstance(settings.get("minimize_to_tray"), bool):
+        settings["minimize_to_tray"] = True
     if settings.get("aspect_ratio") not in ASPECT_KEYS:
         settings["aspect_ratio"] = "auto"
     # "bitstream" used to be a separate EDID profile.  Every built-in profile
@@ -201,10 +204,14 @@ try:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QGridLayout, QLabel, QPushButton, QComboBox, QCheckBox, QSlider, QFrame,
-        QGroupBox, QMessageBox, QStackedLayout, QSizePolicy, QFileDialog
+        QGroupBox, QMessageBox, QStackedLayout, QSizePolicy, QFileDialog,
+        QSystemTrayIcon, QMenu
     )
     from PySide6.QtCore import Qt, QTimer, QThread, Signal, QEvent, QUrl, QSize
-    from PySide6.QtGui import QGuiApplication, QFont, QIcon, QColor, QPalette, QKeySequence, QShortcut, QDesktopServices, QPixmap, QPainter
+    from PySide6.QtGui import (
+        QGuiApplication, QFont, QIcon, QColor, QPalette, QKeySequence, QShortcut,
+        QDesktopServices, QPixmap, QPainter, QAction
+    )
     HAS_QT = True
 except ImportError:
     HAS_QT = False
@@ -1577,7 +1584,7 @@ if HAS_QT:
             self.setWindowTitle("EverLive - Console Hub")
             # Wider layout keeps the full userspace-engine status capsule and
             # the VFIO device line readable without truncation.
-            self.setFixedSize(900, 650)
+            self.setFixedSize(900, 675)
 
             # Application & Window Icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "everlive.png")
@@ -1980,6 +1987,13 @@ if HAS_QT:
             self.chk_streamer.toggled.connect(lambda val: save_settings({"streamer_mode": val}))
             grid_opts.addWidget(self.chk_streamer, 2, 1)
 
+            self.chk_tray = QCheckBox("Close to Tray (hide from Alt-Tab)")
+            self.chk_tray.setToolTip(
+                "Closing with [X] hides the Console Hub window into the system tray so it does not clutter Alt-Tab.")
+            self.chk_tray.setChecked(bool(self.saved_cfg.get("minimize_to_tray", True)))
+            self.chk_tray.toggled.connect(lambda val: save_settings({"minimize_to_tray": val}))
+            grid_opts.addWidget(self.chk_tray, 3, 0, 1, 2)
+
             if self.vfio_mode:
                 # Fullscreen and VSync are forwarded to gc573_user_streamer.
                 self.chk_fullscreen.setToolTip(
@@ -2219,6 +2233,9 @@ if HAS_QT:
             # Initial status poll
             self.update_status()
 
+            # System Tray Integration
+            self._init_tray()
+
         def _set_launch_running(self, running: bool, mode: Optional[str] = None):
             if running:
                 self._launch_mode = mode or "gaming"
@@ -2282,6 +2299,7 @@ if HAS_QT:
                 else:
                     self.lbl_engine_badge.setText("Direct Wayland (< 2ms)")
             self._update_vdev_label()
+            self._update_tray_menu()
 
         def _retry_audio_props(self):
             # SDL creates its sink-input only once the first HDMI audio
@@ -2895,13 +2913,123 @@ if HAS_QT:
                 self.lbl_hero_signal.setText("No HDMI Signal")
                 self.lbl_hero_meta.setText("Waiting for input signal (e.g. power on console or PC)...")
 
-        def closeEvent(self, event):
-            # Do not let a pending handover timer relaunch the streamer.
+        def _init_tray(self):
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                self.tray_icon = None
+                return
+
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "everlive.png")
+            icon = QIcon(icon_path) if os.path.isfile(icon_path) else self.windowIcon()
+
+            self.tray_icon = QSystemTrayIcon(icon, self)
+            self.tray_icon.setToolTip("EverLive - Console Hub")
+
+            self.tray_menu = QMenu()
+            self.tray_menu.setStyleSheet("""
+                QMenu {
+                    background-color: #12151f;
+                    color: #e2e8f0;
+                    border: 1px solid #1f2537;
+                    padding: 4px;
+                    font-size: 13px;
+                }
+                QMenu::item {
+                    padding: 6px 20px;
+                    border-radius: 4px;
+                }
+                QMenu::item:selected {
+                    background-color: #2563eb;
+                    color: #ffffff;
+                }
+                QMenu::separator {
+                    height: 1px;
+                    background-color: #1f2537;
+                    margin: 4px 8px;
+                }
+            """)
+
+            action_show = QAction("Open Console Hub", self)
+            action_show.triggered.connect(self._restore_from_tray)
+            self.tray_menu.addAction(action_show)
+
+            self.tray_menu.addSeparator()
+
+            self.tray_act_stream = QAction("Start Gaming Screen", self)
+            self.tray_act_stream.triggered.connect(self.toggle_stream)
+            self.tray_menu.addAction(self.tray_act_stream)
+
+            self.tray_act_studio = QAction("Start Studio / Headless (OBS)", self)
+            self.tray_act_studio.triggered.connect(self.toggle_studio)
+            self.tray_menu.addAction(self.tray_act_studio)
+
+            self.tray_menu.addSeparator()
+
+            action_quit = QAction("Quit EverLive", self)
+            action_quit.triggered.connect(self._force_quit)
+            self.tray_menu.addAction(action_quit)
+
+            self.tray_icon.setContextMenu(self.tray_menu)
+            self.tray_icon.activated.connect(self._on_tray_activated)
+            self.tray_icon.show()
+
+        def _update_tray_menu(self):
+            if not getattr(self, "tray_act_stream", None) or not getattr(self, "tray_act_studio", None):
+                return
+            if self._launch_mode == "studio":
+                self.tray_act_stream.setText("Switch to Gaming Screen")
+                self.tray_act_studio.setText("Stop Studio")
+            elif self._launch_mode == "gaming":
+                self.tray_act_stream.setText("Stop Gaming Screen")
+                self.tray_act_studio.setText("Switch to Studio (Headless)")
+            else:
+                self.tray_act_stream.setText("Start Gaming Screen")
+                self.tray_act_studio.setText("Start Studio / Headless (OBS)")
+
+        def _restore_from_tray(self):
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+
+        def _on_tray_activated(self, reason):
+            if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+                if self.isVisible() and not self.isMinimized():
+                    self.hide()
+                else:
+                    self._restore_from_tray()
+
+        def _force_quit(self):
             self._switch_pending = None
             was_running = self.streamer.is_running
             self.streamer.stop()
             if self.vfio_mode and was_running:
                 self._restore_led_after_stream()
+            if hasattr(self, "tray_icon") and self.tray_icon:
+                self.tray_icon.hide()
+            QApplication.quit()
+
+        def closeEvent(self, event):
+            # Do not let a pending handover timer relaunch the streamer.
+            self._switch_pending = None
+            was_running = self.streamer.is_running
+
+            # Close to Tray: clicking [X] hides the window into the system tray
+            if getattr(self, "chk_tray", None) and self.chk_tray.isChecked() and getattr(self, "tray_icon", None):
+                event.ignore()
+                self.hide()
+                if not getattr(self, "_tray_notified", False):
+                    self._tray_notified = True
+                    self.tray_icon.showMessage(
+                        "EverLive hidden to tray",
+                        "The Console Hub is minimized to the system tray. Click the tray icon to reopen.",
+                        QSystemTrayIcon.Information,
+                        3000)
+                return
+
+            self.streamer.stop()
+            if self.vfio_mode and was_running:
+                self._restore_led_after_stream()
+            if hasattr(self, "tray_icon") and self.tray_icon:
+                self.tray_icon.hide()
             event.accept()
 
 
