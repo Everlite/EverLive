@@ -44,8 +44,9 @@ int gc573_user_it6664_init(void *bar0);
  *
  * Must be called after gc573_user_it6805_init() so the IT6805 EDID RAM and
  * its HPD line are ready.  Powers on TX1 when the downstream HPD is present,
- * programs the 256-byte capture EDID into the IT6664 upstream EDID RAM and
- * raises the source-facing HPD.
+ * powers TX2 (HDMI OUT passthrough) when a monitor is attached, programs the
+ * 256-byte capture EDID into the IT6664 upstream EDID RAM and raises the
+ * source-facing HPD.
  */
 int gc573_user_it6664_enable_source(void *bar0);
 
@@ -55,8 +56,10 @@ int gc573_user_it6664_enable_source(void *bar0);
  * @status: Optional state snapshot
  *
  * When the IT6664 RX locks it powers TX1 again so the kernel-equivalent AFE
- * calibration runs with the measured pixel clock, and drives the splitter
- * SCDT GPIO like the kernel driver does.
+ * calibration runs with the measured pixel clock, drives the splitter SCDT
+ * GPIO like the kernel driver does, and keeps the optional TX2 passthrough
+ * output armed for as long as RX sync is present, regardless of the HDMI OUT
+ * HPD level (monitors lower HPD while another input is active).
  */
 int gc573_user_it6664_poll(void *bar0,
 			   struct gc573_user_it6664_status *status);

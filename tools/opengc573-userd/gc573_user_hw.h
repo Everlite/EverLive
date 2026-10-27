@@ -22,6 +22,8 @@
 #define GC573_GPIO_SPLITTER_READY0	4
 #define GC573_GPIO_SPLITTER_RESET	5
 #define GC573_GPIO_SPLITTER_READY1	6
+/* The legacy kernel driver also uses READY1 as the TX2 (HDMI OUT) HPD gate. */
+#define GC573_GPIO_TX2_HPD_GATE		GC573_GPIO_SPLITTER_READY1
 #define GC573_GPIO_TX1_HPD_GATE		7
 #define GC573_GPIO_RECEIVER_RESET	8
 
@@ -34,6 +36,22 @@ int gc573_user_set_gpio(void *bar0, unsigned int pin, bool high, unsigned int de
  * gc573_user_get_gpio - Get an FPGA GPIO pin state
  */
 int gc573_user_get_gpio(void *bar0, unsigned int pin, bool *high);
+
+/**
+ * gc573_user_gpio_shadow_invalidate - Re-seed the GPIO output shadow
+ *
+ * Call after anything that may reload the GPIO latch (bridge reset).
+ */
+void gc573_user_gpio_shadow_invalidate(void);
+
+/**
+ * gc573_user_set_tx_hpd_gate - Drive the per-port TX HPD gate
+ * @port: 1 (capture path, GPIO7) or 2 (HDMI OUT, GPIO6)
+ *
+ * Mirrors the legacy kernel gc555_link_set_tx_hpd_gate().
+ */
+int gc573_user_set_tx_hpd_gate(void *bar0, unsigned int port, bool high);
+int gc573_user_get_tx_hpd_gate(void *bar0, unsigned int port, bool *high);
 
 /**
  * gc573_user_hw_init - Perform full FPGA bridge and link reset sequence

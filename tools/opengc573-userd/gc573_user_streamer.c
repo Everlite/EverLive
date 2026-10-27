@@ -66,8 +66,12 @@
 /* Cheap timing/AVI probe cadence while streaming. */
 #define STATUS_POLL_STREAM_MS	50U
 #define STATUS_POLL_WAIT_MS	200U
-/* Splitter service and AVMute release cadence. */
-#define STATUS_SERVICE_MS	500U
+/*
+ * Splitter service and AVMute release cadence.  Keep this short: the HDMI OUT
+ * passthrough only gets a 1-2 s window from the monitor to come alive after an
+ * input switch, and the IT6664 must be unblanked by then.
+ */
+#define STATUS_SERVICE_MS	250U
 /* Bounded DMA stop wait for a hot switch; the following DMA reset is safe. */
 #define VIDEO_STOP_HOT_MS	150U
 /* Audio mapping plus descriptor pages and allocator slack. */

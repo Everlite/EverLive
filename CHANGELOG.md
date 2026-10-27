@@ -7,10 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.2.1] - Unreleased
+## [1.2.1] - 2026-10-27
 
 ### Added
 - **Custom EDID audio unification (#47):** Custom 256-byte `.bin` EDIDs now receive the unified L-PCM + Dolby Digital (AC-3 5.1) + DTS 5.1 Audio Data Block automatically, so consoles no longer grey out bitstream audio. Files without an audio block get one appended; when the CTA-861 extension has no spare bytes, EverLive keeps the file unmodified and reports the bypass in the log.
+- **HDMI passthrough via IT6664 TX2 (#48):** the physical HDMI OUT connector is now powered, routed to the RX stream (switch register `0x0d`, port 2 = direct) and enabled. TX2 reuses TX1's measured pixel clock (its own counter only sees noise before the port is routed) and applies the port-2 AFE clamp, so the TX2 video PLL locks. Capture on TX1 is unaffected when no passthrough sink is connected or the passthrough path fails.
+  - **TX2 transmits continuously, independent of the downstream HPD:** several monitors only assert HPD after they see a TMDS clock, so gating the unblank on HPD deadlocked the link (monitor showed "no signal" and fell back to DisplayPort while TX2 stayed muted at `path=0x00`). The output stage (`0x18`, `0x85`, `0x1a`, SCDC, `0xc1`/`0x19`/`0x88`) is now applied as soon as the RX locks and stays live across monitor input switches; a sink HPD edge only re-applies it. The port is never power-cycled while live, so the video PLL/AFE is not reset.
+  - **TX2 is always driven in HDMI mode:** the passthrough port no longer inherits the RX DVI/HDMI flag (a port stuck at `0xc0` bit 0 = 0 withholds AVI InfoFrames and audio, so HDMI monitors report "no signal"). Both TX HPD gates (GPIO7/GPIO6) are released together with a settling delay before the splitter status is sampled, and TX2 state transitions are logged with status/`0xc0`/`0x85`. Splitter service interval tightened to 250 ms.
 - **`--raw-edid` (`--no-unify-edid`)** CLI opt-out for bit-exact custom EDID passthrough.
 
 ### Changed

@@ -16,7 +16,7 @@ import json
 import shutil
 from typing import Optional, Tuple, Dict
 
-__version__ = "1.1.0"
+__version__ = "1.2.1"
 
 CONFIG_DIR = os.path.expanduser("~/.config/everlive")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
@@ -2532,27 +2532,29 @@ if HAS_QT:
             if not self._vfio_preflight():
                 return
 
-            if not os.path.exists(V4L2_DEFAULT_DEVICE):
+            want_v4l2 = self.chk_v4l2.isChecked()
+            if want_v4l2 and not os.path.exists(V4L2_DEFAULT_DEVICE):
                 self._set_vfio_notice(
                     "Virtual Camera Missing",
-                    f"{V4L2_DEFAULT_DEVICE} not found — load v4l2loopback first",
+                    f"{V4L2_DEFAULT_DEVICE} not found — uncheck Virtual Camera "
+                    "for HDMI passthrough, or load v4l2loopback",
                     seconds=10.0)
                 return
 
+            v4l2_device = V4L2_DEFAULT_DEVICE if (want_v4l2 and os.path.exists(V4L2_DEFAULT_DEVICE)) else None
             aspect = self.combo_aspect.currentData() or "auto"
             if aspect not in ASPECT_KEYS:
                 aspect = "auto"
-            self.chk_v4l2.setChecked(True)
             self.streamer.aspect = aspect
             save_settings({
-                "v4l2_loopback": True,
+                "v4l2_loopback": want_v4l2,
                 "aspect_ratio": aspect,
             })
             success = self.streamer.start(
                 fullscreen=False,
                 vsync=False,
                 streamer_mode=True,
-                v4l2_device=V4L2_DEFAULT_DEVICE,
+                v4l2_device=v4l2_device,
                 headless=True,
                 aspect=aspect)
             if success:
@@ -2560,11 +2562,17 @@ if HAS_QT:
                 self._vfio_notice_until = 0.0
                 self._vfio_volume_applies = 0
                 self._retry_audio_props()
-                self._set_vfio_notice(
-                    "Studio Mode Active",
-                    f"Headless capture → {V4L2_DEFAULT_DEVICE} "
-                    "('EverLive Capture')",
-                    seconds=6.0)
+                if v4l2_device:
+                    self._set_vfio_notice(
+                        "Studio Mode Active",
+                        f"Headless capture → {V4L2_DEFAULT_DEVICE} "
+                        "('EverLive Capture')",
+                        seconds=6.0)
+                else:
+                    self._set_vfio_notice(
+                        "Headless Active",
+                        "HDMI Passthrough & Audio running in background",
+                        seconds=6.0)
                 self._check_audio_sink()
             else:
                 self._set_vfio_notice(

@@ -3,27 +3,101 @@
  * gc573_user_hw.c — Userspace FPGA bridge, GPIO and HDMI link initialization
  */
 
+#include <pthread.h>
+
 #include "gc573_user_hw.h"
 #include "gc573_user_i2c.h"
 
+/*
+ * Software copy of the GPIO output latch (reg 0x00040).
+ *
+ * The FPGA may return live pin levels rather than the last written value on
+ * readback.  A read-modify-write would then fold input levels back into the
+ * register and could clear outputs such as the TX2 HPD gate (GPIO 6).  The
+ * shadow is seeded from the hardware once and every later write is derived
+ * from the shadow only.  A one-time warning per pin reports a readback that
+ * disagrees with what was written, which is the evidence that the register
+ * is not a plain latch.
+ */
+static pthread_mutex_t g_gpio_lock = PTHREAD_MUTEX_INITIALIZER;
+static u32 g_gpio_shadow;
+static bool g_gpio_shadow_valid;
+static u32 g_gpio_mismatch_reported;
+
 int gc573_user_set_gpio(void *bar0, unsigned int pin, bool high, unsigned int delay_ms)
 {
+	u8 *base;
+	u32 val, readback;
+
 	if (!bar0 || pin >= 32)
 		return -EINVAL;
 
-	u8 *base = (u8 *)bar0;
-	u32 val = readl(base + GC573_REG_GPIO);
+	base = (u8 *)bar0;
+
+	pthread_mutex_lock(&g_gpio_lock);
+	if (!g_gpio_shadow_valid) {
+		g_gpio_shadow = readl(base + GC573_REG_GPIO);
+		g_gpio_shadow_valid = true;
+	}
+	val = g_gpio_shadow;
 	if (high)
 		val |= BIT(pin);
 	else
 		val &= ~BIT(pin);
+	g_gpio_shadow = val;
 
 	writel(val, base + GC573_REG_GPIO);
+
+	readback = readl(base + GC573_REG_GPIO);
+	if (((readback ^ val) & BIT(pin)) &&
+	    !(g_gpio_mismatch_reported & BIT(pin))) {
+		g_gpio_mismatch_reported |= BIT(pin);
+		pr_warn("GPIO%u readback mismatch: wrote 0x%08x read 0x%08x",
+			pin, val, readback);
+	}
+	pthread_mutex_unlock(&g_gpio_lock);
 
 	if (delay_ms)
 		msleep(delay_ms);
 
 	return 0;
+}
+
+void gc573_user_gpio_shadow_invalidate(void)
+{
+	pthread_mutex_lock(&g_gpio_lock);
+	g_gpio_shadow_valid = false;
+	pthread_mutex_unlock(&g_gpio_lock);
+}
+
+int gc573_user_set_tx_hpd_gate(void *bar0, unsigned int port, bool high)
+{
+	unsigned int pin;
+
+	switch (port) {
+	case 1:
+		pin = GC573_GPIO_TX1_HPD_GATE;
+		break;
+	case 2:
+		pin = GC573_GPIO_TX2_HPD_GATE;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return gc573_user_set_gpio(bar0, pin, high, 0);
+}
+
+int gc573_user_get_tx_hpd_gate(void *bar0, unsigned int port, bool *high)
+{
+	switch (port) {
+	case 1:
+		return gc573_user_get_gpio(bar0, GC573_GPIO_TX1_HPD_GATE, high);
+	case 2:
+		return gc573_user_get_gpio(bar0, GC573_GPIO_TX2_HPD_GATE, high);
+	default:
+		return -EINVAL;
+	}
 }
 
 int gc573_user_get_gpio(void *bar0, unsigned int pin, bool *high)
@@ -105,6 +179,9 @@ int gc573_user_hw_init(void *bar0)
 	u8 *base = (u8 *)bar0;
 	pr_info("Initializing FPGA bridge, GPIO rails and HDMI link...");
 
+	/* The bridge reset below may reload the GPIO latch: re-seed it. */
+	gc573_user_gpio_shadow_invalidate();
+
 	/* 1. Bridge hardware reset: pulse core & DMA reset bits on 0x0000c */
 	gc573_user_bridge_reset(bar0);
 
@@ -137,7 +214,7 @@ int gc573_user_hw_init(void *bar0)
 
 	/* 7. Enable FPGA bridge host IRQ routing so PCIe MSI triggers */
 	writel(0x1fff | BIT(13), base + 0x00010);
-	writel(0x1b33 | BIT(13), base + 0x0001c);
+	writel(0x0b33, base + 0x0001c);
 
 	/* 3. Link: Prepare Splitter */
 	msleep(200);

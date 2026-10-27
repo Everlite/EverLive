@@ -209,13 +209,14 @@ int main(int argc, char *argv[])
 		sleep(1);
 		gc573_user_it6664_poll(ctx.bar0, &it6664);
 		gc573_user_it6805_poll_signal(ctx.bar0, &sig);
-		printf("[poll %d] 5V=%u SCDT=%u %ux%u@%u (%u kHz) | IT6664 5V=%u RXSCDT=%u TX1=%02x/%u TX2=%02x/%u\n",
+		printf("[poll %d] 5V=%u SCDT=%u %ux%u@%u (%u kHz) | IT6664 5V=%u RXSCDT=%u TX1=%02x/%u TX2=%02x/%u | GPIO=0x%08x\n",
 		       i + 1, sig.five_volt_present, sig.scdt_locked,
 		       sig.width, sig.height, sig.frame_rate_hz,
 		       sig.pixel_clock_khz, it6664.five_volt_present,
 		       it6664.scdt_locked, it6664.tx1_status,
 		       it6664.tx1_hpd, it6664.tx2_status,
-		       it6664.tx2_hpd);
+		       it6664.tx2_hpd,
+		       readl((u8 *)ctx.bar0 + 0x00040));
 	}
 
 	gc573_user_set_led_rgb(ctx.bar0, 0x00, 0xcc, 0xff);

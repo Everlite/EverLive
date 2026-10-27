@@ -174,10 +174,18 @@ static const u8 it6664_tx_irq_enable[] = {
 
 static bool g_tx1_powered;
 static bool g_tx2_powered;
+static bool g_tx2_output_enabled;
+static bool g_tx2_error_reported;
+static bool g_tx2_hpd_last;
 static bool g_rx_locked;
 static u32 g_rclk_khz;
 static u8 g_rx_color_depth;
 static u32 g_tx1_pclk_khz;
+static u32 g_tx2_pclk_khz;
+
+/* Defined next to the TX output helpers; used earlier by enable_source(). */
+static int it6664_arm_tx2(void *bar0);
+static int it6664_assert_tx2_gate(void *bar0);
 
 static int it6664_raw_read(void *bar0, u8 addr, u8 reg, u8 *val)
 {
@@ -1321,6 +1329,16 @@ static int it6664_configure_tx_afe(void *bar0, u8 addr, u32 pclk_khz)
 		reg8b = low_clock_value;
 	}
 
+	/*
+	 * TX2 splits the same RX stream but drives its own PLL, and the kernel
+	 * clamps the port-2 AFE to the low-clock values regardless of the
+	 * measured frequency (gc573-it6664-tx.c).
+	 */
+	if (addr == IT6664_TX2_ADDR) {
+		reg87 = low_clock_value;
+		reg8b = low_clock_value;
+	}
+
 	ret = tx_update(bar0, addr, 0x84, 0x07, reg84);
 	if (ret < 0)
 		return ret;
@@ -1339,93 +1357,95 @@ static int it6664_configure_tx_afe(void *bar0, u8 addr, u32 pclk_khz)
 	return tx_update(bar0, addr, 0x8b, 0x0f, reg8b);
 }
 
-static int it6664_power_on_tx1(void *bar0)
+/*
+ * Power on one TX port (1 = IT6805 capture path, 2 = HDMI OUT passthrough).
+ * The switch exposes one power bit per port; both transmitters share the same
+ * register layout, so only the I2C address and the power bit differ.  With RX
+ * sync already present the port AFE is calibrated from the measured pixel
+ * clock, exactly like the kernel driver's it6664_power_on_tx_port().
+ */
+static int it6664_power_on_tx_port(void *bar0, unsigned int port)
 {
+	u8 addr = (port == 1) ? IT6664_TX1_ADDR : IT6664_TX2_ADDR;
+	u8 power_bit = (port == 1) ? 0x02 : 0x04;
 	u32 pclk_khz = 0;
 	int ret;
 
-	ret = sw_update(bar0, 0x08, 0x02, 0x02);
+	if (port != 1 && port != 2)
+		return -EINVAL;
+
+	ret = sw_update(bar0, 0x08, power_bit, power_bit);
 	if (ret < 0)
 		return ret;
-	ret = tx_update(bar0, IT6664_TX1_ADDR, 0xc1, 0xf0, 0x80);
+	ret = tx_update(bar0, addr, 0xc1, 0xf0, 0x80);
 	if (ret < 0)
 		return ret;
-	ret = tx_update(bar0, IT6664_TX1_ADDR, 0x84, 0xe0, 0x80);
+	ret = tx_update(bar0, addr, 0x84, 0xe0, 0x80);
 	if (ret < 0)
 		return ret;
-	ret = tx_update(bar0, IT6664_TX1_ADDR, 0x86, 0x08, 0x08);
+	ret = tx_update(bar0, addr, 0x86, 0x08, 0x08);
 	if (ret < 0)
 		return ret;
-	ret = tx_update(bar0, IT6664_TX1_ADDR, 0x02, 0x01, 0x00);
+	ret = tx_update(bar0, addr, 0x02, 0x01, 0x00);
 	if (ret < 0)
 		return ret;
-	ret = tx_update(bar0, IT6664_TX1_ADDR, 0x19, 0x07, 0x07);
+	ret = tx_update(bar0, addr, 0x19, 0x07, 0x07);
 	if (ret < 0)
 		return ret;
 
+	/* The AFE needs a live stream to measure against. */
 	if (!g_rx_locked)
 		goto done;
 
 	for (size_t i = 0; i < ARRAY_SIZE(it6664_tx_irq_enable); i++) {
-		ret = tx_write(bar0, IT6664_TX1_ADDR,
-			       IT6664_TX_REG_IRQ_BASE + i,
+		ret = tx_write(bar0, addr, IT6664_TX_REG_IRQ_BASE + i,
 			       it6664_tx_irq_enable[i]);
 		if (ret < 0)
 			return ret;
 	}
 
-	ret = tx_write(bar0, IT6664_TX1_ADDR, 0x01, 0x24);
+	ret = tx_write(bar0, addr, 0x01, 0x24);
 	if (ret < 0)
 		return ret;
-	ret = tx_write(bar0, IT6664_TX1_ADDR, 0x01, 0x00);
+	ret = tx_write(bar0, addr, 0x01, 0x00);
 	if (ret < 0)
 		return ret;
-	ret = it6664_measure_tx_pclk(bar0, IT6664_TX1_ADDR, &pclk_khz);
-	if (ret < 0)
-		return ret;
-	g_tx1_pclk_khz = pclk_khz;
-	ret = it6664_configure_tx_afe(bar0, IT6664_TX1_ADDR, pclk_khz);
+
+	/*
+	 * TX2 splits the identical RX stream.  Its own counter only sees noise
+	 * while the port is still unrouted (~25 MHz), which would configure the
+	 * AFE far too low and keep the video PLL from locking.  Reuse TX1's
+	 * measurement; only fall back to the local counter before TX1 has locked.
+	 */
+	if (port == 1 || !g_tx1_pclk_khz) {
+		ret = it6664_measure_tx_pclk(bar0, addr, &pclk_khz);
+		if (ret < 0)
+			return ret;
+	} else {
+		pclk_khz = g_tx1_pclk_khz;
+	}
+	if (port == 1)
+		g_tx1_pclk_khz = pclk_khz;
+	else
+		g_tx2_pclk_khz = pclk_khz;
+	ret = it6664_configure_tx_afe(bar0, addr, pclk_khz);
 	if (ret < 0)
 		return ret;
 	msleep(100);
-	ret = it6664_reset_tx_video_clock(bar0, IT6664_TX1_ADDR);
+	ret = it6664_reset_tx_video_clock(bar0, addr);
 	if (ret < 0)
 		return ret;
-	ret = tx_update(bar0, IT6664_TX1_ADDR, 0x18, 0x80, 0x80);
+	ret = tx_update(bar0, addr, 0x18, 0x80, 0x80);
 	if (ret < 0)
 		return ret;
-	pr_info("IT6664 TX1 AFE configured for %u kHz (RX depth 0x%02x)",
-		pclk_khz, g_rx_color_depth);
+	pr_info("IT6664 TX%u AFE configured for %u kHz (RX depth 0x%02x)",
+		port, pclk_khz, g_rx_color_depth);
 
-done:
-	g_tx1_powered = true;
-	return 0;
-}
-
-static int it6664_power_on_tx2(void *bar0)
-{
-	int ret;
-
-	ret = sw_update(bar0, 0x08, 0x04, 0x04);
-	if (ret < 0)
-		return ret;
-	ret = tx_update(bar0, IT6664_TX2_ADDR, 0xc1, 0xf0, 0x80);
-	if (ret < 0)
-		return ret;
-	ret = tx_update(bar0, IT6664_TX2_ADDR, 0x84, 0xe0, 0x80);
-	if (ret < 0)
-		return ret;
-	ret = tx_update(bar0, IT6664_TX2_ADDR, 0x86, 0x08, 0x08);
-	if (ret < 0)
-		return ret;
-	ret = tx_update(bar0, IT6664_TX2_ADDR, 0x02, 0x01, 0x00);
-	if (ret < 0)
-		return ret;
-	ret = tx_update(bar0, IT6664_TX2_ADDR, 0x19, 0x07, 0x07);
-	if (ret < 0)
-		return ret;
-
-	g_tx2_powered = true;
+ done:
+	if (port == 1)
+		g_tx1_powered = true;
+	else
+		g_tx2_powered = true;
 	return 0;
 }
 
@@ -1564,6 +1584,9 @@ int gc573_user_it6664_init(void *bar0)
 
 	g_tx1_powered = false;
 	g_tx2_powered = false;
+	g_tx2_output_enabled = false;
+	g_tx2_error_reported = false;
+	g_tx2_hpd_last = false;
 	g_rx_locked = false;
 	g_rx_color_depth = 0;
 
@@ -1660,10 +1683,18 @@ int gc573_user_it6664_enable_source(void *bar0)
 
 	edid = gc573_user_edid_data();
 
-	/* The IT6805 HPD is ready; release the TX1 HPD gate. */
-	ret = gc573_user_set_gpio(bar0, 7, true, 2);
+	/*
+	 * The IT6805 HPD is ready.  Release both TX HPD gates before sampling any
+	 * status: a gated port reports HPD = 0 and would be skipped, and both
+	 * downstream sinks need a moment to assert HPD after the gate goes high.
+	 */
+	ret = gc573_user_set_tx_hpd_gate(bar0, 1, true);
 	if (ret < 0)
 		return ret;
+	ret = gc573_user_set_tx_hpd_gate(bar0, 2, true);
+	if (ret < 0)
+		return ret;
+	msleep(50);
 
 	ret = tx_read(bar0, IT6664_TX1_ADDR, IT6664_TX_REG_STATUS, &value);
 	if (ret < 0)
@@ -1672,7 +1703,7 @@ int gc573_user_it6664_enable_source(void *bar0)
 	pr_info("IT6664 TX1 status 0x%02x (HPD=%u)", value, status.tx1_hpd);
 
 	if (status.tx1_hpd && !g_tx1_powered) {
-		ret = it6664_power_on_tx1(bar0);
+		ret = it6664_power_on_tx_port(bar0, 1);
 		if (ret < 0)
 			return ret;
 	}
@@ -1681,11 +1712,9 @@ int gc573_user_it6664_enable_source(void *bar0)
 	if (ret < 0)
 		return ret;
 	status.tx2_hpd = (value & 0x01) != 0;
-	if (status.tx2_hpd && !g_tx2_powered) {
-		ret = it6664_power_on_tx2(bar0);
-		if (ret < 0)
-			return ret;
-	}
+	/* HDMI OUT is optional: never abort the source enable for it. */
+	if (status.tx2_hpd && !g_tx2_powered)
+		(void)it6664_arm_tx2(bar0);
 
 	pr_info("Programming IT6664 upstream EDID (%u bytes)...",
 		IT6664_EDID_SIZE);
@@ -2101,13 +2130,52 @@ static int it6664_select_tx1_source(void *bar0, u8 addr, bool *csc_route)
 }
 
 /*
- * Kernel it6664_reset_tx_hdcp() when the source reports no HDCP.
- * TX1 0xc1 bit 0 left set makes the splitter emit Set AVMute toward the
- * IT6805, which then fills every frame with limited black.
+ * TX2 drives the physical HDMI OUT connector.  It always takes the RX stream
+ * directly: the CSC repack belongs to the capture path and the monitor does
+ * its own colour handling.  Switch register 0x0d carries one two-bit source
+ * field per TX port; port 2 uses bits 5:4 (0 = direct RX).
  */
-static int it6664_clear_tx1_hdcp(void *bar0)
+static int it6664_select_tx2_source(void *bar0)
 {
-	const u8 addr = IT6664_TX1_ADDR;
+	const u8 addr = IT6664_TX2_ADDR;
+	u8 deep_color = g_rx_color_depth & 0x03;
+	int ret;
+
+	if (!deep_color) {
+		ret = tx_update(bar0, addr, 0xc1, 0xf0, 0x00);
+		if (ret < 0)
+			return ret;
+	}
+	ret = tx_update(bar0, addr, 0xc1, 0x04, deep_color ? 0x04 : 0x00);
+	if (ret < 0)
+		return ret;
+	ret = sw_update(bar0, 0x0d, 0x30, 0x00);
+	if (ret < 0)
+		return ret;
+	ret = tx_update(bar0, addr, 0xad, 0x81, 0x00);
+	if (ret < 0)
+		return ret;
+	return tx_update(bar0, addr, 0xa0, 0x30, 0x00);
+}
+
+static int it6664_select_tx_source(void *bar0, unsigned int port,
+				   bool *csc_route)
+{
+	if (port == 1)
+		return it6664_select_tx1_source(bar0, IT6664_TX1_ADDR,
+						csc_route);
+
+	*csc_route = false;
+	return it6664_select_tx2_source(bar0);
+}
+
+/*
+ * Kernel it6664_reset_tx_hdcp() when the source reports no HDCP.
+ * A TX port with 0xc1 bit 0 left set makes the splitter emit Set AVMute
+ * toward its sink, which then fills every frame with limited black.
+ */
+static int it6664_clear_tx_hdcp(void *bar0, u8 addr)
+{
 	int ret;
 
 	ret = tx_update(bar0, addr, 0x91, 0x10, 0x00);
@@ -2119,9 +2187,40 @@ static int it6664_clear_tx1_hdcp(void *bar0)
 	return tx_update(bar0, addr, 0xc2, 0x80, 0x00);
 }
 
-static int it6664_enable_tx1_output(void *bar0)
+/*
+ * Program the TX protocol mode (reg 0xc0 bit 0: 1 = HDMI, 0 = DVI).  DVI mode
+ * suppresses AVI InfoFrames, audio and HDMI vendor data, which modern HDMI
+ * sinks reject with "no signal".  Writes only on a mismatch so it can run from
+ * the poll loop without disturbing a live link.  *changed is set on a rewrite.
+ */
+static int it6664_set_tx_hdmi_mode(void *bar0, u8 addr, bool hdmi,
+				   bool *changed)
 {
-	const u8 addr = IT6664_TX1_ADDR;
+	u8 want = hdmi ? 0x01 : 0x00;
+	u8 cur = 0;
+	int ret;
+
+	if (changed)
+		*changed = false;
+	ret = tx_read(bar0, addr, 0xc0, &cur);
+	if (ret < 0)
+		return ret;
+	if ((cur & 0x01) == want)
+		return 0;
+	ret = tx_update(bar0, addr, 0xc0, 0x01, want);
+	if (ret < 0)
+		return ret;
+	if (changed)
+		*changed = true;
+	pr_info("IT6664 TX 0x%02x protocol mode -> %s (0xc0 0x%02x)",
+		addr, want ? "HDMI" : "DVI", (cur & ~0x01) | want);
+	return 0;
+}
+
+static int it6664_enable_tx_output(void *bar0, unsigned int port)
+{
+	const u8 addr = (port == 1) ? IT6664_TX1_ADDR : IT6664_TX2_ADDR;
+	u32 pclk_khz = (port == 1) ? g_tx1_pclk_khz : g_tx2_pclk_khz;
 	u8 rx_status = 0;
 	u8 status = 0;
 	bool csc_route = false;
@@ -2134,19 +2233,29 @@ static int it6664_enable_tx1_output(void *bar0)
 	int second_scdc_ret = 0;
 	int ret;
 
+	if (port != 1 && port != 2)
+		return -EINVAL;
+
 	/* Follow the RX HDMI/DVI mode in the TX protocol control. */
 	ret = rx_read(bar0, IT6664_RX_BANK_0, IT6664_RX_REG_STATUS, &rx_status);
 	if (ret < 0)
 		return ret;
-	ret = tx_update(bar0, addr, 0xc0, 0x01,
-			(rx_status & 0x02) ? 0x01 : 0x00);
+	/*
+	 * TX1 mirrors the RX protocol (HDMI vs DVI).  TX2 drives a physical HDMI
+	 * sink and is always driven in HDMI mode: it is armed before the RX mode
+	 * has settled, and a port left at 0xc0 bit 0 = 0 (DVI) withholds AVI
+	 * InfoFrames and audio, so HDMI monitors keep reporting "no signal".
+	 */
+	ret = it6664_set_tx_hdmi_mode(bar0, addr,
+				      port == 2 || (rx_status & 0x02) != 0,
+				      NULL);
 	if (ret < 0)
 		return ret;
 
-	ret = it6664_select_tx1_source(bar0, addr, &csc_route);
+	ret = it6664_select_tx_source(bar0, port, &csc_route);
 	if (ret < 0)
 		return ret;
-	scrambling_required = csc_route ? false : g_tx1_pclk_khz >= 340000;
+	scrambling_required = csc_route ? false : pclk_khz >= 340000;
 
 	ret = tx_update(bar0, addr, 0x18, 0x0c, 0x0c);
 	if (ret < 0)
@@ -2178,6 +2287,23 @@ static int it6664_enable_tx1_output(void *bar0)
 	ret = tx_update(bar0, addr, 0xc3, 0x30, 0x30);
 	if (ret < 0)
 		return ret;
+	/*
+	 * Latch switch stream routing FIFO for the port (Windows CSpliterITE6664::SetTXSource).
+	 * Bit 2 for port 1, Bit 3 for port 2.
+	 */
+	u8 fifo_bit = (port == 1) ? 0x04 : 0x08;
+	ret = sw_update(bar0, 0x4e, 0x0f, fifo_bit);
+	if (ret < 0)
+		return ret;
+	usleep_range(10000, 11000);
+	ret = sw_update(bar0, 0x4e, 0x0f, 0x00);
+	if (ret < 0)
+		return ret;
+
+	/* Open TX OE: clear bit 7 of 0x19 (AVMute/Disable) and bits 1:0 of 0x88 */
+	ret = tx_update(bar0, addr, 0x19, 0x80, 0x00);
+	if (ret < 0)
+		return ret;
 	ret = tx_update(bar0, addr, 0x88, 0x03, 0x00);
 	if (ret < 0)
 		return ret;
@@ -2193,6 +2319,7 @@ static int it6664_enable_tx1_output(void *bar0)
 	if (ret < 0)
 		return ret;
 	if (!(status & 0x08)) {
+		/* PLL not locked yet: re-latch the configured AFE clock once. */
 		ret = it6664_reset_tx_video_clock(bar0, addr);
 		if (ret < 0)
 			return ret;
@@ -2208,14 +2335,171 @@ static int it6664_enable_tx1_output(void *bar0)
 	ret = tx_write(bar0, addr, 0x12, 0xff);
 	if (ret < 0)
 		return ret;
-	ret = it6664_clear_tx1_hdcp(bar0);
+	ret = it6664_clear_tx_hdcp(bar0, addr);
 	if (ret < 0)
 		return ret;
 
-	pr_info("IT6664 TX1 output enabled (status=0x%02x pclk=%u kHz SCDC=%d/%d%s)",
-		status, g_tx1_pclk_khz, first_scdc_ret, second_scdc_ret,
+	/* Bit 3 reports the video PLL lock (e.g. 0x9d = locked, 0x15 = unlocked). */
+	pr_info("IT6664 TX%u output enabled (status=0x%02x pclk=%u kHz PLL=%s SCDC=%d/%d%s)",
+		port, status, pclk_khz, (status & 0x08) ? "locked" : "unlocked",
+		first_scdc_ret, second_scdc_ret,
 		scrambling_required ? " scrambled" : "");
+	if (!(status & 0x08))
+		pr_warn("IT6664 TX%u video PLL did not lock (status=0x%02x, pclk=%u kHz)",
+			port, status, pclk_khz);
 	return 0;
+}
+
+/*
+ * (Re-)assert the TX2 HPD gate (GPIO6).  The legacy kernel driver does this
+ * after every TX2 power-on.  If the pin is found low it is logged, because a
+ * gate that stays low keeps the HDMI OUT sink from ever seeing the link.
+ */
+static int it6664_assert_tx2_gate(void *bar0)
+{
+	bool high = false;
+	int ret;
+
+	ret = gc573_user_get_tx_hpd_gate(bar0, 2, &high);
+	if (ret == 0 && !high)
+		pr_warn("IT6664 TX2 HPD gate (GPIO%u) was low; re-asserting",
+			GC573_GPIO_TX2_HPD_GATE);
+	return gc573_user_set_tx_hpd_gate(bar0, 2, true);
+}
+
+/*
+ * Log the HDMI OUT state on every transition.  status / 0xc0 protocol mode /
+ * 0x85 video-path value distinguish "PLL locked but output never enabled"
+ * from "no sink" during field debugging (0x85 == 0x19 means the unblank
+ * sequence ran; 0xc2 bit 7 is HDCP, not the output enable).
+ */
+static void it6664_log_tx2_state(void *bar0, const char *what)
+{
+	u8 status = 0;
+	u8 mode = 0;
+	u8 path = 0;
+
+	if (tx_read(bar0, IT6664_TX2_ADDR, IT6664_TX_REG_STATUS, &status) < 0)
+		return;
+	if (tx_read(bar0, IT6664_TX2_ADDR, 0xc0, &mode) < 0)
+		return;
+	if (tx_read(bar0, IT6664_TX2_ADDR, 0x85, &path) < 0)
+		return;
+	pr_info("IT6664 TX2 %s: status=0x%02x %s mode=0x%02x path=0x%02x powered=%u enabled=%u pclk=%u kHz",
+		what, status, (status & 0x01) ? "HPD" : "no-HPD", mode, path,
+		g_tx2_powered, g_tx2_output_enabled, g_tx2_pclk_khz);
+}
+
+/*
+ * Enable (unblank) the HDMI OUT transmitter.
+ *
+ * The splitter must transmit continuously like a hardware distribution
+ * amplifier: several monitors only assert HPD once they see a TMDS clock, so
+ * gating the unblank sequence on HPD deadlocks (the chip never starts, the
+ * monitor never plugs in).  The video PLL and AFE are left untouched here -
+ * arm_tx2() brings the port up and it stays warm.
+ *
+ * Returns -EAGAIN when the video PLL is not locked, so the caller can fall
+ * back to a full power cycle.
+ */
+static int it6664_enable_tx2_output(void *bar0)
+{
+	u8 status = 0;
+	int ret;
+
+	(void)it6664_assert_tx2_gate(bar0);
+	ret = it6664_enable_tx_output(bar0, 2);
+	if (ret < 0) {
+		if (!g_tx2_error_reported) {
+			pr_warn("IT6664 TX2 output enable failed: %d", ret);
+			g_tx2_error_reported = true;
+		}
+		return ret;
+	}
+
+	ret = tx_read(bar0, IT6664_TX2_ADDR, IT6664_TX_REG_STATUS, &status);
+	if (ret < 0)
+		return ret;
+
+	if (!(status & 0x08)) {
+		/* Video PLL did not lock: a full power-on is the only way out. */
+		if (!g_tx2_error_reported) {
+			pr_warn("IT6664 TX2 PLL not locked after enable (status=0x%02x)",
+				status);
+			g_tx2_error_reported = true;
+		}
+		return -EAGAIN;
+	}
+
+	g_tx2_output_enabled = true;
+	g_tx2_error_reported = false;
+	it6664_log_tx2_state(bar0, "output enabled");
+	return 0;
+}
+
+/*
+ * Arm the optional HDMI OUT port: power it, configure the AFE and unblank the
+ * output stage so the transmitter runs for as long as the RX is locked.
+ *
+ * A monitor that is absent, unplugged or misbehaving must never fail the
+ * capture path, so callers ignore the result and failures are logged once
+ * until the next HPD edge or RX re-lock.
+ */
+static int it6664_arm_tx2(void *bar0)
+{
+	u8 tx2_status = 0;
+	int ret;
+
+	ret = tx_read(bar0, IT6664_TX2_ADDR, IT6664_TX_REG_STATUS, &tx2_status);
+	if (ret < 0)
+		return ret;
+
+	g_tx2_hpd_last = (tx2_status & 0x01) != 0;
+
+	/*
+	 * Proceed when the port is cable-connected (HPD or cable detect) or
+	 * whenever the upstream RX is locked.  Waiting for persistent HPD would
+	 * recreate the deadlock where the monitor never sees HDMI come alive.
+	 */
+	if (!(tx2_status & 0x11) && !g_rx_locked)
+		return 0;
+
+	/* Never disturb a running passthrough link. */
+	if (g_tx2_powered && g_tx2_output_enabled)
+		return 0;
+
+	/*
+	 * A warm port already runs its video PLL from TX1's clock.  Re-powering
+	 * it would reset the TX video clock and blank TMDS, so only re-apply the
+	 * output stage.
+	 */
+	if (g_tx2_powered) {
+		if (!g_rx_locked)
+			return 0;
+		return it6664_enable_tx2_output(bar0);
+	}
+
+	/* TX2 mirrors TX1's pixel clock whenever it is already known. */
+	if (g_tx1_pclk_khz)
+		g_tx2_pclk_khz = g_tx1_pclk_khz;
+
+	ret = it6664_power_on_tx_port(bar0, 2);
+	if (ret < 0) {
+		if (!g_tx2_error_reported) {
+			pr_warn("IT6664 TX2 power-on failed: %d; HDMI OUT stays off",
+				ret);
+			g_tx2_error_reported = true;
+		}
+		return ret;
+	}
+	(void)it6664_assert_tx2_gate(bar0);
+	it6664_log_tx2_state(bar0, "port powered");
+
+	/* Without RX sync the AFE has no clock to lock onto. */
+	if (!g_rx_locked)
+		return 0;
+
+	return it6664_enable_tx2_output(bar0);
 }
 
 static int it6664_handle_rx_lock(void *bar0)
@@ -2270,13 +2554,17 @@ static int it6664_handle_rx_lock(void *bar0)
 		return ret;
 
 	if (tx_status & 0x01) {
-		ret = it6664_power_on_tx1(bar0);
+		ret = it6664_power_on_tx_port(bar0, 1);
 		if (ret < 0)
 			return ret;
-		ret = it6664_enable_tx1_output(bar0);
+		ret = it6664_enable_tx_output(bar0, 1);
 		if (ret < 0)
 			return ret;
 	}
+
+	/* HDMI OUT passthrough is optional and must never fail capture. */
+	(void)it6664_arm_tx2(bar0);
+
 	ret = it6664_set_rx_hdcp_off(bar0);
 	if (ret < 0)
 		return ret;
@@ -2346,14 +2634,62 @@ int gc573_user_it6664_poll(void *bar0, struct gc573_user_it6664_status *status)
 	} else if (!status->scdt_locked && g_rx_locked) {
 		g_rx_locked = false;
 		gc573_user_set_gpio(bar0, 3, false, 0);
+		/* Forget the HDMI OUT state so a re-lock re-arms TX2 cleanly. */
+		g_tx2_powered = false;
+		g_tx2_output_enabled = false;
+		g_tx2_error_reported = false;
+		g_tx2_hpd_last = status->tx2_hpd;
 		pr_info("IT6664 RX lost sync (status13=0x%02x scdt=0x%02x).",
 			status->rx_status13, status->rx_scdt);
 	}
 
 	if (status->tx1_hpd && !g_tx1_powered) {
-		ret = it6664_power_on_tx1(bar0);
+		ret = it6664_power_on_tx_port(bar0, 1);
 		if (ret < 0)
 			return ret;
+	}
+
+	/*
+	 * HDMI OUT behaves like a hardware distribution amplifier: it keeps
+	 * transmitting for as long as the RX is locked, independent of the
+	 * downstream HPD.  Several monitors only assert HPD after they see a
+	 * TMDS clock, so waiting for HPD before unblanking deadlocks the link
+	 * (the exact symptom of #48).  HPD edges are only logged; a live link is
+	 * never re-armed and the video PLL is never reset.
+	 */
+	if (g_rx_locked) {
+		bool sink = status->tx2_hpd;
+		bool hpd_rise = sink && !g_tx2_hpd_last;
+		bool can_retry = !g_tx2_error_reported || hpd_rise;
+
+		if (g_tx2_output_enabled) {
+			/*
+			 * A live link is left completely alone: re-running the output
+			 * stage (SCDC, 0xc1 pulse, 100 ms) on an HPD edge would blank
+			 * the picture the monitor is just locking onto.  Only keep the
+			 * protocol mode in sync (write-on-mismatch).
+			 */
+			(void)it6664_set_tx_hdmi_mode(bar0, IT6664_TX2_ADDR, true,
+						      NULL);
+		} else if (can_retry) {
+			if (it6664_arm_tx2(bar0) == -EAGAIN) {
+				/* Video PLL down: recover with a full power cycle. */
+				g_tx2_powered = false;
+				(void)it6664_arm_tx2(bar0);
+			}
+		}
+
+		if (sink != g_tx2_hpd_last)
+			it6664_log_tx2_state(bar0, sink ? "sink HPD asserted" :
+					     "sink HPD lost (output kept live)");
+		g_tx2_hpd_last = sink;
+	} else if (g_tx2_powered || g_tx2_output_enabled ||
+		   g_tx2_error_reported) {
+		g_tx2_powered = false;
+		g_tx2_output_enabled = false;
+		g_tx2_error_reported = false;
+		g_tx2_hpd_last = status->tx2_hpd;
+		pr_info("IT6664 TX2 passthrough idle (RX not locked).");
 	}
 
 	return 0;

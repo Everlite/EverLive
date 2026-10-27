@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive - One-Click Launcher for Console Gaming Suite (v1.1.0)
+# EverLive - One-Click Launcher for Console Gaming Suite (v1.2.1)
 # 100% Blob-Free Userspace VFIO Engine for AVerMedia Live Gamer 4K (GC573)
 # ==============================================================================
 set -euo pipefail
@@ -82,6 +82,14 @@ for ((i = 0; i < ${#ARGS[@]}; i++)); do
     esac
 done
 
+# If launching the GUI (no CLI args) and /dev/video10 is not present, attempt to load v4l2loopback
+if [ "$WANT_V4L2" -eq 0 ] && [ $# -eq 0 ] && [ ! -e "/dev/video10" ]; then
+    if modprobe -n v4l2loopback >/dev/null 2>&1; then
+        WANT_V4L2=1
+        V4L2_DEV="/dev/video10"
+    fi
+fi
+
 if [ "$WANT_V4L2" -eq 1 ]; then
     if [ -z "$V4L2_DEV" ]; then
         V4L2_DEV="/dev/video10"
@@ -96,14 +104,12 @@ if [ "$WANT_V4L2" -eq 1 ]; then
         # writer, so OBS never drops the node from its device list.
         MODPROBE_ARGS=(v4l2loopback "video_nr=${VIDEO_NR}" "card_label=EverLive Capture" "exclusive_caps=0")
         if [ "$EUID" -eq 0 ]; then
-            if ! modprobe "${MODPROBE_ARGS[@]}"; then
-                echo "[!] v4l2loopback konnte nicht geladen werden." >&2
-                exit 1
-            fi
+            modprobe "${MODPROBE_ARGS[@]}" 2>/dev/null || true
         else
-            if ! sudo modprobe "${MODPROBE_ARGS[@]}"; then
-                echo "[!] v4l2loopback konnte nicht geladen werden (sudo)." >&2
-                exit 1
+            if command -v pkexec >/dev/null 2>&1 && [ ! -t 0 ]; then
+                pkexec modprobe "${MODPROBE_ARGS[@]}" 2>/dev/null || true
+            else
+                sudo modprobe "${MODPROBE_ARGS[@]}" 2>/dev/null || true
             fi
         fi
         for ((try = 0; try < 10; try++)); do
@@ -115,7 +121,9 @@ if [ "$WANT_V4L2" -eq 1 ]; then
         if [ ! -e "$V4L2_DEV" ]; then
             echo "[!] ${V4L2_DEV} existiert weiterhin nicht." >&2
             echo "    Prüfe: sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback video_nr=${VIDEO_NR} card_label=\"EverLive Capture\" exclusive_caps=0" >&2
-            exit 1
+            if [ $# -gt 0 ]; then
+                exit 1
+            fi
         fi
     fi
 
