@@ -2110,7 +2110,8 @@ if HAS_QT:
                 idx = self.combo_led.findData(led_mode)
                 if idx >= 0:
                     self.combo_led.setCurrentIndex(idx)
-                if isinstance(saved_led, int) and 0 <= saved_led <= 9:
+                will_autostart = self._headless_start or self.saved_cfg.get("autostart", False) or getattr(self.streamer, "_cli_autostart", False)
+                if isinstance(saved_led, int) and 0 <= saved_led <= 9 and not will_autostart:
                     set_vfio_led(saved_led)
             else:
                 if saved_led is not None and isinstance(saved_led, int) and 0 <= saved_led <= 7:
@@ -3106,13 +3107,23 @@ def main():
         if val is not None and 0 <= val <= 9:
             hw = detect_gc573_driver()
             if hw.get("mode") == "vfio":
+                save_settings({"led_mode": val})
+                is_launching = args.cli or args.tray or any(
+                    arg in sys.argv for arg in [
+                        "-f", "--fullscreen", "-p", "--preset",
+                        "--headless", "--v4l2", "--loopback",
+                        "--streamer-mode", "-s"
+                    ]
+                )
                 if _vfio_streamer_running():
-                    save_settings({"led_mode": val})
                     print(f"[*] Userspace streamer is running; LED mode {val} saved for the next session.")
-                elif set_vfio_led(val):
-                    print(f"[+] GC573 LED lighting set to mode {val} via everlive_userd.")
+                elif not is_launching:
+                    if set_vfio_led(val):
+                        print(f"[+] GC573 LED lighting set to mode {val} via everlive_userd.")
+                    else:
+                        print(f"[!] Failed to set GC573 LED to mode {val} via everlive_userd.")
                 else:
-                    print(f"[!] Failed to set GC573 LED to mode {val} via everlive_userd.")
+                    print(f"[+] GC573 LED lighting set to mode {val} for stream.")
             else:
                 if write_led_mode(val):
                     print(f"[+] GC573 LED lighting set to mode {val}.")

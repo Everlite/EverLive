@@ -3755,6 +3755,31 @@ int main(int argc, char *argv[])
 	}
 
 	/*
+	 * 2b. Immediately apply selected LED mode and start worker thread so
+	 *     the card never sits in unprogrammed red-blinking state during the
+	 *     ~3 seconds of HDMI receiver init and EDID handshake.
+	 */
+	if (g_led_mode == STREAM_LED_WAVE) {
+		uint32_t default_zones[5] = {
+			0x00ff0000, 0x00ffff00, 0x0000ff00, 0x0000ffff, 0x008000ff,
+		};
+		gc573_user_set_led_zones(ctx.bar0, default_zones);
+		printf("[LED] Multi-zone rainbow wave active\n");
+	} else if (g_led_mode == STREAM_LED_RAINBOW) {
+		gc573_user_set_led_rgb(ctx.bar0, g_led_r, g_led_g, g_led_b);
+		printf("[LED] Rainbow spectrum active\n");
+	} else {
+		gc573_user_set_led_rgb(ctx.bar0, g_led_r, g_led_g, g_led_b);
+		printf("[LED] Active colour #%02x%02x%02x\n",
+		       g_led_r, g_led_g, g_led_b);
+	}
+
+	if (g_led_mode == STREAM_LED_WAVE || g_led_mode == STREAM_LED_RAINBOW) {
+		if (pthread_create(&g_led_thread, NULL, led_worker, &ctx) == 0)
+			g_led_thread_running = true;
+	}
+
+	/*
 	 * 3. Bring up the IT6664 splitter first.  The source only sees the
 	 *    splitter's upstream EDID/HPD, so this must happen before the
 	 *    IT6805 can lock to TX1.
@@ -3762,6 +3787,11 @@ int main(int argc, char *argv[])
 	ret = gc573_user_it6664_init(ctx.bar0);
 	if (ret < 0) {
 		fprintf(stderr, "[ERROR] IT6664 init failed: %d\n", ret);
+		if (g_led_thread_running) {
+			__atomic_store_n(&g_running, 0, __ATOMIC_RELAXED);
+			pthread_join(g_led_thread, NULL);
+			g_led_thread_running = false;
+		}
 		gc573_vfio_cleanup(&ctx);
 		return 1;
 	}
@@ -3791,6 +3821,11 @@ int main(int argc, char *argv[])
 	ret = gc573_user_it6805_init(ctx.bar0);
 	if (ret < 0) {
 		fprintf(stderr, "[ERROR] IT6805 init failed: %d\n", ret);
+		if (g_led_thread_running) {
+			__atomic_store_n(&g_running, 0, __ATOMIC_RELAXED);
+			pthread_join(g_led_thread, NULL);
+			g_led_thread_running = false;
+		}
 		gc573_vfio_cleanup(&ctx);
 		return 1;
 	}
@@ -3804,6 +3839,11 @@ int main(int argc, char *argv[])
 					      gc573_user_edid_active_name(), NULL);
 	if (ret < 0) {
 		fprintf(stderr, "[ERROR] EDID programming failed: %d\n", ret);
+		if (g_led_thread_running) {
+			__atomic_store_n(&g_running, 0, __ATOMIC_RELAXED);
+			pthread_join(g_led_thread, NULL);
+			g_led_thread_running = false;
+		}
 		gc573_vfio_cleanup(&ctx);
 		return 1;
 	}
@@ -3812,35 +3852,19 @@ int main(int argc, char *argv[])
 	ret = gc573_user_it6664_enable_source(ctx.bar0);
 	if (ret < 0) {
 		fprintf(stderr, "[ERROR] IT6664 source enable failed: %d\n", ret);
+		if (g_led_thread_running) {
+			__atomic_store_n(&g_running, 0, __ATOMIC_RELAXED);
+			pthread_join(g_led_thread, NULL);
+			g_led_thread_running = false;
+		}
 		gc573_vfio_cleanup(&ctx);
 		return 1;
 	}
 
-	/* 6. Keep the selected LED colour to indicate active userspace streaming. */
-	if (g_led_mode == STREAM_LED_WAVE) {
-		uint32_t default_zones[5] = {
-			0x00ff0000, 0x00ffff00, 0x0000ff00, 0x0000ffff, 0x008000ff,
-		};
-		gc573_user_set_led_zones(ctx.bar0, default_zones);
-		printf("[LED] Multi-zone rainbow wave active\n");
-	} else if (g_led_mode == STREAM_LED_RAINBOW) {
-		gc573_user_set_led_rgb(ctx.bar0, g_led_r, g_led_g, g_led_b);
-		printf("[LED] Rainbow spectrum active\n");
-	} else {
-		gc573_user_set_led_rgb(ctx.bar0, g_led_r, g_led_g, g_led_b);
-		printf("[LED] Active colour #%02x%02x%02x\n",
-		       g_led_r, g_led_g, g_led_b);
-	}
-
-	/* 7. Setup MSI Interrupt via EventFD (video DMA completion). */
+	/* 6. Setup MSI Interrupt via EventFD (video DMA completion). */
 	ret = gc573_vfio_setup_msi(&ctx);
 	if (ret < 0)
 		pr_warn("Interrupt setup failed; falling back to IRQ polling");
-
-	if (g_led_mode == STREAM_LED_WAVE || g_led_mode == STREAM_LED_RAINBOW) {
-		if (pthread_create(&g_led_thread, NULL, led_worker, &ctx) == 0)
-			g_led_thread_running = true;
-	}
 
 	/*
 	 * Set the application identity before SDL initializes its video and
