@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive v1.2.1 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573)
+# EverLive v1.2.2 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573)
 # ==============================================================================
 # Installiert den 100% blob-freien Userspace VFIO-Treiber, udev-Hardware-Rechte,
 # Speicher-Locking-Limits und die EverLive Desktop-App für HDMI Console Gaming.
@@ -23,7 +23,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}===================================================================${NC}"
-echo -e "${BLUE}     EverLive v1.2.1 - GC573 Userspace Gaming Suite Installer     ${NC}"
+echo -e "${BLUE}     EverLive v1.2.2 - GC573 Userspace Gaming Suite Installer     ${NC}"
 echo -e "${BLUE}===================================================================${NC}"
 
 # Optionale Virtual Camera: standardmäßig ja, per --no-loopback abschaltbar.
@@ -351,7 +351,7 @@ chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive.desktop" 2>/dev/n
 rm -f "${APPS_DIR}/everlive-intern.desktop" 2>/dev/null || true
 
 echo -e "\n${GREEN}===================================================================${NC}"
-echo -e "${GREEN}      EverLive v1.2.1 erfolgreich installiert & einsatzbereit!      ${NC}"
+echo -e "${GREEN}      EverLive v1.2.2 erfolgreich installiert & einsatzbereit!      ${NC}"
 echo -e "${GREEN}===================================================================${NC}"
 echo -e "Du kannst EverLive ab sofort direkt über dein Startmenü starten,"
 echo -e "oder im Terminal mit: ${BLUE}./play.sh${NC}"
