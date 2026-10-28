@@ -282,7 +282,21 @@ else
 fi
 
 # 5. Udev-Rechte für vfio-pci & unbegrenzten Memlock einrichten
-echo -e "\n${BLUE}[4/5] Richte VFIO Hardware-Zugriffsrechte (udev) & Memlock ein...${NC}"
+echo -e "\n${BLUE}[4/5] Richte VFIO Hardware-Zugriffsrechte (udev), Boot-Autobind & Memlock ein...${NC}"
+
+# Boot-Autobind: vfio-pci beim Kernel-Start laden und Karte binden,
+# damit EverLive ohne Sudo-Passwortabfrage direkt nach dem Booten starten kann.
+mkdir -p /etc/modules-load.d /etc/modprobe.d
+cat > /etc/modules-load.d/everlive-vfio.conf <<EOF
+vfio
+vfio_pci
+vfio_iommu_type1
+EOF
+
+cat > /etc/modprobe.d/everlive-vfio.conf <<EOF
+# EverLive: Auto-bind AVerMedia Live Gamer 4K (GC573) and Live Gamer BOLT (GC555) to vfio-pci at boot
+options vfio-pci ids=1461:0054,1461:0055
+EOF
 
 # Memlock Limits für native 4K DMA Mappings
 mkdir -p /etc/security/limits.d

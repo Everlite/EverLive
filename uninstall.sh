@@ -30,6 +30,8 @@ if command -v dkms >/dev/null 2>&1; then
     rm -rf /usr/src/everlive-* 2>/dev/null || true
 fi
 rm -f /etc/modules-load.d/everlive.conf 2>/dev/null || true
+rm -f /etc/modules-load.d/everlive-vfio.conf 2>/dev/null || true
+rm -f /etc/modprobe.d/everlive-vfio.conf 2>/dev/null || true
 rm -f /etc/modules-load.d/everlive-v4l2loopback.conf 2>/dev/null || true
 rm -f /etc/modprobe.d/everlive-v4l2loopback.conf 2>/dev/null || true
 rm -f /etc/modprobe.d/blacklist-everlive-legacy.conf 2>/dev/null || true
@@ -45,6 +47,7 @@ udevadm trigger 2>/dev/null || true
 # 4. Desktop-Einträge & Icons entfernen
 rm -f "${TARGET_HOME}/.local/share/applications/everlive.desktop"
 rm -f "${TARGET_HOME}/.local/share/applications/everlive-intern.desktop"
+rm -f "${TARGET_HOME}/.config/autostart/everlive.desktop"
 rm -f "${TARGET_HOME}/.local/share/icons/hicolor/"*/apps/everlive.png
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "${TARGET_HOME}/.local/share/applications" 2>/dev/null || true
