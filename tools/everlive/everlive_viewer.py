@@ -1575,6 +1575,8 @@ if HAS_QT:
             self.enable_vsync = vsync
             self.muted = False
             self.saved_cfg = load_settings()
+            self._headless_start = headless_start
+            self._v4l2_device = v4l2_device
             self._vfio_notice_until = 0.0
             self._vfio_volume_applies = 0
             self._launch_mode: Optional[str] = None
