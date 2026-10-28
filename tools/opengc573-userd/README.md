@@ -25,7 +25,9 @@ As of **EverLive v1.0.0**, this userspace engine is the default, primary driver 
 8. **Standby Daemon (`everlive_userd`):**
    Maintains card state and LED configuration via file descriptor handoff without triggering a PCIe Function Level Reset (FLR) when the streaming window closes.
 9. **Virtual Camera & Headless Mode:**
-   Native unscaled YUYV frames can be written to a `v4l2loopback` node (`--v4l2 /dev/video10`) for OBS, Discord or FFmpeg, either alongside the gaming window or with `--headless` (no SDL window at all). Format renegotiation after a resolution change is retried automatically while a reader (OBS) still holds its buffers.
+   Native unscaled YUYV frames can be written to a `v4l2loopback` node (`--v4l2 /dev/video10`) for OBS, Discord or FFmpeg, either alongside the gaming window or with `--headless` (no SDL window at all). The writer probes the node with `VIDIOC_TRY_FMT` before every negotiation: if a reader (OBS) already holds a fixed format, that geometry is adopted and every frame is rescaled into it with `libswscale`, so the picture appears immediately instead of staying black. The native mode is retried every 2 s and picked up automatically as soon as the reader releases the format.
+10. **Procedural No-Signal Screen:**
+   When no HDMI signal is present (console off, cable pulled, signal loss mid-session), the engine renders a generated "NO HDMI SIGNAL" card — dark gradient, subtle grid, crossed-out monitor icon, bitmap-font text — and pushes it at ~30 fps to both the SDL window and the loopback node, so OBS never sees a frozen or black feed. The picture is generated once per geometry (`gc573_user_nosignal.[ch]`), costs no CPU while cached, and is replaced seamlessly by the live DMA feed as soon as the signal locks.
 
 ---
 
@@ -34,11 +36,12 @@ As of **EverLive v1.0.0**, this userspace engine is the default, primary driver 
 | Component | Description |
 |:---|:---|
 | **`gc573_user_streamer`** | The main capture and streaming engine (video DMA, audio DMA, EDID, LED, SDL2 display). |
-| **`everlive_userd`** | Standby daemon that holds the VFIO container open between streaming sessions to avoid FLR resets. |
+| **`everlive_userd`** | Standby daemon that holds the VFIO container open between streaming sessions to avoid FLR resets. Drives the RGB lighting: static `--color R G B`, `--off`, or a smooth `--rainbow` / `--cycle SECONDS` spectrum. |
 | **`gc573_user_probe`** | Diagnostic tool for testing MMIO, I2C discovery, and DMA mappings. |
 | **`gc573_user_edid.[ch]`** | Hardware EDID profile generator and I2C programmer. |
 | **`gc573_user_audio.[ch]`** | PCIe DMA audio ring buffer, IEC 61937 scan/mute guard, audio worker thread and SDL2 playback. |
 | **`gc573_user_bitstream.[ch]`** | IEC 61937 unpacker plus AC-3/DTS decoder (`libavcodec`) and stereo downmix (`libswresample`). |
+| **`gc573_user_nosignal.[ch]`** | Procedural YUYV standby screen (gradient, grid, icon, bitmap-font text) for the window and the V4L2 sink. |
 | **`gc573_user_video.[ch]`** | Mode table, timings verification, and FPGA VIP configuration. |
 | **`gc573_user_fpga.[ch]`** | Artix-7 FPGA register definitions and RGB lighting control. |
 | **`gc573_vfio.[ch]`** | Low-level VFIO container, group, device, and IOMMU DMA mapping primitives. |

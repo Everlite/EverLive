@@ -321,6 +321,54 @@ int gc573_user_set_led_rgb(void *bar0, u8 r, u8 g, u8 b)
 	return 0;
 }
 
+int gc573_user_set_led_zones(void *bar0, const uint32_t colors[5])
+{
+	u8 *base;
+
+	if (!bar0 || !colors)
+		return -EINVAL;
+
+	base = (u8 *)bar0;
+
+	led_write(base, 0x0804, 0);
+	usleep_range(1000, 2000);
+	led_write(base, 0x0800, 0x0000000f);
+
+	/* Assign each of the 5 zones distinct script command slots:
+	 * Zone i -> R: slot (3 + i*3), G: slot (4 + i*3), B: slot (5 + i*3)
+	 */
+	for (int i = 0; i < 5; i++) {
+		u32 btn = 0x0808 + (u32)i * 24;
+		u32 r_cmd = 3 + (u32)i * 3;
+		u32 g_cmd = 4 + (u32)i * 3;
+		u32 b_cmd = 5 + (u32)i * 3;
+
+		led_write(base, btn + 0, r_cmd);
+		led_write(base, btn + 4, r_cmd);
+		led_write(base, btn + 8, g_cmd);
+		led_write(base, btn + 12, g_cmd);
+		led_write(base, btn + 16, b_cmd);
+		led_write(base, btn + 20, b_cmd);
+	}
+
+	led_write(base, 0x2008, 0x00000000);
+
+	for (int i = 0; i < 5; i++) {
+		u32 c = colors[i];
+		u32 r = (c >> 16) & 0xff;
+		u32 g = (c >> 8) & 0xff;
+		u32 b = c & 0xff;
+
+		u32 offset = 0x200c + (u32)i * 12;
+		led_write(base, offset + 0, 0xc0010000 | (r << 8) | r);
+		led_write(base, offset + 4, 0xc0010000 | (g << 8) | g);
+		led_write(base, offset + 8, 0xc0010000 | (b << 8) | b);
+	}
+
+	led_write(base, 0x0804, 0x1f);
+	return 0;
+}
+
 void gc573_user_led_refresh(void *bar0, u8 r, u8 g, u8 b)
 {
 	if (!bar0)

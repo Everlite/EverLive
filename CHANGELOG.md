@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.2] - 2026-10-28
+
+### Added
+- **Procedural "NO HDMI SIGNAL" standby screen:** with no HDMI signal (console off, cable pulled, signal lost mid-session) the engine now renders a generated dark-gaming card — gradient background with a subtle grid and vignette, a crossed-out monitor icon, the `EVERLIVE` wordmark, `NO HDMI SIGNAL` and `Waiting for console / input...` in the built-in 8x8 bitmap font — and pushes it at ~30 fps to both the SDL window and the `v4l2loopback` node, so OBS never shows a frozen or black feed. The YUYV frame is generated once per geometry (`gc573_user_nosignal.[ch]`, pure C, no image libraries) and cached, so an idle session costs no CPU for rendering; the live DMA feed takes over again as soon as the signal locks.
+- **Multi-Zone RGB Rainbow Wave & Smooth Spectrum Cycle:** `everlive_userd` gained `--wave` (5-zone traveling rainbow wave with 72° phase shift across the physical LED blocks) and `--rainbow` (whole-card spectrum cycle with gentle breathing), configurable via `--cycle [SECONDS]` (1-120 s, default 3.0 s for wave, 8.0 s for breathing). The Console Hub GUI includes presets for both effects.
+- **CLI flag `--tray` (`--minimized`):** launches EverLive directly docked into the system tray without popping up the main window, ideal for desktop autostart scripts.
+
+### Fixed
+- **OBS black screen when the virtual camera is opened first:** `v4l2loopback` lets a reader hold the format, so the writer's `VIDIOC_S_FMT` was either refused with `-EBUSY` or silently answered with OBS's geometry — while the streamer kept writing native-size frames, which the sink dropped (`bytes != frame_bytes`). The writer now probes with `VIDIOC_TRY_FMT`, verifies what `VIDIOC_S_FMT` actually granted, and falls back to `VIDIOC_G_FMT` plus the loopback's `/sys/class/video4linux/<node>/format` attribute. If the reader's mode differs, frames are rescaled into it with `libswscale` (`SWS_BILINEAR`), so the picture appears immediately without toggling the OBS source. The native mode is retried every 2 s and restored automatically once the reader releases it. Non-YUYV reader formats are detected and reported instead of feeding corrupt frames.
+
+---
+
 ## [1.2.1] - 2026-10-27
 
 ### Added

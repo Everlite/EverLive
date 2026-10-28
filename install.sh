@@ -164,7 +164,7 @@ detect_and_install_deps() {
         # Arch / CachyOS / Manjaro
         ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(base-devel)
         ! command -v sdl2-config >/dev/null 2>&1 && MISSING_PKGS+=(sdl2)
-        ! pkg-config --exists libavcodec libswresample >/dev/null 2>&1 && MISSING_PKGS+=(ffmpeg)
+        ! pkg-config --exists libavcodec libswresample libswscale >/dev/null 2>&1 && MISSING_PKGS+=(ffmpeg)
         ! command -v setcap >/dev/null 2>&1 && MISSING_PKGS+=(libcap)
         ! command -v wpctl >/dev/null 2>&1 && MISSING_PKGS+=(wireplumber)
         ! pacman -Q xcb-util-cursor >/dev/null 2>&1 && MISSING_PKGS+=(xcb-util-cursor)
@@ -178,7 +178,7 @@ detect_and_install_deps() {
         # Ubuntu / Debian / Pop!_OS / Mint
         ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(build-essential pkg-config)
         ! command -v sdl2-config >/dev/null 2>&1 && MISSING_PKGS+=(libsdl2-dev)
-        ! pkg-config --exists libavcodec libswresample >/dev/null 2>&1 && MISSING_PKGS+=(libavcodec-dev libswresample-dev libavutil-dev)
+        ! pkg-config --exists libavcodec libswresample libswscale >/dev/null 2>&1 && MISSING_PKGS+=(libavcodec-dev libswresample-dev libswscale-dev libavutil-dev)
         ! command -v setcap >/dev/null 2>&1 && MISSING_PKGS+=(libcap2-bin)
         ! command -v wpctl >/dev/null 2>&1 && MISSING_PKGS+=(wireplumber)
         ! dpkg -s libxcb-cursor0 >/dev/null 2>&1 && MISSING_PKGS+=(libxcb-cursor0)
@@ -193,7 +193,7 @@ detect_and_install_deps() {
         # Fedora / Nobara
         ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(gcc make pkgconf-pkg-config)
         ! command -v sdl2-config >/dev/null 2>&1 && MISSING_PKGS+=(SDL2-devel)
-        ! pkg-config --exists libavcodec libswresample >/dev/null 2>&1 && MISSING_PKGS+=(ffmpeg-devel)
+        ! pkg-config --exists libavcodec libswresample libswscale >/dev/null 2>&1 && MISSING_PKGS+=(ffmpeg-devel)
         ! command -v setcap >/dev/null 2>&1 && MISSING_PKGS+=(libcap)
         ! command -v wpctl >/dev/null 2>&1 && MISSING_PKGS+=(wireplumber)
         ! rpm -q xcb-util-cursor >/dev/null 2>&1 && MISSING_PKGS+=(xcb-util-cursor)

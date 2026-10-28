@@ -85,10 +85,20 @@ https://github.com/user-attachments/assets/19932c79-5364-4f16-81cf-0187f741129c
 Starting with version 1.2.0, EverLive supports **native V4L2 Loopback output** directly from its blob-free userspace engine, giving you three distinct workflows:
 
 ### Option 1: Native Virtual Camera (`/dev/video10`) — *Recommended*
-EverLive can stream raw, unscaled YUYV capture frames directly to a virtual video device node (`/dev/video10` labeled `"EverLive Capture"`):
+EverLive streams raw YUYV capture frames directly to a virtual video device node (`/dev/video10` labeled `"EverLive Capture"`):
 1. **Enable in Control Hub:** Check the `Virtual Camera (OBS /dev/video10)` checkbox in EverLive Hub (or launch with `./play.sh --loopback`).
-2. **Add to OBS Studio:** Add a standard **Video Capture Device (V4L2)** source, select `EverLive Capture (/dev/video10)`, and set Resolution to **Device Default**.
+2. **Add to OBS Studio:** Add a standard **Video Capture Device (V4L2)** source, select `EverLive Capture (/dev/video10)`, and set Resolution to **Device Default** (or matching your console, e.g. 1920×1080 / 2560×1440).
 3. **Capture Audio:** Add an **Audio Input Capture (PulseAudio/PipeWire)** source and select the EverLive HDMI audio stream.
+
+> [!TIP]
+> **OBS & EverLive Launch Order & Source Refresh:**  
+> EverLive automatically handles format negotiation with OBS:
+> * **EverLive opened first, then OBS:** OBS connects immediately at the full native resolution (e.g. 1440p or 4K).
+> * **OBS opened first, then EverLive:** If OBS was already open before EverLive started, OBS's V4L2 capture thread may pause while waiting for initial frames. In OBS, simply click on the Video Capture source properties or toggle the source visibility ($👁$) to refresh the feed — EverLive's built-in on-the-fly scaler (`libswscale`) will automatically adopt and fit the frames into OBS's active canvas without dropping.
+
+> [!NOTE]
+> **Standby & "No Signal" Screen (v1.2.2):**  
+> When your console is powered off or during HDMI handshakes, EverLive automatically pumps a clean 30 FPS "No Signal" standby card to both the game window and `/dev/video10`. This prevents OBS from freezing on a black or corrupted frame during signal loss.
 
 > [!NOTE]
 > **Prerequisite:** `install.sh` installs `v4l2loopback` where your distribution packages it and preconfigures it (`/etc/modprobe.d/everlive-v4l2loopback.conf` + `/etc/modules-load.d/`). If the module is not packaged (e.g. Fedora without RPM Fusion), install your distribution's `v4l2loopback-dkms` once — `play.sh` loads it with `video_nr=10 card_label="EverLive Capture" exclusive_caps=0` when the node is missing.
@@ -195,6 +205,9 @@ sudo ./install.sh --no-loopback
 ### Launching:
 ```bash
 ./play.sh
+
+# Or launch directly hidden into the system tray:
+./play.sh --tray
 ```
 Or start **EverLive** directly from your desktop application launcher.
 

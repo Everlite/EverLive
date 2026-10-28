@@ -85,6 +85,13 @@ int gc573_user_bridge_restore_for_led(void *bar0);
 int gc573_user_set_led_rgb(void *bar0, u8 r, u8 g, u8 b);
 
 /**
+ * gc573_user_set_led_zones - Set individual RGB colors for each of the 5 onboard LED zones
+ *
+ * @colors: array of 5 uint32_t RGB values (0x00RRGGBB)
+ */
+int gc573_user_set_led_zones(void *bar0, const uint32_t colors[5]);
+
+/**
  * gc573_user_led_refresh - Re-program the same LED profile without logging
  *
  * Used by the teardown diagnostic and the background daemon to test whether

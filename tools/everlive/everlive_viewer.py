@@ -374,6 +374,8 @@ LED_MODES = {
     "Magenta": 5,
     "Yellow": 6,
     "White": 7,
+    "Rainbow Wave (Multi-Zone)": 8,
+    "Spectrum Cycle (Breathing)": 9,
 }
 
 LED_NAME_MAP = {
@@ -385,6 +387,8 @@ LED_NAME_MAP = {
     "5": 5, "magenta": 5, "lila": 5, "purple": 5,
     "6": 6, "yellow": 6, "gelb": 6,
     "7": 7, "white": 7, "weiss": 7, "weiß": 7,
+    "8": 8, "wave": 8, "welle": 8, "dream": 8, "softdream": 8,
+    "9": 9, "rainbow": 9, "cycle": 9, "regenbogen": 9,
 }
 
 # Hardware EDID profiles understood by gc573_user_streamer --edid.
@@ -408,6 +412,8 @@ LED_COLORS = {
     5: "#d946ef",  # Magenta / Lila
     6: "#eab308",  # Gelb
     7: "#f8fafc",  # Weiß
+    8: "#a855f7",  # Rainbow Wave (Multi-Zone)
+    9: "#06b6d4",  # Spectrum Cycle
 }
 
 # RGB values understood by everlive_userd --color.  Cyan matches the verified
@@ -421,6 +427,8 @@ LED_RGB_VALUES = {
     5: (255, 0, 255),
     6: (255, 255, 0),
     7: (255, 255, 255),
+    8: (168, 85, 247),
+    9: (0, 204, 255),
 }
 
 
@@ -449,7 +457,11 @@ def set_vfio_led(mode: int) -> bool:
 
     _stop_vfio_daemon()
     args = [resolved, "--daemon"]
-    if mode == 0:
+    if mode == 8:
+        args.append("--wave")
+    elif mode == 9:
+        args.append("--rainbow")
+    elif mode == 0:
         args.append("--off")
     else:
         red, green, blue = LED_RGB_VALUES.get(mode, (0, 0, 0))
@@ -2081,11 +2093,11 @@ if HAS_QT:
             if self.vfio_mode:
                 # everlive_userd has no readback path; use the persisted mode
                 # and default to the verified cyan profile.
-                led_mode = saved_led if isinstance(saved_led, int) and 0 <= saved_led <= 7 else 4
+                led_mode = saved_led if isinstance(saved_led, int) and 0 <= saved_led <= 9 else 4
                 idx = self.combo_led.findData(led_mode)
                 if idx >= 0:
                     self.combo_led.setCurrentIndex(idx)
-                if isinstance(saved_led, int) and 0 <= saved_led <= 7:
+                if isinstance(saved_led, int) and 0 <= saved_led <= 9:
                     set_vfio_led(saved_led)
             else:
                 if saved_led is not None and isinstance(saved_led, int) and 0 <= saved_led <= 7:
@@ -3053,6 +3065,8 @@ def main():
                              f"(default: {V4L2_DEFAULT_DEVICE})")
     parser.add_argument("--headless", action="store_true",
                         help="Capture and publish/play without an SDL window")
+    parser.add_argument("--tray", "--minimized", dest="tray", action="store_true",
+                        help="Launch Console Hub directly hidden into the system tray")
     args = parser.parse_args()
 
     # Headless and virtual-camera launches are streamer-only: never open the
@@ -3132,7 +3146,7 @@ def main():
         streamer.stop()
         if streamer.vfio_mode:
             saved_led = load_settings().get("led_mode")
-            mode = saved_led if isinstance(saved_led, int) and 0 <= saved_led <= 7 else 4
+            mode = saved_led if isinstance(saved_led, int) and 0 <= saved_led <= 9 else 4
             if not (_proc_running("everlive_userd") and mode == 4):
                 set_vfio_led(mode)
     else:
@@ -3143,7 +3157,8 @@ def main():
         if os.path.isfile(icon_path):
             app.setWindowIcon(QIcon(icon_path))
         window = MainWindow(streamer, vsync=args.vsync, streamer_mode=args.streamer_mode)
-        window.show()
+        if not args.tray:
+            window.show()
         sys.exit(app.exec())
 
 

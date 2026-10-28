@@ -24,8 +24,10 @@
 #include "gc573_user_video.h"
 #include "gc573_user_audio.h"
 #include "gc573_user_bitstream.h"
+#include "gc573_user_nosignal.h"
 #include "gc573_user_font8x8.h"
 #include <SDL2/SDL.h>
+#include <libswscale/swscale.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -1142,39 +1144,43 @@ static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
 	SDL_RenderCopy(renderer, g_osd.texture, NULL, &dst);
 }
 
+static void fit_destination(SDL_Rect *dst, int win_w, int win_h,
+			    float src_aspect)
+{
+	dst->x = 0;
+	dst->y = 0;
+	dst->w = win_w;
+	dst->h = win_h;
+
+	/* "stretch": use the whole window, ignoring the source aspect. */
+	if (src_aspect <= 0.0f)
+		return;
+
+	float win_aspect = (float)win_w / (float)win_h;
+
+	if (win_aspect > src_aspect) {
+		dst->h = win_h;
+		dst->w = (int)(win_h * src_aspect);
+		dst->x = (win_w - dst->w) / 2;
+	} else {
+		dst->w = win_w;
+		dst->h = (int)(win_w / src_aspect);
+		dst->y = (win_h - dst->h) / 2;
+	}
+}
+
 static void render_frame(SDL_Window *window, SDL_Renderer *renderer,
 			 SDL_Texture *texture, float src_aspect)
 {
 	SDL_Rect dst;
 	int win_w = 0;
 	int win_h = 0;
-	float win_aspect;
 
 	SDL_GetWindowSize(window, &win_w, &win_h);
 	if (win_w <= 0 || win_h <= 0)
 		return;
 
-	if (src_aspect <= 0.0f) {
-		/* "stretch": use the whole window, ignoring the source aspect. */
-		dst.x = 0;
-		dst.y = 0;
-		dst.w = win_w;
-		dst.h = win_h;
-	} else {
-		win_aspect = (float)win_w / (float)win_h;
-
-		if (win_aspect > src_aspect) {
-			dst.h = win_h;
-			dst.w = (int)(win_h * src_aspect);
-			dst.x = (win_w - dst.w) / 2;
-			dst.y = 0;
-		} else {
-			dst.w = win_w;
-			dst.h = (int)(win_w / src_aspect);
-			dst.x = 0;
-			dst.y = (win_h - dst.h) / 2;
-		}
-	}
+	fit_destination(&dst, win_w, win_h, src_aspect);
 
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 	SDL_RenderClear(renderer);
@@ -1183,18 +1189,11 @@ static void render_frame(SDL_Window *window, SDL_Renderer *renderer,
 	SDL_RenderPresent(renderer);
 }
 
-static void render_standby(SDL_Window *window, SDL_Renderer *renderer,
-			   const char *message)
-{
-	/* Headless sessions have no window or renderer. */
-	if (!window || !renderer)
-		return;
-
-	SDL_SetRenderDrawColor(renderer, 15, 17, 26, 255);
-	SDL_RenderClear(renderer);
-	SDL_SetWindowTitle(window, message);
-	SDL_RenderPresent(renderer);
-}
+/*
+ * Replaced by the generated standby card further down (standby_present),
+ * which also feeds the V4L2 loopback sink.  Kept as the single call site used
+ * by the signal-loss paths.
+ */
 
 /*
  * SDL_RenderPresent waits on the monitor.  Doing that in the DMA poll loop
@@ -1441,28 +1440,38 @@ static void preview_release(int handle)
 struct v4l2_sink {
 	int fd;
 	char path[PATH_MAX];
+	/* Geometry the loopback node currently accepts from the writer. */
 	unsigned int width;
 	unsigned int height;
 	size_t frame_bytes;
 	/*
-	 * Geometry that still has to reach the driver.  While a reader (OBS)
-	 * holds the previous resolution, v4l2loopback rejects VIDIOC_S_FMT with
-	 * -EBUSY; the target stays recorded and the write path retries until the
-	 * reader releases or renegotiates its buffers.
+	 * Geometry the capture engine would like to publish.  While a reader
+	 * (OBS) holds its own format, VIDIOC_TRY_FMT/S_FMT report (or silently
+	 * grant) that format instead, so it becomes the write geometry and every
+	 * frame is rescaled into it.
 	 */
 	unsigned int target_width;
 	unsigned int target_height;
-	enum v4l2_colorspace target_colorspace;
+	unsigned int target_colorspace;
 	uint64_t last_retry_ms;
+	uint64_t last_upgrade_ms;
 	bool configured;
+	bool scaled;
+	bool format_warned;
 	bool write_error_reported;
 	bool reopen_error_reported;
+	/* YUYV rescale fallback for a reader-locked geometry. */
+	struct SwsContext *sws;
+	uint8_t *scale_buf;
+	size_t scale_bytes;
 	uint64_t frames;
 	uint64_t dropped;
 };
 
-/* Re-attempt an EBUSY format renegotiation at most four times per second. */
+/* Re-attempt a refused format negotiation at most four times per second. */
 #define V4L2_SINK_RETRY_MS	250U
+/* Retry the native mode this often while a reader holds another geometry. */
+#define V4L2_SINK_UPGRADE_MS	2000U
 
 static enum v4l2_colorspace v4l2_colorspace_for_signal(
 				const struct gc573_user_video_signal *sig)
@@ -1531,91 +1540,406 @@ static int v4l2_sink_reopen(struct v4l2_sink *sink)
 	return 0;
 }
 
+/*
+ * Build the YUYV pixel format the capture engine wants to publish.
+ * VIDIOC_S_FMT and VIDIOC_TRY_FMT both rewrite the structure with what the
+ * driver actually grants, which is how a reader-locked mode is detected.
+ */
+static void v4l2_fill_pix_format(struct v4l2_format *fmt, unsigned int width,
+				 unsigned int height, unsigned int colorspace)
+{
+	memset(fmt, 0, sizeof(*fmt));
+	fmt->type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+	fmt->fmt.pix.width = width;
+	fmt->fmt.pix.height = height;
+	fmt->fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+	fmt->fmt.pix.bytesperline = width * 2U;
+	fmt->fmt.pix.sizeimage = (uint32_t)((size_t)width * height * 2U);
+	fmt->fmt.pix.field = V4L2_FIELD_NONE;
+	fmt->fmt.pix.colorspace = colorspace;
+}
+
+static void v4l2_fourcc_str(uint32_t fourcc, char out[5])
+{
+	out[0] = (char)(fourcc & 0xffU);
+	out[1] = (char)((fourcc >> 8) & 0xffU);
+	out[2] = (char)((fourcc >> 16) & 0xffU);
+	out[3] = (char)((fourcc >> 24) & 0xffU);
+	out[4] = '\0';
+	for (unsigned int i = 0; i < 4; i++) {
+		if (!isprint((unsigned char)out[i]))
+			out[i] = '?';
+	}
+}
+
+/*
+ * Ask the driver what it would grant for the native mode, without changing
+ * anything.  While a reader owns the format, v4l2loopback answers with the
+ * locked mode instead of the requested one (format token / keep_format);
+ * older releases reject the request with -EBUSY instead.  Either way this is
+ * the authoritative, side-effect-free probe.
+ *
+ * Returns 0 and the granted format, or -errno when nothing usable came back.
+ */
+static int v4l2_try_format(int fd, unsigned int width, unsigned int height,
+			   unsigned int colorspace, struct v4l2_pix_format *out)
+{
+	struct v4l2_format fmt;
+
+	v4l2_fill_pix_format(&fmt, width, height, colorspace);
+	if (ioctl(fd, VIDIOC_TRY_FMT, &fmt) < 0)
+		return -errno;
+	if (!fmt.fmt.pix.width || !fmt.fmt.pix.height)
+		return -EINVAL;
+	*out = fmt.fmt.pix;
+	return 0;
+}
+
+/* Current device format (the reader's, once it holds the format token). */
+static int v4l2_current_format(int fd, struct v4l2_pix_format *out)
+{
+	struct v4l2_format fmt;
+
+	memset(&fmt, 0, sizeof(fmt));
+	fmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+	if (ioctl(fd, VIDIOC_G_FMT, &fmt) < 0)
+		return -errno;
+	if (!fmt.fmt.pix.width || !fmt.fmt.pix.height)
+		return -EINVAL;
+	*out = fmt.fmt.pix;
+	return 0;
+}
+
+/*
+ * Last resort for drivers that keep G_FMT/TRY_FMT at the requested values
+ * although a reader holds the link: v4l2loopback exports the live format as
+ * "FOURCC:WxH@fps" through sysfs.  An empty file means "no owner, no
+ * format", i.e. nothing is locked.
+ */
+static int v4l2_sysfs_format(const char *device, struct v4l2_pix_format *out)
+{
+	const char *name;
+	char path[PATH_MAX];
+	char buf[64];
+	char fourcc[5] = { 0 };
+	unsigned int w = 0, h = 0;
+	ssize_t n;
+	int fd;
+
+	if (!device || !out)
+		return -EINVAL;
+	name = strrchr(device, '/');
+	name = name ? name + 1 : device;
+	if (!*name)
+		return -EINVAL;
+	if (snprintf(path, sizeof(path),
+		     "/sys/class/video4linux/%s/format", name) >= (int)sizeof(path))
+		return -EINVAL;
+
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -errno;
+	n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n <= 0)
+		return -ENODATA;
+	buf[n] = '\0';
+	if (sscanf(buf, "%4s:%ux%u", fourcc, &w, &h) != 3 || !w || !h)
+		return -EINVAL;
+
+	memset(out, 0, sizeof(*out));
+	out->width = w;
+	out->height = h;
+	out->bytesperline = w * 2U;
+	out->sizeimage = (uint32_t)((size_t)w * h * 2U);
+	out->pixelformat = v4l2_fourcc(fourcc[0], fourcc[1], fourcc[2],
+				       fourcc[3]);
+	return 0;
+}
+
+static void v4l2_sink_drop_scaler(struct v4l2_sink *sink)
+{
+	if (sink->sws) {
+		sws_freeContext(sink->sws);
+		sink->sws = NULL;
+	}
+	free(sink->scale_buf);
+	sink->scale_buf = NULL;
+	sink->scale_bytes = 0;
+	sink->scaled = false;
+}
+
+/*
+ * Adopt the native geometry: nothing is locked, frames go out unchanged.
+ */
+static int v4l2_sink_adopt_native(struct v4l2_sink *sink,
+				  const struct v4l2_pix_format *pix)
+{
+	bool same = sink->configured && !sink->scaled &&
+		    sink->width == pix->width && sink->height == pix->height;
+
+	v4l2_sink_drop_scaler(sink);
+	sink->width = pix->width;
+	sink->height = pix->height;
+	sink->frame_bytes = pix->bytesperline ?
+			    (size_t)pix->bytesperline * pix->height :
+			    (size_t)pix->width * pix->height * 2U;
+	sink->configured = true;
+	sink->write_error_reported = false;
+	sink->format_warned = false;
+
+	if (!same)
+		pr_info("V4L2 sink: %ux%u YUYV, %zu KB/frame on %s",
+			sink->width, sink->height, sink->frame_bytes / 1024U,
+			sink->path);
+	return 0;
+}
+
+/*
+ * Adopt a reader-locked geometry and rescale every frame into it.  Frames are
+ * no longer dropped: the writer produces exactly what the device accepts, so
+ * OBS shows a picture immediately instead of waiting for a manual restart.
+ */
+static int v4l2_sink_adopt_scaled(struct v4l2_sink *sink,
+				  const struct v4l2_pix_format *pix,
+				  const char *why)
+{
+	bool same;
+
+	if (!pix->width || !pix->height || (pix->width & 1U))
+		return -EINVAL;
+
+	if (pix->pixelformat != V4L2_PIX_FMT_YUYV) {
+		char cc[5];
+
+		v4l2_fourcc_str(pix->pixelformat, cc);
+		if (!sink->format_warned) {
+			pr_warn("V4L2 sink: %s is locked to %s %ux%u; EverLive only "
+				"produces YUYV. Select YUYV in the OBS source "
+				"properties (or restart OBS).",
+				sink->path, cc, pix->width, pix->height);
+			sink->format_warned = true;
+		}
+		sink->configured = false;
+		return -EPROTO;
+	}
+
+	same = sink->configured && sink->scaled &&
+	       sink->width == pix->width && sink->height == pix->height;
+
+	sink->width = pix->width;
+	sink->height = pix->height;
+	sink->frame_bytes = pix->bytesperline ?
+			    (size_t)pix->bytesperline * pix->height :
+			    (size_t)pix->width * pix->height * 2U;
+	sink->configured = true;
+	sink->scaled = true;
+	sink->write_error_reported = false;
+	sink->format_warned = false;
+
+	if (!same)
+		pr_info("V4L2 sink: reader holds %ux%u YUYV (%s); rescaling "
+			"native %ux%u into it. Native retry every %u ms.",
+			sink->width, sink->height, why, sink->target_width,
+			sink->target_height, V4L2_SINK_UPGRADE_MS);
+	return 0;
+}
+
+/*
+ * Rescale one YUYV frame into the reader-locked geometry with libswscale.
+ * Only runs while a reader holds a foreign format; native output is a plain
+ * write().  The context is cached and rebuilt only when a geometry changes.
+ */
+static int v4l2_sink_rescale(struct v4l2_sink *sink, const void *data,
+			     unsigned int src_width, unsigned int src_height)
+{
+	const uint8_t *src_slice[4] = { data, NULL, NULL, NULL };
+	uint8_t *dst_slice[4] = { sink->scale_buf, NULL, NULL, NULL };
+	int src_stride[4] = { 0, 0, 0, 0 };
+	int dst_stride[4] = { 0, 0, 0, 0 };
+	size_t need;
+	int ret;
+
+	if (!src_width || !src_height || !sink->width || !sink->height)
+		return -EINVAL;
+
+	need = (size_t)sink->width * sink->height * 2U;
+	if (sink->scale_bytes < need) {
+		uint8_t *buf = realloc(sink->scale_buf, need);
+
+		if (!buf)
+			return -ENOMEM;
+		sink->scale_buf = buf;
+		sink->scale_bytes = need;
+	}
+
+	dst_slice[0] = sink->scale_buf;
+
+	sink->sws = sws_getCachedContext(sink->sws, (int)src_width,
+					 (int)src_height, AV_PIX_FMT_YUYV422,
+					 (int)sink->width, (int)sink->height,
+					 AV_PIX_FMT_YUYV422, SWS_BILINEAR, NULL, NULL,
+					 NULL);
+	if (!sink->sws)
+		return -EINVAL;
+
+	src_stride[0] = (int)src_width * 2;
+	dst_stride[0] = (int)sink->width * 2;
+	ret = sws_scale(sink->sws, src_slice, src_stride, 0, (int)src_height,
+			dst_slice, dst_stride);
+	if (ret <= 0) {
+		if (!sink->write_error_reported) {
+			pr_warn("V4L2 sink: rescale %ux%u -> %ux%u failed",
+				src_width, src_height, sink->width, sink->height);
+			sink->write_error_reported = true;
+		}
+		return -EIO;
+	}
+	return 0;
+}
+
 static int v4l2_sink_configure(struct v4l2_sink *sink,
 			       unsigned int width, unsigned int height,
 			       const struct gc573_user_video_signal *sig)
 {
 	struct v4l2_format fmt;
-	size_t frame_bytes;
+	struct v4l2_pix_format granted = { 0 };
+	unsigned int colorspace;
+	bool granted_valid = false;
 	int err;
 
 	if (!sink || !width || !height || (width & 1U) || !sink->path[0])
 		return -EINVAL;
 
-	/* Remember what the stream needs, even if the driver refuses it now. */
-	if (sink->target_width != width || sink->target_height != height)
-		sink->last_retry_ms = 0;
-	sink->target_width = width;
-	sink->target_height = height;
 	if (sig)
 		sink->target_colorspace = v4l2_colorspace_for_signal(sig);
+	colorspace = sink->target_colorspace;
+
+	/* Remember what the stream needs, even if the driver refuses it now. */
+	if (sink->target_width != width || sink->target_height != height)
+		sink->last_upgrade_ms = 0;
+	sink->target_width = width;
+	sink->target_height = height;
 
 	if (sink->fd < 0 && v4l2_sink_reopen(sink) < 0)
 		return -EBADF;
 
-	frame_bytes = (size_t)width * height * 2U;
-	if (sink->configured && sink->width == width &&
-	    sink->height == height && sink->frame_bytes == frame_bytes)
+	/* Cheap path: already publishing exactly this geometry, no scaling. */
+	if (sink->configured && !sink->scaled && sink->width == width &&
+	    sink->height == height)
 		return 0;
 
+	/*
+	 * 1. Always attempt native configuration first via VIDIOC_S_FMT.
+	 *    If no reader has permanently locked buffers, v4l2loopback will happily
+	 *    switch to the target resolution (1440p / 1080p).
+	 */
 	memset(&fmt, 0, sizeof(fmt));
-	fmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-	fmt.fmt.pix.width = width;
-	fmt.fmt.pix.height = height;
-	fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
-	fmt.fmt.pix.bytesperline = width * 2U;
-	fmt.fmt.pix.sizeimage = (uint32_t)frame_bytes;
-	fmt.fmt.pix.field = V4L2_FIELD_NONE;
-	fmt.fmt.pix.colorspace = sink->target_colorspace;
+	v4l2_fill_pix_format(&fmt, width, height, colorspace);
+	if (ioctl(sink->fd, VIDIOC_S_FMT, &fmt) == 0) {
+		if (fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_YUYV &&
+		    fmt.fmt.pix.width == width &&
+		    fmt.fmt.pix.height == height)
+			return v4l2_sink_adopt_native(sink, &fmt.fmt.pix);
+		return v4l2_sink_adopt_scaled(sink, &fmt.fmt.pix,
+					      "granted by VIDIOC_S_FMT");
+	}
 
-	if (ioctl(sink->fd, VIDIOC_S_FMT, &fmt) < 0) {
-		err = errno;
+	err = errno;
+	if (err != EBUSY) {
 		sink->configured = false;
-		if (err == EBUSY) {
-			pr_warn("V4L2 sink: %s reader (OBS) is holding the previous "
-				"resolution; will auto-retry VIDIOC_S_FMT once the "
-				"reader releases buffers...", sink->path);
-			/* Drop stale loopback state on the writer side. */
-			(void)v4l2_sink_reopen(sink);
-			return -EBUSY;
-		}
 		pr_err("V4L2 sink: VIDIOC_S_FMT %ux%u YUYV failed on %s: %s",
 		       width, height, sink->path, strerror(err));
 		return -err;
 	}
 
-	/* Use the geometry the driver actually accepted. */
-	sink->width = fmt.fmt.pix.width;
-	sink->height = fmt.fmt.pix.height;
-	sink->frame_bytes = (size_t)fmt.fmt.pix.bytesperline *
-			    fmt.fmt.pix.height;
-	if (!sink->frame_bytes)
-		sink->frame_bytes = frame_bytes;
-	sink->configured = true;
-	sink->write_error_reported = false;
+	/*
+	 * 2. EBUSY: An active reader (OBS) has locked buffers at another resolution.
+	 *    Probe what resolution the device is actually serving and scale into it.
+	 */
+	if (v4l2_try_format(sink->fd, width, height, colorspace, &granted) == 0)
+		granted_valid = true;
 
-	pr_info("V4L2 sink: %ux%u YUYV, %zu KB/frame on %s",
-		sink->width, sink->height, sink->frame_bytes / 1024U,
-		sink->path);
-	return 0;
+	/*
+	 * 3. A reader holds another mode.  Ask the device what it currently
+	 *    serves - G_FMT reflects the locked format on v4l2loopback, and the
+	 *    sysfs attribute is the live truth on drivers that keep G_FMT at the
+	 *    default.  Never guess: an unusable answer only means "retry later".
+	 */
+	if (!granted_valid ||
+	    (granted.pixelformat == V4L2_PIX_FMT_YUYV &&
+	     granted.width == width && granted.height == height)) {
+		struct v4l2_pix_format current;
+		struct v4l2_pix_format sysfs;
+		bool have_current = v4l2_current_format(sink->fd, &current) == 0;
+		bool have_sysfs = v4l2_sysfs_format(sink->path, &sysfs) == 0;
+
+		if (have_sysfs &&
+		    (!have_current || sysfs.width != current.width ||
+		     sysfs.height != current.height ||
+		     sysfs.pixelformat != current.pixelformat)) {
+			granted = sysfs;
+			granted_valid = true;
+		} else if (have_current) {
+			granted = current;
+			granted_valid = true;
+		} else if (have_sysfs) {
+			granted = sysfs;
+			granted_valid = true;
+		}
+
+		if (!granted_valid) {
+			sink->configured = false;
+			sink->last_retry_ms = now_ms();
+			if (!sink->format_warned) {
+				pr_warn("V4L2 sink: format negotiation pending on %s",
+					sink->path);
+				sink->format_warned = true;
+			}
+			return -EBUSY;
+		}
+	}
+
+	/*
+	 * S_FMT was refused, but the device already serves the native mode (e.g.
+	 * another opener holds the writer token).  Writing unchanged frames is
+	 * then correct - no rescale needed.
+	 */
+	if (granted.pixelformat == V4L2_PIX_FMT_YUYV &&
+	    granted.width == width && granted.height == height)
+		return v4l2_sink_adopt_native(sink, &granted);
+
+	return v4l2_sink_adopt_scaled(sink, &granted, "held by reader");
 }
 
 static void v4l2_sink_write(struct v4l2_sink *sink, const void *data,
-			    size_t bytes)
+			    size_t bytes, unsigned int src_width,
+			    unsigned int src_height)
 {
 	ssize_t written;
 	uint64_t now;
 
-	if (!sink || !data)
+	if (!sink || !data || !sink->path[0])
 		return;
 
+	if (sink->fd < 0 && v4l2_sink_reopen(sink) < 0)
+		return;
+
+	/*
+	 * A reader-locked geometry is only a fallback: keep asking for the native
+	 * mode, and drop the scaler as soon as the reader releases or
+	 * renegotiates.  No user interaction required.
+	 */
+	if (sink->scaled) {
+		now = now_ms();
+		if (now - sink->last_upgrade_ms >= V4L2_SINK_UPGRADE_MS) {
+			sink->last_upgrade_ms = now;
+			(void)v4l2_sink_configure(sink, sink->target_width,
+						  sink->target_height, NULL);
+		}
+	}
+
 	if (!sink->configured) {
-		/*
-		 * A reader (OBS) rejected the new geometry with -EBUSY.  Keep
-		 * retrying while frames keep arriving: as soon as OBS releases or
-		 * renegotiates its buffers, VIDIOC_S_FMT succeeds and delivery
-		 * resumes without restarting the streamer.
-		 */
 		if (!sink->target_width || !sink->target_height)
 			return;
 
@@ -1626,11 +1950,25 @@ static void v4l2_sink_write(struct v4l2_sink *sink, const void *data,
 
 		(void)v4l2_sink_configure(sink, sink->target_width,
 					  sink->target_height, NULL);
-		return;
+		if (!sink->configured || sink->fd < 0)
+			return;
 	}
 
-	if (sink->fd < 0)
-		return;
+	/*
+	 * Rescale only when the device geometry differs from the frame.  This is
+	 * the whole point of the fallback: frames are delivered instead of being
+	 * dropped, so OBS shows the picture immediately.
+	 */
+	if (sink->scaled && (src_width != sink->width ||
+			     src_height != sink->height)) {
+		if (v4l2_sink_rescale(sink, data, src_width, src_height) < 0) {
+			sink->dropped++;
+			return;
+		}
+		data = sink->scale_buf;
+		bytes = sink->frame_bytes;
+	}
+
 	if (bytes != sink->frame_bytes) {
 		sink->dropped++;
 		return;
@@ -1655,7 +1993,11 @@ static void v4l2_sink_write(struct v4l2_sink *sink, const void *data,
 
 static void v4l2_sink_close(struct v4l2_sink *sink)
 {
-	if (!sink || sink->fd < 0)
+	if (!sink)
+		return;
+
+	v4l2_sink_drop_scaler(sink);
+	if (sink->fd < 0)
 		return;
 
 	pr_info("V4L2 sink: closing %s (%lu frames, %lu dropped)",
@@ -1664,6 +2006,144 @@ static void v4l2_sink_close(struct v4l2_sink *sink)
 	close(sink->fd);
 	sink->fd = -1;
 	sink->configured = false;
+}
+
+/* ------------------------------------------------------------------ */
+/* No-signal standby screen                                          */
+/* ------------------------------------------------------------------ */
+
+/* One card refresh per 33 ms: enough for OBS, no measurable CPU cost. */
+#define STANDBY_INTERVAL_MS	33U
+
+struct standby_state {
+	struct gc573_no_signal frame;
+	SDL_Texture *texture;
+	uint64_t next_push_ms;
+	uint64_t pushes;
+};
+
+/* Set by main() so the signal-loss helpers can reach the shared state. */
+static struct standby_state *g_standby;
+static struct v4l2_sink *g_standby_sink;
+
+/*
+ * Render the standby card at the geometry the loopback node currently
+ * accepts, so the no-signal feed never has to be rescaled either.  Before the
+ * first negotiation (and without a sink) it defaults to 1080p.
+ */
+static void standby_geometry(const struct v4l2_sink *sink, unsigned int *width,
+			     unsigned int *height)
+{
+	if (sink && sink->path[0] && sink->configured && sink->width &&
+	    sink->height) {
+		*width = sink->width;
+		*height = sink->height;
+		return;
+	}
+	if (sink && sink->path[0] && sink->target_width && sink->target_height) {
+		*width = sink->target_width;
+		*height = sink->target_height;
+		return;
+	}
+
+	*width = GC573_NO_SIGNAL_DEFAULT_WIDTH;
+	*height = GC573_NO_SIGNAL_DEFAULT_HEIGHT;
+}
+
+/*
+ * Push the standby card to the window and the loopback node.
+ *
+ * The generated YUYV frame is immutable and cached per geometry, so a tick
+ * only costs one texture upload plus one write().  @force bypasses the 30 fps
+ * throttle for an immediate redraw on a state transition.
+ */
+static void standby_present(SDL_Window *window, SDL_Renderer *renderer,
+			    struct v4l2_sink *sink, const char *title,
+			    bool force)
+{
+	unsigned int width = 0;
+	unsigned int height = 0;
+	const void *frame;
+	size_t bytes = 0;
+	SDL_Rect dst;
+	int win_w = 0;
+	int win_h = 0;
+	uint64_t now;
+
+	if (!g_standby)
+		return;
+
+	now = now_ms();
+	if (!force && now < g_standby->next_push_ms)
+		return;
+	g_standby->next_push_ms = now + STANDBY_INTERVAL_MS;
+
+	if (title && window)
+		SDL_SetWindowTitle(window, title);
+
+	standby_geometry(sink, &width, &height);
+	if (gc573_no_signal_ensure(&g_standby->frame, width, height) < 0)
+		return;
+
+	frame = gc573_no_signal_frame(&g_standby->frame, &bytes);
+	if (!frame || !bytes)
+		return;
+
+	/*
+	 * Feed the loopback sink even in headless sessions, so OBS shows the
+	 * standby card instead of a frozen last frame.  The target geometry is
+	 * recorded once; a reader still holding the old mode is handled by the
+	 * sink's own 250 ms retry path.
+	 */
+	if (sink && sink->path[0]) {
+		/* Seed the target once; v4l2_sink_write() owns retry/upgrade. */
+		if (!sink->target_width || !sink->target_height)
+			(void)v4l2_sink_configure(sink, width, height, NULL);
+		v4l2_sink_write(sink, frame, bytes, width, height);
+	}
+
+	if (!window || !renderer)
+		return;
+
+	if (ensure_texture(renderer, &g_standby->texture, width, height) < 0)
+		return;
+	if (SDL_UpdateTexture(g_standby->texture, NULL, frame,
+			      (int)width * 2) < 0) {
+		static bool reported;
+
+		if (!reported) {
+			pr_warn("Standby texture upload failed: %s", SDL_GetError());
+			reported = true;
+		}
+		return;
+	}
+
+	SDL_GetWindowSize(window, &win_w, &win_h);
+	if (win_w <= 0 || win_h <= 0)
+		return;
+
+	fit_destination(&dst, win_w, win_h, 16.0f / 9.0f);
+	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+	SDL_RenderClear(renderer);
+	SDL_RenderCopy(renderer, g_standby->texture, NULL, &dst);
+	SDL_RenderPresent(renderer);
+	g_standby->pushes++;
+}
+
+/* Immediate standby redraw with a status title (signal-loss paths). */
+static void render_standby(SDL_Window *window, SDL_Renderer *renderer,
+			   const char *message)
+{
+	standby_present(window, renderer, g_standby_sink, message, true);
+}
+
+/*
+ * Periodic standby tick for the idle loop: redraws at ~30 fps and keeps the
+ * loopback feed alive without blocking event handling.
+ */
+static void standby_tick(SDL_Window *window, SDL_Renderer *renderer)
+{
+	standby_present(window, renderer, g_standby_sink, NULL, false);
 }
 
 struct audio_playback {
@@ -2984,6 +3464,7 @@ int main(int argc, char *argv[])
 	struct gc573_user_video video;
 	struct v4l2_sink v4l2_sink = { .fd = -1 };
 	struct audio_stream audio;
+	struct standby_state standby;
 	bool video_ready = false;
 	bool streaming = false;
 	SDL_Window *window = NULL;
@@ -3118,6 +3599,10 @@ int main(int argc, char *argv[])
 
 	memset(&video, 0, sizeof(video));
 	memset(&audio, 0, sizeof(audio));
+	memset(&standby, 0, sizeof(standby));
+	pthread_mutex_init(&standby.frame.lock, NULL);
+	g_standby = &standby;
+	g_standby_sink = &v4l2_sink;
 	memset(&current_sig, 0, sizeof(current_sig));
 	memset(&watch, 0, sizeof(watch));
 
@@ -3301,7 +3786,7 @@ int main(int argc, char *argv[])
 		if (v4l2_sink_open(&v4l2_sink, v4l2_device) < 0) {
 			fprintf(stderr, "[ERROR] V4L2 loopback sink unavailable (%s).\n",
 				v4l2_device);
-			fprintf(stderr, "        Create it with: sudo modprobe v4l2loopback video_nr=10 card_label=\"EverLive Capture\" exclusive_caps=1\n");
+			fprintf(stderr, "        Create it with: sudo modprobe v4l2loopback video_nr=10 card_label=\"EverLive Capture\" exclusive_caps=0\n");
 			if (renderer) {
 				SDL_DestroyRenderer(renderer);
 				renderer = NULL;
@@ -3773,7 +4258,8 @@ int main(int argc, char *argv[])
 				have_frame = true;
 				if (v4l2_sink.path[0])
 					v4l2_sink_write(&v4l2_sink, pixels,
-							g_preview.bytes);
+							g_preview.bytes,
+							output_width, output_height);
 				if (texture) {
 					int uret = SDL_UpdateTexture(texture, NULL,
 								     pixels,
@@ -3847,7 +4333,14 @@ int main(int argc, char *argv[])
 				SDL_Delay(1);
 			}
 		} else {
-			SDL_Delay(20);
+			/*
+			 * No live DMA: run the generated standby card at ~30 fps on
+			 * screen and on the loopback node.  The tick throttles itself,
+			 * so the short sleep only keeps events and status polling
+			 * responsive.
+			 */
+			standby_tick(window, renderer);
+			SDL_Delay(5);
 		}
 
 		if (streaming) {
@@ -3912,15 +4405,16 @@ int main(int argc, char *argv[])
 				       (double)g_preview.taken_age_us / 1000.0);
 				if (v4l2_sink.path[0]) {
 					if (v4l2_sink.configured)
-						printf("[V4L2] %ux%u YUYV | written %lu | dropped %lu\n",
+						printf("[V4L2] %ux%u YUYV%s | written %lu | dropped %lu\n",
 						       v4l2_sink.width, v4l2_sink.height,
+						       v4l2_sink.scaled ? " (rescaled to reader)" : "",
 						       (unsigned long)v4l2_sink.frames,
 						       (unsigned long)v4l2_sink.dropped);
 					else
-						printf("[V4L2] waiting for reader to release %ux%u -> %ux%u | dropped %lu\n",
-						       v4l2_sink.width, v4l2_sink.height,
+						printf("[V4L2] negotiating %ux%u YUYV on %s | dropped %lu\n",
 						       v4l2_sink.target_width,
 						       v4l2_sink.target_height,
+						       v4l2_sink.path,
 						       (unsigned long)v4l2_sink.dropped);
 				}
 				if (audio.streaming && audio.bt_playing) {
@@ -3983,6 +4477,11 @@ int main(int argc, char *argv[])
 		audio_cleanup(&audio);
 		gc573_user_it6805_audio_disable(ctx.bar0);
 		v4l2_sink_close(&v4l2_sink);
+		if (standby.texture) {
+			SDL_DestroyTexture(standby.texture);
+			standby.texture = NULL;
+		}
+		gc573_no_signal_destroy(&standby.frame);
 		run_teardown_trace(&ctx, &video, video_ready, window, renderer,
 				   texture);
 		return 0;
@@ -4005,6 +4504,9 @@ int main(int argc, char *argv[])
 		gc573_user_video_cleanup(&video);
 	if (texture)
 		SDL_DestroyTexture(texture);
+	if (standby.texture)
+		SDL_DestroyTexture(standby.texture);
+	gc573_no_signal_destroy(&standby.frame);
 	osd_destroy();
 	if (renderer)
 		SDL_DestroyRenderer(renderer);
