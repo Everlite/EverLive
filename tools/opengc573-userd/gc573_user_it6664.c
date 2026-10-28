@@ -178,6 +178,7 @@ static bool g_tx2_output_enabled;
 static bool g_tx2_error_reported;
 static bool g_tx2_hpd_last;
 static bool g_rx_locked;
+static bool g_rx_last_5v;
 static u32 g_rclk_khz;
 static u8 g_rx_color_depth;
 static u32 g_tx1_pclk_khz;
@@ -1741,6 +1742,7 @@ int gc573_user_it6664_enable_source(void *bar0)
 	ret = rx_read(bar0, IT6664_RX_BANK_0, IT6664_RX_REG_STATUS, &value);
 	if (ret < 0)
 		return ret;
+	g_rx_last_5v = (value & 0x01) != 0;
 	pr_info("[✓] IT6664 source enabled, RX HDCP off (RX status 0x%02x, 5V=%u).",
 		value, !!(value & 0x01));
 	return 0;
@@ -2600,6 +2602,16 @@ int gc573_user_it6664_poll(void *bar0, struct gc573_user_it6664_status *status)
 		return ret;
 	status->rx_status13 = value;
 	status->five_volt_present = (value & 0x01) != 0;
+
+	if (status->five_volt_present && !g_rx_last_5v) {
+		g_rx_last_5v = true;
+		pr_info("IT6664 5V detected (console powered on / connected); pulsing RX HPD...");
+		it6664_rx_set_hpd(bar0, false);
+		msleep(120);
+		it6664_rx_set_hpd(bar0, true);
+	} else if (!status->five_volt_present && g_rx_last_5v) {
+		g_rx_last_5v = false;
+	}
 
 	ret = rx_read(bar0, IT6664_RX_BANK_0, IT6664_RX_REG_STATUS_14, &value);
 	if (ret < 0)
