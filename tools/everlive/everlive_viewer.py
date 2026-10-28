@@ -16,7 +16,7 @@ import json
 import shutil
 from typing import Optional, Tuple, Dict
 
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 
 CONFIG_DIR = os.path.expanduser("~/.config/everlive")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")

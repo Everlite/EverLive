@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive - One-Click Launcher for Console Gaming Suite (v1.2.2)
+# EverLive - One-Click Launcher for Console Gaming Suite (v1.2.3)
 # 100% Blob-Free Userspace VFIO Engine for AVerMedia Live Gamer 4K (GC573)
 # ==============================================================================
 set -euo pipefail

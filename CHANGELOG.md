@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.3] - 2026-10-28
+
+### Added
+- **Zero-Sudo Boot Auto-Binding:** `install.sh` now configures `/etc/modules-load.d/everlive-vfio.conf` (`vfio`, `vfio_pci`, `vfio_iommu_type1`) and `/etc/modprobe.d/everlive-vfio.conf` (`options vfio-pci ids=1461:0054,1461:0055`). The Linux kernel automatically binds the AVerMedia GC573 and GC555 to `vfio-pci` right during early boot, completely eliminating password prompts when launching EverLive or running it via desktop autostart (`~/.config/autostart/everlive.desktop`).
+- **Live RGB Worker Thread:** `gc573_user_streamer` now runs a dedicated 20 Hz pthread worker to continuously animate the 5-zone traveling rainbow wave (`--wave`) and whole-card breathing spectrum cycle (`--rainbow`) while active capturing is running.
+- **Combined CLI & Tray Execution:** `--tray` (`--minimized`) can now be combined seamlessly with `--headless`, `--loopback`, and `--wave`/`--rainbow` in a single command, docking EverLive directly into the system tray while capturing to `/dev/video10` without launching conflicting daemon instances.
+
+### Fixed
+- **Startup LED Red Blinking Gap:** moved streamer LED preset application to millisecond 10 (immediately after FPGA bridge initialization) and prevented redundant standby daemon launches when starting directly into stream mode, eliminating the ~3s unprogrammed red-flashing gap during HDMI receiver init and EDID handshakes.
+- **Console Power-On After EverLive (5V Rise Detection):** added 5V power-rise detection in `gc573_user_it6664.c`. When a console (PS5, Xbox, Switch) is powered on after EverLive is already active, EverLive detects the 5V HDMI line and automatically triggers an RX HPD pulse so the console immediately locks onto video without needing a cable replug or app restart.
+- **GUI Headless Autostart Initialization:** fixed an `AttributeError` on `_headless_start` in `MainWindow` during UI initialization.
+
+---
+
 ## [1.2.2] - 2026-10-28
 
 ### Added
