@@ -119,6 +119,14 @@ static uint8_t g_led_r = 0x00;
 static uint8_t g_led_g = 0xcc;
 static uint8_t g_led_b = 0xff;
 
+enum stream_led_mode {
+	STREAM_LED_STATIC,
+	STREAM_LED_WAVE,
+	STREAM_LED_RAINBOW,
+};
+
+static enum stream_led_mode g_led_mode = STREAM_LED_STATIC;
+
 /*
  * Set when the active EDID advertises compressed audio.  Built-in profiles
  * always do (L-PCM + AC-3 + DTS), so the receiver can deliver IEC 61937
@@ -282,6 +290,18 @@ static bool parse_led_color(const char *spec, uint8_t *r, uint8_t *g, uint8_t *b
 	if (!spec || !*spec)
 		return false;
 
+	if (strcasecmp(spec, "wave") == 0 || strcasecmp(spec, "softdream") == 0) {
+		g_led_mode = STREAM_LED_WAVE;
+		*r = 0xa8; *g = 0x55; *b = 0xf7;
+		return true;
+	}
+	if (strcasecmp(spec, "rainbow") == 0 || strcasecmp(spec, "cycle") == 0) {
+		g_led_mode = STREAM_LED_RAINBOW;
+		*r = 0x00; *g = 0xcc; *b = 0xff;
+		return true;
+	}
+	g_led_mode = STREAM_LED_STATIC;
+
 	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
 		if (strcasecmp(spec, names[i].name) == 0) {
 			*r = names[i].r;
@@ -428,10 +448,20 @@ static bool start_led_daemon(struct gc573_vfio_ctx *ctx, bool handoff)
 		setsid();
 		mark_extra_fds_close_on_exec(ctx->container_fd, ctx->group_fd,
 					     ctx->device_fd);
-		execl(exe, "everlive_userd", "--inherit",
-		      container_fd, group_fd, device_fd,
-		      bar_offset, bar_size, "--color",
-		      led_r, led_g, led_b, (char *)NULL);
+		if (g_led_mode == STREAM_LED_WAVE) {
+			execl(exe, "everlive_userd", "--inherit",
+			      container_fd, group_fd, device_fd,
+			      bar_offset, bar_size, "--wave", (char *)NULL);
+		} else if (g_led_mode == STREAM_LED_RAINBOW) {
+			execl(exe, "everlive_userd", "--inherit",
+			      container_fd, group_fd, device_fd,
+			      bar_offset, bar_size, "--rainbow", (char *)NULL);
+		} else {
+			execl(exe, "everlive_userd", "--inherit",
+			      container_fd, group_fd, device_fd,
+			      bar_offset, bar_size, "--color",
+			      led_r, led_g, led_b, (char *)NULL);
+		}
 		_exit(127);
 	}
 
@@ -856,7 +886,14 @@ static int configure_and_start(struct gc573_vfio_ctx *ctx,
 	 * Re-arm the selected colour; profile, divider and opcode sequence are
 	 * unchanged.
 	 */
-	gc573_user_led_refresh(ctx->bar0, g_led_r, g_led_g, g_led_b);
+	if (g_led_mode == STREAM_LED_WAVE) {
+		uint32_t default_zones[5] = {
+			0x00ff0000, 0x00ffff00, 0x0000ff00, 0x0000ffff, 0x008000ff,
+		};
+		gc573_user_set_led_zones(ctx->bar0, default_zones);
+	} else {
+		gc573_user_led_refresh(ctx->bar0, g_led_r, g_led_g, g_led_b);
+	}
 
 	if (!gc573_user_fpga_mode_known(sig->width, sig->height,
 					sig->frame_rate_hz,
@@ -3498,6 +3535,10 @@ int main(int argc, char *argv[])
 			led_spec = argv[++i];
 		} else if (strncmp(argv[i], "--led=", 6) == 0) {
 			led_spec = argv[i] + 6;
+		} else if (strcmp(argv[i], "--wave") == 0) {
+			led_spec = "wave";
+		} else if (strcmp(argv[i], "--rainbow") == 0) {
+			led_spec = "rainbow";
 		} else if (strcmp(argv[i], "--edid") == 0 && i + 1 < argc) {
 			edid_spec = argv[++i];
 		} else if (strncmp(argv[i], "--edid=", 7) == 0) {
@@ -3698,9 +3739,20 @@ int main(int argc, char *argv[])
 	}
 
 	/* 6. Keep the selected LED colour to indicate active userspace streaming. */
-	gc573_user_set_led_rgb(ctx.bar0, g_led_r, g_led_g, g_led_b);
-	printf("[LED] Active colour #%02x%02x%02x\n",
-	       g_led_r, g_led_g, g_led_b);
+	if (g_led_mode == STREAM_LED_WAVE) {
+		uint32_t default_zones[5] = {
+			0x00ff0000, 0x00ffff00, 0x0000ff00, 0x0000ffff, 0x008000ff,
+		};
+		gc573_user_set_led_zones(ctx.bar0, default_zones);
+		printf("[LED] Multi-zone rainbow wave active\n");
+	} else if (g_led_mode == STREAM_LED_RAINBOW) {
+		gc573_user_set_led_rgb(ctx.bar0, g_led_r, g_led_g, g_led_b);
+		printf("[LED] Rainbow spectrum active\n");
+	} else {
+		gc573_user_set_led_rgb(ctx.bar0, g_led_r, g_led_g, g_led_b);
+		printf("[LED] Active colour #%02x%02x%02x\n",
+		       g_led_r, g_led_g, g_led_b);
+	}
 
 	/* 7. Setup MSI Interrupt via EventFD (video DMA completion). */
 	ret = gc573_vfio_setup_msi(&ctx);

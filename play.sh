@@ -145,20 +145,32 @@ if [ "$WANT_V4L2" -eq 1 ]; then
     fi
 fi
 
-# 4. Direct CLI passthrough: if --cli or streamer-specific flags are passed, launch streamer directly
+# 4. Direct CLI passthrough: if --cli or streamer-specific flags are passed (without --tray), launch streamer directly
 if [ "${1:-}" = "--cli" ]; then
     shift
     "${USERD_DIR}/gc573_user_streamer" "$@"
     exit $?
 fi
 
+HAS_TRAY=0
 for arg in "$@"; do
     case "$arg" in
-        --aspect|--edid|--v4l2|--loopback|--headless|--v4l2=*|--loopback=*)
-            exec "${USERD_DIR}/gc573_user_streamer" "$@"
+        --tray|--minimized)
+            HAS_TRAY=1
+            break
             ;;
     esac
 done
+
+if [ "$HAS_TRAY" -eq 0 ]; then
+    for arg in "$@"; do
+        case "$arg" in
+            --aspect|--edid|--v4l2|--loopback|--headless|--v4l2=*|--loopback=*)
+                exec "${USERD_DIR}/gc573_user_streamer" "$@"
+                ;;
+        esac
+    done
+fi
 
 # 5. Launch EverLive Console Hub GUI
 if [ -x "${SCRIPT_DIR}/tools/everlive/.venv/bin/python3" ]; then

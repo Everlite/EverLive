@@ -1210,9 +1210,14 @@ class GameStreamer:
         # Keep the colour selected in the GUI while gaming instead of the
         # streamer's built-in cyan default.
         led_mode = load_settings().get("led_mode", 4)
-        if not isinstance(led_mode, int) or not 0 <= led_mode <= 7:
-            led_mode = 4
-        cmd.extend(["--led", led_hex_for_mode(led_mode)])
+        if led_mode == 8:
+            cmd.extend(["--led", "wave"])
+        elif led_mode == 9:
+            cmd.extend(["--led", "rainbow"])
+        elif isinstance(led_mode, int) and 0 <= led_mode <= 7:
+            cmd.extend(["--led", led_hex_for_mode(led_mode)])
+        else:
+            cmd.extend(["--led", "#00ccff"])
 
         # Hardware EDID profile advertised to the console.
         edid_profile = load_settings().get("edid_profile", "default")
@@ -1562,7 +1567,8 @@ class GameStreamer:
 
 if HAS_QT:
     class MainWindow(QMainWindow):
-        def __init__(self, streamer: GameStreamer, vsync: bool = True, streamer_mode: bool = False):
+        def __init__(self, streamer: GameStreamer, vsync: bool = True, streamer_mode: bool = False,
+                     headless_start: bool = False, v4l2_device: Optional[str] = None):
             super().__init__()
             self.streamer = streamer
             self.vfio_mode = streamer.vfio_mode
@@ -1583,13 +1589,20 @@ if HAS_QT:
 
             self.init_ui()
 
+            if v4l2_device:
+                self.chk_v4l2.setChecked(True)
+                if isinstance(v4l2_device, str) and v4l2_device != V4L2_DEFAULT_DEVICE:
+                    self.edit_v4l2_path.setText(v4l2_device)
+
             # Signal monitor timer (1s polling)
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.update_status)
             self.timer.start(1000)
 
-            # Check if autostart is requested
-            if self.saved_cfg.get("autostart", False) or getattr(streamer, "_cli_autostart", False):
+            # Check if autostart or headless start is requested
+            if headless_start:
+                QTimer.singleShot(250, self.start_studio)
+            elif self.saved_cfg.get("autostart", False) or getattr(streamer, "_cli_autostart", False):
                 QTimer.singleShot(250, self.start_gaming_screen)
 
         def init_ui(self):
@@ -2350,12 +2363,12 @@ if HAS_QT:
             return True
 
         def _restore_led_after_stream(self):
-            """The streamer hands off cyan; restore the hub's saved colour."""
+            """The streamer hands off; restore the hub's saved colour."""
             if not self.vfio_mode:
                 return
             mode = load_settings().get("led_mode",
                                        self.saved_cfg.get("led_mode"))
-            if not isinstance(mode, int) or not 0 <= mode <= 7:
+            if not isinstance(mode, int) or not 0 <= mode <= 9:
                 mode = 4
             # If the streamer failed before its handoff there may be no
             # standby daemon at all; start one even for the cyan default.
@@ -3067,11 +3080,19 @@ def main():
                         help="Capture and publish/play without an SDL window")
     parser.add_argument("--tray", "--minimized", dest="tray", action="store_true",
                         help="Launch Console Hub directly hidden into the system tray")
+    parser.add_argument("--wave", action="store_true",
+                        help="Set GC573 LED to multi-zone rainbow wave")
+    parser.add_argument("--rainbow", action="store_true",
+                        help="Set GC573 LED to whole-card spectrum cycle")
     args = parser.parse_args()
 
-    # Headless and virtual-camera launches are streamer-only: never open the
-    # control hub just to ignore those flags.
-    if args.headless or args.v4l2:
+    if args.wave:
+        args.led = "wave"
+    elif args.rainbow:
+        args.led = "rainbow"
+
+    # Headless and virtual-camera launches are streamer-only unless tray is requested.
+    if (args.headless or args.v4l2) and not args.tray:
         args.cli = True
 
     if args.led is not None:
@@ -3082,7 +3103,7 @@ def main():
                 val = int(key)
             except ValueError:
                 pass
-        if val is not None and 0 <= val <= 7:
+        if val is not None and 0 <= val <= 9:
             hw = detect_gc573_driver()
             if hw.get("mode") == "vfio":
                 if _vfio_streamer_running():
@@ -3099,7 +3120,7 @@ def main():
                     print(f"[!] Failed to set GC573 LED to mode {val}.")
         else:
             print(f"[!] Invalid LED mode '{args.led}'. Valid: {list(LED_NAME_MAP.keys())}")
-        if not args.cli and not any(arg in sys.argv for arg in ["-f", "--fullscreen", "-p", "--preset"]):
+        if not args.cli and not args.tray and not any(arg in sys.argv for arg in ["-f", "--fullscreen", "-p", "--preset", "--headless", "--v4l2", "--loopback"]):
             sys.exit(0)
 
     streamer = GameStreamer(vdev=args.device, adev=args.audio, force_mpv=args.mpv)
@@ -3156,7 +3177,8 @@ def main():
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "everlive.png")
         if os.path.isfile(icon_path):
             app.setWindowIcon(QIcon(icon_path))
-        window = MainWindow(streamer, vsync=args.vsync, streamer_mode=args.streamer_mode)
+        window = MainWindow(streamer, vsync=args.vsync, streamer_mode=args.streamer_mode,
+                            headless_start=args.headless, v4l2_device=args.v4l2)
         if not args.tray:
             window.show()
         sys.exit(app.exec())
