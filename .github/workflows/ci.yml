@@ -24,6 +24,7 @@ jobs:
             libsdl2-dev \
             libavcodec-dev \
             libswresample-dev \
+            libswscale-dev \
             libavutil-dev \
             libx11-dev \
             libgl-dev \
