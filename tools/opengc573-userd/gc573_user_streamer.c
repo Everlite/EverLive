@@ -489,6 +489,84 @@ static uint64_t now_ms(void)
 	return now_us() / 1000;
 }
 
+#define RAINBOW_SATURATION	150U
+#define RAINBOW_VALUE_MIN	150U
+#define RAINBOW_VALUE_MAX	205U
+
+static void hsv_to_rgb(uint32_t hue, uint8_t sat, uint8_t val,
+		       uint8_t *r, uint8_t *g, uint8_t *b)
+{
+	uint32_t region = (hue >> 8) % 6U;
+	uint32_t rem = hue & 0xffU;
+	uint8_t p = (uint8_t)((val * (255U - sat)) / 255U);
+	uint8_t q = (uint8_t)((val * (255U - (sat * rem) / 255U)) / 255U);
+	uint8_t t = (uint8_t)((val *
+			      (255U - (sat * (255U - rem)) / 255U)) / 255U);
+
+	switch (region) {
+	case 0: *r = val; *g = t;   *b = p;   break;
+	case 1: *r = q;   *g = val; *b = p;   break;
+	case 2: *r = p;   *g = val; *b = t;   break;
+	case 3: *r = p;   *g = q;   *b = val; break;
+	case 4: *r = t;   *g = p;   *b = val; break;
+	default:*r = val; *g = p;   *b = q;   break;
+	}
+}
+
+static void rainbow_tick(uint64_t elapsed_ms, uint32_t cycle_ms,
+			 uint8_t *r, uint8_t *g, uint8_t *b)
+{
+	uint32_t pos = cycle_ms ? (uint32_t)(elapsed_ms % cycle_ms) : 0U;
+	uint32_t hue = (uint32_t)(((uint64_t)pos * 1536U) / cycle_ms);
+	uint32_t half = cycle_ms / 2U;
+	uint32_t level, breath, val;
+
+	if (!half)
+		half = 1U;
+
+	level = (uint32_t)(((uint64_t)(pos % half) * 255U) / half);
+	breath = (level <= 127U) ? level * 2U : (255U - level) * 2U;
+	val = RAINBOW_VALUE_MIN +
+	      ((RAINBOW_VALUE_MAX - RAINBOW_VALUE_MIN) * breath) / 255U;
+
+	hsv_to_rgb(hue, RAINBOW_SATURATION, (uint8_t)val, r, g, b);
+}
+
+static void wave_tick(uint64_t elapsed_ms, uint32_t cycle_ms, uint32_t colors[5])
+{
+	for (int i = 0; i < 5; i++) {
+		uint64_t zone_elapsed = elapsed_ms + ((uint64_t)i * cycle_ms) / 5U;
+		uint8_t r, g, b;
+		rainbow_tick(zone_elapsed, cycle_ms, &r, &g, &b);
+		colors[i] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+	}
+}
+
+static pthread_t g_led_thread;
+static bool g_led_thread_running;
+
+static void *led_worker(void *arg)
+{
+	struct gc573_vfio_ctx *ctx = arg;
+	uint64_t start_ms = now_ms();
+
+	while (__atomic_load_n(&g_running, __ATOMIC_RELAXED)) {
+		if (g_led_mode == STREAM_LED_WAVE) {
+			uint32_t zone_colors[5];
+			wave_tick(now_ms() - start_ms, 3000, zone_colors);
+			gc573_user_set_led_zones(ctx->bar0, zone_colors);
+		} else if (g_led_mode == STREAM_LED_RAINBOW) {
+			uint8_t r, g, b;
+			rainbow_tick(now_ms() - start_ms, 8000, &r, &g, &b);
+			gc573_user_led_refresh(ctx->bar0, r, g, b);
+		} else {
+			break;
+		}
+		usleep(50000);
+	}
+	return NULL;
+}
+
 static const char *colorspace_name(uint8_t colorspace)
 {
 	switch (colorspace) {
@@ -3759,6 +3837,11 @@ int main(int argc, char *argv[])
 	if (ret < 0)
 		pr_warn("Interrupt setup failed; falling back to IRQ polling");
 
+	if (g_led_mode == STREAM_LED_WAVE || g_led_mode == STREAM_LED_RAINBOW) {
+		if (pthread_create(&g_led_thread, NULL, led_worker, &ctx) == 0)
+			g_led_thread_running = true;
+	}
+
 	/*
 	 * Set the application identity before SDL initializes its video and
 	 * audio backends; PipeWire/PulseAudio also read their properties when
@@ -4565,6 +4648,11 @@ int main(int argc, char *argv[])
 	if (window)
 		SDL_DestroyWindow(window);
 	SDL_Quit();
+
+	if (g_led_thread_running) {
+		pthread_join(g_led_thread, NULL);
+		g_led_thread_running = false;
+	}
 
 	/*
 	 * If the early handoff failed, fall back to the old late handoff.
