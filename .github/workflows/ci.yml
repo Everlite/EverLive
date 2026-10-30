@@ -26,6 +26,7 @@ jobs:
             libswresample-dev \
             libswscale-dev \
             libavutil-dev \
+            libpipewire-0.3-dev \
             libx11-dev \
             libgl-dev \
             python3
@@ -42,6 +43,7 @@ jobs:
       - name: Verify Python syntax
         run: |
           python3 -m py_compile tools/everlive/everlive_viewer.py
+          python3 -m py_compile tools/everlive/everlive_client.py
 
       - name: Verify shell script syntax
         run: |
