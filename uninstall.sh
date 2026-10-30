@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive - Deinstaller (v1.2.3)
+# EverLive - Deinstaller (v1.3.0)
 # ==============================================================================
 set -euo pipefail
 
@@ -35,6 +35,7 @@ rm -f /etc/modprobe.d/everlive-vfio.conf 2>/dev/null || true
 rm -f /etc/modules-load.d/everlive-v4l2loopback.conf 2>/dev/null || true
 rm -f /etc/modprobe.d/everlive-v4l2loopback.conf 2>/dev/null || true
 rm -f /etc/modprobe.d/blacklist-everlive-legacy.conf 2>/dev/null || true
+rm -f /etc/pipewire/pipewire.conf.d/50-everlive-capture.conf 2>/dev/null || true
 rm -f /etc/udev/rules.d/70-everlive.rules 2>/dev/null || true
 rm -f /usr/local/bin/everlive-audio 2>/dev/null || true
 

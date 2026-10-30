@@ -16,7 +16,13 @@ import json
 import shutil
 from typing import Optional, Tuple, Dict
 
-__version__ = "1.2.3"
+try:
+    from everlive_client import EverLiveIpcClient, probe as ipc_probe
+except ImportError:  # imported as a module from another working directory
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from everlive_client import EverLiveIpcClient, probe as ipc_probe
+
+__version__ = "1.3.0"
 
 CONFIG_DIR = os.path.expanduser("~/.config/everlive")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
@@ -25,6 +31,7 @@ GC573_VENDOR_ID = "0x1461"
 GC573_DEVICE_IDS = {"0x0054", "0x0055"}
 ENGINE_VFIO_TEXT = "● Userspace VFIO"
 V4L2_DEFAULT_DEVICE = "/dev/video10"
+AUDIO_TAP_NODE = "everlive-capture-audio"
 
 ASPECT_OPTIONS = [
     ("Auto (Native HDMI)", "auto"),
@@ -34,9 +41,20 @@ ASPECT_OPTIONS = [
 ]
 ASPECT_KEYS = {key for _, key in ASPECT_OPTIONS}
 
+OSD_POSITIONS = ("tr", "br", "bl", "tl")
+OSD_POSITION_OPTIONS = [
+    ("Top Right", "tr"),
+    ("Bottom Right", "br"),
+    ("Bottom Left", "bl"),
+    ("Top Left", "tl"),
+]
+
 DEFAULT_SETTINGS = {
     "v4l2_loopback": True,
     "aspect_ratio": "auto",
+    "osd_enabled": True,
+    "osd_position": "tr",
+    "audio_tap": False,
     "minimize_to_tray": True,
 }
 
@@ -60,6 +78,12 @@ def load_settings() -> dict:
         settings["minimize_to_tray"] = True
     if settings.get("aspect_ratio") not in ASPECT_KEYS:
         settings["aspect_ratio"] = "auto"
+    if not isinstance(settings.get("osd_enabled"), bool):
+        settings["osd_enabled"] = True
+    if settings.get("osd_position") not in OSD_POSITIONS:
+        settings["osd_position"] = "tr"
+    if not isinstance(settings.get("audio_tap"), bool):
+        settings["audio_tap"] = False
     # "bitstream" used to be a separate EDID profile.  Every built-in profile
     # now advertises AC-3/DTS, so old settings migrate to the unified default.
     if settings.get("edid_profile") == "bitstream":
@@ -1187,7 +1211,10 @@ class GameStreamer:
                     streamer_mode: bool = False,
                     v4l2_device: Optional[str] = None,
                     headless: bool = False,
-                    aspect: Optional[str] = None) -> bool:
+                    aspect: Optional[str] = None,
+                    osd: bool = True,
+                    osd_pos: str = "tr",
+                    audio_tap: Optional[str] = None) -> bool:
         """Launch the blob-free userspace VFIO streamer directly."""
         if _vfio_streamer_running():
             print("[!] A userspace streamer is already running; refusing to start a second instance.")
@@ -1238,7 +1265,13 @@ class GameStreamer:
             if fullscreen:
                 cmd.append("--fullscreen")
             cmd.append("--vsync" if vsync else "--no-vsync")
-            cmd.append("--streamer-mode" if streamer_mode else "--osd")
+            if streamer_mode:
+                cmd.append("--streamer-mode")
+            else:
+                cmd.append("--osd" if osd else "--no-osd")
+        if osd_pos not in ("tr", "br", "bl", "tl"):
+            osd_pos = "tr"
+        cmd.extend(["--osd-pos", osd_pos])
 
         if aspect is None:
             aspect = getattr(self, "aspect", "auto")
@@ -1250,6 +1283,8 @@ class GameStreamer:
 
         if v4l2_device:
             cmd.extend(["--v4l2", v4l2_device])
+        if audio_tap:
+            cmd.extend(["--audio-tap", audio_tap])
         if headless:
             cmd.append("--headless")
 
@@ -1302,7 +1337,7 @@ class GameStreamer:
             return False
         return True
 
-    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None) -> bool:
+    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None, osd: bool = True, osd_pos: str = "tr", audio_tap: Optional[str] = None) -> bool:
         if self.is_running:
             return True
 
@@ -1314,7 +1349,10 @@ class GameStreamer:
                                     streamer_mode=streamer_mode,
                                     v4l2_device=v4l2_device,
                                     headless=headless,
-                                    aspect=aspect)
+                                    aspect=aspect,
+                                    osd=osd,
+                                    osd_pos=osd_pos,
+                                    audio_tap=audio_tap)
 
         if headless:
             print("[!] Headless/Studio mode requires the userspace VFIO engine.")
@@ -1577,6 +1615,13 @@ if HAS_QT:
             self.saved_cfg = load_settings()
             self._headless_start = headless_start
             self._v4l2_device = v4l2_device
+            # Remote control: set once we attach to a streamer we did not
+            # start ourselves (it owns the card, we only observe it).
+            self._remote = False
+            self._remote_status: Dict = {}
+            self._ipc = None
+            self._ipc_timer = None
+            self._ipc_shutdown = False
             self._vfio_notice_until = 0.0
             self._vfio_volume_applies = 0
             self._launch_mode: Optional[str] = None
@@ -1601,17 +1646,30 @@ if HAS_QT:
             self.timer.timeout.connect(self.update_status)
             self.timer.start(1000)
 
+            # Remote channel to a streamer that already owns the device.
+            # QSocketNotifier keeps this on the GUI thread: no worker threads
+            # and no cross-thread signals.
+            self._ipc = EverLiveIpcClient(self)
+            self._ipc.connectedChanged.connect(self._on_remote_connection)
+            self._ipc.statusReceived.connect(self._on_remote_status)
+            self._ipc.errorRaised.connect(lambda msg: print(f"[IPC] {msg}"))
+            self._ipc_timer = QTimer(self)
+            self._ipc_timer.setInterval(1000)
+            self._ipc_timer.timeout.connect(self._poll_remote_status)
+
             # Check if autostart or headless start is requested
             if headless_start:
                 QTimer.singleShot(250, self.start_studio)
             elif self.saved_cfg.get("autostart", False) or getattr(streamer, "_cli_autostart", False):
                 QTimer.singleShot(250, self.start_gaming_screen)
 
+            QTimer.singleShot(300, self, self._ipc_try_attach)
+
         def init_ui(self):
             self.setWindowTitle("EverLive - Console Hub")
             # Wider layout keeps the full userspace-engine status capsule and
             # the VFIO device line readable without truncation.
-            self.setFixedSize(900, 675)
+            self.setFixedSize(900, 700)
 
             # Application & Window Icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "everlive.png")
@@ -1972,7 +2030,7 @@ if HAS_QT:
                     "Studio / headless mode requires the userspace VFIO engine.")
             v_hero.addWidget(self.btn_studio)
 
-            # Launch options (3x2 grid)
+            # Launch options (4x2 grid)
             grid_opts = QGridLayout()
             grid_opts.setHorizontalSpacing(24)
             grid_opts.setVerticalSpacing(8)
@@ -1991,7 +2049,20 @@ if HAS_QT:
                 self.chk_v4l2.setEnabled(False)
                 self.chk_v4l2.setToolTip(
                     "Virtual camera output requires the userspace VFIO engine.")
-            grid_opts.addWidget(self.chk_v4l2, 0, 0, 1, 2)
+            grid_opts.addWidget(self.chk_v4l2, 0, 0)
+
+            self.chk_audio_tap = QCheckBox("Virtual Audio Track for OBS")
+            self.chk_audio_tap.setToolTip(
+                "Publishes the mixed HDMI audio (L-PCM and decoded AC-3/DTS) "
+                f"to the PipeWire sink '{AUDIO_TAP_NODE}'. In OBS add "
+                "'Monitor of EverLive Capture Audio' as its own audio source.")
+            self.chk_audio_tap.setChecked(bool(self.saved_cfg.get("audio_tap", False)))
+            self.chk_audio_tap.toggled.connect(
+                lambda val: save_settings({"audio_tap": val}))
+            if not self.vfio_mode:
+                self.chk_audio_tap.setChecked(False)
+                self.chk_audio_tap.setEnabled(False)
+            grid_opts.addWidget(self.chk_audio_tap, 0, 1)
 
             self.chk_fullscreen = QCheckBox("Start in Fullscreen")
             self.chk_fullscreen.setChecked(self.saved_cfg.get("fullscreen", True))
@@ -2019,7 +2090,7 @@ if HAS_QT:
                 "Closing with [X] hides the Console Hub window into the system tray so it does not clutter Alt-Tab.")
             self.chk_tray.setChecked(bool(self.saved_cfg.get("minimize_to_tray", True)))
             self.chk_tray.toggled.connect(lambda val: save_settings({"minimize_to_tray": val}))
-            grid_opts.addWidget(self.chk_tray, 3, 0, 1, 2)
+            grid_opts.addWidget(self.chk_tray, 3, 0)
 
             if self.vfio_mode:
                 # Fullscreen and VSync are forwarded to gc573_user_streamer.
@@ -2223,6 +2294,40 @@ if HAS_QT:
                 "IT6805 / SDL2 stream log.")
             grid.addWidget(self.lbl_audio_fmt, 3, 1, 1, 3)
 
+            # Row 4: On-screen stats overlay (engine OSD)
+            lbl_osd = QLabel("On-Screen Stats:")
+            lbl_osd.setStyleSheet("font-weight: 500; color: #94a3b8;")
+            lbl_osd.setToolTip(
+                "Live resolution, FPS and audio format drawn by the engine "
+                "itself. Hotkeys in the gaming window: Tab/o toggles, p "
+                "cycles the corner.")
+            grid.addWidget(lbl_osd, 4, 0)
+
+            self.chk_osd = QCheckBox("Show overlay")
+            self.chk_osd.setToolTip(
+                "Forwarded as --osd/--no-osd. Overridden by Streamer Mode "
+                "(clean feed hides the overlay).")
+            self.chk_osd.setChecked(bool(self.saved_cfg.get("osd_enabled", True)))
+            self.chk_osd.toggled.connect(self.on_osd_changed)
+            grid.addWidget(self.chk_osd, 4, 1)
+
+            lbl_osd_pos = QLabel("OSD Corner:")
+            lbl_osd_pos.setStyleSheet("font-weight: 500; color: #94a3b8;")
+            grid.addWidget(lbl_osd_pos, 4, 2)
+
+            self.combo_osd_pos = QComboBox()
+            for text, key in OSD_POSITION_OPTIONS:
+                self.combo_osd_pos.addItem(text, key)
+            saved_pos = self.saved_cfg.get("osd_position", "tr")
+            pos_idx = self.combo_osd_pos.findData(saved_pos)
+            if pos_idx >= 0:
+                self.combo_osd_pos.setCurrentIndex(pos_idx)
+            self.combo_osd_pos.setToolTip(
+                "Forwarded as --osd-pos. Top Right is the default so the "
+                "overlay never covers console navigation.")
+            self.combo_osd_pos.currentIndexChanged.connect(self.on_osd_pos_changed)
+            grid.addWidget(self.combo_osd_pos, 4, 3)
+
             v_settings.addLayout(grid)
             root_layout.addWidget(card_settings)
 
@@ -2358,12 +2463,171 @@ if HAS_QT:
                     "Userspace Engine Missing",
                     "Build it with: make -C tools/opengc573-userd")
                 return False
+            if self._remote or ipc_probe() is not None:
+                self._set_vfio_notice(
+                    "Remote Session",
+                    "Another streamer owns the capture card; close it to start "
+                    "a session from here",
+                    seconds=8.0)
+                return False
             if _vfio_streamer_running():
                 self._set_vfio_notice(
                     "Userspace Engine Active",
                     "An external gc573_user_streamer instance already owns the device")
                 return False
             return True
+
+        # -----------------------------------------------------------------
+        # Remote control channel
+        # -----------------------------------------------------------------
+        def _ipc_try_attach(self):
+            """Attach to a running streamer (local or external)."""
+            if self._ipc is None or self._ipc_shutdown:
+                return
+            if self._ipc.connected:
+                return
+            if self._ipc.try_connect():
+                return
+            # If a local streamer is running, or if idle watching for external streamers, retry
+            if self.streamer.is_running or getattr(self, "_launch_mode", None):
+                QTimer.singleShot(400, self._ipc_try_attach)
+            else:
+                QTimer.singleShot(2500, self, self._ipc_try_attach)
+
+        def _on_remote_connection(self, connected: bool):
+            is_local = self.streamer.is_running or bool(getattr(self, "_launch_mode", None))
+            self._remote = bool(connected and not is_local)
+            if connected:
+                self._ipc_timer.start()
+                print(f"[IPC] Attached to running streamer "
+                      f"v{self._ipc.version or '?'}")
+                if self._remote:
+                    self._set_remote_ui(True)
+                self._poll_remote_status()
+            else:
+                self._ipc_timer.stop()
+                self._remote_status = {}
+                if self._remote:
+                    self._set_remote_ui(False)
+                self._remote = False
+                # The streamer may come back; keep watching quietly.
+                if not self._ipc_shutdown and not self.streamer.is_running:
+                    QTimer.singleShot(2500, self, self._ipc_try_attach)
+
+        def _set_remote_ui(self, remote: bool):
+            """Mirror the hub between local control and remote observation."""
+            if remote:
+                if hasattr(self, "lbl_engine_badge"):
+                    self.lbl_engine_badge.setText("● Remote Session")
+                self.btn_launch.setText("Remote Session Active")
+                self.btn_launch.setObjectName("btnLaunchStart")
+                self.btn_launch.setEnabled(False)
+                self.btn_launch.setToolTip(
+                    "A userspace streamer started outside this window owns "
+                    "the capture card.")
+                self.btn_studio.setText("Start Studio / Headless (OBS)")
+                self.btn_studio.setObjectName("btnStudioStart")
+                self.btn_studio.setEnabled(False)
+                self.btn_studio.setToolTip(
+                    "Stop the external streamer to start a session from here.")
+                for button in (self.btn_launch, self.btn_studio):
+                    button.setStyle(button.style())
+                # The LED, volume and aspect controls stay live: they now talk
+                # to the running engine over the control socket.
+                if hasattr(self, "combo_led"):
+                    self.combo_led.setEnabled(True)
+                self._set_vfio_notice(
+                    "Remote Session",
+                    "Attached to the userspace streamer that owns the card",
+                    seconds=6.0)
+            else:
+                if hasattr(self, "lbl_engine_badge") and self.vfio_mode:
+                    self.lbl_engine_badge.setText("Userspace VFIO")
+                self._set_launch_running(False)
+
+        def _poll_remote_status(self):
+            if self._remote and self._ipc is not None:
+                self._ipc.request_status()
+
+        def _on_remote_status(self, status: Dict):
+            """Render a snapshot published by the remote streamer."""
+            self._remote_status = status
+            if not self._remote or self.streamer.is_running:
+                return
+
+            signal_info = status.get("signal") or {}
+            video = status.get("video") or {}
+            audio = status.get("audio") or {}
+            v4l2 = status.get("v4l2") or {}
+
+            self._sync_remote_controls(status, audio)
+
+            if hasattr(self, "lbl_audio_fmt"):
+                self.lbl_audio_fmt.setText(audio.get("label") or "No Audio")
+
+            if signal_info.get("locked"):
+                interlace = "i" if signal_info.get("interlaced") else "p"
+                self.lbl_hero_signal.setText(
+                    f"{signal_info.get('width', 0)} × "
+                    f"{signal_info.get('height', 0)}{interlace} @ "
+                    f"{signal_info.get('rate_hz', 0.0):.2f} Hz")
+                parts = [
+                    f"{video.get('fps', 0.0):.1f} FPS",
+                    f"ring {video.get('ring_buffers', 0)}/"
+                    f"{video.get('ring_channels', 0)}ch",
+                ]
+                if audio.get("label"):
+                    parts.append(audio["label"])
+                if v4l2.get("configured"):
+                    parts.append(
+                        f"V4L2 {v4l2.get('width', 0)}×{v4l2.get('height', 0)}")
+                self.lbl_hero_meta.setText(" • ".join(parts))
+            else:
+                self.lbl_hero_signal.setText("No HDMI Signal")
+                self.lbl_hero_meta.setText(
+                    "Remote streamer running • waiting for input")
+
+        def _sync_remote_controls(self, status: Dict, audio: Dict):
+            """Mirror the engine's settings into the local controls.
+
+            Signals are blocked so the 1 Hz refresh cannot bounce the value
+            straight back to the streamer.
+            """
+            gain = audio.get("gain")
+            if isinstance(gain, (int, float)) and not self.slider_vol.isSliderDown():
+                pct = max(0, min(150, int(round(float(gain) * 100))))
+                if pct != self.slider_vol.value():
+                    self.slider_vol.blockSignals(True)
+                    self.slider_vol.setValue(pct)
+                    self.slider_vol.blockSignals(False)
+                self.lbl_vol.setText(f"{pct}%")
+
+            muted = bool(audio.get("muted"))
+            if muted != self.muted:
+                self._set_mute_visual(muted)
+
+            aspect = status.get("aspect")
+            if aspect in ASPECT_KEYS:
+                idx = self.combo_aspect.findData(aspect)
+                if idx >= 0 and idx != self.combo_aspect.currentIndex():
+                    self.combo_aspect.blockSignals(True)
+                    self.combo_aspect.setCurrentIndex(idx)
+                    self.combo_aspect.blockSignals(False)
+
+            osd = status.get("osd") or {}
+            if (isinstance(osd.get("enabled"), bool) and
+                    osd["enabled"] != self.chk_osd.isChecked()):
+                self.chk_osd.blockSignals(True)
+                self.chk_osd.setChecked(osd["enabled"])
+                self.chk_osd.blockSignals(False)
+
+            pos = osd.get("position")
+            if pos in OSD_POSITIONS:
+                idx = self.combo_osd_pos.findData(pos)
+                if idx >= 0 and idx != self.combo_osd_pos.currentIndex():
+                    self.combo_osd_pos.blockSignals(True)
+                    self.combo_osd_pos.setCurrentIndex(idx)
+                    self.combo_osd_pos.blockSignals(False)
 
         def _restore_led_after_stream(self):
             """The streamer hands off; restore the hub's saved colour."""
@@ -2384,12 +2648,37 @@ if HAS_QT:
                 return False
             mode = int(mode)
             self.saved_cfg["led_mode"] = mode
+            save_settings({"led_mode": mode})
+            if self._ipc is not None and self._ipc.connected:
+                return self._send_ipc_led(mode)
             if self.vfio_mode:
                 ok = set_vfio_led(mode)
                 if self.streamer.is_running:
                     print("[*] LED colour saved; the active userspace stream keeps cyan until it exits.")
                 return ok
             return write_led_mode(mode)
+
+        def _send_ipc_led(self, mode: int) -> bool:
+            """Forward a LED mode to the running streamer via IPC.
+
+            Modes 8/9 are animations the engine renders itself; 0 turns the
+            LEDs off; 1-7 are static colours sent as an explicit RGB triple.
+            """
+            if self._ipc is None or not self._ipc.connected:
+                return False
+            if mode == 8:
+                return self._ipc.set_led_mode("wave")
+            if mode == 9:
+                return self._ipc.set_led_mode("rainbow")
+            if mode == 0:
+                return self._ipc.set_led_mode("off")
+
+            color = LED_COLORS.get(mode)
+            if not color or len(color) != 7:
+                return False
+            return self._ipc.set_led(int(color[1:3], 16),
+                                     int(color[3:5], 16),
+                                     int(color[5:7], 16))
 
         def toggle_stream(self):
             if self._switch_pending:
@@ -2428,6 +2717,8 @@ if HAS_QT:
 
             self._switch_pending = target
             self._handoff_tries = 0
+            if self._ipc is not None:
+                self._ipc.close()
             self.streamer.stop()
             self._set_launch_running(False)
             if hasattr(self, "lbl_engine_badge"):
@@ -2487,6 +2778,8 @@ if HAS_QT:
             # Cancel any in-flight mode handover so its timer cannot relaunch.
             self._switch_pending = None
             self._handoff_tries = 0
+            if self._ipc is not None:
+                self._ipc.close()
             self.streamer.stop()
             self._set_launch_running(False)
             if self.vfio_mode:
@@ -2513,6 +2806,12 @@ if HAS_QT:
                 aspect = self.combo_aspect.currentData() or "auto"
                 if aspect not in ASPECT_KEYS:
                     aspect = "auto"
+                want_osd = self.chk_osd.isChecked()
+                osd_pos = self.combo_osd_pos.currentData() or "tr"
+                if osd_pos not in OSD_POSITIONS:
+                    osd_pos = "tr"
+                audio_tap = (AUDIO_TAP_NODE
+                             if self.chk_audio_tap.isChecked() else None)
 
                 if v4l2_device and not os.path.exists(v4l2_device):
                     self._set_vfio_notice(
@@ -2528,6 +2827,9 @@ if HAS_QT:
                     "streamer_mode": want_streamer,
                     "v4l2_loopback": want_v4l2,
                     "aspect_ratio": aspect,
+                    "osd_enabled": want_osd,
+                    "osd_position": osd_pos,
+                    "audio_tap": bool(audio_tap),
                 })
                 self.streamer.aspect = aspect
                 success = self.streamer.start(
@@ -2536,13 +2838,17 @@ if HAS_QT:
                     streamer_mode=want_streamer,
                     v4l2_device=v4l2_device,
                     headless=False,
-                    aspect=aspect)
+                    aspect=aspect,
+                    osd=want_osd,
+                    osd_pos=osd_pos,
+                    audio_tap=audio_tap)
                 if success:
                     self._set_launch_running(True, "gaming")
                     self._vfio_notice_until = 0.0
                     self._vfio_volume_applies = 0
                     self._retry_audio_props()
                     self._check_audio_sink()
+                    QTimer.singleShot(350, self._ipc_try_attach)
                 else:
                     self._set_vfio_notice(
                         "Userspace Engine Failed",
@@ -2591,10 +2897,13 @@ if HAS_QT:
             aspect = self.combo_aspect.currentData() or "auto"
             if aspect not in ASPECT_KEYS:
                 aspect = "auto"
+            audio_tap = (AUDIO_TAP_NODE
+                         if self.chk_audio_tap.isChecked() else None)
             self.streamer.aspect = aspect
             save_settings({
                 "v4l2_loopback": want_v4l2,
                 "aspect_ratio": aspect,
+                "audio_tap": bool(audio_tap),
             })
             success = self.streamer.start(
                 fullscreen=False,
@@ -2602,12 +2911,14 @@ if HAS_QT:
                 streamer_mode=True,
                 v4l2_device=v4l2_device,
                 headless=True,
-                aspect=aspect)
+                aspect=aspect,
+                audio_tap=audio_tap)
             if success:
                 self._set_launch_running(True, "studio")
                 self._vfio_notice_until = 0.0
                 self._vfio_volume_applies = 0
                 self._retry_audio_props()
+                QTimer.singleShot(350, self._ipc_try_attach)
                 if v4l2_device:
                     self._set_vfio_notice(
                         "Studio Mode Active",
@@ -2633,8 +2944,28 @@ if HAS_QT:
             self.saved_cfg["aspect_ratio"] = aspect
             self.streamer.aspect = aspect
             save_settings({"aspect_ratio": aspect})
-            if self.streamer.is_running:
+            if self._ipc is not None and self._ipc.connected:
+                self._ipc.set_aspect(aspect)
+            elif self.streamer.is_running:
                 print("[*] Aspect ratio saved; restart the stream to apply it.")
+
+        def on_osd_changed(self, enabled: bool):
+            self.saved_cfg["osd_enabled"] = bool(enabled)
+            save_settings({"osd_enabled": bool(enabled)})
+            if self._ipc is not None and self._ipc.connected:
+                self._ipc.set_osd(bool(enabled))
+            elif self.streamer.is_running:
+                print("[*] OSD setting saved; use Tab/o in the gaming window "
+                      "to toggle the running overlay.")
+
+        def on_osd_pos_changed(self, *_):
+            pos = self.combo_osd_pos.currentData() or "tr"
+            if pos not in OSD_POSITIONS:
+                pos = "tr"
+            self.saved_cfg["osd_position"] = pos
+            save_settings({"osd_position": pos})
+            if self._ipc is not None and self._ipc.connected:
+                self._ipc.set_osd_position(pos)
 
         def on_preset_changed(self, *_):
             if self.vfio_mode:
@@ -2726,25 +3057,35 @@ if HAS_QT:
                 self.apply_led(mode)
 
         def toggle_mute(self):
-            self.muted = not self.muted
+            self._set_mute_visual(not self.muted)
+            if self._ipc is not None and self._ipc.connected:
+                self._ipc.set_mute(self.muted)
+                return
+            set_audio_mute(self.muted)
+            if self.vfio_mode:
+                # Re-arm the retry window if the sink-input is not there yet.
+                self._vfio_volume_applies = 0
+
+        def _set_mute_visual(self, muted: bool):
+            self.muted = bool(muted)
             if self.muted:
                 self.btn_mute.setText("Unmute")
                 self.btn_mute.setStyleSheet("background-color: #36171d; color: #f87171; border: 1px solid #7f1d1d;")
             else:
                 self.btn_mute.setText("Mute")
                 self.btn_mute.setStyleSheet("")
-            set_audio_mute(self.muted)
-            if self.vfio_mode:
-                # Re-arm the retry window if the sink-input is not there yet.
-                self._vfio_volume_applies = 0
 
         def on_volume_changed(self, val: int):
             self.lbl_vol.setText(f"{val}%")
             save_settings({"volume": val / 100.0})
-            if not self.muted:
-                set_audio_volume(val)
-                if self.vfio_mode:
-                    self._vfio_volume_applies = 0
+            if self.muted:
+                return
+            if self._ipc is not None and self._ipc.connected:
+                self._ipc.set_volume(val / 100.0)
+                return
+            set_audio_volume(val)
+            if self.vfio_mode:
+                self._vfio_volume_applies = 0
 
         def force_resync(self, *args):
             """Kernel: HPD re-sync. VFIO: restart the userspace engine."""
@@ -2849,6 +3190,10 @@ if HAS_QT:
                 self.lbl_audio_fmt.setText("No Audio")
 
         def _update_status_vfio(self):
+            if self._remote and not self.streamer.is_running:
+                # The remote streamer owns these values; its 1 Hz snapshot
+                # already drives the hero labels through _on_remote_status.
+                return
             if hasattr(self, "lbl_audio_fmt"):
                 self.lbl_audio_fmt.setText(
                     self.streamer.audio_format_label()
@@ -3027,6 +3372,9 @@ if HAS_QT:
 
         def _force_quit(self):
             self._switch_pending = None
+            self._ipc_shutdown = True
+            if self._ipc is not None:
+                self._ipc.close()
             was_running = self.streamer.is_running
             self.streamer.stop()
             if self.vfio_mode and was_running:
@@ -3053,6 +3401,9 @@ if HAS_QT:
                         3000)
                 return
 
+            self._ipc_shutdown = True
+            if self._ipc is not None:
+                self._ipc.close()
             self.streamer.stop()
             if self.vfio_mode and was_running:
                 self._restore_led_after_stream()

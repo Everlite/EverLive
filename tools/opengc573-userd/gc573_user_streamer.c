@@ -25,6 +25,8 @@
 #include "gc573_user_audio.h"
 #include "gc573_user_bitstream.h"
 #include "gc573_user_nosignal.h"
+#include "gc573_user_ipc.h"
+#include "gc573_user_audio_tap.h"
 #include "gc573_user_font8x8.h"
 #include <SDL2/SDL.h>
 #include <libswscale/swscale.h>
@@ -32,6 +34,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <linux/videodev2.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -40,6 +43,14 @@
 #include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
+
+/*
+ * Reported through the control socket.  Keep in sync with __version__ in
+ * tools/everlive/everlive_viewer.py.
+ */
+#ifndef EVERLIVE_VERSION
+#define EVERLIVE_VERSION "1.3.0"
+#endif
 
 /* SDL_HINT_APP_NAME was added after the 2.0.20 headers some distros ship. */
 #ifndef SDL_HINT_APP_NAME
@@ -125,7 +136,34 @@ enum stream_led_mode {
 	STREAM_LED_RAINBOW,
 };
 
-static enum stream_led_mode g_led_mode = STREAM_LED_STATIC;
+/*
+ * The LED worker runs on its own thread, so the mode lives in an atomic int.
+ * led_mode_set() is the only writer; g_led_mode is a read-only accessor.
+ */
+static int g_led_mode_raw = STREAM_LED_STATIC;
+
+static void led_mode_set(enum stream_led_mode mode)
+{
+	__atomic_store_n(&g_led_mode_raw, (int)mode, __ATOMIC_RELAXED);
+}
+
+#define g_led_mode \
+	((enum stream_led_mode)__atomic_load_n(&g_led_mode_raw, __ATOMIC_RELAXED))
+
+/*
+ * Atomically published static colour.  The main thread keeps g_led_r/g_led_g/
+ * g_led_b as the authoritative values; led_worker() reads this packed word so
+ * a colour change can never tear across the three bytes.
+ */
+static uint32_t g_led_packed = 0x0000ccffu;
+
+static void led_publish_rgb(void)
+{
+	__atomic_store_n(&g_led_packed,
+			 ((uint32_t)g_led_r << 16) |
+			 ((uint32_t)g_led_g << 8) |
+			 (uint32_t)g_led_b, __ATOMIC_RELAXED);
+}
 
 /*
  * Set when the active EDID advertises compressed audio.  Built-in profiles
@@ -291,16 +329,16 @@ static bool parse_led_color(const char *spec, uint8_t *r, uint8_t *g, uint8_t *b
 		return false;
 
 	if (strcasecmp(spec, "wave") == 0 || strcasecmp(spec, "softdream") == 0) {
-		g_led_mode = STREAM_LED_WAVE;
+		led_mode_set(STREAM_LED_WAVE);
 		*r = 0xa8; *g = 0x55; *b = 0xf7;
 		return true;
 	}
 	if (strcasecmp(spec, "rainbow") == 0 || strcasecmp(spec, "cycle") == 0) {
-		g_led_mode = STREAM_LED_RAINBOW;
+		led_mode_set(STREAM_LED_RAINBOW);
 		*r = 0x00; *g = 0xcc; *b = 0xff;
 		return true;
 	}
-	g_led_mode = STREAM_LED_STATIC;
+	led_mode_set(STREAM_LED_STATIC);
 
 	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
 		if (strcasecmp(spec, names[i].name) == 0) {
@@ -357,6 +395,13 @@ static void print_usage(const char *prog)
 	printf("  --loopback [DEV]  Shorthand for --v4l2 (default: %s).\n",
 	       DEFAULT_V4L2_DEVICE);
 	printf("  --headless        No SDL window/video output; capture, V4L2 and audio only.\n");
+	printf("  --ipc-socket PATH Control socket for the Control Hub remote mode\n");
+	printf("                    (default: $XDG_RUNTIME_DIR/everlive.sock).\n");
+	printf("  --no-ipc          Do not open the control socket.\n");
+	printf("  --audio-tap [NAME] Mirror the mixed audio into a PipeWire sink\n");
+	printf("                    (default: %s).\n",
+	       GC573_AUDIO_TAP_DEFAULT);
+	printf("                    Add 'Monitor of EverLive Capture Audio' in OBS.\n");
 	printf("  EVERLIVE_LED      fallback used when --led is not given.\n");
 }
 
@@ -549,19 +594,36 @@ static void *led_worker(void *arg)
 {
 	struct gc573_vfio_ctx *ctx = arg;
 	uint64_t start_ms = now_ms();
+	uint32_t last_static = 0xFFFFFFFFu;
+	int last_mode = -1;
 
 	while (__atomic_load_n(&g_running, __ATOMIC_RELAXED)) {
-		if (g_led_mode == STREAM_LED_WAVE) {
+		int mode = __atomic_load_n(&g_led_mode_raw, __ATOMIC_RELAXED);
+
+		if (mode == STREAM_LED_WAVE) {
 			uint32_t zone_colors[5];
+
 			wave_tick(now_ms() - start_ms, 3000, zone_colors);
 			gc573_user_set_led_zones(ctx->bar0, zone_colors);
-		} else if (g_led_mode == STREAM_LED_RAINBOW) {
+		} else if (mode == STREAM_LED_RAINBOW) {
 			uint8_t r, g, b;
+
 			rainbow_tick(now_ms() - start_ms, 8000, &r, &g, &b);
 			gc573_user_led_refresh(ctx->bar0, r, g, b);
 		} else {
-			break;
+			uint32_t rgb = __atomic_load_n(&g_led_packed,
+						       __ATOMIC_RELAXED);
+
+			/* Only touch the controller when the colour actually changed. */
+			if (mode != last_mode || rgb != last_static) {
+				gc573_user_led_refresh(ctx->bar0,
+						       (uint8_t)(rgb >> 16),
+						       (uint8_t)(rgb >> 8),
+						       (uint8_t)rgb);
+				last_static = rgb;
+			}
 		}
+		last_mode = mode;
 		usleep(50000);
 	}
 	return NULL;
@@ -2383,6 +2445,7 @@ static int audio_open_device(struct audio_playback *playback,
 	playback->bits = (int)sample_bits;
 	playback->bytes_per_frame = (sample_bits / 8U) * 2U;
 	playback->primed = false;
+	gc573_audio_tap_set_format((unsigned int)playback->rate);
 	/* Stay paused until audio_queue_pcm_bytes() has built the cushion. */
 	SDL_PauseAudioDevice(playback->dev, 1);
 	pr_info("SDL audio: opened %u Hz, 2 ch, %u-bit via %s (cushion %u ms)",
@@ -2565,6 +2628,114 @@ static bool audio_scan_bitstream(struct audio_stream *as, const uint8_t *data,
 	return false;
 }
 
+/*
+ * Remote audio gain.  The value is published as raw float bits so the audio
+ * worker can read it without a lock; g_audio_gain_current is worker-private.
+ */
+#define AUDIO_GAIN_RAMP_MS	20U
+#define AUDIO_GAIN_MAX		1.5f
+
+static uint32_t g_audio_gain_bits = 0x3F800000u;	/* 1.0f */
+static int g_audio_mute_flag;
+static float g_audio_gain_current = 1.0f;
+static uint8_t g_gain_scratch[65536];
+
+static float float_from_bits(uint32_t bits)
+{
+	float value;
+
+	memcpy(&value, &bits, sizeof(value));
+	return value;
+}
+
+static uint32_t float_to_bits(float value)
+{
+	uint32_t bits;
+
+	memcpy(&bits, &value, sizeof(bits));
+	return bits;
+}
+
+/*
+ * Scale a PCM block by the remote gain with a short linear ramp, so slider
+ * moves and mute toggles never click.  Returns the buffer to queue: the
+ * caller's data at unity gain, otherwise the shared scratch block.
+ *
+ * Only the audio worker calls this, so the scratch needs no locking.
+ */
+static const void *audio_apply_gain(struct audio_stream *as, const void *data,
+				    size_t bytes)
+{
+	uint32_t bits = __atomic_load_n(&g_audio_gain_bits, __ATOMIC_RELAXED);
+	bool muted = __atomic_load_n(&g_audio_mute_flag, __ATOMIC_RELAXED) != 0;
+	float target = muted ? 0.0f : float_from_bits(bits);
+	float current = g_audio_gain_current;
+	size_t sample_bytes = as->playback.bits > 16 ? 4U : 2U;
+	size_t samples, ramp_samples, i;
+	uint8_t *dst;
+	float delta;
+
+	if (current == target && target == 1.0f)
+		return data;	/* unity: nothing to do */
+	if (!bytes || bytes > sizeof(g_gain_scratch))
+		return data;
+
+	if (target > AUDIO_GAIN_MAX)
+		target = AUDIO_GAIN_MAX;
+	if (target < 0.0f)
+		target = 0.0f;
+
+	samples = bytes / sample_bytes;
+	if (!samples)
+		return data;
+
+	ramp_samples = (size_t)as->playback.rate * AUDIO_GAIN_RAMP_MS / 1000U;
+	if (!ramp_samples)
+		ramp_samples = 1;
+
+	delta = (target - current) / (float)ramp_samples;
+	memcpy(g_gain_scratch, data, bytes);
+	dst = g_gain_scratch;
+
+	for (i = 0; i < samples; i++) {
+		if (current != target) {
+			current += delta;
+			if ((delta > 0.0f && current > target) ||
+			    (delta < 0.0f && current < target))
+				current = target;
+		}
+
+		if (sample_bytes == 2) {
+			int16_t v;
+			float scaled;
+
+			memcpy(&v, dst + i * 2U, sizeof(v));
+			scaled = (float)v * current;
+			if (scaled > 32767.0f)
+				scaled = 32767.0f;
+			if (scaled < -32768.0f)
+				scaled = -32768.0f;
+			v = (int16_t)lrintf(scaled);
+			memcpy(dst + i * 2U, &v, sizeof(v));
+		} else {
+			int32_t v;
+			float scaled;
+
+			memcpy(&v, dst + i * 4U, sizeof(v));
+			scaled = (float)v * current;
+			if (scaled > 2147483520.0f)
+				scaled = 2147483520.0f;
+			if (scaled < -2147483648.0f)
+				scaled = -2147483648.0f;
+			v = (int32_t)lrintf(scaled);
+			memcpy(dst + i * 4U, &v, sizeof(v));
+		}
+	}
+
+	g_audio_gain_current = current;
+	return dst;
+}
+
 static void audio_queue_pcm_bytes(struct audio_stream *as, const void *data,
 				  size_t bytes)
 {
@@ -2598,6 +2769,14 @@ static void audio_queue_pcm_bytes(struct audio_stream *as, const void *data,
 		as->dropped_blocks++;
 		return;
 	}
+
+	data = audio_apply_gain(as, data, bytes);
+
+	/*
+	 * Mirror exactly what SDL is about to play.  The tap normalises to S16
+	 * and never feeds back into the playback path.
+	 */
+	gc573_audio_tap_write(data, bytes, (unsigned int)playback->bits);
 
 	if (SDL_QueueAudio(playback->dev, data, (Uint32)bytes) < 0) {
 		if (!playback->queue_error_reported) {
@@ -3567,6 +3746,169 @@ static void set_window_icon(SDL_Window *window)
 	pr_info("Window icon: %s", icon_path);
 }
 
+/*
+ * Publish a coherent snapshot for the control socket.  Called once per second
+ * from the stats block, so the control thread never takes a lock in the
+ * render or DMA path.
+ */
+static void publish_ipc_stats(bool have_signal, bool streaming,
+			      const struct gc573_user_video_signal *sig,
+			      uint32_t in_w, uint32_t in_h,
+			      uint32_t out_w, uint32_t out_h,
+			      double fps, uint64_t frames,
+			      const struct gc573_user_video *video,
+			      const struct audio_stream *audio,
+			      const struct v4l2_sink *sink)
+{
+	struct gc573_stats st;
+
+	memset(&st, 0, sizeof(st));
+	st.timestamp_ms = now_ms();
+	st.headless = g_headless;
+	st.signal_locked = have_signal;
+	st.streaming = streaming && have_signal;
+	st.width = in_w;
+	st.height = in_h;
+	st.interlaced = sig->interlaced;
+	st.rate_x100 = sig->frame_rate_x100;
+	st.pixel_clock_khz = sig->pixel_clock_khz;
+	st.output_width = out_w;
+	st.output_height = out_h;
+	st.fps = fps;
+	st.frames = frames;
+	st.ring_buffers = video->num_buffers;
+	st.ring_channels = video->num_channels;
+
+	if (audio->streaming) {
+		if (audio->bt_playing) {
+			snprintf(st.audio_state, sizeof(st.audio_state),
+				 "bitstream");
+			snprintf(st.audio_label, sizeof(st.audio_label),
+				 "%.24s 5.1 -> Stereo",
+				 audio_bitstream_osd_name(audio->bitstream));
+		} else if (audio_output_muted(audio)) {
+			snprintf(st.audio_state, sizeof(st.audio_state), "muted");
+			snprintf(st.audio_label, sizeof(st.audio_label),
+				 "%.24s (Muted)",
+				 (audio->non_pcm || !audio->lpcm_verified) ?
+				 audio_bitstream_osd_name(audio->bitstream) :
+				 "Audio");
+		} else {
+			snprintf(st.audio_state, sizeof(st.audio_state), "lpcm");
+			snprintf(st.audio_label, sizeof(st.audio_label),
+				 "L-PCM %ukHz",
+				 (audio->format_rate + 500U) / 1000U);
+		}
+		st.audio_rate = audio->format_rate;
+		st.audio_channels = audio->format_channels;
+		st.audio_bits = audio->format_bits;
+	} else {
+		snprintf(st.audio_state, sizeof(st.audio_state), "none");
+		snprintf(st.audio_label, sizeof(st.audio_label),
+			 "No HDMI audio");
+	}
+
+	st.audio_gain = float_from_bits(
+		__atomic_load_n(&g_audio_gain_bits, __ATOMIC_RELAXED));
+	st.audio_muted = __atomic_load_n(&g_audio_mute_flag,
+					 __ATOMIC_RELAXED) != 0;
+
+	if (sink && sink->path[0]) {
+		snprintf(st.v4l2_path, sizeof(st.v4l2_path), "%.63s",
+			 sink->path);
+		st.v4l2_configured = sink->configured;
+		st.v4l2_width = sink->width;
+		st.v4l2_height = sink->height;
+		st.v4l2_frames = sink->frames;
+		st.v4l2_dropped = sink->dropped;
+	}
+
+	st.osd_enabled = g_osd_enabled;
+	snprintf(st.osd_position, sizeof(st.osd_position), "%.15s",
+		 osd_pos_name(g_osd_pos));
+	snprintf(st.aspect, sizeof(st.aspect), "%.11s", aspect_name(g_aspect));
+	st.vsync = g_vsync;
+	st.fullscreen = g_fullscreen;
+	st.led_r = g_led_r;
+	st.led_g = g_led_g;
+	st.led_b = g_led_b;
+
+	gc573_ipc_publish_stats(&st);
+}
+
+/*
+ * Apply one queued control command.  Runs on the render thread: every value it
+ * touches is either render-thread-only or a relaxed atomic polled by the LED
+ * and audio workers.
+ */
+static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
+			      SDL_Window *window)
+{
+	switch (cmd->kind) {
+	case GC573_IPC_CMD_LED_SET:
+		g_led_r = (uint8_t)cmd->a;
+		g_led_g = (uint8_t)cmd->b;
+		g_led_b = (uint8_t)cmd->c;
+		led_publish_rgb();
+		led_mode_set(STREAM_LED_STATIC);
+		printf("[IPC] LED colour #%02x%02x%02x\n",
+		       g_led_r, g_led_g, g_led_b);
+		break;
+	case GC573_IPC_CMD_LED_MODE:
+		switch (cmd->a) {
+		case GC573_IPC_LED_WAVE:
+			led_mode_set(STREAM_LED_WAVE);
+			break;
+		case GC573_IPC_LED_RAINBOW:
+			led_mode_set(STREAM_LED_RAINBOW);
+			break;
+		case GC573_IPC_LED_OFF:
+			g_led_r = 0;
+			g_led_g = 0;
+			g_led_b = 0;
+			led_publish_rgb();
+			led_mode_set(STREAM_LED_STATIC);
+			break;
+		default:
+			led_mode_set(STREAM_LED_STATIC);
+			break;
+		}
+		printf("[IPC] LED mode: %d\n", cmd->a);
+		break;
+	case GC573_IPC_CMD_AUDIO_GAIN:
+		__atomic_store_n(&g_audio_gain_bits, float_to_bits(cmd->f),
+				 __ATOMIC_RELAXED);
+		printf("[IPC] Audio gain: %d%%\n",
+		       (int)(cmd->f * 100.0f + 0.5f));
+		break;
+	case GC573_IPC_CMD_AUDIO_MUTE:
+		__atomic_store_n(&g_audio_mute_flag, cmd->a ? 1 : 0,
+				 __ATOMIC_RELAXED);
+		printf("[IPC] Audio mute: %s\n", cmd->a ? "on" : "off");
+		break;
+	case GC573_IPC_CMD_OSD_ENABLE:
+		g_osd_enabled = cmd->a != 0;
+		if (window)
+			SDL_ShowCursor(g_osd_enabled ? SDL_ENABLE : SDL_DISABLE);
+		printf("[IPC] OSD overlay: %s\n",
+		       g_osd_enabled ? "on" : "off");
+		break;
+	case GC573_IPC_CMD_OSD_POSITION:
+		if (cmd->a >= 0 && cmd->a < (int32_t)OSD_POS_COUNT)
+			g_osd_pos = (enum osd_position)cmd->a;
+		printf("[IPC] OSD position: %s\n", osd_pos_name(g_osd_pos));
+		break;
+	case GC573_IPC_CMD_ASPECT:
+		if (cmd->a >= 0 && cmd->a < (int32_t)ASPECT_COUNT)
+			g_aspect = (enum stream_aspect)cmd->a;
+		printf("[IPC] Aspect: %s\n", aspect_name(g_aspect));
+		break;
+	default:
+		break;
+	}
+	fflush(stdout);
+}
+
 int main(int argc, char *argv[])
 {
 	const char *pci_addr = NULL;
@@ -3575,6 +3917,9 @@ int main(int argc, char *argv[])
 	const char *aspect_spec = NULL;
 	const char *osd_pos_spec = NULL;
 	const char *v4l2_device = NULL;
+	const char *ipc_socket_override = NULL;
+	const char *audio_tap_node = NULL;
+	bool ipc_disabled = false;
 	struct gc573_vfio_ctx ctx;
 	struct gc573_user_video video;
 	struct v4l2_sink v4l2_sink = { .fd = -1 };
@@ -3585,6 +3930,7 @@ int main(int argc, char *argv[])
 	SDL_Window *window = NULL;
 	SDL_Renderer *renderer = NULL;
 	SDL_Texture *texture = NULL;
+	struct gc573_ipc_cmd ipc_cmd;
 	uint64_t last_status_poll = 0;
 	uint64_t last_service = 0;
 	uint64_t last_stats = 0;
@@ -3643,6 +3989,19 @@ int main(int argc, char *argv[])
 			v4l2_device = argv[i] + 11;
 		} else if (strcmp(argv[i], "--headless") == 0) {
 			g_headless = true;
+		} else if (strcmp(argv[i], "--ipc-socket") == 0 && i + 1 < argc) {
+			ipc_socket_override = argv[++i];
+		} else if (strncmp(argv[i], "--ipc-socket=", 13) == 0) {
+			ipc_socket_override = argv[i] + 13;
+		} else if (strcmp(argv[i], "--no-ipc") == 0) {
+			ipc_disabled = true;
+		} else if (strcmp(argv[i], "--audio-tap") == 0) {
+			if (i + 1 < argc && argv[i + 1][0] != '-')
+				audio_tap_node = argv[++i];
+			else
+				audio_tap_node = GC573_AUDIO_TAP_DEFAULT;
+		} else if (strncmp(argv[i], "--audio-tap=", 12) == 0) {
+			audio_tap_node = argv[i] + 12;
 		} else if (strcmp(argv[i], "-f") == 0 ||
 			   strcmp(argv[i], "--fullscreen") == 0) {
 			g_fullscreen = true;
@@ -3695,6 +4054,7 @@ int main(int argc, char *argv[])
 		g_led_g = 0xcc;
 		g_led_b = 0xff;
 	}
+	led_publish_rgb();
 	if (!edid_spec || !*edid_spec)
 		edid_spec = GC573_EDID_PROFILE_DEFAULT;
 
@@ -3774,10 +4134,13 @@ int main(int argc, char *argv[])
 		       g_led_r, g_led_g, g_led_b);
 	}
 
-	if (g_led_mode == STREAM_LED_WAVE || g_led_mode == STREAM_LED_RAINBOW) {
-		if (pthread_create(&g_led_thread, NULL, led_worker, &ctx) == 0)
-			g_led_thread_running = true;
-	}
+	/*
+	 * Always run the LED worker: the control socket can switch between static,
+	 * wave and rainbow at runtime, and a static colour change must reach the
+	 * controller without restarting the streamer.
+	 */
+	if (pthread_create(&g_led_thread, NULL, led_worker, &ctx) == 0)
+		g_led_thread_running = true;
 
 	/*
 	 * 3. Bring up the IT6664 splitter first.  The source only sees the
@@ -4003,6 +4366,29 @@ int main(int argc, char *argv[])
 	render_standby(window, renderer,
 		       "EverLive [USERSPACE VFIO] — Waiting for HDMI signal...");
 
+	/*
+	 * Open the control socket last: every earlier failure path returns
+	 * before this point, so the socket never outlives a half-initialized
+	 * engine.  A failure here is non-fatal — the stream simply cannot be
+	 * remote controlled.
+	 */
+	if (!ipc_disabled) {
+		int ipc_ret = gc573_ipc_start(EVERLIVE_VERSION,
+					      ipc_socket_override);
+
+		if (ipc_ret < 0)
+			pr_warn("IPC control socket unavailable (%s); continuing without remote control",
+				strerror(-ipc_ret));
+	}
+
+	if (audio_tap_node) {
+		int tap_ret = gc573_audio_tap_start(audio_tap_node);
+
+		if (tap_ret < 0)
+			pr_warn("Audio tap unavailable (%s); continuing without it",
+				strerror(-tap_ret));
+	}
+
 	last_stats = now_ms();
 	last_stats_us = now_us();
 	last_status_poll = 0;
@@ -4071,6 +4457,14 @@ int main(int argc, char *argv[])
 		}
 		if (!g_running)
 			break;
+
+		/*
+		 * Apply remote mutations on the render thread.  SDL, the OSD state and
+		 * the DMA ring therefore keep a single writer; the control thread only
+		 * ever appends to the lock-free command ring.
+		 */
+		while (gc573_ipc_poll_cmd(&ipc_cmd))
+			apply_ipc_command(&ipc_cmd, window);
 
 		now = now_ms();
 
@@ -4537,6 +4931,10 @@ int main(int argc, char *argv[])
 				      (double)(stats_us - last_stats_us);
 
 			displayed_fps = fps;
+			publish_ipc_stats(have_signal, streaming, &current_sig,
+					  input_width, input_height,
+					  output_width, output_height,
+					  fps, frames, &video, &audio, &v4l2_sink);
 
 			if (streaming) {
 				snprintf(title, sizeof(title),
@@ -4631,6 +5029,11 @@ int main(int argc, char *argv[])
 			last_stats_us = stats_us;
 		}
 	}
+
+	/* Drop the control socket before the long teardown so the Control Hub
+	 * notices within one poll interval that the session ended. */
+	gc573_ipc_stop();
+	gc573_audio_tap_stop();
 
 	if (g_trace_requested) {
 		audio_cleanup(&audio);

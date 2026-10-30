@@ -74,11 +74,74 @@ gc573_user_streamer [PCI_ADDRESS] [OPTIONS]
   --v4l2 DEVICE        Write native YUYV frames to a v4l2loopback device
   --loopback [DEVICE]  Shorthand for --v4l2 (default: /dev/video10)
   --headless           No SDL window; capture, V4L2 output and audio only
+  --ipc-socket PATH    Control socket for the Control Hub (default:
+                       $XDG_RUNTIME_DIR/everlive.sock)
+  --no-ipc             Do not open the control socket
+  --audio-tap [NAME]   Mirror the mixed audio into a PipeWire sink
+                       (default: everlive-capture-audio)
 ```
 
 Game-window hotkeys: <kbd>f</kbd>/<kbd>F11</kbd> fullscreen, <kbd>a</kbd> aspect ratio,
 <kbd>p</kbd> OSD position, <kbd>o</kbd>/<kbd>i</kbd>/<kbd>Tab</kbd> stats overlay,
 <kbd>s</kbd>/<kbd>F10</kbd> overlay + cursor, <kbd>Esc</kbd>/<kbd>q</kbd> quit.
+
+## Remote Control Socket
+
+The engine owns the VFIO container and BAR0 mapping exclusively, so a second
+process can never open the card. Instead of failing with "an external instance
+already owns the device", the streamer publishes its state over a Unix domain
+socket and the Control Hub attaches to it as a read-only **Remote Session**.
+
+- Path: `$XDG_RUNTIME_DIR/everlive.sock` (fallback `/run/user/<uid>`, then
+  `/tmp/everlive-<uid>`), mode `0600`.
+- Auth: `SO_PEERCRED` — only clients with the streamer's own UID are accepted.
+- Ownership: an `flock` on `everlive.sock.lock` is authoritative. A socket left
+  behind by a crash is detected and removed on the next start.
+- Transport: newline-delimited JSON-RPC 2.0, max 64 KiB per line.
+
+Methods: `hello`, `ping`, `status.get`, and the write path
+`led.set`, `led.mode.set`, `audio.volume.set`, `audio.mute.set`, `osd.set`,
+`osd.position.set`, `aspect.set`. Mutations are queued into a lock-free ring
+and applied by the render thread, so they never touch the DMA path; the
+audio gain uses a 20 ms linear ramp instead of pausing the device. The snapshot
+is published once per second from the render loop through a seqlock, so remote
+queries never touch the DMA path.
+
+```console
+$ printf '{"jsonrpc":"2.0","id":1,"method":"status.get"}\n' \
+    | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/everlive.sock"
+{"jsonrpc":"2.0","id":1,"result":{"proto":1,"version":"1.2.3",...}}
+```
+
+## Virtual Audio Track (OBS)
+
+`--audio-tap [NAME]` mirrors exactly what the streamer plays (L-PCM after the
+volume ramp, or the decoded AC-3/DTS stereo downmix) into a dedicated PipeWire
+sink, so OBS can record it as its own track while the desktop mix stays
+untouched.
+
+```console
+$ ./gc573_user_streamer --audio-tap --headless --v4l2 /dev/video10
+```
+
+In OBS add **Audio Input Capture (PipeWire) → Monitor of EverLive Capture
+Audio**.
+
+The sink is normally created by a config drop-in that `install.sh` writes to
+`/etc/pipewire/pipewire.conf.d/50-everlive-capture.conf`. If the node is
+missing, the streamer asks the daemon for it at runtime via `pw-cli
+load-module` (no shell involved) and logs a hint when that fails.
+
+Implementation notes:
+
+- A lock-free SPSC ring (64 KiB) connects the audio worker to the PipeWire RT
+  thread; the audio path never blocks on the graph.
+- The tap always publishes **S16_LE stereo**. 24-bit HDMI carriers arrive as
+  left-aligned S32LSB and are re-quantised; the playback path is untouched.
+- The stream is connected only once the HDMI sample rate is known, so a
+  44.1 kHz source is never played at 48 kHz pitch.
+- Muting or lowering the volume affects the tap identically - OBS records
+  what the player hears, never raw compressed bytes.
 
 ---
 

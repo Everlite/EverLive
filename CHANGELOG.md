@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.0] - 2026-10-30
+
+### Added
+- **Dedicated PipeWire Virtual Audio Track for OBS / Broadcasting:**
+  - Added in-process PipeWire audio tap (`gc573_user_audio_tap.[ch]`) publishing mixed, decoded HDMI audio directly to a dedicated virtual audio sink named `"EverLive Capture Audio"`.
+  - Enables clean, isolated game audio recording in OBS (`Monitor of EverLive Capture Audio`), Discord, or FFmpeg without capturing desktop noise, system sounds, Discord chat, or background music.
+  - Configured seamlessly in `install.sh` via `/etc/pipewire/pipewire.conf.d/50-everlive-capture.conf` (zero kernel modules, zero DKMS dependencies). Cleanly removed by `uninstall.sh`.
+  - Supports both interactive Gaming Screen and Headless Studio modes.
+- **Control-IPC Engine (Zero-Interrupt Runtime Mutations):**
+  - High-performance, lock-free JSON-RPC 2.0 control socket (`$XDG_RUNTIME_DIR/everlive.sock`) powered by `gc573_user_ipc.[ch]` with `epoll` and `SO_PEERCRED` security.
+  - Control commands communicate via a lock-free Single-Producer Single-Consumer (SPSC) command ring directly to the streamer thread without tearing down DMA buffers, dropping frames, or stalling hardware pipelines.
+  - Python GUI automatically docks to the control socket (`everlive_client.py`) using non-blocking `QSocketNotifier`.
+- **Live On-The-Fly Hardware Adjustments:**
+  - **Volume & Mute:** Live gain adjustments with a smooth 20 ms linear fade to eliminate pops and clicks; mute toggles instantly without restarting audio devices.
+  - **RGB Lighting:** Instant on-the-fly switching between RGB Wave, Rainbow cycle, static colors, and off without restarting background daemons.
+  - **Aspect Ratio & OSD:** Live aspect ratio switching (16:9, Auto, Stretch) and OSD overlay toggling/position cycling without stream interruptions.
+- **Symmetrical Console Hub GUI:**
+  - Modernized 2-column layout pairing Virtual Camera and Virtual Audio Track alongside screen and launch preferences.
+  - On-screen stats (OSD) controls integrated directly into the Hardware & Capture settings panel.
+
+### Fixed
+- **Local IPC Docking:** Resolved an issue where local sessions started from the GUI did not attach to the engine's IPC socket, allowing live adjustments to take effect immediately without needing a mode switch or stream restart.
+- **24-bit Audio Gain Normalization:** Fixed sample alignment in the audio worker gain pass to support both S16 and 4-byte widened S32 formats correctly.
+- **Dependencies:** Added `libpipewire-0.3-dev` (Ubuntu/Debian), `pipewire-devel` (Fedora), and `pipewire` (Arch) to `install.sh` automated package verification.
+
+---
+
 ## [1.2.3] - 2026-10-28
 
 ### Added

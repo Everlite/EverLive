@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive v1.2.3 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573)
+# EverLive v1.3.0 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573)
 # ==============================================================================
 # Installiert den 100% blob-freien Userspace VFIO-Treiber, udev-Hardware-Rechte,
 # Speicher-Locking-Limits und die EverLive Desktop-App für HDMI Console Gaming.
@@ -23,7 +23,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}===================================================================${NC}"
-echo -e "${BLUE}     EverLive v1.2.3 - GC573 Userspace Gaming Suite Installer     ${NC}"
+echo -e "${BLUE}     EverLive v1.3.0 - GC573 Userspace Gaming Suite Installer     ${NC}"
 echo -e "${BLUE}===================================================================${NC}"
 
 # Optionale Virtual Camera: standardmäßig ja, per --no-loopback abschaltbar.
@@ -165,6 +165,7 @@ detect_and_install_deps() {
         ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(base-devel)
         ! command -v sdl2-config >/dev/null 2>&1 && MISSING_PKGS+=(sdl2)
         ! pkg-config --exists libavcodec libswresample libswscale >/dev/null 2>&1 && MISSING_PKGS+=(ffmpeg)
+        ! pkg-config --exists libpipewire-0.3 >/dev/null 2>&1 && MISSING_PKGS+=(pipewire)
         ! command -v setcap >/dev/null 2>&1 && MISSING_PKGS+=(libcap)
         ! command -v wpctl >/dev/null 2>&1 && MISSING_PKGS+=(wireplumber)
         ! pacman -Q xcb-util-cursor >/dev/null 2>&1 && MISSING_PKGS+=(xcb-util-cursor)
@@ -179,6 +180,7 @@ detect_and_install_deps() {
         ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(build-essential pkg-config)
         ! command -v sdl2-config >/dev/null 2>&1 && MISSING_PKGS+=(libsdl2-dev)
         ! pkg-config --exists libavcodec libswresample libswscale >/dev/null 2>&1 && MISSING_PKGS+=(libavcodec-dev libswresample-dev libswscale-dev libavutil-dev)
+        ! pkg-config --exists libpipewire-0.3 >/dev/null 2>&1 && MISSING_PKGS+=(libpipewire-0.3-dev)
         ! command -v setcap >/dev/null 2>&1 && MISSING_PKGS+=(libcap2-bin)
         ! command -v wpctl >/dev/null 2>&1 && MISSING_PKGS+=(wireplumber)
         ! dpkg -s libxcb-cursor0 >/dev/null 2>&1 && MISSING_PKGS+=(libxcb-cursor0)
@@ -194,6 +196,7 @@ detect_and_install_deps() {
         ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(gcc make pkgconf-pkg-config)
         ! command -v sdl2-config >/dev/null 2>&1 && MISSING_PKGS+=(SDL2-devel)
         ! pkg-config --exists libavcodec libswresample libswscale >/dev/null 2>&1 && MISSING_PKGS+=(ffmpeg-devel)
+        ! pkg-config --exists libpipewire-0.3 >/dev/null 2>&1 && MISSING_PKGS+=(pipewire-devel)
         ! command -v setcap >/dev/null 2>&1 && MISSING_PKGS+=(libcap)
         ! command -v wpctl >/dev/null 2>&1 && MISSING_PKGS+=(wireplumber)
         ! rpm -q xcb-util-cursor >/dev/null 2>&1 && MISSING_PKGS+=(xcb-util-cursor)
@@ -281,6 +284,42 @@ else
     echo -e "${YELLOW}[!] v4l2loopback nicht verfügbar; Virtual Camera bleibt bis zur Installation aus.${NC}"
 fi
 
+# PipeWire-Sink für OBS: eigene Tonspur "EverLive Capture Audio".
+# Kein Kernelmodul und keine DKMS-Abhängigkeit - reine PipeWire-Konfiguration.
+ensure_pipewire_capture_sink() {
+    local conf_dir="/etc/pipewire/pipewire.conf.d"
+
+    if ! command -v pipewire >/dev/null 2>&1; then
+        echo -e "${YELLOW}[!] PipeWire nicht gefunden; der OBS-Audio-Track wird übersprungen.${NC}"
+        return 0
+    fi
+
+    mkdir -p "$conf_dir"
+
+    cat > "$conf_dir/50-everlive-capture.conf" <<'EOF'
+# Managed by EverLive: dedicated capture sink for OBS / Discord / FFmpeg.
+# Add "Monitor of EverLive Capture Audio" as an audio source in OBS.
+context.objects = [
+    { factory = adapter
+      args = {
+          factory.name            = support.null-audio-sink
+          node.name               = "everlive-capture-audio"
+          node.description        = "EverLive Capture Audio"
+          media.class             = Audio/Sink
+          audio.position          = [ FL FR ]
+          monitor.channel-volumes = true
+          node.virtual            = false
+      }
+    }
+]
+EOF
+
+    echo -e "${GREEN}[+] PipeWire-Sink 'EverLive Capture Audio' konfiguriert.${NC}"
+    echo -e "${YELLOW}    Aktivieren mit: systemctl --user restart pipewire pipewire-pulse${NC}"
+}
+
+ensure_pipewire_capture_sink
+
 # 5. Udev-Rechte für vfio-pci & unbegrenzten Memlock einrichten
 echo -e "\n${BLUE}[4/5] Richte VFIO Hardware-Zugriffsrechte (udev), Boot-Autobind & Memlock ein...${NC}"
 
@@ -365,7 +404,7 @@ chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive.desktop" 2>/dev/n
 rm -f "${APPS_DIR}/everlive-intern.desktop" 2>/dev/null || true
 
 echo -e "\n${GREEN}===================================================================${NC}"
-echo -e "${GREEN}      EverLive v1.2.3 erfolgreich installiert & einsatzbereit!      ${NC}"
+echo -e "${GREEN}      EverLive v1.3.0 erfolgreich installiert & einsatzbereit!      ${NC}"
 echo -e "${GREEN}===================================================================${NC}"
 echo -e "Du kannst EverLive ab sofort direkt über dein Startmenü starten,"
 echo -e "oder im Terminal mit: ${BLUE}./play.sh${NC}"
