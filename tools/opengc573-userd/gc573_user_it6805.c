@@ -156,6 +156,7 @@ struct it6805_audio_runtime {
 
 static struct it6805_audio_runtime g_audio;
 static bool g_audio_path_enabled;
+static bool g_it6805_last_5v;
 
 int gc573_user_it6805_set_bank(void *bar0, u8 bank)
 {
@@ -1332,6 +1333,7 @@ int gc573_user_it6805_init(void *bar0)
 	if (ret < 0)
 		return ret;
 
+	g_it6805_last_5v = present;
 	pr_info("[✓] IT6805 initialization complete (5V=%u, HPD released).",
 		present);
 	return 0;
@@ -1542,6 +1544,57 @@ restore_bank:
 		ret = cleanup_ret;
 
 	return ret;
+}
+
+#define IT6805_DRM_PACKET_TYPE		0x87U
+#define IT6805_DRM_INFOFRAME_SIZE	31U
+#define IT6805_DRM_EOTF_MASK		0x07U
+#define IT6805_DRM_OFFSET		0x24U
+
+static int it6805_read_drm_info(void *bar0, struct gc573_user_video_signal *sig)
+{
+	u8 raw[IT6805_DRM_INFOFRAME_SIZE];
+	int cleanup_ret;
+	int ret;
+
+	sig->hdr_present = false;
+	sig->eotf = 0;
+	sig->max_cll = 0;
+	sig->max_fall = 0;
+
+	ret = gc573_user_it6805_set_bank(bar0, IT6805_BANK_2);
+	if (ret < 0)
+		return ret;
+
+	for (size_t i = 0; i < ARRAY_SIZE(raw); i++) {
+		ret = it6805_read_reg(bar0, IT6805_DRM_OFFSET + i, &raw[i]);
+		if (ret < 0)
+			goto restore_bank;
+	}
+
+	if (raw[0] == IT6805_DRM_PACKET_TYPE) {
+		sig->hdr_present = true;
+		sig->eotf = raw[4] & IT6805_DRM_EOTF_MASK;
+		/* Static metadata is little-endian; MaxCLL/MaxFALL at +22/+24. */
+		sig->max_cll = (uint16_t)(raw[4 + 22] | (raw[4 + 23] << 8));
+		sig->max_fall = (uint16_t)(raw[4 + 24] | (raw[4 + 25] << 8));
+	}
+
+restore_bank:
+	cleanup_ret = gc573_user_it6805_set_bank(bar0, IT6805_BANK_0);
+	if (ret >= 0)
+		ret = cleanup_ret;
+
+	return ret;
+}
+
+int gc573_user_it6805_poll_hdr(void *bar0,
+			       struct gc573_user_video_signal *sig)
+{
+	if (!bar0 || !sig)
+		return -EINVAL;
+
+	return it6805_read_drm_info(bar0, sig);
 }
 
 int gc573_user_it6805_unmute(void *bar0)
@@ -1928,6 +1981,18 @@ int gc573_user_it6805_poll_status(void *bar0, struct gc573_user_video_signal *si
 	sig->five_volt_present = (status13 & BIT(0)) != 0;
 	sig->status15 = status15;
 
+	if (sig->five_volt_present && !g_it6805_last_5v) {
+		g_it6805_last_5v = true;
+		pr_info("IT6805 5V detected on port 0; re-arming HPD and receiver...");
+		bool present = false;
+		(void)it6805_handle_5v_port0(bar0, false, &present);
+	} else if (!sig->five_volt_present && g_it6805_last_5v) {
+		g_it6805_last_5v = false;
+		pr_info("IT6805 5V lost on port 0; entering standby...");
+		bool present = false;
+		(void)it6805_handle_5v_port0(bar0, false, &present);
+	}
+
 	/*
 	 * 1440p120 / 4K60 use scrambled HDMI 2.0.  Reg 0x14[7:6] is set by
 	 * the source once it negotiates the high-speed link; follow it with
@@ -2019,9 +2084,23 @@ int gc573_user_it6805_poll_signal_ex(void *bar0,
 			    sig->frame_rate_x100 - vic_x100 <= 500)
 				sig->frame_rate_hz = frame_rate;
 		}
-		if (sig->colorspace == GC573_USER_COLORSPACE_YCBCR420)
-			sig->width *= 2;
-	}
+			if (sig->colorspace == GC573_USER_COLORSPACE_YCBCR420)
+				sig->width *= 2;
+		}
+
+		/*
+		 * The DRM InfoFrame costs 31 extra I2C reads; only refresh it on a
+		 * full probe (lock / hot switch).  The streamer polls it once per
+		 * second through gc573_user_it6805_poll_hdr() so an HDR toggle at
+		 * an unchanged resolution is still noticed.
+		 */
+		if (probe == GC573_USER_SIGNAL_PROBE_FULL) {
+			int hdr_ret = it6805_read_drm_info(bar0, sig);
+
+			if (hdr_ret < 0)
+				pr_warn("IT6805 DRM InfoFrame read failed: %d",
+					hdr_ret);
+		}
 
 	if (sig->interlaced)
 		sig->height *= 2;

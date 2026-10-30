@@ -2555,14 +2555,27 @@ static int it6664_handle_rx_lock(void *bar0)
 	if (ret < 0)
 		return ret;
 
-	if (tx_status & 0x01) {
-		ret = it6664_power_on_tx_port(bar0, 1);
-		if (ret < 0)
-			return ret;
-		ret = it6664_enable_tx_output(bar0, 1);
-		if (ret < 0)
-			return ret;
-	}
+	/*
+	 * TX1 is the internal PCB trace connecting IT6664 directly to the
+	 * IT6805 capture receiver. Unlike external HDMI OUT (TX2), TX1 is
+	 * hardwired on the board and MUST always be powered and enabled
+	 * when RX is locked.
+	 *
+	 * IT6805 may have its HPD deasserted in standby/no-signal until it
+	 * senses TMDS clock/5V. Never gate TX1 power or output on tx_status & 0x01
+	 * (HPD), otherwise the two chips deadlock.
+	 */
+	(void)gc573_user_set_tx_hpd_gate(bar0, 1, true);
+
+	ret = it6664_power_on_tx_port(bar0, 1);
+	if (ret < 0)
+		pr_warn("IT6664 TX1 power on failed: %d", ret);
+
+	ret = it6664_enable_tx_output(bar0, 1);
+	if (ret < 0)
+		pr_warn("IT6664 TX1 output enable failed: %d", ret);
+	else
+		pr_info("IT6664 TX1 output enabled (capture link active).");
 
 	/* HDMI OUT passthrough is optional and must never fail capture. */
 	(void)it6664_arm_tx2(bar0);
@@ -2646,11 +2659,13 @@ int gc573_user_it6664_poll(void *bar0, struct gc573_user_it6664_status *status)
 	} else if (!status->scdt_locked && g_rx_locked) {
 		g_rx_locked = false;
 		gc573_user_set_gpio(bar0, 3, false, 0);
-		/* Forget the HDMI OUT state so a re-lock re-arms TX2 cleanly. */
+		/* Forget TX states so a re-lock re-arms TX1 and TX2 cleanly. */
 		g_tx2_powered = false;
 		g_tx2_output_enabled = false;
 		g_tx2_error_reported = false;
 		g_tx2_hpd_last = status->tx2_hpd;
+		g_tx1_powered = false;
+		g_tx1_pclk_khz = 0;
 		pr_info("IT6664 RX lost sync (status13=0x%02x scdt=0x%02x).",
 			status->rx_status13, status->rx_scdt);
 	}

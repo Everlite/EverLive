@@ -11,7 +11,7 @@
 
 **EverLive** is a Linux console gaming suite and open-source userspace driver for the **AVerMedia Live Gamer 4K (GC573)** (`PCI 1461:0054`, Subsystem `1461:5730`).
 
-It is designed to let you play console games (PlayStation 5, Xbox Series X, Nintendo Switch, retro scalers, or secondary PCs) directly on your Linux desktop (Wayland & X11) with low presentation overhead, synchronized audio (**Linear PCM** as well as **Dolby Digital / DTS 5.1** decoded to stereo), a native **V4L2 virtual camera** for OBS/Discord, on-the-fly hardware EDID switching, and custom hardware RGB LED control.
+It is designed to let you play console games (PlayStation 5, Xbox Series X, Nintendo Switch, retro scalers, or secondary PCs) directly on your Linux desktop (Wayland & X11) with low presentation overhead, real-time **HDR10 / HLG to SDR filmic tonemapping**, synchronized audio (**Linear PCM** as well as **Dolby Digital / DTS 5.1** decoded to stereo), a native **V4L2 virtual camera** and **PipeWire virtual audio track** for OBS/Discord, zero-interruption live runtime controls over IPC, on-the-fly hardware EDID switching, and custom hardware RGB LED control.
 
 ---
 
@@ -34,18 +34,19 @@ Starting with version 1.0.0, EverLive transitions from an out-of-tree kernel mod
 
 The following capabilities have been physically tested and verified on physical hardware:
 
-> Items marked **(v1.2.0)** were verified on physical hardware with a PlayStation 5:
-> 1440p120 capture, the OBS virtual camera (`/dev/video10`), the Gaming $\leftrightarrow$ Studio
-> handover, and Dolby Digital / DTS decoding.
+> Items marked **(v1.2.0 / v1.3.0)** were verified on physical hardware with a PlayStation 5:
+> 1440p60 & 1440p120 SDR/HDR capture, real-time HDR10/HLG filmic tonemapping, the OBS virtual camera (`/dev/video10`), the isolated PipeWire virtual audio track (`EverLive Capture Audio`), zero-interruption live Gaming $\leftrightarrow$ Studio switching, and Dolby Digital / DTS decoding.
 
 * **PlayStation 5:**
-  - **2560×1440 @ 120 FPS:** Verified in 120 Hz titles (*The Finals*, *Fortnite 120Hz Mode*, PS5 Dashboard). Stable frame pacing matching display refresh intervals.
-  - **3840×2160 @ 60 FPS (Native 4K):** Verified native 4K capture without downscaling stalls.
+  - **2560×1440 @ 60 & 120 FPS (SDR & HDR — v1.3.0):** Verified across PS5 *Test 1440p Output* (`60 Hz SDR/HDR` and `120 Hz SDR/HDR`) and 120 Hz titles (*The Finals*, *Fortnite 120Hz Mode*, PS5 Dashboard). Stable frame pacing matching display refresh intervals.
+  - **3840×2160 @ 60 FPS (Native 4K SDR & HDR):** Verified native 4K capture without downscaling stalls.
+  - **HDR10 & HLG Filmic Tonemapping (v1.3.0):** Automatic IT6805 DRM InfoFrame detection (`PQ` / `HLG`) with real-time in-place Hable filmic tonemapping (ITU-R BT.2408 203-nit diffuse white + BT.2020 $\to$ BT.709 chroma matrix) for both the SDL2 game window and OBS (`/dev/video10`), with live EV exposure adjustment (`-2.0 .. +2.0 EV`) and zero-copy bypass on SDR signals.
   - **Audio DMA & Universal Bitstream Decoding:** High-fidelity audio captured over PCIe DMA and played back via SDL2 into PipeWire. Supports both uncompressed **Linear PCM** (up to 8 channels) and compressed **Dolby Digital (AC-3 5.1)** and **DTS (5.1)** bitstreams decoded in real time via `libavcodec` and downmixed to stereo with `libswresample`. Failsafe mute-guard prevents digital noise during mode transitions.
-  - **Dynamic Hot-Switching:** Verified dynamic mode changes (e.g. 4K60 dashboard $\leftrightarrow$ 1440p120 gameplay $\leftrightarrow$ 1080p) without process crashes or window recreation.
-* **Virtual Camera & Studio Mode (v1.2.0):**
-  - **Native V4L2 output:** Verified with a PS5 at 1440p120 feeding OBS through `/dev/video10` (`"EverLive Capture"`) while the interactive gaming window is open.
-  - **Headless Studio:** The same 1440p120 feed without an SDL window; switching between Gaming Screen and Studio Mode completes without restarting EverLive.
+  - **Dynamic Hot-Switching & Cold-Start Handshake:** Verified dynamic mode changes (e.g. 4K60 dashboard $\leftrightarrow$ 1440p120 gameplay $\leftrightarrow$ 1080p) without process crashes or window recreation, plus reliable cold-start locking when the console boots after EverLive is already running.
+* **Virtual Camera, Isolated OBS Audio & Live IPC Control (v1.2.0 / v1.3.0):**
+  - **Native V4L2 output (`/dev/video10`):** Verified with a PS5 feeding OBS (`"EverLive Capture"`) while the interactive gaming window is open, with dynamic live attach/detach (`v4l2.set`) without restarting the stream.
+  - **Dedicated PipeWire Virtual Audio Track (v1.3.0):** Optional in-process tap publishing mixed, decoded HDMI audio directly to `"EverLive Capture Audio"` so OBS records clean game audio isolated from desktop notifications or voice chat.
+  - **Zero-Interruption Live Mode Switch (v1.3.0):** Switching between Gaming Screen and Headless Studio Mode swaps only the SDL2 window over JSON-RPC IPC (`mode.set`) — VFIO, DMA rings, HDMI passthrough, audio, and active OBS recordings continue without a single dropped frame.
   - **OBS-safe renegotiation:** Resolution changes while OBS holds its buffers resume automatically once OBS renegotiates.
 * **Hardware EDID Profile Injection (Universal Audio Support — v1.2.0):**
   - All standard built-in profiles natively advertise **Linear PCM**, **Dolby Digital (AC-3)**, and **DTS 5.1** Short Audio Descriptors (SADs), allowing consoles to output surround audio automatically without manual profile switching.
@@ -86,9 +87,9 @@ Starting with version 1.2.0, EverLive supports **native V4L2 Loopback output** d
 
 ### Option 1: Native Virtual Camera (`/dev/video10`) — *Recommended*
 EverLive streams raw YUYV capture frames directly to a virtual video device node (`/dev/video10` labeled `"EverLive Capture"`):
-1. **Enable in Control Hub:** Check the `Virtual Camera (OBS /dev/video10)` checkbox in EverLive Hub (or launch with `./play.sh --loopback`).
+1. **Enable in Control Hub:** Check `Virtual Camera (/dev/video10)` (and optionally `Virtual Audio Track`) in EverLive Hub, or launch with `./play.sh --loopback --audio-tap`.
 2. **Add to OBS Studio:** Add a standard **Video Capture Device (V4L2)** source, select `EverLive Capture (/dev/video10)`, and set Resolution to **Device Default** (or matching your console, e.g. 1920×1080 / 2560×1440).
-3. **Capture Audio:** Add an **Audio Input Capture (PulseAudio/PipeWire)** source and select the EverLive HDMI audio stream.
+3. **Capture Isolated Game Audio:** Add an **Audio Input Capture (PipeWire)** source and select **`Monitor of EverLive Capture Audio`** (isolates console audio from desktop sounds and Discord chat).
 
 > [!TIP]
 > **OBS & EverLive Launch Order & Source Refresh:**  
@@ -225,6 +226,7 @@ git pull
 | Key / Action | Function |
 |:---|:---|
 | <kbd>f</kbd> or <kbd>F11</kbd> | Toggle borderless fullscreen |
+| <kbd>h</kbd> | Toggle real-time HDR10 / HLG $\to$ SDR filmic tonemapping |
 | <kbd>a</kbd> | Cycle Aspect Ratio (`auto` $\to$ `16:9` $\to$ `4:3` $\to$ `stretch`) |
 | <kbd>p</kbd> | Cycle OSD position (Top-Right $\to$ Bottom-Right $\to$ Bottom-Left $\to$ Top-Left; default Top-Right) |
 | <kbd>o</kbd>, <kbd>i</kbd> or <kbd>Tab</kbd> | Toggle the on-screen stats overlay |

@@ -27,6 +27,7 @@
 #include "gc573_user_nosignal.h"
 #include "gc573_user_ipc.h"
 #include "gc573_user_audio_tap.h"
+#include "gc573_user_hdr.h"
 #include "gc573_user_font8x8.h"
 #include <SDL2/SDL.h>
 #include <libswscale/swscale.h>
@@ -121,6 +122,8 @@ static bool g_trace_mode;
 static bool g_trace_requested;
 /* --headless: no SDL window/renderer, capture and V4L2/audio output only. */
 static bool g_headless;
+/* Pending mode.set request (0 = none, GC573_IPC_MODE_*). Render thread only. */
+static int g_mode_request;
 
 /*
  * LED colour used while streaming.  Cyan is the verified default; it can be
@@ -186,6 +189,11 @@ static bool g_fullscreen;
 static bool g_vsync;
 static bool g_osd_enabled = true;
 static enum stream_aspect g_aspect = ASPECT_AUTO;
+
+/* HDR to SDR tonemapping: on by default, exposure added in EV. */
+static bool g_hdr_enabled = true;
+static float g_hdr_exposure_ev;
+static enum gc573_hdr_type g_hdr_announced = GC573_HDR_SDR;
 
 enum osd_position {
 	OSD_POS_TR,
@@ -402,6 +410,8 @@ static void print_usage(const char *prog)
 	printf("                    (default: %s).\n",
 	       GC573_AUDIO_TAP_DEFAULT);
 	printf("                    Add 'Monitor of EverLive Capture Audio' in OBS.\n");
+	printf("  --no-hdr          Disable HDR10/HLG -> SDR tonemapping (bypass).\n");
+	printf("  --hdr-exposure EV Exposure bias for the tonemapper, -2.0 .. +2.0.\n");
 	printf("  EVERLIVE_LED      fallback used when --led is not given.\n");
 }
 
@@ -1257,29 +1267,34 @@ static int osd_scale_for_height(int win_h)
 
 static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 		       uint32_t in_w, uint32_t in_h, bool interlaced,
-		       uint32_t rate_x100, double fps, const char *audio_text)
+		       uint32_t rate_x100, double fps, const char *audio_text,
+		       const char *hdr_text)
 {
-	char line2[256];
+	char line2[384];
 	char text[512];
+	char tail[96] = "";
 	int win_h = 0;
 	int scale;
 
 	if (!g_osd_enabled || !renderer || !window)
 		return;
 
+	if (hdr_text && *hdr_text)
+		snprintf(tail, sizeof(tail), " %c %s", OSD_BULLET, hdr_text);
+
 	SDL_GetWindowSize(window, NULL, &win_h);
 	scale = osd_scale_for_height(win_h);
 
 	if (g_vsync)
 		snprintf(line2, sizeof(line2),
-			 "%.1f FPS %c %s %c VSync %c %s",
+			 "%.1f FPS %c %s %c VSync %c %s%s",
 			 fps, OSD_BULLET, aspect_label(g_aspect),
-			 OSD_BULLET, OSD_BULLET, audio_text);
+			 OSD_BULLET, OSD_BULLET, audio_text, tail);
 	else
 		snprintf(line2, sizeof(line2),
-			 "%.1f FPS %c %s %c %s",
+			 "%.1f FPS %c %s %c %s%s",
 			 fps, OSD_BULLET, aspect_label(g_aspect),
-			 OSD_BULLET, audio_text);
+			 OSD_BULLET, audio_text, tail);
 
 	snprintf(text, sizeof(text),
 		 "EVERLIVE %c %ux%u%s @ %.2f Hz\n%s",
@@ -2174,15 +2189,20 @@ static void v4l2_sink_close(struct v4l2_sink *sink)
 		return;
 
 	v4l2_sink_drop_scaler(sink);
-	if (sink->fd < 0)
-		return;
-
-	pr_info("V4L2 sink: closing %s (%lu frames, %lu dropped)",
-		sink->path, (unsigned long)sink->frames,
-		(unsigned long)sink->dropped);
-	close(sink->fd);
-	sink->fd = -1;
+	if (sink->fd >= 0) {
+		pr_info("V4L2 sink: closing %s (%lu frames, %lu dropped)",
+			sink->path, (unsigned long)sink->frames,
+			(unsigned long)sink->dropped);
+		close(sink->fd);
+		sink->fd = -1;
+	}
 	sink->configured = false;
+	/*
+	 * Clearing the path marks the sink as inactive.  Without it the write
+	 * path would see fd < 0 and silently reopen the node, which is the
+	 * opposite of an explicit detach.
+	 */
+	sink->path[0] = '\0';
 }
 
 /* ------------------------------------------------------------------ */
@@ -3747,6 +3767,101 @@ static void set_window_icon(SDL_Window *window)
 }
 
 /*
+ * Switch the presentation layer between the interactive window and headless
+ * operation without touching the DMA ring, the V4L2 sink or the audio path.
+ *
+ * The main loop owns window/renderer/texture, so the switch happens on that
+ * thread and the render path can never observe a half-torn triple.  The SDL
+ * video subsystem is never shut down once initialised: tearing it down would
+ * drop the compositor connection and make a later switch fragile.
+ */
+static void switch_output_mode(bool want_gaming, SDL_Window **window,
+			       SDL_Renderer **renderer, SDL_Texture **texture,
+			       struct standby_state *standby)
+{
+	Uint32 renderer_flags;
+
+	if (want_gaming == !g_headless)
+		return;		/* already in the requested mode */
+
+	if (!want_gaming) {
+		if (*texture) {
+			SDL_DestroyTexture(*texture);
+			*texture = NULL;
+		}
+		if (standby->texture) {
+			SDL_DestroyTexture(standby->texture);
+			standby->texture = NULL;
+		}
+		osd_destroy();
+		if (*renderer) {
+			SDL_DestroyRenderer(*renderer);
+			*renderer = NULL;
+		}
+		if (*window) {
+			SDL_DestroyWindow(*window);
+			*window = NULL;
+		}
+		g_headless = true;
+		printf("[MODE] Headless: DMA, V4L2 and audio keep running\n");
+		fflush(stdout);
+		return;
+	}
+
+	/*
+	 * A process started with --headless never initialised SDL video, so do
+	 * it on demand; the subsystem then stays up for later switches.
+	 */
+	if (!SDL_WasInit(SDL_INIT_VIDEO) &&
+	    SDL_InitSubSystem(SDL_INIT_VIDEO) < 0) {
+		pr_warn("Mode switch: SDL video unavailable (%s)",
+			SDL_GetError());
+		return;
+	}
+
+	*window = SDL_CreateWindow("EverLive",
+				   SDL_WINDOWPOS_CENTERED,
+				   SDL_WINDOWPOS_CENTERED,
+				   DEFAULT_WINDOW_WIDTH,
+				   DEFAULT_WINDOW_HEIGHT,
+				   SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+	if (!*window) {
+		pr_warn("Mode switch: SDL_CreateWindow failed (%s)",
+			SDL_GetError());
+		return;
+	}
+
+	set_window_icon(*window);
+	SDL_SetHint(SDL_HINT_RENDER_VSYNC, g_vsync ? "1" : "0");
+
+	renderer_flags = SDL_RENDERER_ACCELERATED;
+	if (g_vsync)
+		renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
+
+	*renderer = SDL_CreateRenderer(*window, -1, renderer_flags);
+	if (!*renderer && g_vsync)
+		*renderer = SDL_CreateRenderer(*window, -1,
+					       SDL_RENDERER_ACCELERATED);
+	if (!*renderer)
+		*renderer = SDL_CreateRenderer(*window, -1, 0);
+	if (!*renderer) {
+		pr_warn("Mode switch: SDL_CreateRenderer failed (%s)",
+			SDL_GetError());
+		SDL_DestroyWindow(*window);
+		*window = NULL;
+		return;
+	}
+
+	if (g_fullscreen)
+		SDL_SetWindowFullscreen(*window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+	SDL_ShowCursor(g_osd_enabled ? SDL_ENABLE : SDL_DISABLE);
+
+	g_headless = false;
+	printf("[MODE] Gaming window opened; DMA ring untouched\n");
+	fflush(stdout);
+}
+
+/*
  * Publish a coherent snapshot for the control socket.  Called once per second
  * from the stats block, so the control thread never takes a lock in the
  * render or DMA path.
@@ -3841,8 +3956,45 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
  * touches is either render-thread-only or a relaxed atomic polled by the LED
  * and audio workers.
  */
+/*
+ * Map the DRM InfoFrame to a tonemapping mode.  Cheap when nothing changed:
+ * gc573_hdr_set_mode() only rebuilds the 256-entry table on a real change.
+ */
+static void hdr_apply(const struct gc573_user_video_signal *sig,
+		      bool have_signal)
+{
+	enum gc573_hdr_type type = GC573_HDR_SDR;
+
+	if (g_hdr_enabled && have_signal && sig && sig->hdr_present) {
+		if (sig->eotf == 2)
+			type = GC573_HDR_PQ;
+		else if (sig->eotf == 3)
+			type = GC573_HDR_HLG;
+	}
+
+	gc573_hdr_set_mode(type, powf(2.0f, g_hdr_exposure_ev));
+
+	if (type != g_hdr_announced) {
+		g_hdr_announced = type;
+		if (type == GC573_HDR_SDR) {
+			printf("[HDR] SDR%s\n",
+			       (have_signal && sig && sig->hdr_present &&
+				!g_hdr_enabled) ?
+			       " (HDR signal, tonemap bypassed)" : "");
+		} else {
+			printf("[HDR] %s (MaxCLL %u, MaxFALL %u)\n",
+			       gc573_hdr_label(), sig->max_cll, sig->max_fall);
+		}
+		fflush(stdout);
+	}
+}
+
 static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
-			      SDL_Window *window)
+			      SDL_Window *window,
+			      struct v4l2_sink *sink,
+			      uint32_t out_w, uint32_t out_h,
+			      const struct gc573_user_video_signal *sig,
+			      bool have_signal)
 {
 	switch (cmd->kind) {
 	case GC573_IPC_CMD_LED_SET:
@@ -3903,6 +4055,55 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 			g_aspect = (enum stream_aspect)cmd->a;
 		printf("[IPC] Aspect: %s\n", aspect_name(g_aspect));
 		break;
+	case GC573_IPC_CMD_MODE:
+		/* Applied by the render loop at the top of the next iteration. */
+		__atomic_store_n(&g_mode_request, cmd->a, __ATOMIC_RELEASE);
+		printf("[IPC] Mode request: %s\n",
+		       cmd->a == GC573_IPC_MODE_GAMING ? "gaming" : "headless");
+		break;
+	case GC573_IPC_CMD_HDR:
+		g_hdr_enabled = cmd->a != 0;
+		g_hdr_exposure_ev = cmd->f;
+		hdr_apply(sig, have_signal);
+		printf("[IPC] HDR: %s, exposure %+.1f EV\n",
+		       g_hdr_enabled ? "auto" : "bypass",
+		       (double)g_hdr_exposure_ev);
+		break;
+	case GC573_IPC_CMD_V4L2: {
+		const char *path = cmd->path[0] ? cmd->path :
+				   DEFAULT_V4L2_DEVICE;
+
+		if (cmd->a) {
+			if (sink->fd >= 0 && strcmp(sink->path, path) == 0) {
+				printf("[V4L2] Live attach ignored: %s already active\n",
+				       path);
+				break;
+			}
+			/* open() memsets the sink, so drop an old fd first. */
+			if (sink->fd >= 0 || sink->path[0])
+				v4l2_sink_close(sink);
+			if (v4l2_sink_open(sink, path) < 0) {
+				pr_warn("V4L2 live attach failed: %s", path);
+				break;
+			}
+			printf("[V4L2] Live attach to %s\n", path);
+			/*
+			 * Negotiate immediately when a signal is already locked, so
+			 * the very next frame reaches OBS instead of the first
+			 * frame after the writer's own retry interval.
+			 */
+			if (have_signal && out_w && out_h)
+				(void)v4l2_sink_configure(sink, out_w, out_h, sig);
+		} else {
+			if (sink->fd < 0 && !sink->path[0]) {
+				printf("[V4L2] Live detach ignored: no sink attached\n");
+				break;
+			}
+			v4l2_sink_close(sink);
+			printf("[V4L2] Live detach\n");
+		}
+		break;
+	}
 	default:
 		break;
 	}
@@ -3995,6 +4196,12 @@ int main(int argc, char *argv[])
 			ipc_socket_override = argv[i] + 13;
 		} else if (strcmp(argv[i], "--no-ipc") == 0) {
 			ipc_disabled = true;
+		} else if (strcmp(argv[i], "--no-hdr") == 0) {
+			g_hdr_enabled = false;
+		} else if (strcmp(argv[i], "--hdr-exposure") == 0 && i + 1 < argc) {
+			g_hdr_exposure_ev = (float)atof(argv[++i]);
+		} else if (strncmp(argv[i], "--hdr-exposure=", 15) == 0) {
+			g_hdr_exposure_ev = (float)atof(argv[i] + 15);
 		} else if (strcmp(argv[i], "--audio-tap") == 0) {
 			if (i + 1 < argc && argv[i + 1][0] != '-')
 				audio_tap_node = argv[++i];
@@ -4055,6 +4262,7 @@ int main(int argc, char *argv[])
 		g_led_b = 0xff;
 	}
 	led_publish_rgb();
+	gc573_hdr_init();
 	if (!edid_spec || !*edid_spec)
 		edid_spec = GC573_EDID_PROFILE_DEFAULT;
 
@@ -4441,6 +4649,12 @@ int main(int argc, char *argv[])
 					printf("[OSD] Position: %s\n",
 					       osd_pos_name(g_osd_pos));
 					fflush(stdout);
+				} else if (event.key.keysym.sym == SDLK_h) {
+					g_hdr_enabled = !g_hdr_enabled;
+					hdr_apply(&current_sig, have_signal);
+					printf("[HDR] Tonemapping: %s\n",
+					       g_hdr_enabled ? "auto" : "bypass");
+					fflush(stdout);
 				} else if (event.key.keysym.sym == SDLK_TAB ||
 					   event.key.keysym.sym == SDLK_i ||
 					   event.key.keysym.sym == SDLK_o ||
@@ -4464,7 +4678,21 @@ int main(int argc, char *argv[])
 		 * ever appends to the lock-free command ring.
 		 */
 		while (gc573_ipc_poll_cmd(&ipc_cmd))
-			apply_ipc_command(&ipc_cmd, window);
+			apply_ipc_command(&ipc_cmd, window, &v4l2_sink,
+					  output_width, output_height,
+					  &current_sig, have_signal);
+
+		/* mode.set is applied here: window/renderer/texture belong to this
+		 * thread, and the DMA ring must not be disturbed. */
+		{
+			int request = __atomic_exchange_n(&g_mode_request, 0,
+							  __ATOMIC_ACQ_REL);
+
+			if (request)
+				switch_output_mode(
+					request == GC573_IPC_MODE_GAMING,
+					&window, &renderer, &texture, &standby);
+		}
 
 		now = now_ms();
 
@@ -4804,11 +5032,31 @@ int main(int argc, char *argv[])
 
 		if (streaming) {
 			void *pixels = NULL;
-			int ph = preview_take(&pixels);
+			int ph;
 			bool have_frame = false;
+
+			/*
+			 * A mode switch (or a failed allocation during a hot switch)
+			 * leaves texture == NULL.  Rebuild it from the current geometry;
+			 * the DMA ring is not involved.
+			 */
+			if (!g_headless && renderer && !texture &&
+			    output_width && output_height)
+				(void)ensure_texture(renderer, &texture,
+						     output_width, output_height);
+
+			ph = preview_take(&pixels);
 
 			if (ph > 0) {
 				have_frame = true;
+				/*
+				 * Tonemap once, in place, before both consumers read
+				 * the slot: the window and the OBS feed then show the
+				 * same picture.  SDR is a pure pass-through.
+				 */
+				if (gc573_hdr_active())
+					gc573_hdr_tonemap_yuyv(pixels, output_width,
+							       output_height);
 				if (v4l2_sink.path[0])
 					v4l2_sink_write(&v4l2_sink, pixels,
 							g_preview.bytes,
@@ -4872,7 +5120,9 @@ int main(int argc, char *argv[])
 						   input_width, input_height,
 						   current_sig.interlaced,
 						   input_rate_x100,
-						   displayed_fps, audio_desc);
+						   displayed_fps, audio_desc,
+						   gc573_hdr_active() ?
+						   gc573_hdr_label() : NULL);
 				}
 				render_frame(window, renderer, texture,
 					     aspect_ratio(g_aspect, video_aspect));
@@ -4931,6 +5181,18 @@ int main(int argc, char *argv[])
 				      (double)(stats_us - last_stats_us);
 
 			displayed_fps = fps;
+
+			/*
+			 * Refresh the DRM InfoFrame once per second: an HDR toggle at an
+			 * unchanged resolution does not trigger a timing probe.
+			 */
+			if (streaming && have_signal) {
+				if (gc573_user_it6805_poll_hdr(ctx.bar0,
+							       &current_sig) == 0)
+					hdr_apply(&current_sig, true);
+			} else {
+				hdr_apply(&current_sig, false);
+			}
 			publish_ipc_stats(have_signal, streaming, &current_sig,
 					  input_width, input_height,
 					  output_width, output_height,

@@ -270,6 +270,36 @@ if QSocketNotifier is not None:
             """mode: ``auto`` | ``16:9`` | ``4:3`` | ``stretch``."""
             return self.request("aspect.set", {"mode": str(mode)})
 
+        def set_mode(self, mode: str) -> bool:
+            """Switch the running engine between ``gaming`` and ``headless``.
+
+            The engine swaps only its presentation layer: the DMA ring, the
+            V4L2 loopback feed and the audio path keep running, so an OBS
+            recording is never interrupted.
+            """
+            return self.request("mode.set", {"mode": str(mode)})
+
+        def set_v4l2(self, enabled: bool, device: str = "/dev/video10") -> bool:
+            """Attach or detach the v4l2loopback sink on a running engine.
+
+            The DMA ring, the gaming window and the audio path keep running;
+            only the loopback writer is opened or closed.
+            """
+            params = {"enabled": bool(enabled)}
+            if device:
+                params["device"] = str(device)
+            return self.request("v4l2.set", params)
+
+        def set_hdr(self, enabled: bool, exposure_ev: float = 0.0) -> bool:
+            """Enable/disable HDR10/HLG to SDR tonemapping on a running engine.
+
+            ``exposure_ev`` biases the ACES curve, -2.0 .. +2.0 EV.
+            """
+            return self.request("hdr.set", {
+                "mode": "auto" if enabled else "off",
+                "exposure": max(-2.0, min(2.0, float(exposure_ev))),
+            })
+
         # -- wire ------------------------------------------------------
 
         def _send(self, message) -> bool:

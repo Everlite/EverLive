@@ -520,7 +520,8 @@ static void ipc_send_hello(struct ipc_server *s, struct ipc_client *c,
 		     "\"methods\":[\"hello\",\"ping\",\"status.get\","
 		     "\"led.set\",\"led.mode.set\",\"audio.volume.set\","
 		     "\"audio.mute.set\",\"osd.set\",\"osd.position.set\","
-		     "\"aspect.set\"]}",
+		     "\"aspect.set\",\"mode.set\",\"v4l2.set\","
+		     "\"hdr.set\"]}",
 		     GC573_IPC_PROTO_VERSION, s->version, (long)getpid(),
 		     path_esc);
 	if (n > 0 && (size_t)n < sizeof(result))
@@ -718,6 +719,90 @@ static void ipc_handle_aspect(struct ipc_client *c, const char *id,
 	ipc_push_and_reply(c, id, &cmd);
 }
 
+static void ipc_handle_hdr(struct ipc_client *c, const char *id,
+			   const char *line)
+{
+	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_HDR };
+	char mode[16];
+	double exposure = 0.0;
+
+	if (!json_get_string(line, "mode", mode, sizeof(mode))) {
+		ipc_error(c, id, -32602, "invalid params: mode required");
+		return;
+	}
+
+	if (!strcasecmp(mode, "auto") || !strcasecmp(mode, "on"))
+		cmd.a = 1;
+	else if (!strcasecmp(mode, "off") || !strcasecmp(mode, "bypass"))
+		cmd.a = 0;
+	else {
+		ipc_error(c, id, -32602, "unknown mode: auto|off");
+		return;
+	}
+
+	if (json_get_double(line, "exposure", &exposure)) {
+		if (exposure < -2.0)
+			exposure = -2.0;
+		if (exposure > 2.0)
+			exposure = 2.0;
+		cmd.f = (float)exposure;
+	}
+
+	ipc_push_and_reply(c, id, &cmd);
+}
+
+static void ipc_handle_mode(struct ipc_client *c, const char *id,
+			    const char *line)
+{
+	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_MODE };
+	char mode[24];
+
+	if (!json_get_string(line, "mode", mode, sizeof(mode))) {
+		ipc_error(c, id, -32602, "invalid params: mode required");
+		return;
+	}
+
+	if (!strcasecmp(mode, "gaming") || !strcasecmp(mode, "window")) {
+		cmd.a = GC573_IPC_MODE_GAMING;
+	} else if (!strcasecmp(mode, "headless") ||
+		   !strcasecmp(mode, "studio")) {
+		cmd.a = GC573_IPC_MODE_HEADLESS;
+	} else {
+		ipc_error(c, id, -32602, "unknown mode: gaming|headless");
+		return;
+	}
+
+	ipc_push_and_reply(c, id, &cmd);
+}
+
+static void ipc_handle_v4l2(struct ipc_client *c, const char *id,
+			    const char *line)
+{
+	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_V4L2 };
+	char device[64];
+	bool enabled;
+
+	if (!json_get_bool(line, "enabled", &enabled)) {
+		ipc_error(c, id, -32602, "invalid params: enabled required");
+		return;
+	}
+
+	cmd.a = enabled ? 1 : 0;
+
+	if (json_get_string(line, "device", device, sizeof(device))) {
+		/* Only character devices; no traversal, no relative paths. */
+		if (strncmp(device, "/dev/", 5) != 0 ||
+		    strstr(device, "..") != NULL) {
+			ipc_error(c, id, -32602,
+				  "device must be an absolute /dev/ path");
+			return;
+		}
+		snprintf(cmd.path, sizeof(cmd.path), "%s", device);
+	}
+
+	ipc_push_and_reply(c, id, &cmd);
+}
+
 static void ipc_handle_line(struct ipc_server *s, struct ipc_client *c,
 			    const char *line)
 {
@@ -753,6 +838,12 @@ static void ipc_handle_line(struct ipc_server *s, struct ipc_client *c,
 		ipc_handle_osd_position(c, has_id ? id : NULL, line);
 	} else if (strcmp(method, "aspect.set") == 0) {
 		ipc_handle_aspect(c, has_id ? id : NULL, line);
+	} else if (strcmp(method, "mode.set") == 0) {
+		ipc_handle_mode(c, has_id ? id : NULL, line);
+	} else if (strcmp(method, "v4l2.set") == 0) {
+		ipc_handle_v4l2(c, has_id ? id : NULL, line);
+	} else if (strcmp(method, "hdr.set") == 0) {
+		ipc_handle_hdr(c, has_id ? id : NULL, line);
 	} else {
 		ipc_error(c, has_id ? id : NULL, -32601, "method not found");
 	}

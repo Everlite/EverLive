@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.3.0] - 2026-10-30
 
 ### Added
+- **HDR10 & HLG Detection + Real-Time Filmic SDR Tonemapper:**
+  - Added IT6805 DRM InfoFrame decoding (`0x87`, Bank 2) in `gc573_user_it6805.[ch]` with 1 Hz live polling to detect SMPTE ST 2084 (PQ / HDR10) and HLG signals, `MaxCLL`, and `MaxFALL`.
+  - Added in-place YUYV tonemapper (`gc573_user_hdr.[ch]`) using a John Hable filmic curve calibrated to ITU-R BT.2408 reference diffuse white (`203 cd/m²`), BT.709 OETF, limited-range scaling (`16..235`), and a 2x2 BT.2020-to-BT.709 chroma matrix. Both the SDL2 gaming window and OBS (`/dev/video10`) receive accurate SDR colors, while native SDR signals stay on the zero-copy fast path.
+  - Added runtime toggle (`h` hotkey in game window, `--no-hdr`, IPC `hdr.set`) and linear exposure bias (`--hdr-exposure -2.0..+2.0`, live EV steppers in Console Hub).
+- **Native PlayStation 5 1440p60 & 1440p120 SDR/HDR EDID Support:**
+  - Added VESA CVT-RB `2560x1440 @ 59.95 Hz` (`241.50 MHz`) Detailed Timing Descriptors alongside `1440p120` in both `Default (4K60 / 1440p120 HDR)` and `Force 1440p @ 120 Hz` hardware EDID profiles (`gc573_user_edid.c`).
+  - Hardware-verified on PlayStation 5 via *Test 1440p Output*: unlocks both `60 Hz SDR/HDR` and `120 Hz SDR/HDR`.
 - **Dedicated PipeWire Virtual Audio Track for OBS / Broadcasting:**
   - Added in-process PipeWire audio tap (`gc573_user_audio_tap.[ch]`) publishing mixed, decoded HDMI audio directly to a dedicated virtual audio sink named `"EverLive Capture Audio"`.
   - Enables clean, isolated game audio recording in OBS (`Monitor of EverLive Capture Audio`), Discord, or FFmpeg without capturing desktop noise, system sounds, Discord chat, or background music.
@@ -19,18 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - High-performance, lock-free JSON-RPC 2.0 control socket (`$XDG_RUNTIME_DIR/everlive.sock`) powered by `gc573_user_ipc.[ch]` with `epoll` and `SO_PEERCRED` security.
   - Control commands communicate via a lock-free Single-Producer Single-Consumer (SPSC) command ring directly to the streamer thread without tearing down DMA buffers, dropping frames, or stalling hardware pipelines.
   - Python GUI automatically docks to the control socket (`everlive_client.py`) using non-blocking `QSocketNotifier`.
-- **Live On-The-Fly Hardware Adjustments:**
-  - **Volume & Mute:** Live gain adjustments with a smooth 20 ms linear fade to eliminate pops and clicks; mute toggles instantly without restarting audio devices.
-  - **RGB Lighting:** Instant on-the-fly switching between RGB Wave, Rainbow cycle, static colors, and off without restarting background daemons.
-  - **Aspect Ratio & OSD:** Live aspect ratio switching (16:9, Auto, Stretch) and OSD overlay toggling/position cycling without stream interruptions.
-- **Symmetrical Console Hub GUI:**
-  - Modernized 2-column layout pairing Virtual Camera and Virtual Audio Track alongside screen and launch preferences.
-  - On-screen stats (OSD) controls integrated directly into the Hardware & Capture settings panel.
+- **Zero-Interruption Live Mode Switch & Dynamic Virtual Camera:**
+  - **Live Gaming <-> Studio Switch (`mode.set`):** Swaps between the interactive SDL2 gaming window and Headless Studio mode in place without closing the VFIO container, DMA ring, audio stream, or active OBS recording.
+  - **Live Virtual Camera Toggle (`v4l2.set`):** Dynamically attaches or detaches `/dev/video10` (`v4l2loopback`) on a running engine with immediate format negotiation when a signal is already locked.
+  - **Volume, Mute, RGB, Aspect & OSD:** Live gain adjustments (20 ms linear fade), instant mute, on-the-fly RGB lighting modes (wave, rainbow, static, off), aspect ratio switching, and OSD overlay controls without stream restarts.
+- **Redesigned Console Hub GUI:**
+  - Clean dark hardware-utility interface (`everlive_viewer.py`) with a single horizontal runtime action bar (`Start Gaming Screen`, `Start Studio / Headless (OBS)`, `Restart Engine`), live signal/audio telemetry badges, and structured `VIDEO & COLOR`, `AUDIO & HARDWARE`, and `OBS OUTPUTS, OVERLAY & APP` sections.
 
 ### Fixed
+- **PS5 Cold-Start HDMI Handshake:** Unconditionally power and unblank the internal IT6664 TX1 capture port upon RX lock and track 5V transitions cleanly across `gc573_user_it6664.c` and `gc573_user_it6805.c`, fixing "No HDMI Signal" when a console boots after EverLive is already running.
 - **Local IPC Docking:** Resolved an issue where local sessions started from the GUI did not attach to the engine's IPC socket, allowing live adjustments to take effect immediately without needing a mode switch or stream restart.
 - **24-bit Audio Gain Normalization:** Fixed sample alignment in the audio worker gain pass to support both S16 and 4-byte widened S32 formats correctly.
-- **Dependencies:** Added `libpipewire-0.3-dev` (Ubuntu/Debian), `pipewire-devel` (Fedora), and `pipewire` (Arch) to `install.sh` automated package verification.
+- **Dependencies:** Added `libpipewire-0.3-dev` (Ubuntu/Debian), `pipewire-devel` (Fedora), and `pipewire` (Arch) to `install.sh` automated package verification and CI workflow.
 
 ---
 

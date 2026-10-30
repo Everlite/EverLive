@@ -38,6 +38,11 @@ struct gc573_user_video_signal {
 	uint8_t ycc_quantization;
 	uint8_t status15;
 	uint8_t avi_raw[6];
+	/* HDMI Dynamic Range and Mastering InfoFrame (packet 0x87, bank 2). */
+	bool hdr_present;
+	uint8_t eotf;		/* 0 = SDR gamma, 2 = PQ (HDR10), 3 = HLG */
+	uint16_t max_cll;
+	uint16_t max_fall;
 };
 
 /**
@@ -116,6 +121,20 @@ int gc573_user_it6805_poll_signal_ex(void *bar0,
  * Returns 0 on success, negative errno on failure.
  */
 int gc573_user_it6805_poll_signal(void *bar0, struct gc573_user_video_signal *sig);
+
+/**
+ * gc573_user_it6805_poll_hdr - Refresh only the DRM InfoFrame status
+ * @bar0: Pointer to mapped FPGA BAR0 MMIO
+ * @sig: Signal struct whose hdr_present/eotf/max_cll/max_fall are updated
+ *
+ * Reads the 31-byte DRM InfoFrame from bank 2 (0x24..0x42) and leaves every
+ * timing field untouched.  Costs ~31 I2C transactions, so the streamer calls
+ * it once per second rather than on the hot path.
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int gc573_user_it6805_poll_hdr(void *bar0,
+			       struct gc573_user_video_signal *sig);
 
 /**
  * gc573_user_it6805_apply_signal_output - Configure and enable the video path

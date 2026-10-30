@@ -54,6 +54,12 @@ enum gc573_ipc_aspect {
 	GC573_IPC_ASPECT_STRETCH = 3,
 };
 
+/* Output mode of the running engine. */
+enum gc573_ipc_mode {
+	GC573_IPC_MODE_HEADLESS = 0,
+	GC573_IPC_MODE_GAMING = 1,
+};
+
 enum gc573_ipc_cmd_kind {
 	GC573_IPC_CMD_LED_SET = 0,
 	GC573_IPC_CMD_LED_MODE,
@@ -62,6 +68,9 @@ enum gc573_ipc_cmd_kind {
 	GC573_IPC_CMD_OSD_ENABLE,
 	GC573_IPC_CMD_OSD_POSITION,
 	GC573_IPC_CMD_ASPECT,
+	GC573_IPC_CMD_MODE,
+	GC573_IPC_CMD_V4L2,
+	GC573_IPC_CMD_HDR,
 };
 
 /*
@@ -74,6 +83,8 @@ struct gc573_ipc_cmd {
 	int32_t b;
 	int32_t c;
 	float f;
+	/* Optional device path for GC573_IPC_CMD_V4L2 (empty = streamer default). */
+	char path[64];
 };
 
 /*

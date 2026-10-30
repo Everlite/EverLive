@@ -38,7 +38,10 @@ As of **EverLive v1.0.0**, this userspace engine is the default, primary driver 
 | **`gc573_user_streamer`** | The main capture and streaming engine (video DMA, audio DMA, EDID, LED, SDL2 display). |
 | **`everlive_userd`** | Standby daemon that holds the VFIO container open between streaming sessions to avoid FLR resets. Drives the RGB lighting: static `--color R G B`, `--off`, or a smooth `--rainbow` / `--cycle SECONDS` spectrum. |
 | **`gc573_user_probe`** | Diagnostic tool for testing MMIO, I2C discovery, and DMA mappings. |
-| **`gc573_user_edid.[ch]`** | Hardware EDID profile generator and I2C programmer. |
+| **`gc573_user_edid.[ch]`** | Hardware EDID profile generator (4K60, 1440p60/120 SDR & HDR, 1080p240) and I2C programmer. |
+| **`gc573_user_hdr.[ch]`** | Real-time HDR10 (PQ) & HLG to SDR Hable filmic tonemapper and BT.2020-to-BT.709 chroma matrix. |
+| **`gc573_user_ipc.[ch]`** | Lock-free JSON-RPC 2.0 Unix control socket (`everlive.sock`) for zero-interrupt runtime mutations. |
+| **`gc573_user_audio_tap.[ch]`** | In-process PipeWire virtual audio tap (`EverLive Capture Audio`) for isolated OBS recording. |
 | **`gc573_user_audio.[ch]`** | PCIe DMA audio ring buffer, IEC 61937 scan/mute guard, audio worker thread and SDL2 playback. |
 | **`gc573_user_bitstream.[ch]`** | IEC 61937 unpacker plus AC-3/DTS decoder (`libavcodec`) and stereo downmix (`libswresample`). |
 | **`gc573_user_nosignal.[ch]`** | Procedural YUYV standby screen (gradient, grid, icon, bitmap-font text) for the window and the V4L2 sink. |
@@ -79,9 +82,11 @@ gc573_user_streamer [PCI_ADDRESS] [OPTIONS]
   --no-ipc             Do not open the control socket
   --audio-tap [NAME]   Mirror the mixed audio into a PipeWire sink
                        (default: everlive-capture-audio)
+  --no-hdr             Disable HDR10/HLG -> SDR tonemapping (bypass)
+  --hdr-exposure EV    Exposure bias for the tonemapper (-2.0 .. +2.0)
 ```
 
-Game-window hotkeys: <kbd>f</kbd>/<kbd>F11</kbd> fullscreen, <kbd>a</kbd> aspect ratio,
+Game-window hotkeys: <kbd>f</kbd>/<kbd>F11</kbd> fullscreen, <kbd>h</kbd> HDR tonemapper, <kbd>a</kbd> aspect ratio,
 <kbd>p</kbd> OSD position, <kbd>o</kbd>/<kbd>i</kbd>/<kbd>Tab</kbd> stats overlay,
 <kbd>s</kbd>/<kbd>F10</kbd> overlay + cursor, <kbd>Esc</kbd>/<kbd>q</kbd> quit.
 
@@ -101,17 +106,82 @@ socket and the Control Hub attaches to it as a read-only **Remote Session**.
 
 Methods: `hello`, `ping`, `status.get`, and the write path
 `led.set`, `led.mode.set`, `audio.volume.set`, `audio.mute.set`, `osd.set`,
-`osd.position.set`, `aspect.set`. Mutations are queued into a lock-free ring
-and applied by the render thread, so they never touch the DMA path; the
-audio gain uses a 20 ms linear ramp instead of pausing the device. The snapshot
-is published once per second from the render loop through a seqlock, so remote
-queries never touch the DMA path.
+`osd.position.set`, `aspect.set`, `mode.set`, `v4l2.set`, `hdr.set`.
+Mutations are queued into a lock-free ring and applied by the render thread, so
+they never touch the DMA path; the audio gain uses a 20 ms linear ramp instead
+of pausing the device. The snapshot is published once per second from the
+render loop through a seqlock, so remote queries never touch the DMA path.
 
 ```console
 $ printf '{"jsonrpc":"2.0","id":1,"method":"status.get"}\n' \
     | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/everlive.sock"
-{"jsonrpc":"2.0","id":1,"result":{"proto":1,"version":"1.2.3",...}}
+{"jsonrpc":"2.0","id":1,"result":{"proto":1,"version":"1.3.0",...}}
 ```
+
+## HDR10 / HLG to SDR
+
+The IT6805 DRM InfoFrame (packet `0x87`, bank 2, `0x24..0x42`) is decoded to
+`hdr_present`, `eotf` (0 SDR, 2 PQ, 3 HLG), `MaxCLL` and `MaxFALL`. It is read
+on every full signal probe and once per second afterwards, so an HDR toggle at
+an unchanged resolution is still noticed.
+
+When PQ or HLG is detected the frame is tonemapped **in place** before it is
+handed to SDL and to the V4L2 sink, so the gaming window and OBS show the same
+picture:
+
+- Luma: one 256-entry table per transfer function, built on demand. It folds
+  PQ/HLG EOTF, a John Hable filmic curve calibrated to ITU-R BT.2408 diffuse
+  white (`203 cd/m²`, `white = 11.2`), the BT.709 OETF and limited-range
+  scaling (`16..235`) into a single byte lookup.
+- Chroma: a constant 2x2 matrix derived from BT.2020 -> BT.709, applied to the
+  centred Cb/Cr values (`HDR_SATURATION = 1.15`).
+
+SDR signals stay on the zero-copy path, so the pass costs nothing when it is
+not needed. Hotkey <kbd>h</kbd> toggles the tonemapper, `--no-hdr` disables it,
+`--hdr-exposure EV` biases the curve.
+
+Measured throughput on the development machine: **~4.2 ms per 1440p frame**
+(7.2 MB YUYV, ~1.7 GB/s). The pass is memory-bandwidth bound, not compute
+bound; 4K scales to roughly 2.5x. The <1 ms target is not reachable for a
+full-frame CPU pass at 4K - that would need a GPU render pass plus a readback
+for the V4L2 feed, which is more expensive overall.
+
+## Live Virtual Camera
+
+`v4l2.set {"enabled": true, "device": "/dev/video10"}` opens or closes the
+v4l2loopback writer on a running engine:
+
+```console
+$ printf '{"jsonrpc":"2.0","id":1,"method":"v4l2.set","params":{"enabled":true}}\n' \
+    | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/everlive.sock"
+{"jsonrpc":"2.0","id":1,"result":{"ok":true}}
+```
+
+Only the loopback fd is opened or closed. The DMA ring, the gaming window, the
+audio tap and the VFIO container keep running. When a signal is already locked,
+the sink is negotiated immediately so the next frame reaches OBS without
+waiting for the writer's retry interval. `device` is optional and must be an
+absolute `/dev/` path; it defaults to `/dev/video10`.
+
+## Live Mode Switch
+
+`mode.set {"mode": "gaming"|"headless"}` swaps the presentation layer of a
+running engine:
+
+```console
+$ printf '{"jsonrpc":"2.0","id":1,"method":"mode.set","params":{"mode":"gaming"}}\n' \
+    | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/everlive.sock"
+{"jsonrpc":"2.0","id":1,"result":{"ok":true}}
+```
+
+Only the SDL window/renderer/texture are created or destroyed. The VFIO
+container, the DMA ring, the V4L2 loopback writer and the audio path keep
+running, so an OBS recording survives the switch. The SDL video subsystem is
+initialised on demand (important for a process started with `--headless`) and
+is never torn down once it is up.
+
+The command is acknowledged as soon as it is queued, before the switch is
+applied - the render loop performs it at the top of its next iteration.
 
 ## Virtual Audio Track (OBS)
 
