@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.3.0] - 2026-10-30
+## [1.3.0] - 2026-10-31
 
 ### Added
 - **HDR10 & HLG Detection + Real-Time Filmic SDR Tonemapper:**
@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Clean dark hardware-utility interface (`everlive_viewer.py`) with a single horizontal runtime action bar (`Start Gaming Screen`, `Start Studio / Headless (OBS)`, `Restart Engine`), live signal/audio telemetry badges, and structured `VIDEO & COLOR`, `AUDIO & HARDWARE`, and `OBS OUTPUTS, OVERLAY & APP` sections.
 
 ### Fixed
+- **V4L2 Virtual Camera Self-Lock & Studio Thread Offload:** Added a 600 ms startup grace window before publishing standby frames to `/dev/video10` so cold-starting into an active HDMI source never pre-locks `v4l2loopback` at `1080p`. Added sysfs `consumers` detection (`v4l2_reader_active`) to reopen self-locked writer buffers cleanly on native geometry changes without churning active OBS captures, and offloaded Headless Studio V4L2 writes onto a dedicated worker thread.
 - **PS5 Cold-Start HDMI Handshake:** Unconditionally power and unblank the internal IT6664 TX1 capture port upon RX lock and track 5V transitions cleanly across `gc573_user_it6664.c` and `gc573_user_it6805.c`, fixing "No HDMI Signal" when a console boots after EverLive is already running.
 - **Local IPC Docking:** Resolved an issue where local sessions started from the GUI did not attach to the engine's IPC socket, allowing live adjustments to take effect immediately without needing a mode switch or stream restart.
 - **24-bit Audio Gain Normalization:** Fixed sample alignment in the audio worker gain pass to support both S16 and 4-byte widened S32 formats correctly.

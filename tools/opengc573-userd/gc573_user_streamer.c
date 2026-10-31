@@ -1421,6 +1421,9 @@ struct frame_preview {
 	uint64_t taken_age_us;
 };
 
+/* Defined with the V4L2 sink, further down; joined before the ring is freed. */
+static void v4l2_pump_stop(void);
+
 static struct frame_preview g_preview;
 
 static void *preview_thread(void *arg)
@@ -1510,6 +1513,11 @@ static void preview_free_buffers(void)
 
 static void preview_stop(void)
 {
+	/*
+	 * The asynchronous V4L2 pump consumes preview slots; it must be joined
+	 * before the ring buffers are freed.
+	 */
+	v4l2_pump_stop();
 	if (g_preview.started) {
 		g_preview.stop = true;
 		pthread_join(g_preview.thread, NULL);
@@ -1849,6 +1857,67 @@ static int v4l2_sysfs_format(const char *device, struct v4l2_pix_format *out)
 	return 0;
 }
 
+/*
+ * Does a capture consumer currently own the loopback node?
+ *
+ * v4l2loopback exports its live state through sysfs.  "capture" means a
+ * capture application (OBS) has buffers allocated, so the writer must not
+ * churn its fd: the reader's format survives a writer reopen and S_FMT still
+ * fails with EBUSY.  "idle", "output" or a missing attribute means only our
+ * writer holds the node, so closing the fd really does release the stale
+ * ready_for_output buffers.
+ *
+ * The "buffers" attribute is only a fallback for kernels that do not export
+ * "state": a positive count there means capture buffers exist.
+ */
+static bool v4l2_reader_active(const char *device)
+{
+	const char *name;
+	char path[PATH_MAX];
+	char buf[64];
+	ssize_t n;
+	int fd;
+
+	if (!device || !*device)
+		return false;
+	name = strrchr(device, '/');
+	name = name ? name + 1 : device;
+	if (!*name)
+		return false;
+
+	if (snprintf(path, sizeof(path),
+		     "/sys/class/video4linux/%s/state", name) <
+			(int)sizeof(path)) {
+		fd = open(path, O_RDONLY | O_CLOEXEC);
+		if (fd >= 0) {
+			const char *p = buf;
+
+			n = read(fd, buf, sizeof(buf) - 1);
+			close(fd);
+			if (n > 0) {
+				buf[n] = '\0';
+				while (*p == ' ' || *p == '\t' || *p == '\n')
+					p++;
+				return strncasecmp(p, "capture", 7) == 0;
+			}
+		}
+	}
+
+	if (snprintf(path, sizeof(path),
+		     "/sys/class/video4linux/%s/buffers", name) >=
+			(int)sizeof(path))
+		return false;
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return false;
+	n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n <= 0)
+		return false;
+	buf[n] = '\0';
+	return strtoul(buf, NULL, 10) > 0;
+}
+
 static void v4l2_sink_drop_scaler(struct v4l2_sink *sink)
 {
 	if (sink->sws) {
@@ -1997,6 +2066,8 @@ static int v4l2_sink_configure(struct v4l2_sink *sink,
 	struct v4l2_format fmt;
 	struct v4l2_pix_format granted = { 0 };
 	unsigned int colorspace;
+	unsigned int prev_target_w, prev_target_h;
+	bool geometry_change;
 	bool granted_valid = false;
 	int err;
 
@@ -2007,11 +2078,23 @@ static int v4l2_sink_configure(struct v4l2_sink *sink,
 		sink->target_colorspace = v4l2_colorspace_for_signal(sig);
 	colorspace = sink->target_colorspace;
 
+	prev_target_w = sink->target_width;
+	prev_target_h = sink->target_height;
+
 	/* Remember what the stream needs, even if the driver refuses it now. */
 	if (sink->target_width != width || sink->target_height != height)
 		sink->last_upgrade_ms = 0;
 	sink->target_width = width;
 	sink->target_height = height;
+
+	/*
+	 * Either the published mode is changing, or the requested geometry just
+	 * moved (first negotiation included).  Both mean a refused S_FMT may be
+	 * self-inflicted rather than caused by a capture reader.
+	 */
+	geometry_change = (!sink->scaled && sink->configured &&
+			   (sink->width != width || sink->height != height)) ||
+			  (prev_target_w != width || prev_target_h != height);
 
 	if (sink->fd < 0 && v4l2_sink_reopen(sink) < 0)
 		return -EBADF;
@@ -2043,6 +2126,42 @@ static int v4l2_sink_configure(struct v4l2_sink *sink,
 		pr_err("V4L2 sink: VIDIOC_S_FMT %ux%u YUYV failed on %s: %s",
 		       width, height, sink->path, strerror(err));
 		return -err;
+	}
+
+	/*
+	 * EBUSY can be self-inflicted.  Once this fd has called write(),
+	 * v4l2loopback allocates ready_for_output buffers on it and then refuses
+	 * VIDIOC_S_FMT on that SAME fd until they are released - even with zero
+	 * capture readers.  With no reader those buffers die with the fd, so close
+	 * and reopen once and retry the native format natively.  If a reader does
+	 * hold buffers, the driver preserves them across the reopen and the retry
+	 * stays EBUSY; the scaler fallback below then takes over.
+	 */
+	if ((geometry_change || sink->scaled) && !v4l2_reader_active(sink->path)) {
+		sink->last_upgrade_ms = now_ms();
+		if (v4l2_sink_reopen(sink) != 0) {
+			sink->configured = false;
+			return -EBUSY;
+		}
+		memset(&fmt, 0, sizeof(fmt));
+		v4l2_fill_pix_format(&fmt, width, height, colorspace);
+		if (ioctl(sink->fd, VIDIOC_S_FMT, &fmt) == 0) {
+			if (fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_YUYV &&
+			    fmt.fmt.pix.width == width &&
+			    fmt.fmt.pix.height == height)
+				return v4l2_sink_adopt_native(
+					sink, &fmt.fmt.pix);
+			return v4l2_sink_adopt_scaled(
+				sink, &fmt.fmt.pix,
+				"granted after writer reopen");
+		}
+		err = errno;
+		if (err != EBUSY) {
+			sink->configured = false;
+			pr_err("V4L2 sink: VIDIOC_S_FMT %ux%u YUYV failed after reopen on %s: %s",
+			       width, height, sink->path, strerror(err));
+			return -err;
+		}
 	}
 
 	/*
@@ -2120,14 +2239,18 @@ static void v4l2_sink_write(struct v4l2_sink *sink, const void *data,
 	/*
 	 * A reader-locked geometry is only a fallback: keep asking for the native
 	 * mode, and drop the scaler as soon as the reader releases or
-	 * renegotiates.  No user interaction required.
+	 * renegotiates.  While a capture consumer really is streaming, skip the
+	 * attempt entirely so its buffers (and the writer fd) are never churned.
 	 */
 	if (sink->scaled) {
 		now = now_ms();
 		if (now - sink->last_upgrade_ms >= V4L2_SINK_UPGRADE_MS) {
 			sink->last_upgrade_ms = now;
-			(void)v4l2_sink_configure(sink, sink->target_width,
-						  sink->target_height, NULL);
+			if (!v4l2_reader_active(sink->path))
+				(void)v4l2_sink_configure(sink,
+							  sink->target_width,
+							  sink->target_height,
+							  NULL);
 		}
 	}
 
@@ -2205,6 +2328,144 @@ static void v4l2_sink_close(struct v4l2_sink *sink)
 	sink->path[0] = '\0';
 }
 
+/*
+ * The loopback sink can be driven from two threads (the main render thread and
+ * the asynchronous headless pump), while attach/detach and format changes
+ * happen on the main thread.  Every entry point that touches the fd, the
+ * SwsContext or the counters takes this lock; the per-frame write paths never
+ * call each other recursively.
+ */
+static pthread_mutex_t g_v4l2_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int v4l2_sink_open_guarded(struct v4l2_sink *sink, const char *path)
+{
+	int ret;
+
+	pthread_mutex_lock(&g_v4l2_lock);
+	ret = v4l2_sink_open(sink, path);
+	pthread_mutex_unlock(&g_v4l2_lock);
+	return ret;
+}
+
+static int v4l2_sink_configure_guarded(struct v4l2_sink *sink,
+				       unsigned int width, unsigned int height,
+				       const struct gc573_user_video_signal *sig)
+{
+	int ret;
+
+	pthread_mutex_lock(&g_v4l2_lock);
+	ret = v4l2_sink_configure(sink, width, height, sig);
+	pthread_mutex_unlock(&g_v4l2_lock);
+	return ret;
+}
+
+static void v4l2_sink_write_guarded(struct v4l2_sink *sink, const void *data,
+				    size_t bytes, unsigned int width,
+				    unsigned int height)
+{
+	pthread_mutex_lock(&g_v4l2_lock);
+	if (sink && (sink->fd >= 0 || sink->path[0]))
+		v4l2_sink_write(sink, data, bytes, width, height);
+	pthread_mutex_unlock(&g_v4l2_lock);
+}
+
+static void v4l2_sink_close_guarded(struct v4l2_sink *sink)
+{
+	pthread_mutex_lock(&g_v4l2_lock);
+	v4l2_sink_close(sink);
+	pthread_mutex_unlock(&g_v4l2_lock);
+}
+
+/* ------------------------------------------------------------------ */
+/* Asynchronous V4L2 loopback pump (Headless / Studio mode)           */
+/* ------------------------------------------------------------------ */
+
+static void *v4l2_pump_thread(void *arg);
+
+struct v4l2_pump {
+	pthread_t thread;
+	bool started;
+	int stop;		/* __atomic */
+	uint64_t frames;	/* __atomic */
+	uint64_t writes;
+	struct v4l2_sink *sink;
+	unsigned int width;
+	unsigned int height;
+	size_t bytes;
+};
+
+static struct v4l2_pump g_v4l2_pump;
+
+static bool v4l2_pump_running(void)
+{
+	return g_v4l2_pump.started;
+}
+
+static void v4l2_pump_stop(void)
+{
+	struct v4l2_pump *pump = &g_v4l2_pump;
+
+	if (!pump->started)
+		return;
+
+	__atomic_store_n(&pump->stop, 1, __ATOMIC_RELEASE);
+	pthread_join(pump->thread, NULL);
+	pump->started = false;
+	pump->sink = NULL;
+}
+
+static int v4l2_pump_start(struct v4l2_sink *sink, unsigned int width,
+			   unsigned int height, size_t bytes)
+{
+	struct v4l2_pump *pump = &g_v4l2_pump;
+
+	v4l2_pump_stop();
+	if (!sink || !width || !height || !bytes)
+		return -EINVAL;
+
+	pump->sink = sink;
+	pump->width = width;
+	pump->height = height;
+	pump->bytes = bytes;
+	__atomic_store_n(&pump->stop, 0, __ATOMIC_RELEASE);
+
+	if (pthread_create(&pump->thread, NULL, v4l2_pump_thread, pump) != 0) {
+		pump->sink = NULL;
+		return -EAGAIN;
+	}
+
+	pump->started = true;
+	pr_info("V4L2 sink offloaded to its own thread (%ux%u)", width, height);
+	return 0;
+}
+
+static void *v4l2_pump_thread(void *arg)
+{
+	struct v4l2_pump *pump = arg;
+
+	while (!__atomic_load_n(&pump->stop, __ATOMIC_ACQUIRE)) {
+		void *pixels = NULL;
+		int ph = preview_take(&pixels);
+
+		if (ph <= 0) {
+			SDL_Delay(1);
+			continue;
+		}
+
+		if (gc573_hdr_active())
+			gc573_hdr_tonemap_yuyv(pixels, pump->width, pump->height);
+
+		v4l2_sink_write_guarded(pump->sink, pixels, pump->bytes,
+					pump->width, pump->height);
+		preview_release(ph);
+
+		__atomic_fetch_add(&pump->writes, 1, __ATOMIC_RELAXED);
+		__atomic_fetch_add(&pump->frames, 1, __ATOMIC_RELAXED);
+	}
+
+	return NULL;
+}
+
 /* ------------------------------------------------------------------ */
 /* No-signal standby screen                                          */
 /* ------------------------------------------------------------------ */
@@ -2222,6 +2483,17 @@ struct standby_state {
 /* Set by main() so the signal-loss helpers can reach the shared state. */
 static struct standby_state *g_standby;
 static struct v4l2_sink *g_standby_sink;
+
+/*
+ * Startup grace: give a connected console a moment to lock its HDMI signal
+ * before the standby card claims the loopback node at the 1080p default.
+ * Writing first would self-lock /dev/video10 at 1920x1080 and force a rescale
+ * even after the native 1440p/4K signal arrives.  Once a signal has ever been
+ * streamed (or the input geometry is already known) standby feeds immediately.
+ */
+#define SINK_STARTUP_GRACE_MS	600U
+static uint64_t g_loop_start_ms;
+static bool g_ever_streamed;
 
 /*
  * Render the standby card at the geometry the loopback node currently
@@ -2291,12 +2563,24 @@ static void standby_present(SDL_Window *window, SDL_Renderer *renderer,
 	 * standby card instead of a frozen last frame.  The target geometry is
 	 * recorded once; a reader still holding the old mode is handled by the
 	 * sink's own 250 ms retry path.
+	 *
+	 * At cold start the sink is left alone for a short grace window while a
+	 * live console may still be locking: the first write creates writer
+	 * buffers at the fallback geometry and would pin the node there.
 	 */
 	if (sink && sink->path[0]) {
-		/* Seed the target once; v4l2_sink_write() owns retry/upgrade. */
-		if (!sink->target_width || !sink->target_height)
-			(void)v4l2_sink_configure(sink, width, height, NULL);
-		v4l2_sink_write(sink, frame, bytes, width, height);
+		bool ready = g_ever_streamed ||
+			     (sink->target_width && sink->target_height) ||
+			     (g_loop_start_ms &&
+			      now - g_loop_start_ms >= SINK_STARTUP_GRACE_MS);
+
+		if (ready) {
+			/* Seed the target once; v4l2_sink_write() owns retry/upgrade. */
+			if (!sink->target_width || !sink->target_height)
+				(void)v4l2_sink_configure_guarded(sink, width,
+								  height, NULL);
+			v4l2_sink_write_guarded(sink, frame, bytes, width, height);
+		}
 	}
 
 	if (!window || !renderer)
@@ -3856,6 +4140,7 @@ static void switch_output_mode(bool want_gaming, SDL_Window **window,
 		SDL_SetWindowFullscreen(*window, SDL_WINDOW_FULLSCREEN_DESKTOP);
 	SDL_ShowCursor(g_osd_enabled ? SDL_ENABLE : SDL_DISABLE);
 
+	v4l2_pump_stop();
 	g_headless = false;
 	printf("[MODE] Gaming window opened; DMA ring untouched\n");
 	fflush(stdout);
@@ -3928,14 +4213,19 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 	st.audio_muted = __atomic_load_n(&g_audio_mute_flag,
 					 __ATOMIC_RELAXED) != 0;
 
-	if (sink && sink->path[0]) {
-		snprintf(st.v4l2_path, sizeof(st.v4l2_path), "%.63s",
-			 sink->path);
-		st.v4l2_configured = sink->configured;
-		st.v4l2_width = sink->width;
-		st.v4l2_height = sink->height;
-		st.v4l2_frames = sink->frames;
-		st.v4l2_dropped = sink->dropped;
+	if (sink) {
+		/* The pump thread updates these counters; take a coherent snapshot. */
+		pthread_mutex_lock(&g_v4l2_lock);
+		if (sink->path[0]) {
+			snprintf(st.v4l2_path, sizeof(st.v4l2_path), "%.63s",
+				 sink->path);
+			st.v4l2_configured = sink->configured;
+			st.v4l2_width = sink->width;
+			st.v4l2_height = sink->height;
+			st.v4l2_frames = sink->frames;
+			st.v4l2_dropped = sink->dropped;
+		}
+		pthread_mutex_unlock(&g_v4l2_lock);
 	}
 
 	st.osd_enabled = g_osd_enabled;
@@ -4079,10 +4369,11 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 				       path);
 				break;
 			}
+			v4l2_pump_stop();
 			/* open() memsets the sink, so drop an old fd first. */
 			if (sink->fd >= 0 || sink->path[0])
-				v4l2_sink_close(sink);
-			if (v4l2_sink_open(sink, path) < 0) {
+				v4l2_sink_close_guarded(sink);
+			if (v4l2_sink_open_guarded(sink, path) < 0) {
 				pr_warn("V4L2 live attach failed: %s", path);
 				break;
 			}
@@ -4093,13 +4384,14 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 			 * frame after the writer's own retry interval.
 			 */
 			if (have_signal && out_w && out_h)
-				(void)v4l2_sink_configure(sink, out_w, out_h, sig);
+				(void)v4l2_sink_configure_guarded(sink, out_w, out_h, sig);
 		} else {
 			if (sink->fd < 0 && !sink->path[0]) {
 				printf("[V4L2] Live detach ignored: no sink attached\n");
 				break;
 			}
-			v4l2_sink_close(sink);
+			v4l2_pump_stop();
+			v4l2_sink_close_guarded(sink);
 			printf("[V4L2] Live detach\n");
 		}
 		break;
@@ -4279,7 +4571,7 @@ int main(int argc, char *argv[])
 	}
 
 	printf("==================================================================\n");
-	printf("  EverLive Userspace VFIO Streamer [INTERN TEST - EXPERIMENTAL]  \n");
+	printf("  EverLive Userspace VFIO Streamer v" EVERLIVE_VERSION "\n");
 	printf("==================================================================\n\n");
 	if (g_trace_mode)
 		printf("[TRACE] Teardown trace enabled: press T while streaming to start the phase test.\n");
@@ -4513,7 +4805,7 @@ int main(int argc, char *argv[])
 	 * preview ring, so the sink works with or without an SDL window.
 	 */
 	if (v4l2_device) {
-		if (v4l2_sink_open(&v4l2_sink, v4l2_device) < 0) {
+		if (v4l2_sink_open_guarded(&v4l2_sink, v4l2_device) < 0) {
 			fprintf(stderr, "[ERROR] V4L2 loopback sink unavailable (%s).\n",
 				v4l2_device);
 			fprintf(stderr, "        Create it with: sudo modprobe v4l2loopback video_nr=10 card_label=\"EverLive Capture\" exclusive_caps=0\n");
@@ -4601,6 +4893,7 @@ int main(int argc, char *argv[])
 	last_stats_us = now_us();
 	last_status_poll = 0;
 	last_service = 0;
+	g_loop_start_ms = now_ms();
 
 	while (g_running) {
 		SDL_Event event;
@@ -4858,7 +5151,7 @@ int main(int argc, char *argv[])
 										     new_out_w,
 										     new_out_h);
 							if (ret == 0 && v4l2_sink.path[0])
-								(void)v4l2_sink_configure(&v4l2_sink,
+								(void)v4l2_sink_configure_guarded(&v4l2_sink,
 											  new_out_w,
 											  new_out_h,
 											  &fresh);
@@ -4892,6 +5185,7 @@ int main(int argc, char *argv[])
 							} else {
 								streaming = true;
 								have_signal = true;
+								g_ever_streamed = true;
 								rate_probe_after_scdt = false;
 								current_sig = fresh;
 								output_width = new_out_w;
@@ -4948,7 +5242,7 @@ int main(int argc, char *argv[])
 									     new_out_w,
 									     new_out_h);
 						if (ret == 0 && v4l2_sink.path[0])
-							(void)v4l2_sink_configure(&v4l2_sink,
+							(void)v4l2_sink_configure_guarded(&v4l2_sink,
 										  new_out_w,
 										  new_out_h,
 										  &sig);
@@ -4972,6 +5266,7 @@ int main(int argc, char *argv[])
 						} else {
 							streaming = true;
 							have_signal = true;
+							g_ever_streamed = true;
 							signal_lost_hits = 0;
 							rate_probe_after_scdt = false;
 							current_sig = sig;
@@ -5031,62 +5326,74 @@ int main(int argc, char *argv[])
 		}
 
 		if (streaming) {
-			void *pixels = NULL;
-			int ph;
-			bool have_frame = false;
+			bool want_pump = g_headless && v4l2_sink.path[0] != '\0';
 
-			/*
-			 * A mode switch (or a failed allocation during a hot switch)
-			 * leaves texture == NULL.  Rebuild it from the current geometry;
-			 * the DMA ring is not involved.
-			 */
-			if (!g_headless && renderer && !texture &&
-			    output_width && output_height)
-				(void)ensure_texture(renderer, &texture,
-						     output_width, output_height);
+			if (want_pump && (!v4l2_pump_running() ||
+					  g_v4l2_pump.width != output_width ||
+					  g_v4l2_pump.height != output_height))
+				(void)v4l2_pump_start(&v4l2_sink,
+						      output_width, output_height,
+						      (size_t)output_width *
+						      output_height * 2U);
+			else if (!want_pump && v4l2_pump_running())
+				v4l2_pump_stop();
 
-			ph = preview_take(&pixels);
+			if (!g_headless) {
+				void *pixels = NULL;
+				int ph;
+				bool have_frame = false;
 
-			if (ph > 0) {
-				have_frame = true;
 				/*
-				 * Tonemap once, in place, before both consumers read
-				 * the slot: the window and the OBS feed then show the
-				 * same picture.  SDR is a pure pass-through.
+				 * A mode switch (or a failed allocation during a hot switch)
+				 * leaves texture == NULL.  Rebuild it from the current geometry;
+				 * the DMA ring is not involved.
 				 */
-				if (gc573_hdr_active())
-					gc573_hdr_tonemap_yuyv(pixels, output_width,
-							       output_height);
-				if (v4l2_sink.path[0])
-					v4l2_sink_write(&v4l2_sink, pixels,
-							g_preview.bytes,
-							output_width, output_height);
-				if (texture) {
-					int uret = SDL_UpdateTexture(texture, NULL,
-								     pixels,
-								     output_width * 2);
+				if (renderer && !texture &&
+				    output_width && output_height)
+					(void)ensure_texture(renderer, &texture,
+							     output_width, output_height);
 
-					if (uret < 0) {
-						static bool reported = false;
+				ph = preview_take(&pixels);
 
-						if (!reported) {
-							printf("[SDL-ERR] SDL_UpdateTexture failed: %s\n",
-							       SDL_GetError());
-							reported = true;
+				if (ph > 0) {
+					have_frame = true;
+					/*
+					 * Tonemap once, in place, before both consumers read
+					 * the slot: the window and the OBS feed then show the
+					 * same picture.  SDR is a pure pass-through.
+					 */
+					if (gc573_hdr_active())
+						gc573_hdr_tonemap_yuyv(pixels, output_width,
+								       output_height);
+					if (v4l2_sink.path[0])
+						v4l2_sink_write_guarded(&v4l2_sink, pixels,
+									g_preview.bytes,
+									output_width, output_height);
+					if (texture) {
+						int uret = SDL_UpdateTexture(texture, NULL,
+									     pixels,
+									     output_width * 2);
+
+						if (uret < 0) {
+							static bool reported = false;
+
+							if (!reported) {
+								printf("[SDL-ERR] SDL_UpdateTexture failed: %s\n",
+								       SDL_GetError());
+								reported = true;
+							}
 						}
 					}
+					preview_release(ph);
 				}
-				preview_release(ph);
-			}
 
-			/*
-			 * With VSync, present once per display refresh even when no new
-			 * source frame is ready.  A frame arriving just after a refresh
-			 * then repeats the previous frame instead of producing a 33 ms
-			 * hitch (the 60.03 vs 60.00 Hz phase drift).
-			 */
-			if (texture && (have_frame || g_vsync)) {
-				{
+				/*
+				 * With VSync, present once per display refresh even when no new
+				 * source frame is ready.  A frame arriving just after a refresh
+				 * then repeats the previous frame instead of producing a 33 ms
+				 * hitch (the 60.03 vs 60.00 Hz phase drift).
+				 */
+				if (texture && (have_frame || g_vsync)) {
 					char audio_text[64];
 					const char *audio_desc;
 
@@ -5123,16 +5430,42 @@ int main(int argc, char *argv[])
 						   displayed_fps, audio_desc,
 						   gc573_hdr_active() ?
 						   gc573_hdr_label() : NULL);
+					render_frame(window, renderer, texture,
+						     aspect_ratio(g_aspect, video_aspect));
+				} else {
+					/*
+					 * Present-on-new-frame pacing: poll just often enough that a
+					 * frame arriving mid-sleep is picked up within ~1 ms.  The old
+					 * 2 ms blind delay added up to a full refresh of phase error
+					 * on 59.72/60.03 Hz sources and showed up as micro-stutter.
+					 */
+					SDL_Delay(1);
 				}
-				render_frame(window, renderer, texture,
-					     aspect_ratio(g_aspect, video_aspect));
 			} else {
 				/*
-				 * Present-on-new-frame pacing: poll just often enough that a
-				 * frame arriving mid-sleep is picked up within ~1 ms.  The old
-				 * 2 ms blind delay added up to a full refresh of phase error
-				 * on 59.72/60.03 Hz sources and showed up as micro-stutter.
+				 * Headless / Studio mode: when the dedicated V4L2 pump thread is
+				 * running it owns preview_take().  Otherwise (no loopback sink or
+				 * fallback path) drain the preview slot here so ring slots keep
+				 * rotating cleanly.
 				 */
+				if (!v4l2_pump_running()) {
+					void *pixels = NULL;
+					int ph = preview_take(&pixels);
+
+					if (ph > 0) {
+						if (gc573_hdr_active())
+							gc573_hdr_tonemap_yuyv(pixels,
+									       output_width,
+									       output_height);
+						if (v4l2_sink.path[0])
+							v4l2_sink_write_guarded(&v4l2_sink,
+										pixels,
+										g_preview.bytes,
+										output_width,
+										output_height);
+						preview_release(ph);
+					}
+				}
 				SDL_Delay(1);
 			}
 		} else {
@@ -5142,6 +5475,7 @@ int main(int argc, char *argv[])
 			 * so the short sleep only keeps events and status polling
 			 * responsive.
 			 */
+			v4l2_pump_stop();
 			standby_tick(window, renderer);
 			SDL_Delay(5);
 		}
@@ -5222,6 +5556,7 @@ int main(int argc, char *argv[])
 				       (unsigned long)__atomic_load_n(&g_preview.dropped,
 							      __ATOMIC_RELAXED),
 				       (double)g_preview.taken_age_us / 1000.0);
+				pthread_mutex_lock(&g_v4l2_lock);
 				if (v4l2_sink.path[0]) {
 					if (v4l2_sink.configured)
 						printf("[V4L2] %ux%u YUYV%s | written %lu | dropped %lu\n",
@@ -5236,6 +5571,7 @@ int main(int argc, char *argv[])
 						       v4l2_sink.path,
 						       (unsigned long)v4l2_sink.dropped);
 				}
+				pthread_mutex_unlock(&g_v4l2_lock);
 				if (audio.streaming && audio.bt_playing) {
 					printf("[AUDIO] Decoding %s -> Stereo | bursts %lu | frames %lu | errors %lu\n",
 					       audio_bitstream_name(audio.bitstream),
@@ -5298,9 +5634,10 @@ int main(int argc, char *argv[])
 	gc573_audio_tap_stop();
 
 	if (g_trace_requested) {
+		v4l2_pump_stop();
 		audio_cleanup(&audio);
 		gc573_user_it6805_audio_disable(ctx.bar0);
-		v4l2_sink_close(&v4l2_sink);
+		v4l2_sink_close_guarded(&v4l2_sink);
 		if (standby.texture) {
 			SDL_DestroyTexture(standby.texture);
 			standby.texture = NULL;
@@ -5323,7 +5660,7 @@ int main(int argc, char *argv[])
 	audio_cleanup(&audio);
 	gc573_user_it6805_audio_disable(ctx.bar0);
 	preview_stop();
-	v4l2_sink_close(&v4l2_sink);
+	v4l2_sink_close_guarded(&v4l2_sink);
 	if (video_ready)
 		gc573_user_video_cleanup(&video);
 	if (texture)
