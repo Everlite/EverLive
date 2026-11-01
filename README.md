@@ -1,6 +1,6 @@
 # EverLive - AVerMedia GC573 Linux Gaming Suite & Userspace Driver
 
-[![Version](https://img.shields.io/badge/version-v1.3.0-blue.svg)](https://github.com/Everlite/EverLive/releases)
+[![Version](https://img.shields.io/badge/version-v1.3.1-blue.svg)](https://github.com/Everlite/EverLive/releases)
 [![Status](https://img.shields.io/badge/status-1440p120%20%2B%204K60%20%2B%20V4L2%20%2B%20Audio%20(Hardware%20Verified)-brightgreen.svg)](#hardware-verified-capabilities)
 [![Driver](https://img.shields.io/badge/driver-Userspace%20VFIO%20(Blob--Free)-2e7d32.svg)](#architecture--design)
 [![Kernel Modules](https://img.shields.io/badge/DKMS-None%20Required-success.svg)](#architecture--design)
@@ -11,7 +11,7 @@
 
 **EverLive** is a Linux console gaming suite and open-source userspace driver for the **AVerMedia Live Gamer 4K (GC573)** (`PCI 1461:0054`, Subsystem `1461:5730`).
 
-It is designed to let you play console games (PlayStation 5, Xbox Series X, Nintendo Switch, retro scalers, or secondary PCs) directly on your Linux desktop (Wayland & X11) with low presentation overhead, real-time **HDR10 / HLG to SDR filmic tonemapping**, synchronized audio (**Linear PCM** as well as **Dolby Digital / DTS 5.1** decoded to stereo), a native **V4L2 virtual camera** and **PipeWire virtual audio track** for OBS/Discord, zero-interruption live runtime controls over IPC, on-the-fly hardware EDID switching, and custom hardware RGB LED control.
+It is designed to let you play console games (PlayStation 5, Xbox Series X, Nintendo Switch, retro scalers, or secondary PCs) directly on your Linux desktop (Wayland & X11) with low presentation overhead, real-time **HDR10 / HLG to SDR filmic tonemapping**, synchronized audio (**Linear PCM** as well as **Dolby Digital / DTS 5.1** decoded to stereo), a native **V4L2 virtual camera** and **PipeWire virtual audio track** for OBS/Discord, zero-interruption live runtime controls over IPC, **pixel-perfect integer scaling** for retro and 720p/1080p consoles, on-the-fly hardware EDID switching, and custom hardware RGB LED control.
 
 ---
 
@@ -48,6 +48,9 @@ The following capabilities have been physically tested and verified on physical 
   - **Dedicated PipeWire Virtual Audio Track (v1.3.0):** Optional in-process tap publishing mixed, decoded HDMI audio directly to `"EverLive Capture Audio"` so OBS records clean game audio isolated from desktop notifications or voice chat.
   - **Zero-Interruption Live Mode Switch (v1.3.0):** Switching between Gaming Screen and Headless Studio Mode swaps only the SDL2 window over JSON-RPC IPC (`mode.set`) — VFIO, DMA rings, HDMI passthrough, audio, and active OBS recordings continue without a single dropped frame.
   - **OBS-safe renegotiation:** Resolution changes while OBS holds its buffers resume automatically once OBS renegotiates.
+* **Pixel-Perfect Integer Scaling & Live Audio Controls:**
+  - **Zero-Blur Integer Scaling:** Toggleable pixel-exact integer scaling with nearest-neighbor presentation (`1` / `l` hotkey, `--scale integer`, Console Hub GUI), automatic Pixel Aspect Ratio (PAR) preservation, and 4:2:2 chroma alignment. Delivers sharp, unblurred presentation for 720p consoles (Xbox 360, PS3, Nintendo Switch) on 1440p (exact 2x) or 4K (exact 3x) and 1080p on 4K (exact 2x) without bilinear resampling blur.
+  - **In-Game Audio Controls & Hotkey Card:** Live keyboard volume adjustments (`↑` / `↓` in 5% steps) with auto-unmute, instant mute toggle (`m`), a toggleable on-screen hotkey guide (`F1` / `?`), and jitter-free stats OSD reporting true DMA hardware latency (`DMA: x.x ms`). All adjustments synchronize bidirectionally with the Console Hub GUI in real time over IPC.
 * **Hardware EDID Profile Injection (Universal Audio Support — v1.2.0):**
   - All standard built-in profiles natively advertise **Linear PCM**, **Dolby Digital (AC-3)**, and **DTS 5.1** Short Audio Descriptors (SADs), allowing consoles to output surround audio automatically without manual profile switching.
   - `Default (4K60 / 1440p120 HDR)`: Standard multi-mode EDID profile.
@@ -226,14 +229,18 @@ git pull
 | Key / Action | Function |
 |:---|:---|
 | <kbd>f</kbd> or <kbd>F11</kbd> | Toggle borderless fullscreen |
+| <kbd>1</kbd> or <kbd>l</kbd> | Toggle scaling mode (`fit` bilinear $\to$ `integer` nearest-neighbor) |
 | <kbd>h</kbd> | Toggle real-time HDR10 / HLG $\to$ SDR filmic tonemapping |
 | <kbd>a</kbd> | Cycle Aspect Ratio (`auto` $\to$ `16:9` $\to$ `4:3` $\to$ `stretch`) |
+| <kbd>↑</kbd> / <kbd>↓</kbd> (or <kbd>+</kbd> / <kbd>-</kbd>) | Volume up / down (in 5% steps) |
+| <kbd>m</kbd> | Toggle audio mute |
+| <kbd>F1</kbd> or <kbd>?</kbd> | Toggle on-screen hotkey help overlay |
 | <kbd>p</kbd> | Cycle OSD position (Top-Right $\to$ Bottom-Right $\to$ Bottom-Left $\to$ Top-Left; default Top-Right) |
 | <kbd>o</kbd>, <kbd>i</kbd> or <kbd>Tab</kbd> | Toggle the on-screen stats overlay |
 | <kbd>s</kbd> or <kbd>F10</kbd> | Toggle overlay and mouse cursor (Streamer Mode toggle; `--streamer-mode` starts with both hidden) |
-| <kbd>Esc</kbd> or <kbd>q</kbd> | Exit the game window |
+| <kbd>Esc</kbd> or <kbd>q</kbd> | Exit the game window (or dismiss the F1 help overlay) |
 
-*VSync is a launch option (`--vsync` / Hub checkbox) and cannot be toggled while streaming. Volume and mute are controlled through the EverLive Console Hub, your system audio mixer, or PipeWire.*
+*VSync is a launch option (`--vsync` / Hub checkbox) and cannot be toggled while streaming. Volume, mute, and scaling can also be controlled through the EverLive Console Hub GUI.*
 
 ---
 

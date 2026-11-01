@@ -75,6 +75,7 @@ enum gc573_ipc_mode {
 	GC573_IPC_CMD_MODE,
 	GC573_IPC_CMD_V4L2,
 	GC573_IPC_CMD_HDR,
+	GC573_IPC_CMD_SCALE,
 	GC573_IPC_CMD_FRAMEGEN,
 };
 
@@ -150,6 +151,7 @@ struct gc573_stats {
 	bool osd_enabled;
 	char osd_position[16];
 	char aspect[12];
+	char scale[12];		/* "fit" | "integer" */
 	bool vsync;
 	bool fullscreen;
 

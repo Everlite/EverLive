@@ -57,6 +57,12 @@ OSD_POSITION_OPTIONS = [
     ("Top Left", "tl"),
 ]
 
+SCALE_OPTIONS = [
+    ("Aspect Fit (Bilinear)", "fit"),
+    ("Integer Scale (Nearest)", "integer"),
+]
+SCALE_MODES = {key for _, key in SCALE_OPTIONS}
+
 # Experimental lsfg-vk frame generation (gc573_user_streamer --framegen).
 FRAMEGEN_OPTIONS = [
     ("Off — Native Ultra-Low Latency", "off"),
@@ -89,6 +95,7 @@ DEFAULT_SETTINGS = {
     "audio_tap": False,
     "hdr_tonemap": True,
     "hdr_exposure": 0.0,
+    "scale_mode": "fit",
     "minimize_to_tray": True,
     "framegen_mode": "off",
     "fg_flow_scale": 1.0,
@@ -153,6 +160,8 @@ def load_settings() -> dict:
     if not isinstance(settings.get("hdr_exposure"), (int, float)):
         settings["hdr_exposure"] = 0.0
     settings["hdr_exposure"] = max(-2.0, min(2.0, float(settings["hdr_exposure"])))
+    if settings.get("scale_mode") not in SCALE_MODES:
+        settings["scale_mode"] = "fit"
     # Experimental lsfg-vk frame generation.  Migrate the old shader-era keys.
     fg_mode = str(settings.get("framegen_mode", "off")).lower()
     fg_mode = FRAMEGEN_ALIASES.get(fg_mode, fg_mode)
@@ -1460,6 +1469,8 @@ class GameStreamer:
                     audio_tap: Optional[str] = None,
                     hdr: bool = True,
                     hdr_exposure: float = 0.0,
+                    scale: str = "fit",
+                    volume: float = 1.0,
                     framegen: str = "off",
                     fg_flow_scale: float = 1.0,
                     fg_perf_mode: bool = False,
@@ -1529,6 +1540,11 @@ class GameStreamer:
         self.aspect = aspect
         if aspect != "auto":
             cmd.extend(["--aspect", aspect])
+
+        if scale not in SCALE_MODES:
+            scale = "fit"
+        cmd.extend(["--scale", scale])
+        cmd.extend(["--volume", f"{volume:.2f}"])
 
         if v4l2_device:
             cmd.extend(["--v4l2", v4l2_device])
@@ -1608,7 +1624,7 @@ class GameStreamer:
             return False
         return True
 
-    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None, osd: bool = True, osd_pos: str = "tr", audio_tap: Optional[str] = None, hdr: bool = True, hdr_exposure: float = 0.0, framegen: str = "off", fg_flow_scale: float = 1.0, fg_perf_mode: bool = False, fg_low_latency: bool = True) -> bool:
+    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None, osd: bool = True, osd_pos: str = "tr", audio_tap: Optional[str] = None, hdr: bool = True, hdr_exposure: float = 0.0, scale: str = "fit", framegen: str = "off", fg_flow_scale: float = 1.0, fg_perf_mode: bool = False, fg_low_latency: bool = True) -> bool:
         if self.is_running:
             return True
 
@@ -1626,6 +1642,8 @@ class GameStreamer:
                                     audio_tap=audio_tap,
                                     hdr=hdr,
                                     hdr_exposure=hdr_exposure,
+                                    scale=scale,
+                                    volume=volume,
                                     framegen=framegen,
                                     fg_flow_scale=fg_flow_scale,
                                     fg_perf_mode=fg_perf_mode,
@@ -2750,6 +2768,26 @@ if HAS_QT:
 
             grid_video.addLayout(h_exposure, 1, 3)
 
+            grid_video.addWidget(_field(
+                "Scaling Mode",
+                "Integer Scale picks the largest whole multiple of the "
+                "source (crisp pixels for retro/720p). Falls back to Aspect "
+                "Fit when the monitor is smaller or the content is anamorphic."),
+                2, 0)
+
+            self.combo_scale = QComboBox()
+            for text, key in SCALE_OPTIONS:
+                self.combo_scale.addItem(text, key)
+            saved_scale = self.saved_cfg.get("scale_mode", "fit")
+            scale_idx = self.combo_scale.findData(saved_scale)
+            if scale_idx >= 0:
+                self.combo_scale.setCurrentIndex(scale_idx)
+            self.combo_scale.setToolTip(
+                "Forwarded as --scale. Applies live over IPC while the "
+                "engine runs. Hotkey 'L' in the gaming window cycles it.")
+            self.combo_scale.currentIndexChanged.connect(self.on_scale_changed)
+            grid_video.addWidget(self.combo_scale, 2, 1)
+
             root_layout.addWidget(card_video)
 
             # --- Section A2: lsfg-vk frame generation --------------------
@@ -3280,7 +3318,7 @@ if HAS_QT:
                 self._refresh_idle_fg_status()
 
         def _poll_remote_status(self):
-            if self._remote and self._ipc is not None:
+            if self._ipc is not None and self._ipc.connected:
                 self._ipc.request_status()
 
         def _on_remote_status(self, status: Dict):
@@ -3288,16 +3326,17 @@ if HAS_QT:
             self._remote_status = status
             self._update_framegen_status(status.get("framegen") or {},
                                          bool(status.get("headless")))
-            if not self._remote or self.streamer.is_running:
-                return
-
             signal_info = status.get("signal") or {}
             video = status.get("video") or {}
             audio = status.get("audio") or {}
             v4l2 = status.get("v4l2") or {}
             framegen = status.get("framegen") or {}
 
+            # Always sync engine controls (volume, mute, aspect, scale) into the GUI
             self._sync_remote_controls(status, audio)
+
+            if not self._remote or self.streamer.is_running:
+                return
 
             if hasattr(self, "lbl_audio_fmt"):
                 self.lbl_audio_fmt.setText(audio.get("label") or "No Audio")
@@ -3354,6 +3393,14 @@ if HAS_QT:
                     self.combo_aspect.blockSignals(True)
                     self.combo_aspect.setCurrentIndex(idx)
                     self.combo_aspect.blockSignals(False)
+
+            scale = status.get("scale")
+            if scale in SCALE_MODES:
+                idx = self.combo_scale.findData(scale)
+                if idx >= 0 and idx != self.combo_scale.currentIndex():
+                    self.combo_scale.blockSignals(True)
+                    self.combo_scale.setCurrentIndex(idx)
+                    self.combo_scale.blockSignals(False)
 
             osd = status.get("osd") or {}
             if (isinstance(osd.get("enabled"), bool) and
@@ -3631,6 +3678,10 @@ if HAS_QT:
                              if self.chk_audio_tap.isChecked() else None)
                 want_hdr = self.chk_hdr.isChecked()
                 hdr_exposure = float(self.spin_hdr_exposure.value())
+                scale_mode = self.combo_scale.currentData() or "fit"
+                if scale_mode not in SCALE_MODES:
+                    scale_mode = "fit"
+                vol = self.slider_vol.value() / 100.0
                 fg_cfg = self._framegen_config()
 
                 if v4l2_device and not os.path.exists(v4l2_device):
@@ -3652,6 +3703,7 @@ if HAS_QT:
                     "audio_tap": bool(audio_tap),
                     "hdr_tonemap": want_hdr,
                     "hdr_exposure": hdr_exposure,
+                    "scale_mode": scale_mode,
                     **fg_cfg,
                 })
                 self.streamer.aspect = aspect
@@ -3667,6 +3719,8 @@ if HAS_QT:
                     audio_tap=audio_tap,
                     hdr=want_hdr,
                     hdr_exposure=hdr_exposure,
+                    scale=scale_mode,
+                    volume=vol,
                     framegen=fg_cfg["framegen_mode"],
                     fg_flow_scale=fg_cfg["fg_flow_scale"],
                     fg_perf_mode=fg_cfg["fg_perf_mode"],
@@ -3730,6 +3784,10 @@ if HAS_QT:
                          if self.chk_audio_tap.isChecked() else None)
             want_hdr = self.chk_hdr.isChecked()
             hdr_exposure = float(self.spin_hdr_exposure.value())
+            scale_mode = self.combo_scale.currentData() or "fit"
+            if scale_mode not in SCALE_MODES:
+                scale_mode = "fit"
+            vol = self.slider_vol.value() / 100.0
             fg_cfg = self._framegen_config()
             self.streamer.aspect = aspect
             save_settings({
@@ -3738,6 +3796,7 @@ if HAS_QT:
                 "audio_tap": bool(audio_tap),
                 "hdr_tonemap": want_hdr,
                 "hdr_exposure": hdr_exposure,
+                "scale_mode": scale_mode,
                 **fg_cfg,
             })
             success = self.streamer.start(
@@ -3750,6 +3809,8 @@ if HAS_QT:
                 audio_tap=audio_tap,
                 hdr=want_hdr,
                 hdr_exposure=hdr_exposure,
+                scale=scale_mode,
+                volume=vol,
                 framegen=fg_cfg["framegen_mode"],
                 fg_flow_scale=fg_cfg["fg_flow_scale"],
                 fg_perf_mode=fg_cfg["fg_perf_mode"],
@@ -3789,6 +3850,18 @@ if HAS_QT:
                 self._ipc.set_aspect(aspect)
             elif self.streamer.is_running:
                 print("[*] Aspect ratio saved; restart the stream to apply it.")
+
+        def on_scale_changed(self, *_):
+            mode = self.combo_scale.currentData() or "fit"
+            if mode not in SCALE_MODES:
+                mode = "fit"
+            self.saved_cfg["scale_mode"] = mode
+            self.streamer.scale_mode = mode
+            save_settings({"scale_mode": mode})
+            if self._ipc is not None and self._ipc.connected:
+                self._ipc.set_scale(mode)
+            elif self.streamer.is_running:
+                print("[*] Scaling mode saved; restart the stream to apply it.")
 
         def on_osd_changed(self, enabled: bool):
             self.saved_cfg["osd_enabled"] = bool(enabled)

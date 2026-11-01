@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # EverLive Experimental - One-Click Launcher for the 1.4 Lab Console Suite
-# 100% Blob-Free Userspace VFIO Engine + lsfg-vk Frame Generation
+# 100% Blob-Free Userspace VFIO Engine + lsfg-vk Frame Generation (v1.4.0-experimental)
 # ==============================================================================
 set -euo pipefail
 

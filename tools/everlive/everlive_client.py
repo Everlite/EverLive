@@ -318,6 +318,13 @@ if QSocketNotifier is not None:
                 "exposure": max(-2.0, min(2.0, float(exposure_ev))),
             })
 
+        def set_scale(self, mode: str) -> bool:
+            """Scaling mode: ``fit`` (bilinear) or ``integer`` (nearest).
+
+            Integer scaling picks the largest whole multiple of the source.
+            """
+            return self.request("scale.set", {"mode": str(mode)})
+
         def set_framegen(self, mode: str = "off", flow_scale: float = 1.0,
                          perf_mode: bool = False,
                          low_latency: bool = True) -> bool:

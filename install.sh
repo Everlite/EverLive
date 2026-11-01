@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive v1.3.0 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573)
+# EverLive v1.3.1 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573)
 # ==============================================================================
 # Installiert den 100% blob-freien Userspace VFIO-Treiber, udev-Hardware-Rechte,
 # Speicher-Locking-Limits und die EverLive Desktop-App für HDMI Console Gaming.

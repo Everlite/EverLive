@@ -235,12 +235,64 @@ static bool g_bitstream_enabled;
 
 /* Presentation options; the GUI forwards its checkboxes as CLI flags. */
 enum stream_aspect {
-	ASPECT_AUTO,
+	ASPECT_AUTO = 0,
 	ASPECT_16_9,
 	ASPECT_4_3,
 	ASPECT_STRETCH,
 	ASPECT_COUNT,
 };
+
+enum stream_scale {
+	SCALE_FIT = 0,
+	SCALE_INTEGER,
+	SCALE_COUNT,
+};
+
+static enum stream_scale g_scale_mode = SCALE_FIT;
+/* Mode actually pushed into the texture; SCALE_COUNT forces the first apply. */
+static enum stream_scale g_scale_applied = SCALE_COUNT;
+
+static const char *scale_name(enum stream_scale mode)
+{
+	switch (mode) {
+	case SCALE_INTEGER:
+		return "integer";
+	default:
+		return "fit";
+	}
+}
+
+static bool parse_scale(const char *value, enum stream_scale *out)
+{
+	if (!value || !*value)
+		return false;
+	if (!strcasecmp(value, "fit") || !strcasecmp(value, "aspect") ||
+	    !strcasecmp(value, "linear")) {
+		*out = SCALE_FIT;
+		return true;
+	}
+	if (!strcasecmp(value, "integer") || !strcasecmp(value, "nearest") ||
+	    !strcasecmp(value, "pixel")) {
+		*out = SCALE_INTEGER;
+		return true;
+	}
+	return false;
+}
+
+/*
+ * SDL evaluates SDL_HINT_RENDER_SCALE_QUALITY when the texture is created, so
+ * the live path is SDL_SetTextureScaleMode().  Both are kept in sync: the
+ * hint covers textures created later by a signal hot-switch.
+ */
+static void apply_scale_mode(SDL_Texture *texture, enum stream_scale mode)
+{
+	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY,
+		    mode == SCALE_INTEGER ? "0" : "1");
+	if (texture)
+		SDL_SetTextureScaleMode(texture,
+			mode == SCALE_INTEGER ? SDL_ScaleModeNearest :
+						SDL_ScaleModeLinear);
+}
 
 static bool g_fullscreen;
 static bool g_vsync;
@@ -451,6 +503,8 @@ static void print_usage(const char *prog)
 	printf("  --vsync           Pace presentation to the display refresh rate.\n");
 	printf("  --no-vsync        Present as soon as a frame is ready (default).\n");
 	printf("  --aspect MODE     auto|16:9|4:3|stretch (default: auto, 'a' cycles).\n");
+	printf("  --scale MODE      fit|integer (default: fit, 'l' cycles).\n");
+	printf("  --integer-scale   Alias for --scale integer.\n");
 	printf("  --osd             Show the on-screen stats overlay (default).\n");
 	printf("  --no-osd          Hide the overlay (same as --streamer-mode).\n");
 	printf("  --osd-pos POS     tr|br|bl|tl (default: tr, 'p' cycles).\n");
@@ -1024,6 +1078,10 @@ static int ensure_texture(SDL_Renderer *renderer, SDL_Texture **texture,
 		return -EIO;
 	}
 
+	/* New textures are created with the current filtering mode. */
+	apply_scale_mode(new_texture, g_scale_mode);
+	g_scale_applied = g_scale_mode;
+
 	if (*texture)
 		SDL_DestroyTexture(*texture);
 	*texture = new_texture;
@@ -1170,7 +1228,6 @@ static int configure_and_start(struct gc573_vfio_ctx *ctx,
 	return 0;
 }
 
-static SDL_Surface *osd_create_surface(int scale, const char *text);
 static void framegen_describe(char *out, size_t len);
 
 /*
@@ -1194,6 +1251,14 @@ struct osd_overlay {
 };
 
 static struct osd_overlay g_osd;
+/* Centred F1 help card; separate texture so the stats OSD stays intact. */
+static struct osd_overlay g_help;
+static bool g_help_overlay;
+
+/* Filled by the render loop for the OSD latency readout. */
+static double g_osd_dma_ms;
+/* Integer factor used by the last presented frame (0 = not integer scaled). */
+static int g_integer_factor;
 
 static void osd_destroy(void)
 {
@@ -1205,6 +1270,20 @@ static void osd_destroy(void)
 	g_osd.height = 0;
 	g_osd.scale = 0;
 	g_osd.text[0] = '\0';
+}
+
+static void help_destroy(void)
+{
+	if (g_help.texture) {
+		SDL_DestroyTexture(g_help.texture);
+		g_help.texture = NULL;
+	}
+	g_help.width = 0;
+	g_help.height = 0;
+	g_help.scale = 0;
+	g_help.text[0] = '\0';
+	/* The card belongs to the renderer that just went away. */
+	g_help_overlay = false;
 }
 
 static int osd_pad_for_scale(int scale)
@@ -1271,7 +1350,8 @@ static void osd_draw_text(SDL_Surface *surface, const char *text, int scale)
 	}
 }
 
-static SDL_Surface *osd_create_surface(int scale, const char *text)
+static void osd_build(SDL_Renderer *renderer, int scale, const char *text,
+		      struct osd_overlay *out)
 {
 	const int pad = osd_pad_for_scale(scale);
 	const int line_height = 8 * scale;
@@ -1281,11 +1361,15 @@ static SDL_Surface *osd_create_surface(int scale, const char *text)
 	unsigned int line_len = 0;
 	unsigned int lines = 1;
 	SDL_Surface *surface;
+	SDL_Texture *texture;
 	SDL_Rect edge;
 	Uint32 bg;
 	Uint32 border_color;
 	int width;
 	int height;
+
+	if (!renderer || !out)
+		return;
 
 	for (const char *p = text;; p++) {
 		if (*p == '\n' || *p == '\0') {
@@ -1300,6 +1384,17 @@ static SDL_Surface *osd_create_surface(int scale, const char *text)
 		line_len++;
 	}
 
+	if (out == &g_osd) {
+		/*
+		 * Prevent the stats box from twitching back and forth in width
+		 * as DMA latency, FPS decimals, or mode tags change character count.
+		 * Pad to a generous minimum and snap to 4-character boundaries.
+		 */
+		if (max_len < 48)
+			max_len = 48;
+		max_len = ((max_len + 3) / 4) * 4 + 2;
+	}
+
 	width = pad * 2 + (int)max_len * 8 * scale;
 	height = pad * 2 + (int)lines * line_height +
 		 ((int)lines - 1) * line_gap;
@@ -1312,7 +1407,7 @@ static SDL_Surface *osd_create_surface(int scale, const char *text)
 	surface = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32,
 						 SDL_PIXELFORMAT_RGBA32);
 	if (!surface)
-		return NULL;
+		return;
 
 	bg = SDL_MapRGBA(surface->format, 12, 16, 22, 210);
 	SDL_FillRect(surface, NULL, bg);
@@ -1333,36 +1428,25 @@ static SDL_Surface *osd_create_surface(int scale, const char *text)
 	SDL_FillRect(surface, &edge, border_color);
 
 	osd_draw_text(surface, text, scale);
-	return surface;
+
+	texture = SDL_CreateTextureFromSurface(renderer, surface);
+	SDL_FreeSurface(surface);
+	if (!texture)
+		return;
+	SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+
+	if (out->texture)
+		SDL_DestroyTexture(out->texture);
+	out->texture = texture;
+	out->width = width;
+	out->height = height;
+	out->scale = scale;
+	snprintf(out->text, sizeof(out->text), "%s", text);
 }
 
 static void osd_rebuild(SDL_Renderer *renderer, int scale, const char *text)
 {
-	SDL_Surface *surface;
-	SDL_Texture *texture;
-
-	if (!renderer)
-		return;
-
-	surface = osd_create_surface(scale, text);
-	if (!surface)
-		return;
-
-	texture = SDL_CreateTextureFromSurface(renderer, surface);
-	if (!texture) {
-		SDL_FreeSurface(surface);
-		return;
-	}
-	SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-
-	if (g_osd.texture)
-		SDL_DestroyTexture(g_osd.texture);
-	g_osd.texture = texture;
-	g_osd.width = surface->w;
-	g_osd.height = surface->h;
-	g_osd.scale = scale;
-	snprintf(g_osd.text, sizeof(g_osd.text), "%s", text);
-	SDL_FreeSurface(surface);
+	osd_build(renderer, scale, text, &g_osd);
 }
 
 static int osd_scale_for_height(int win_h)
@@ -1374,6 +1458,23 @@ static int osd_scale_for_height(int win_h)
 	return 1;
 }
 
+/*
+ * Latency read-out for the stats OSD.  The measurement jitters by a few tenths
+ * of a millisecond every frame; feeding it straight into the text would
+ * rebuild the whole text texture on nearly every present.  Quantise to 0.5 ms
+ * and keep a 1 ms dead band, so the value only moves when it really moved.
+ */
+static void osd_note_dma_age(uint64_t age_us)
+{
+	double ms = (double)age_us / 1000.0;
+	double quantised = floor(ms * 2.0 + 0.5) / 2.0;
+
+	if (quantised < 0.0)
+		quantised = 0.0;
+	if (g_osd_dma_ms <= 0.0 || fabs(quantised - g_osd_dma_ms) >= 1.0)
+		g_osd_dma_ms = quantised;
+}
+
 static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 		       uint32_t in_w, uint32_t in_h, bool interlaced,
 		       uint32_t rate_x100, double fps, const char *audio_text,
@@ -1383,6 +1484,8 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 	char line3[128];
 	char text[640];
 	char tail[96] = "";
+	char scale_tag[32] = "";
+	char dma_tag[32] = "";
 	int win_h = 0;
 	int scale;
 
@@ -1391,20 +1494,26 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 
 	if (hdr_text && *hdr_text)
 		snprintf(tail, sizeof(tail), " %c %s", OSD_BULLET, hdr_text);
+	if (g_integer_factor > 0)
+		snprintf(scale_tag, sizeof(scale_tag), " %c %dx Integer",
+			 OSD_BULLET, g_integer_factor);
+	if (g_osd_dma_ms > 0.0)
+		snprintf(dma_tag, sizeof(dma_tag), " %c DMA: %4.1fms",
+			 OSD_BULLET, g_osd_dma_ms);
 
 	SDL_GetWindowSize(window, NULL, &win_h);
 	scale = osd_scale_for_height(win_h);
 
 	if (g_vsync)
 		snprintf(line2, sizeof(line2),
-			 "%.1f FPS %c %s %c VSync %c %s%s",
-			 fps, OSD_BULLET, aspect_label(g_aspect),
-			 OSD_BULLET, OSD_BULLET, audio_text, tail);
+			 "%.1f FPS %c %s%s%s %c VSync %c %s%s",
+			 fps, OSD_BULLET, aspect_label(g_aspect), scale_tag,
+			 dma_tag, OSD_BULLET, OSD_BULLET, audio_text, tail);
 	else
 		snprintf(line2, sizeof(line2),
-			 "%.1f FPS %c %s %c %s%s",
-			 fps, OSD_BULLET, aspect_label(g_aspect),
-			 OSD_BULLET, audio_text, tail);
+			 "%.1f FPS %c %s%s%s %c %s%s",
+			 fps, OSD_BULLET, aspect_label(g_aspect), scale_tag,
+			 dma_tag, OSD_BULLET, audio_text, tail);
 
 	framegen_describe(line3, sizeof(line3));
 
@@ -1455,6 +1564,52 @@ static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
 	SDL_RenderCopy(renderer, g_osd.texture, NULL, &dst);
 }
 
+/* F1 help card.  Built lazily, re-rasterised only on scale or text change. */
+static const char g_help_text[] =
+	"EVERLIVE HOTKEYS\n"
+	"F11 / F    Fullscreen\n"
+	"1 / L      Scaling (Fit / Integer)\n"
+	"A          Aspect Ratio (Auto/16:9/4:3/Stretch)\n"
+	"H          HDR Filmic Tonemap Toggle\n"
+	"Up / Down  Volume Up / Down (5%) [or + / -]\n"
+	"M          Audio Mute Toggle\n"
+	"P          OSD Position (TR/BR/BL/TL)\n"
+	"Tab / I    OSD Stats Overlay Toggle\n"
+	"F1 / ?     Close Help Overlay\n"
+	"Esc / Q    Quit Streamer";
+
+static void help_render(SDL_Renderer *renderer, SDL_Window *window)
+{
+	int win_w = 0;
+	int win_h = 0;
+	int scale;
+	SDL_Rect dst;
+
+	if (!g_help_overlay)
+		return;
+
+	SDL_GetWindowSize(window, &win_w, &win_h);
+	if (win_w <= 0 || win_h <= 0)
+		return;
+
+	scale = osd_scale_for_height(win_h);
+	if (scale != g_help.scale || strcmp(g_help.text, g_help_text) != 0)
+		osd_build(renderer, scale, g_help_text, &g_help);
+	if (!g_help.texture)
+		return;
+
+	dst.w = g_help.width;
+	dst.h = g_help.height;
+	dst.x = (win_w - dst.w) / 2;
+	dst.y = (win_h - dst.h) / 2;
+	if (dst.x < 0)
+		dst.x = 0;
+	if (dst.y < 0)
+		dst.y = 0;
+
+	SDL_RenderCopy(renderer, g_help.texture, NULL, &dst);
+}
+
 static void fit_destination(SDL_Rect *dst, int win_w, int win_h,
 			    float src_aspect)
 {
@@ -1481,7 +1636,67 @@ static void fit_destination(SDL_Rect *dst, int win_w, int win_h,
 }
 
 static void render_frame(SDL_Window *window, SDL_Renderer *renderer,
-			 SDL_Texture *texture, float src_aspect)
+			 SDL_Texture *texture, float src_aspect,
+			 int src_w, int src_h);
+
+/*
+ * Largest whole multiple of the source that still fits.
+ *
+ * @display_aspect is the *display* aspect (4:3 for 480i/576i, 16:9 for the
+ * anamorphic 3840x1080 RetroTINK mode).  The logical width in square pixels
+ * is therefore src_h * display_aspect, which may differ from src_w.
+ *
+ * Returns false when the monitor cannot hold one full copy: integer scaling
+ * cannot shrink, so the caller falls back to the bilinear aspect fit.
+ */
+static bool fit_destination_integer(SDL_Rect *dst, int win_w, int win_h,
+				    int src_w, int src_h,
+				    float display_aspect)
+{
+	int disp_w, scale_x, scale_y, scale;
+
+	if (src_w <= 0 || src_h <= 0 || win_w <= 0 || win_h <= 0)
+		return false;
+	if (!(display_aspect > 0.0f))
+		return false;		/* ASPECT_STRETCH: no integer grid */
+
+	/* Picture width measured in square pixels (pixel-aspect correction). */
+	disp_w = (int)lroundf((float)src_h * display_aspect);
+	if (disp_w <= 0)
+		return false;
+
+	/*
+	 * Anamorphic content (e.g. 3840x1080 squeezed into 16:9) would need a
+	 * fractional horizontal factor; integer scaling would halve the width.
+	 * Fall back to the aspect fit instead of producing a wrong picture.
+	 */
+	if (disp_w < src_w)
+		return false;
+
+	scale_x = win_w / disp_w;
+	scale_y = win_h / src_h;
+	scale = scale_x < scale_y ? scale_x : scale_y;
+
+	if (scale < 1)
+		return false;		/* downscale is never integer */
+
+	dst->w = disp_w * scale;
+	dst->h = src_h * scale;
+	dst->x = (win_w - dst->w) / 2;
+	dst->y = (win_h - dst->h) / 2;
+
+	/*
+	 * YUYV is 4:2:2: an odd destination x shifts the chroma pairing by one
+	 * source pixel per column, which shows up as colour fringing on text.
+	 */
+	dst->x &= ~1;
+
+	return true;
+}
+
+static void render_frame(SDL_Window *window, SDL_Renderer *renderer,
+			 SDL_Texture *texture, float src_aspect,
+			 int src_w, int src_h)
 {
 	SDL_Rect dst;
 	int win_w = 0;
@@ -1491,12 +1706,25 @@ static void render_frame(SDL_Window *window, SDL_Renderer *renderer,
 	if (win_w <= 0 || win_h <= 0)
 		return;
 
-	fit_destination(&dst, win_w, win_h, src_aspect);
+	if (g_scale_applied != g_scale_mode) {
+		apply_scale_mode(texture, g_scale_mode);
+		g_scale_applied = g_scale_mode;
+	}
+
+	if (g_scale_mode == SCALE_INTEGER &&
+	    fit_destination_integer(&dst, win_w, win_h, src_w, src_h, src_aspect)) {
+		/* Report the achieved factor in the OSD (0 = plain fit below). */
+		g_integer_factor = src_h > 0 ? dst.h / src_h : 0;
+	} else {
+		g_integer_factor = 0;
+		fit_destination(&dst, win_w, win_h, src_aspect);
+	}
 
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 	SDL_RenderClear(renderer);
 	SDL_RenderCopy(renderer, texture, NULL, &dst);
 	osd_render(renderer, window);
+	help_render(renderer, window);
 	SDL_RenderPresent(renderer);
 }
 
@@ -3171,6 +3399,58 @@ static uint32_t float_to_bits(float value)
 }
 
 /*
+ * Keyboard volume control in the gaming window.  Both helpers publish the new
+ * state atomically for the audio worker and mirror it into the title bar, so
+ * the level stays visible while the OSD is switched off.  The actual ramp is
+ * still done per block by audio_apply_gain().
+ */
+static void audio_hotkey_report(SDL_Window *window)
+{
+	uint32_t bits = __atomic_load_n(&g_audio_gain_bits, __ATOMIC_RELAXED);
+	bool muted = __atomic_load_n(&g_audio_mute_flag, __ATOMIC_RELAXED) != 0;
+	int percent = (int)(float_from_bits(bits) * 100.0f + 0.5f);
+
+	printf("[AUDIO] Volume: %d%% %s\n", percent, muted ? "(Muted)" : "");
+	fflush(stdout);
+
+	if (window) {
+		char title[128];
+
+		snprintf(title, sizeof(title),
+			 "EverLive [USERSPACE VFIO] — Volume: %d%%%s", percent,
+			 muted ? " (Muted)" : "");
+		SDL_SetWindowTitle(window, title);
+	}
+}
+
+static void audio_hotkey_set_gain(float delta, SDL_Window *window)
+{
+	uint32_t bits = __atomic_load_n(&g_audio_gain_bits, __ATOMIC_RELAXED);
+	float gain = float_from_bits(bits) + delta;
+
+	if (gain > AUDIO_GAIN_MAX)
+		gain = AUDIO_GAIN_MAX;
+	if (gain < 0.0f)
+		gain = 0.0f;
+
+	__atomic_store_n(&g_audio_gain_bits, float_to_bits(gain),
+			 __ATOMIC_RELAXED);
+	/* Turning volume up automatically unmutes if muted */
+	if (delta > 0.0f)
+		__atomic_store_n(&g_audio_mute_flag, 0, __ATOMIC_RELAXED);
+
+	audio_hotkey_report(window);
+}
+
+static void audio_hotkey_toggle_mute(SDL_Window *window)
+{
+	int muted = __atomic_load_n(&g_audio_mute_flag, __ATOMIC_RELAXED) ? 0 : 1;
+
+	__atomic_store_n(&g_audio_mute_flag, muted, __ATOMIC_RELAXED);
+	audio_hotkey_report(window);
+}
+
+/*
  * Scale a PCM block by the remote gain with a short linear ramp, so slider
  * moves and mute toggles never click.  Returns the buffer to queue: the
  * caller's data at unity gain, otherwise the shared scratch block.
@@ -4134,6 +4414,7 @@ static void run_teardown_trace(struct gc573_vfio_ctx *ctx,
 	if (texture)
 		SDL_DestroyTexture(texture);
 	osd_destroy();
+	help_destroy();
 	if (renderer)
 		SDL_DestroyRenderer(renderer);
 	if (window)
@@ -4543,6 +4824,7 @@ static void switch_output_mode(bool want_gaming, SDL_Window **window,
 			standby->texture = NULL;
 		}
 		osd_destroy();
+		help_destroy();
 		presentation_destroy(window, renderer, texture);
 		g_headless = true;
 		printf("[MODE] Headless: DMA, V4L2 and audio keep running\n");
@@ -4667,6 +4949,7 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 	snprintf(st.osd_position, sizeof(st.osd_position), "%.15s",
 		 osd_pos_name(g_osd_pos));
 	snprintf(st.aspect, sizeof(st.aspect), "%.11s", aspect_name(g_aspect));
+	snprintf(st.scale, sizeof(st.scale), "%s", scale_name(g_scale_mode));
 	st.vsync = g_vsync;
 	st.fullscreen = g_fullscreen;
 	st.led_r = g_led_r;
@@ -4775,6 +5058,8 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 	case GC573_IPC_CMD_AUDIO_GAIN:
 		__atomic_store_n(&g_audio_gain_bits, float_to_bits(cmd->f),
 				 __ATOMIC_RELAXED);
+		if (cmd->f > 0.0f)
+			__atomic_store_n(&g_audio_mute_flag, 0, __ATOMIC_RELAXED);
 		printf("[IPC] Audio gain: %d%%\n",
 		       (int)(cmd->f * 100.0f + 0.5f));
 		break;
@@ -4813,6 +5098,11 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		printf("[IPC] HDR: %s, exposure %+.1f EV\n",
 		       g_hdr_enabled ? "auto" : "bypass",
 		       (double)g_hdr_exposure_ev);
+		break;
+	case GC573_IPC_CMD_SCALE:
+		g_scale_mode = cmd->a ? SCALE_INTEGER : SCALE_FIT;
+		/* The texture is updated by render_frame() via g_scale_applied. */
+		printf("[IPC] Scaling: %s\n", scale_name(g_scale_mode));
 		break;
 	case GC573_IPC_CMD_FRAMEGEN: {
 		int mode = g_fg_config.mode;
@@ -4870,6 +5160,7 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 				       path);
 				break;
 			}
+			v4l2_pump_stop();
 			/* open() memsets the sink, so drop an old fd first. */
 			if (sink->fd >= 0 || sink->path[0])
 				v4l2_sink_close_guarded(sink);
@@ -4890,6 +5181,7 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 				printf("[V4L2] Live detach ignored: no sink attached\n");
 				break;
 			}
+			v4l2_pump_stop();
 			v4l2_sink_close_guarded(sink);
 			printf("[V4L2] Live detach\n");
 		}
@@ -5065,6 +5357,39 @@ int main(int argc, char *argv[])
 			aspect_spec = argv[++i];
 		} else if (strncmp(argv[i], "--aspect=", 9) == 0) {
 			aspect_spec = argv[i] + 9;
+		} else if (strcmp(argv[i], "--integer-scale") == 0) {
+			g_scale_mode = SCALE_INTEGER;
+		} else if ((strcmp(argv[i], "-v") == 0 ||
+			    strcmp(argv[i], "--volume") == 0) && i + 1 < argc) {
+			float vol = strtof(argv[++i], NULL);
+
+			if (vol < 0.0f)
+				vol = 0.0f;
+			if (vol > AUDIO_GAIN_MAX)
+				vol = AUDIO_GAIN_MAX;
+			g_audio_gain_bits = float_to_bits(vol);
+		} else if (strncmp(argv[i], "--volume=", 9) == 0) {
+			float vol = strtof(argv[i] + 9, NULL);
+
+			if (vol < 0.0f)
+				vol = 0.0f;
+			if (vol > AUDIO_GAIN_MAX)
+				vol = AUDIO_GAIN_MAX;
+			g_audio_gain_bits = float_to_bits(vol);
+		} else if (strcmp(argv[i], "--scale") == 0 && i + 1 < argc) {
+			const char *scale_spec = argv[++i];
+
+			if (!parse_scale(scale_spec, &g_scale_mode))
+				fprintf(stderr,
+					"[SCALE] Unknown mode '%s'; using fit\n",
+					scale_spec);
+		} else if (strncmp(argv[i], "--scale=", 8) == 0) {
+			const char *scale_spec = argv[i] + 8;
+
+			if (!parse_scale(scale_spec, &g_scale_mode))
+				fprintf(stderr,
+					"[SCALE] Unknown mode '%s'; using fit\n",
+					scale_spec);
 		} else if (strcmp(argv[i], "-h") == 0 ||
 			   strcmp(argv[i], "--help") == 0) {
 			print_usage(argv[0]);
@@ -5115,7 +5440,7 @@ int main(int argc, char *argv[])
 	}
 
 	printf("==================================================================\n");
-	printf("  EverLive Experimental — Userspace VFIO Streamer [1.4 LAB]     \n");
+	printf("  EverLive Experimental — Userspace VFIO Streamer [1.4 LAB] (v" EVERLIVE_VERSION ")\n");
 	printf("==================================================================\n\n");
 	if (g_trace_mode)
 		printf("[TRACE] Teardown trace enabled: press T while streaming to start the phase test.\n");
@@ -5382,10 +5707,13 @@ int main(int argc, char *argv[])
 	if (g_headless) {
 		printf("[*] Userspace streamer active (headless). Send SIGINT/SIGTERM to exit.\n");
 	} else {
-		printf("[*] Userspace streamer active. Press 'q' or ESC to exit, 'f' fullscreen, 'a' aspect, 'p' OSD position, Tab/'o' OSD, 'g' frame generation, 'u' CAS.\n");
-		printf("[OSD] Start: fullscreen=%s vsync=%s aspect=%s overlay=%s pos=%s framegen=%s flow=%d%% perf=%s\n",
+		printf("[*] Userspace streamer active. Press 'q' or ESC to exit, F1 for the hotkey list,\n");
+		printf("    'f' fullscreen, 'a' aspect, '1'/'l' scaling, 'p' OSD position, Tab/'o' OSD,\n");
+		printf("    '↑'/'↓'/'+'/'-' volume, 'm' mute, 'g' frame generation.\n");
+		printf("[OSD] Start: fullscreen=%s vsync=%s aspect=%s scale=%s overlay=%s pos=%s framegen=%s flow=%d%% perf=%s\n",
 		       g_fullscreen ? "on" : "off",
 		       g_vsync ? "on" : "off", aspect_name(g_aspect),
+		       scale_name(g_scale_mode),
 		       g_osd_enabled ? "on" : "off", osd_pos_name(g_osd_pos),
 		       framegen_mode_name(g_fg_config.mode),
 		       (int)(g_fg_config.flow_scale * 100.0f + 0.5f),
@@ -5436,8 +5764,18 @@ int main(int argc, char *argv[])
 					g_trace_requested = true;
 				g_running = 0;
 			} else if (event.type == SDL_KEYDOWN && !g_headless) {
-				if (event.key.keysym.sym == SDLK_ESCAPE ||
-				    event.key.keysym.sym == SDLK_q) {
+				if (event.key.keysym.sym == SDLK_ESCAPE) {
+					/* First Esc only dismisses the help card. */
+					if (g_help_overlay) {
+						g_help_overlay = false;
+						printf("[OSD] Help overlay: off\n");
+						fflush(stdout);
+					} else {
+						if (g_trace_mode && streaming)
+							g_trace_requested = true;
+						g_running = 0;
+					}
+				} else if (event.key.keysym.sym == SDLK_q) {
 					if (g_trace_mode && streaming)
 						g_trace_requested = true;
 					g_running = 0;
@@ -5491,6 +5829,19 @@ int main(int argc, char *argv[])
 					printf("[FRAMEGEN] Mode: %s\n",
 					       framegen_mode_name(g_fg_config.mode));
 					fflush(stdout);
+				} else if (event.key.keysym.sym == SDLK_l ||
+					   event.key.keysym.sym == SDLK_1) {
+					char title[128];
+
+					g_scale_mode = (enum stream_scale)
+						((g_scale_mode + 1) % SCALE_COUNT);
+					printf("[SCALE] Scaling: %s\n",
+					       scale_name(g_scale_mode));
+					fflush(stdout);
+					snprintf(title, sizeof(title),
+						 "EverLive Experimental — Scaling: %s",
+						 scale_name(g_scale_mode));
+					SDL_SetWindowTitle(window, title);
 				} else if (event.key.keysym.sym == SDLK_TAB ||
 					   event.key.keysym.sym == SDLK_i ||
 					   event.key.keysym.sym == SDLK_o ||
@@ -5502,6 +5853,22 @@ int main(int argc, char *argv[])
 					printf("[OSD] Overlay: %s\n",
 					       g_osd_enabled ? "on" : "off");
 					fflush(stdout);
+				} else if (event.key.keysym.sym == SDLK_F1 ||
+					   event.key.keysym.sym == SDLK_QUESTION) {
+					g_help_overlay = !g_help_overlay;
+					printf("[OSD] Help overlay: %s\n",
+					       g_help_overlay ? "on" : "off");
+					fflush(stdout);
+				} else if (event.key.keysym.sym == SDLK_m) {
+					audio_hotkey_toggle_mute(window);
+				} else if (event.key.keysym.sym == SDLK_UP ||
+					   event.key.keysym.sym == SDLK_PLUS ||
+					   event.key.keysym.sym == SDLK_KP_PLUS) {
+					audio_hotkey_set_gain(0.05f, window);
+				} else if (event.key.keysym.sym == SDLK_DOWN ||
+					   event.key.keysym.sym == SDLK_MINUS ||
+					   event.key.keysym.sym == SDLK_KP_MINUS) {
+					audio_hotkey_set_gain(-0.05f, window);
 				}
 			}
 		}
@@ -6085,7 +6452,8 @@ int main(int argc, char *argv[])
 						render_frame(
 							window, renderer, texture,
 							aspect_ratio(g_aspect,
-								     video_aspect));
+								     video_aspect),
+							output_width, output_height);
 					}
 					gc573_framegen_release(g_framegen);
 				} else {
@@ -6103,6 +6471,7 @@ int main(int argc, char *argv[])
 
 				if (ph > 0) {
 					have_frame = true;
+					osd_note_dma_age(g_preview.taken_age_us);
 					/*
 					 * Tonemap once, in place, before both consumers read
 					 * the slot: the window and the OBS feed then show the
@@ -6141,6 +6510,17 @@ int main(int argc, char *argv[])
 						audio_osd_text(&audio, audio_text,
 							       sizeof(audio_text));
 
+					/* The keyboard mute is not part of the stream state, so
+					 * it is appended here rather than inside the branches. */
+					if (audio.streaming &&
+					    __atomic_load_n(&g_audio_mute_flag,
+							    __ATOMIC_RELAXED) &&
+					    !strstr(audio_text, "(Muted)"))
+						snprintf(audio_text + strlen(audio_text),
+							 sizeof(audio_text) -
+							 strlen(audio_text),
+							 " (Muted)");
+
 					osd_update(renderer, window,
 						   input_width, input_height,
 						   current_sig.interlaced,
@@ -6149,13 +6529,15 @@ int main(int argc, char *argv[])
 						   gc573_hdr_active() ?
 						   gc573_hdr_label() : NULL);
 					render_frame(window, renderer, texture,
-						     aspect_ratio(g_aspect,
-								  video_aspect));
+						     aspect_ratio(g_aspect, video_aspect),
+						     (int)output_width,
+						     (int)output_height);
 				} else {
 					/*
-					 * Present-on-new-frame pacing: poll often enough
-					 * that a frame arriving mid-sleep is picked up
-					 * within ~1 ms.
+					 * Present-on-new-frame pacing: poll just often enough that a
+					 * frame arriving mid-sleep is picked up within ~1 ms.  The old
+					 * 2 ms blind delay added up to a full refresh of phase error
+					 * on 59.72/60.03 Hz sources and showed up as micro-stutter.
 					 */
 					SDL_Delay(1);
 				}
@@ -6285,6 +6667,7 @@ int main(int argc, char *argv[])
 				       (unsigned long)__atomic_load_n(&g_preview.dropped,
 							      __ATOMIC_RELAXED),
 				       (double)g_preview.taken_age_us / 1000.0);
+				pthread_mutex_lock(&g_v4l2_lock);
 				if (v4l2_sink.path[0]) {
 					pthread_mutex_lock(&g_v4l2_lock);
 					if (v4l2_sink.configured)
@@ -6301,6 +6684,7 @@ int main(int argc, char *argv[])
 						       (unsigned long)v4l2_sink.dropped);
 					pthread_mutex_unlock(&g_v4l2_lock);
 				}
+				pthread_mutex_unlock(&g_v4l2_lock);
 				if (audio.streaming && audio.bt_playing) {
 					printf("[AUDIO] Decoding %s -> Stereo | bursts %lu | frames %lu | errors %lu\n",
 					       audio_bitstream_name(audio.bitstream),
@@ -6363,6 +6747,7 @@ int main(int argc, char *argv[])
 	gc573_audio_tap_stop();
 
 	if (g_trace_requested) {
+		v4l2_pump_stop();
 		audio_cleanup(&audio);
 		gc573_user_it6805_audio_disable(ctx.bar0);
 		/*
@@ -6403,6 +6788,7 @@ int main(int argc, char *argv[])
 		SDL_DestroyTexture(standby.texture);
 	gc573_no_signal_destroy(&standby.frame);
 	osd_destroy();
+	help_destroy();
 	/* preview_stop() has joined the capture thread, so the teardown is safe. */
 	presentation_destroy(&window, &renderer, &texture);
 	SDL_Quit();
