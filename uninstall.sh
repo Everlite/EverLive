@@ -46,10 +46,16 @@ udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger 2>/dev/null || true
 
 # 4. Desktop-Einträge & Icons entfernen
-rm -f "${TARGET_HOME}/.local/share/applications/everlive.desktop"
+#
+# Side-by-side safety: this branch installs everlive-experimental.desktop.  The
+# stable everlive.desktop (and its config/socket) must survive an Experimental
+# uninstall, so the icon set is only removed when no launcher is left either.
+rm -f "${TARGET_HOME}/.local/share/applications/everlive-experimental.desktop"
 rm -f "${TARGET_HOME}/.local/share/applications/everlive-intern.desktop"
-rm -f "${TARGET_HOME}/.config/autostart/everlive.desktop"
-rm -f "${TARGET_HOME}/.local/share/icons/hicolor/"*/apps/everlive.png
+if [ ! -f "${TARGET_HOME}/.local/share/applications/everlive.desktop" ]; then
+    rm -f "${TARGET_HOME}/.config/autostart/everlive.desktop"
+    rm -f "${TARGET_HOME}/.local/share/icons/hicolor/"*/apps/everlive.png
+fi
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "${TARGET_HOME}/.local/share/applications" 2>/dev/null || true
 fi

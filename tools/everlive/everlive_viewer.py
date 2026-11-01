@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """
-EverLive - Live Gamer 4K (GC573) Control Center & Video Viewer
+EverLive Experimental - Live Gamer 4K (GC573) Control Center & Video Viewer
 Desktop Studio with low-latency direct-DMA preview for Linux gaming.
+
+The "Experimental / 1.4 Lab" build installs side by side with the stable
+EverLive release: it keeps its own config directory and IPC socket, so a hub
+sitting in the system tray of the stable release never collides with it.
 """
 
 import sys
@@ -22,10 +26,14 @@ except ImportError:  # imported as a module from another working directory
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from everlive_client import EverLiveIpcClient, probe as ipc_probe
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
-CONFIG_DIR = os.path.expanduser("~/.config/everlive")
+APP_NAME = "EverLive Experimental"
+# Side-by-side isolation: the stable EverLive keeps ~/.config/everlive, so this
+# branch must never overwrite the user's EDID/LED/volume preferences.
+CONFIG_DIR = os.path.expanduser("~/.config/everlive-experimental")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
+STABLE_CONFIG_FILE = os.path.expanduser("~/.config/everlive/settings.json")
 
 GC573_VENDOR_ID = "0x1461"
 GC573_DEVICE_IDS = {"0x0054", "0x0055"}
@@ -49,6 +57,30 @@ OSD_POSITION_OPTIONS = [
     ("Top Left", "tl"),
 ]
 
+# Experimental lsfg-vk frame generation (gc573_user_streamer --framegen).
+FRAMEGEN_OPTIONS = [
+    ("Off — Native Ultra-Low Latency", "off"),
+    ("60 → 120 FPS (LSFG 2x · 60 FPS Games)", "60to120"),
+    ("30 → 60 FPS (LSFG 2x · PS5 30 FPS Games)", "30to60"),
+]
+FRAMEGEN_KEYS = {key for _, key in FRAMEGEN_OPTIONS}
+
+# Older settings files / scripts used the shader-pipeline names.  Map them onto
+# the two real lsfg-vk modes instead of silently resetting to off.
+FRAMEGEN_ALIASES = {
+    "2x": "60to120",
+    "interp": "60to120",
+    "interpolation": "60to120",
+    "60": "60to120",
+    "adaptive": "30to60",
+    "max": "30to60",
+    "maxhz": "30to60",
+    "30": "30to60",
+    "ps5": "30to60",
+    "none": "off",
+    "native": "off",
+}
+
 DEFAULT_SETTINGS = {
     "v4l2_loopback": True,
     "aspect_ratio": "auto",
@@ -58,11 +90,27 @@ DEFAULT_SETTINGS = {
     "hdr_tonemap": True,
     "hdr_exposure": 0.0,
     "minimize_to_tray": True,
+    "framegen_mode": "off",
+    "fg_flow_scale": 1.0,
+    "fg_perf_mode": False,
+    "fg_low_latency": True,
 }
+
+
+def _write_settings(data: dict) -> bool:
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception:
+        return False
 
 
 def load_settings() -> dict:
     data = {}
+    seeded = False
+
     if os.path.isfile(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
@@ -71,6 +119,20 @@ def load_settings() -> dict:
                 data = loaded
         except Exception:
             pass
+    elif os.path.isfile(STABLE_CONFIG_FILE):
+        #
+        # First launch of the experimental build: inherit the user's stable
+        # preferences (EDID profile, LED colour, volume) by reading the stable
+        # file once.  It is never modified - this is a one-way seed.
+        #
+        try:
+            with open(STABLE_CONFIG_FILE, "r") as f:
+                seeded_data = json.load(f)
+            if isinstance(seeded_data, dict):
+                data = seeded_data
+                seeded = True
+        except Exception:
+            data = {}
 
     settings = dict(DEFAULT_SETTINGS)
     settings.update(data)
@@ -91,22 +153,196 @@ def load_settings() -> dict:
     if not isinstance(settings.get("hdr_exposure"), (int, float)):
         settings["hdr_exposure"] = 0.0
     settings["hdr_exposure"] = max(-2.0, min(2.0, float(settings["hdr_exposure"])))
+    # Experimental lsfg-vk frame generation.  Migrate the old shader-era keys.
+    fg_mode = str(settings.get("framegen_mode", "off")).lower()
+    fg_mode = FRAMEGEN_ALIASES.get(fg_mode, fg_mode)
+    if fg_mode not in FRAMEGEN_KEYS:
+        fg_mode = "off"
+    settings["framegen_mode"] = fg_mode
+    try:
+        settings["fg_flow_scale"] = max(
+            0.5, min(1.0, float(settings.get("fg_flow_scale", 1.0))))
+    except (TypeError, ValueError):
+        settings["fg_flow_scale"] = 1.0
+    if not isinstance(settings.get("fg_perf_mode"), bool):
+        settings["fg_perf_mode"] = False
+    if not isinstance(settings.get("fg_low_latency"), bool):
+        settings["fg_low_latency"] = True
+    # The OpenGL shader pipeline (HUD protection, CAS) no longer exists.
+    for stale in ("framegen_hud_protect", "cas_enabled", "cas_strength"):
+        settings.pop(stale, None)
     # "bitstream" used to be a separate EDID profile.  Every built-in profile
     # now advertises AC-3/DTS, so old settings migrate to the unified default.
     if settings.get("edid_profile") == "bitstream":
         settings["edid_profile"] = "default"
+
+    if seeded:
+        _write_settings(settings)
     return settings
 
 
 def save_settings(data: dict):
     try:
-        os.makedirs(CONFIG_DIR, exist_ok=True)
         cur = load_settings()
         cur.update(data)
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(cur, f, indent=2)
+        _write_settings(cur)
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# lsfg-vk readiness probe (offline, no external binaries)
+# ---------------------------------------------------------------------------
+
+def _resolve_lsfg_dll(candidate: str) -> str:
+    """Resolve a candidate shader DLL path for lsfg-vk 2.x.
+
+    If a stale config or env var points at Windows ``Lossless.dll``, prefer a
+    sibling ``lsfg-vk.dll`` (from Steam's ``lsfg-vk`` beta branch) and reject
+    bare ``Lossless.dll`` which lacks the precompiled Vulkan SPIR-V shaders.
+    """
+    if not candidate:
+        return ""
+    if os.path.basename(candidate).lower() == "lossless.dll":
+        sibling = os.path.join(os.path.dirname(candidate), "lsfg-vk.dll")
+        if os.path.isfile(sibling) and os.access(sibling, os.R_OK):
+            return sibling
+        return ""
+    if os.path.isfile(candidate) and os.access(candidate, os.R_OK):
+        return candidate
+    return ""
+
+
+def _lsfg_dll_from_conf(path: str) -> str:
+    """Return the ``dll = "..."`` value from lsfg-vk's conf.toml, if usable."""
+    try:
+        with open(path, "r", errors="ignore") as f:
+            for raw in f:
+                line = raw.lstrip()
+                if not line.lower().startswith("dll"):
+                    continue
+                first = line.find('"')
+                if first < 0:
+                    continue
+                last = line.find('"', first + 1)
+                if last < 0:
+                    continue
+                resolved = _resolve_lsfg_dll(line[first + 1:last])
+                if resolved:
+                    return resolved
+    except OSError:
+        pass
+    return ""
+
+
+def _lsfg_dll_from_libraryfolders(path: str) -> Tuple[str, bool]:
+    """Scan a Steam libraryfolders.vdf for a Lossless Scaling install.
+
+    Returns ``(lsfg_vk_dll_path, legacy_lossless_dll_found)``.
+    """
+    try:
+        with open(path, "r", errors="ignore") as f:
+            body = f.read()
+    except OSError:
+        return "", False
+
+    legacy_found = False
+    lowered = body.lower()
+    pos = 0
+    while True:
+        pos = lowered.find('"path"', pos)
+        if pos < 0:
+            return "", legacy_found
+        pos += len('"path"')
+        first = body.find('"', pos)
+        if first < 0:
+            return "", legacy_found
+        last = body.find('"', first + 1)
+        if last < 0:
+            return "", legacy_found
+        library = body[first + 1:last].replace("\\\\", "/")
+        game_dir = os.path.join(
+            library, "steamapps", "common", "Lossless Scaling")
+        candidate = os.path.join(game_dir, "lsfg-vk.dll")
+        if os.path.isfile(candidate) and os.access(candidate, os.R_OK):
+            return candidate, True
+        legacy = os.path.join(game_dir, "Lossless.dll")
+        if os.path.isfile(legacy) and os.access(legacy, os.R_OK):
+            legacy_found = True
+
+
+def probe_lsfg_vk() -> Dict[str, object]:
+    """Locate the lsfg-vk Vulkan layer and lsfg-vk.dll without running tools.
+
+    Mirrors ``gc573_fg_probe_system()`` in ``gc573_user_framegen.c`` so the Hub
+    can show readiness before a stream is even started, and after the user
+    installs the layer or enables the Steam beta while the Hub stays open.
+    """
+    layer_dir = ""
+    home = os.path.expanduser("~")
+    xdg_data = os.environ.get("XDG_DATA_HOME") or os.path.join(
+        home, ".local", "share")
+    search = [
+        "/usr/share/vulkan/implicit_layer.d",
+        "/etc/vulkan/implicit_layer.d",
+        os.path.join(xdg_data, "vulkan", "implicit_layer.d"),
+    ]
+    for directory in search:
+        try:
+            for name in os.listdir(directory):
+                lower = name.lower()
+                if not lower.endswith(".json"):
+                    continue
+                hit = "lsfg" in lower
+                if not hit:
+                    try:
+                        with open(os.path.join(directory, name), "r",
+                                  errors="ignore") as f:
+                            body = f.read().lower()
+                        hit = "lsfg" in body or "lossless" in body
+                    except OSError:
+                        pass
+                if hit:
+                    layer_dir = directory
+                    break
+        except OSError:
+            continue
+        if layer_dir:
+            break
+
+    dll_path = _resolve_lsfg_dll(os.environ.get("LSFGVK_DLL_PATH") or "")
+    legacy_dll_found = False
+    if not dll_path:
+        xdg_cfg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+            home, ".config")
+        dll_path = _lsfg_dll_from_conf(
+            os.path.join(xdg_cfg, "lsfg-vk", "conf.toml"))
+    if not dll_path:
+        for root in ("~/.local/share/Steam", "~/.steam/steam"):
+            base = os.path.expanduser(root)
+            game_dir = os.path.join(
+                base, "steamapps", "common", "Lossless Scaling")
+            candidate = os.path.join(game_dir, "lsfg-vk.dll")
+            if os.path.isfile(candidate) and os.access(candidate, os.R_OK):
+                dll_path = candidate
+                break
+            legacy = os.path.join(game_dir, "Lossless.dll")
+            if os.path.isfile(legacy) and os.access(legacy, os.R_OK):
+                legacy_dll_found = True
+            dll_path, vdf_legacy = _lsfg_dll_from_libraryfolders(
+                os.path.join(base, "steamapps", "libraryfolders.vdf"))
+            if vdf_legacy:
+                legacy_dll_found = True
+            if dll_path:
+                break
+
+    return {
+        "layer_found": bool(layer_dir),
+        "dll_found": bool(dll_path),
+        "legacy_dll_found": legacy_dll_found,
+        "layer_dir": layer_dir,
+        "dll_path": dll_path,
+    }
 
 
 def _read_sysfs(path: str) -> str:
@@ -1223,7 +1459,11 @@ class GameStreamer:
                     osd_pos: str = "tr",
                     audio_tap: Optional[str] = None,
                     hdr: bool = True,
-                    hdr_exposure: float = 0.0) -> bool:
+                    hdr_exposure: float = 0.0,
+                    framegen: str = "off",
+                    fg_flow_scale: float = 1.0,
+                    fg_perf_mode: bool = False,
+                    fg_low_latency: bool = True) -> bool:
         """Launch the blob-free userspace VFIO streamer directly."""
         if _vfio_streamer_running():
             print("[!] A userspace streamer is already running; refusing to start a second instance.")
@@ -1298,6 +1538,24 @@ class GameStreamer:
             cmd.append("--no-hdr")
         elif abs(hdr_exposure) >= 0.05:
             cmd.extend(["--hdr-exposure", f"{hdr_exposure:.1f}"])
+
+        # Experimental lsfg-vk frame generation.  This is deliberately passed
+        # in headless mode too: the engine keeps LSFG idle while the window is
+        # closed and activates Vulkan + LSFG as soon as mode.set("gaming")
+        # opens it, so a Studio -> Gaming switch needs no restart.  The V4L2
+        # loopback keeps receiving the raw capture path independently.
+        if framegen not in FRAMEGEN_KEYS:
+            framegen = FRAMEGEN_ALIASES.get(str(framegen).lower(), "off")
+        if framegen in FRAMEGEN_KEYS and framegen != "off":
+            cmd.extend(["--framegen", framegen])
+        # Flow/perf/latency are passed even in mode OFF so a later live toggle
+        # (hotkey or IPC) starts from the Hub's saved values, not defaults.
+        cmd.extend(["--fg-flow-scale",
+                    f"{max(0.5, min(1.0, float(fg_flow_scale))):.2f}"])
+        cmd.append("--fg-perf" if fg_perf_mode else "--no-fg-perf")
+        cmd.append("--fg-low-latency" if fg_low_latency
+                   else "--no-fg-low-latency")
+
         if headless:
             cmd.append("--headless")
 
@@ -1350,7 +1608,7 @@ class GameStreamer:
             return False
         return True
 
-    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None, osd: bool = True, osd_pos: str = "tr", audio_tap: Optional[str] = None, hdr: bool = True, hdr_exposure: float = 0.0) -> bool:
+    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None, osd: bool = True, osd_pos: str = "tr", audio_tap: Optional[str] = None, hdr: bool = True, hdr_exposure: float = 0.0, framegen: str = "off", fg_flow_scale: float = 1.0, fg_perf_mode: bool = False, fg_low_latency: bool = True) -> bool:
         if self.is_running:
             return True
 
@@ -1367,7 +1625,11 @@ class GameStreamer:
                                     osd_pos=osd_pos,
                                     audio_tap=audio_tap,
                                     hdr=hdr,
-                                    hdr_exposure=hdr_exposure)
+                                    hdr_exposure=hdr_exposure,
+                                    framegen=framegen,
+                                    fg_flow_scale=fg_flow_scale,
+                                    fg_perf_mode=fg_perf_mode,
+                                    fg_low_latency=fg_low_latency)
 
         if headless:
             print("[!] Headless/Studio mode requires the userspace VFIO engine.")
@@ -1685,10 +1947,10 @@ if HAS_QT:
             QTimer.singleShot(300, self, self._ipc_try_attach)
 
         def init_ui(self):
-            self.setWindowTitle("EverLive - Console Hub")
+            self.setWindowTitle(f"{APP_NAME} - Console Hub")
             # Compact console-hub layout: the cards below are sized so the
             # window never needs more than ~1080p of vertical space.
-            self.setFixedSize(920, 760)
+            self.setFixedWidth(920)
 
             # Application & Window Icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "everlive.png")
@@ -1725,6 +1987,16 @@ if HAS_QT:
                     color: #64748b;
                     font-size: 11px;
                     font-weight: 500;
+                }
+                QLabel#pillLab {
+                    color: #fbbf24;
+                    background-color: #241733;
+                    border: 1px solid #7c3aed;
+                    border-radius: 9px;
+                    padding: 2px 9px;
+                    font-size: 10px;
+                    font-weight: 700;
+                    letter-spacing: 0.9px;
                 }
                 QLabel#badgeModel {
                     color: #94a3b8;
@@ -2193,6 +2465,17 @@ if HAS_QT:
             lbl_logo.setObjectName("logoTitle")
             top_bar.addWidget(lbl_logo, 0, Qt.AlignVCenter)
 
+            # Amber/violet lab pill: the stable EverLive window has no such
+            # badge, so Experimental is unmistakable at a glance.
+            lbl_lab = QLabel("EXPERIMENTAL · 1.4 LAB")
+            lbl_lab.setObjectName("pillLab")
+            lbl_lab.setFixedHeight(20)
+            lbl_lab.setToolTip(
+                "EverLive 1.4 Lab: Lossless Scaling frame generation through "
+                "the native lsfg-vk Vulkan layer. Installed side by side "
+                "with the stable release.")
+            top_bar.addWidget(lbl_lab, 0, Qt.AlignVCenter)
+
             lbl_badge = QLabel("GC573 · LIVE GAMER 4K" if self.vfio_mode else "GC573")
             lbl_badge.setObjectName("badgeModel")
             lbl_badge.setFixedHeight(24)
@@ -2469,6 +2752,115 @@ if HAS_QT:
 
             root_layout.addWidget(card_video)
 
+            # --- Section A2: lsfg-vk frame generation --------------------
+            card_fg, grid_fg = _section(
+                "EXPERIMENTAL · LSFG-VK FRAME GENERATION")
+            grid_fg.setVerticalSpacing(8)
+            grid_fg.setColumnMinimumWidth(0, 148)
+            grid_fg.setColumnStretch(1, 1)
+            grid_fg.setColumnMinimumWidth(2, 140)
+            grid_fg.setColumnStretch(3, 1)
+
+            self._fg_ready_ok = False
+            grid_fg.addWidget(_field(
+                "Installation",
+                "Lossless Scaling Frame Generation 3.x through the native "
+                "lsfg-vk 2.0 Vulkan layer (Steam Beta branch 'lsfg-vk')."),
+                0, 0)
+
+            self.lbl_fg_ready = QLabel("Checking lsfg-vk…")
+            self.lbl_fg_ready.setObjectName("fieldLabel")
+            self.lbl_fg_ready.setWordWrap(True)
+            grid_fg.addWidget(self.lbl_fg_ready, 0, 1, 1, 2, Qt.AlignVCenter)
+
+            self.btn_fg_recheck = QPushButton("Re-check")
+            self.btn_fg_recheck.setObjectName("btnGhost")
+            self.btn_fg_recheck.setFixedSize(96, 26)
+            self.btn_fg_recheck.setStyleSheet("padding: 0px 12px;")
+            self.btn_fg_recheck.setCursor(Qt.PointingHandCursor)
+            self.btn_fg_recheck.setToolTip(
+                "Re-scan for the lsfg-vk layer and lsfg-vk.dll without "
+                "restarting the Hub.")
+            self.btn_fg_recheck.clicked.connect(self.on_fg_recheck)
+            grid_fg.addWidget(
+                self.btn_fg_recheck, 0, 3, Qt.AlignRight | Qt.AlignVCenter)
+            self._refresh_fg_readiness()
+
+            grid_fg.addWidget(_field(
+                "Frame Generation",
+                "lsfg-vk 2x. The 30→60 mode drops the repeated HDMI frame a "
+                "PS5 sends for a 30 FPS game before the layer interpolates."),
+                1, 0)
+
+            self.combo_framegen = QComboBox()
+            for text, key in FRAMEGEN_OPTIONS:
+                self.combo_framegen.addItem(text, key)
+            fg_idx = self.combo_framegen.findData(
+                self.saved_cfg.get("framegen_mode", "off"))
+            if fg_idx >= 0:
+                self.combo_framegen.setCurrentIndex(fg_idx)
+            self.combo_framegen.setToolTip(
+                "Forwarded as --framegen. Applies live over IPC while the "
+                "engine runs (hotkey 'g' cycles it in the game window).")
+            self.combo_framegen.currentIndexChanged.connect(
+                self.on_framegen_changed)
+            grid_fg.addWidget(self.combo_framegen, 1, 1, 1, 3)
+
+            grid_fg.addWidget(_field(
+                "Flow Scale",
+                "Optical-flow resolution used by LSFG. 100% is full quality; "
+                "lower values cost less GPU time on 1440p/4K captures."),
+                2, 0)
+
+            h_flow = QHBoxLayout()
+            h_flow.setContentsMargins(0, 0, 0, 0)
+            h_flow.setSpacing(8)
+            self.slider_flow = QSlider(Qt.Horizontal)
+            self.slider_flow.setMinimumHeight(24)
+            self.slider_flow.setRange(50, 100)
+            self.slider_flow.setValue(int(round(
+                float(self.saved_cfg.get("fg_flow_scale", 1.0)) * 100)))
+            self.slider_flow.setToolTip("LSFGVK_FLOW_SCALE: 50% to 100%.")
+            self.slider_flow.valueChanged.connect(self.on_flow_scale_changed)
+            self.slider_flow.sliderReleased.connect(
+                lambda: save_settings(self._framegen_config()))
+            h_flow.addWidget(self.slider_flow, 1)
+
+            self.lbl_flow = QLabel(f"{self.slider_flow.value()}%")
+            self.lbl_flow.setObjectName("fieldLabel")
+            self.lbl_flow.setFixedWidth(38)
+            h_flow.addWidget(self.lbl_flow, 0, Qt.AlignVCenter)
+            grid_fg.addLayout(h_flow, 2, 1)
+
+            self.chk_fg_perf = QCheckBox("Performance Mode")
+            self.chk_fg_perf.setMinimumHeight(24)
+            self.chk_fg_perf.setChecked(
+                bool(self.saved_cfg.get("fg_perf_mode", False)))
+            self.chk_fg_perf.setToolTip(
+                "LSFGVK_PERFORMANCE_MODE: lower latency and less GPU load, "
+                "at the cost of some interpolation quality.")
+            self.chk_fg_perf.toggled.connect(self.on_fg_perf_toggled)
+            grid_fg.addWidget(self.chk_fg_perf, 2, 2, Qt.AlignVCenter)
+
+            self.chk_fg_ll = QCheckBox("Low-Latency Swapchain")
+            self.chk_fg_ll.setMinimumHeight(24)
+            self.chk_fg_ll.setChecked(
+                bool(self.saved_cfg.get("fg_low_latency", True)))
+            self.chk_fg_ll.setToolTip(
+                "Sets LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT=1 so lsfg-vk keeps "
+                "the minimum Vulkan swapchain queue depth (saves 8-17 ms at "
+                "120 Hz). Uncheck if frame pacing ever stutters.")
+            self.chk_fg_ll.toggled.connect(self.on_fg_low_latency_toggled)
+            grid_fg.addWidget(self.chk_fg_ll, 2, 3, Qt.AlignVCenter)
+
+            self.lbl_fg_status = QLabel(
+                "Frame generation is off (native zero-latency path).")
+            self.lbl_fg_status.setObjectName("fieldLabel")
+            grid_fg.addWidget(self.lbl_fg_status, 3, 0, 1, 4)
+            self._refresh_idle_fg_status()
+
+            root_layout.addWidget(card_fg)
+
             # --- Section B: audio & hardware ----------------------------
             card_audio, grid_audio = _section("AUDIO & HARDWARE")
             grid_audio.setColumnMinimumWidth(0, 148)
@@ -2678,7 +3070,7 @@ if HAS_QT:
                 self.lbl_vdev = QLabel(
                     f"VFIO {pci} · EDID {self._edid_profile_label()} · "
                     "SDL2 audio")
-                hints_text = "F Fullscreen · Tab OSD · H HDR · P Corner · Esc Exit"
+                hints_text = "F Fullscreen · Tab OSD · G FrameGen · H HDR · P Corner · Esc Exit"
             else:
                 if self.streamer.pw_node:
                     audio_str = f"PipeWire ({self.streamer.pw_node})"
@@ -2698,6 +3090,11 @@ if HAS_QT:
 
             root_layout.addStretch(1)
             root_layout.addWidget(bottom_box)
+
+            # Size vertically to the real layout hint so font/DPI metrics
+            # never compress or overlap rows inside the cards.
+            central_widget.layout().activate()
+            self.setFixedSize(920, max(968, central_widget.sizeHint().height()))
 
             # Initial status poll
             self.update_status()
@@ -2880,6 +3277,7 @@ if HAS_QT:
                 if hasattr(self, "lbl_engine_badge") and self.vfio_mode:
                     self.lbl_engine_badge.setText("Userspace VFIO")
                 self._set_launch_running(False)
+                self._refresh_idle_fg_status()
 
         def _poll_remote_status(self):
             if self._remote and self._ipc is not None:
@@ -2888,6 +3286,8 @@ if HAS_QT:
         def _on_remote_status(self, status: Dict):
             """Render a snapshot published by the remote streamer."""
             self._remote_status = status
+            self._update_framegen_status(status.get("framegen") or {},
+                                         bool(status.get("headless")))
             if not self._remote or self.streamer.is_running:
                 return
 
@@ -2895,6 +3295,7 @@ if HAS_QT:
             video = status.get("video") or {}
             audio = status.get("audio") or {}
             v4l2 = status.get("v4l2") or {}
+            framegen = status.get("framegen") or {}
 
             self._sync_remote_controls(status, audio)
 
@@ -2917,6 +3318,10 @@ if HAS_QT:
                 if v4l2.get("configured"):
                     parts.append(
                         f"V4L2 {v4l2.get('width', 0)}×{v4l2.get('height', 0)}")
+                if framegen.get("mode") in ("60to120", "30to60"):
+                    parts.append(
+                        f"LSFG {float(framegen.get('present_fps') or 0.0):.0f}"
+                        f"→{float(framegen.get('output_fps') or 0.0):.0f} FPS")
                 self.lbl_hero_meta.setText(" • ".join(parts))
             else:
                 self.lbl_hero_signal.setText("No HDMI Signal")
@@ -2964,6 +3369,54 @@ if HAS_QT:
                     self.combo_osd_pos.blockSignals(True)
                     self.combo_osd_pos.setCurrentIndex(idx)
                     self.combo_osd_pos.blockSignals(False)
+
+            # Experimental lsfg-vk: mirror the engine's live state.
+            fg = status.get("framegen") or {}
+            headless = bool(status.get("headless"))
+            if hasattr(self, "combo_framegen"):
+                mode = FRAMEGEN_ALIASES.get(str(fg.get("mode", "")).lower(),
+                                            fg.get("mode"))
+                # A headless engine can legitimately report "off" (old build or
+                # started without --framegen).  Never let that silently
+                # downgrade the user's saved selection in the Hub.
+                if mode in FRAMEGEN_KEYS and not (headless and mode == "off"):
+                    idx = self.combo_framegen.findData(mode)
+                    if idx >= 0 and idx != self.combo_framegen.currentIndex():
+                        self.combo_framegen.blockSignals(True)
+                        self.combo_framegen.setCurrentIndex(idx)
+                        self.combo_framegen.blockSignals(False)
+
+                if hasattr(self, "chk_fg_perf"):
+                    value = fg.get("perf_mode")
+                    if isinstance(value, bool) and value != self.chk_fg_perf.isChecked():
+                        self.chk_fg_perf.blockSignals(True)
+                        self.chk_fg_perf.setChecked(value)
+                        self.chk_fg_perf.blockSignals(False)
+
+                if hasattr(self, "chk_fg_ll"):
+                    value = fg.get("low_latency")
+                    if isinstance(value, bool) and value != self.chk_fg_ll.isChecked():
+                        self.chk_fg_ll.blockSignals(True)
+                        self.chk_fg_ll.setChecked(value)
+                        self.chk_fg_ll.blockSignals(False)
+
+                if hasattr(self, "slider_flow"):
+                    scale = fg.get("flow_scale")
+                    if (isinstance(scale, (int, float)) and
+                            not self.slider_flow.isSliderDown()):
+                        pct = int(round(max(0.5, min(1.0, float(scale))) * 100))
+                        if pct != self.slider_flow.value():
+                            self.slider_flow.blockSignals(True)
+                            self.slider_flow.setValue(pct)
+                            self.slider_flow.blockSignals(False)
+                        self.lbl_flow.setText(f"{pct}%")
+
+                # The engine's own probe is authoritative while it runs.
+                if isinstance(fg.get("layer_found"), bool):
+                    self._set_fg_readiness(
+                        bool(fg.get("layer_found")),
+                        bool(fg.get("dll_found")),
+                        str(fg.get("dll_path") or ""))
 
         def _restore_led_after_stream(self):
             """The streamer hands off; restore the hub's saved colour."""
@@ -3060,6 +3513,11 @@ if HAS_QT:
                     self.streamer.headless = target == "studio"
                     self._set_launch_running(True, target)
                     self._vfio_notice_until = 0.0
+                    if target == "gaming":
+                        # Guarantee the engine matches the Hub's selection: the
+                        # process may have been started without --framegen or
+                        # still hold a value from an earlier Studio session.
+                        self._apply_framegen(persist=False)
                     if target == "studio":
                         self._vfio_volume_applies = 0
                         self._set_vfio_notice(
@@ -3173,6 +3631,7 @@ if HAS_QT:
                              if self.chk_audio_tap.isChecked() else None)
                 want_hdr = self.chk_hdr.isChecked()
                 hdr_exposure = float(self.spin_hdr_exposure.value())
+                fg_cfg = self._framegen_config()
 
                 if v4l2_device and not os.path.exists(v4l2_device):
                     self._set_vfio_notice(
@@ -3193,6 +3652,7 @@ if HAS_QT:
                     "audio_tap": bool(audio_tap),
                     "hdr_tonemap": want_hdr,
                     "hdr_exposure": hdr_exposure,
+                    **fg_cfg,
                 })
                 self.streamer.aspect = aspect
                 success = self.streamer.start(
@@ -3206,7 +3666,11 @@ if HAS_QT:
                     osd_pos=osd_pos,
                     audio_tap=audio_tap,
                     hdr=want_hdr,
-                    hdr_exposure=hdr_exposure)
+                    hdr_exposure=hdr_exposure,
+                    framegen=fg_cfg["framegen_mode"],
+                    fg_flow_scale=fg_cfg["fg_flow_scale"],
+                    fg_perf_mode=fg_cfg["fg_perf_mode"],
+                    fg_low_latency=fg_cfg["fg_low_latency"])
                 if success:
                     self._set_launch_running(True, "gaming")
                     self._vfio_notice_until = 0.0
@@ -3217,7 +3681,7 @@ if HAS_QT:
                 else:
                     self._set_vfio_notice(
                         "Userspace Engine Failed",
-                        "See ~/.config/everlive/streamer.log for the hardware error")
+                        "See ~/.config/everlive-experimental/streamer.log for the hardware error")
                     QTimer.singleShot(300, self._restore_led_after_stream)
                 return
 
@@ -3266,6 +3730,7 @@ if HAS_QT:
                          if self.chk_audio_tap.isChecked() else None)
             want_hdr = self.chk_hdr.isChecked()
             hdr_exposure = float(self.spin_hdr_exposure.value())
+            fg_cfg = self._framegen_config()
             self.streamer.aspect = aspect
             save_settings({
                 "v4l2_loopback": want_v4l2,
@@ -3273,6 +3738,7 @@ if HAS_QT:
                 "audio_tap": bool(audio_tap),
                 "hdr_tonemap": want_hdr,
                 "hdr_exposure": hdr_exposure,
+                **fg_cfg,
             })
             success = self.streamer.start(
                 fullscreen=False,
@@ -3283,7 +3749,11 @@ if HAS_QT:
                 aspect=aspect,
                 audio_tap=audio_tap,
                 hdr=want_hdr,
-                hdr_exposure=hdr_exposure)
+                hdr_exposure=hdr_exposure,
+                framegen=fg_cfg["framegen_mode"],
+                fg_flow_scale=fg_cfg["fg_flow_scale"],
+                fg_perf_mode=fg_cfg["fg_perf_mode"],
+                fg_low_latency=fg_cfg["fg_low_latency"])
             if success:
                 self._set_launch_running(True, "studio")
                 self._vfio_notice_until = 0.0
@@ -3305,7 +3775,7 @@ if HAS_QT:
             else:
                 self._set_vfio_notice(
                     "Studio Engine Failed",
-                    "See ~/.config/everlive/streamer.log for the hardware error")
+                    "See ~/.config/everlive-experimental/streamer.log for the hardware error")
                 QTimer.singleShot(300, self._restore_led_after_stream)
 
         def on_aspect_changed(self, *_):
@@ -3389,6 +3859,178 @@ if HAS_QT:
             self.saved_cfg["hdr_exposure"] = float(value)
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_hdr(self.chk_hdr.isChecked(), float(value))
+
+        # -----------------------------------------------------------------
+        # Experimental frame generation & CAS
+        # -----------------------------------------------------------------
+        def _framegen_config(self) -> Dict:
+            mode = self.combo_framegen.currentData() or "off"
+            if mode not in FRAMEGEN_KEYS:
+                mode = "off"
+            return {
+                "framegen_mode": mode,
+                "fg_flow_scale": max(0.5, min(1.0,
+                                             self.slider_flow.value() / 100.0)),
+                "fg_perf_mode": self.chk_fg_perf.isChecked(),
+                "fg_low_latency": self.chk_fg_ll.isChecked(),
+            }
+
+        def _apply_framegen(self, persist: bool = True):
+            if not hasattr(self, "combo_framegen"):
+                return
+            cfg = self._framegen_config()
+            self.saved_cfg.update(cfg)
+            if persist:
+                save_settings(cfg)
+            if self._ipc is not None and self._ipc.connected:
+                self._ipc.set_framegen(
+                    cfg["framegen_mode"], cfg["fg_flow_scale"],
+                    cfg["fg_perf_mode"], cfg["fg_low_latency"])
+            else:
+                self._refresh_idle_fg_status()
+                if self.streamer.is_running:
+                    print("[*] Frame generation saved; applies on the next start.")
+
+        def on_framegen_changed(self, *_):
+            self._apply_framegen()
+
+        def on_fg_perf_toggled(self, _enabled: bool):
+            self._apply_framegen()
+
+        def on_fg_low_latency_toggled(self, _enabled: bool):
+            self._apply_framegen()
+
+        def on_flow_scale_changed(self, value: int):
+            self.lbl_flow.setText(f"{value}%")
+            # Live while dragging, persisted once the handle is released.
+            self._apply_framegen(persist=not self.slider_flow.isSliderDown())
+
+        def _set_fg_readiness(self, layer_found: bool, dll_found: bool,
+                              dll_path: str = "",
+                              legacy_dll_found: Optional[bool] = None):
+            """Colour the readiness line green/amber with the exact fix."""
+            self._fg_ready_ok = bool(layer_found and dll_found)
+            if not hasattr(self, "lbl_fg_ready"):
+                return
+            if layer_found and dll_found:
+                name = os.path.basename(dll_path) if dll_path else "lsfg-vk.dll"
+                self.lbl_fg_ready.setText(
+                    f"✓ LSFG-VK Ready · {name} found")
+                self.lbl_fg_ready.setStyleSheet("color: #5fd38d;")
+                self.lbl_fg_ready.setToolTip(dll_path)
+                return
+
+            if not layer_found:
+                message = ("Missing lsfg-vk package "
+                           "(sudo pacman -S lsfg-vk)")
+            else:
+                if legacy_dll_found is None:
+                    try:
+                        legacy_dll_found = bool(
+                            probe_lsfg_vk().get("legacy_dll_found"))
+                    except Exception:
+                        legacy_dll_found = False
+                if legacy_dll_found:
+                    message = ("Select 'lsfg-vk' Beta in Steam "
+                               "(Lossless Scaling -> Properties -> Betas)")
+                else:
+                    message = ("Missing Lossless Scaling in Steam "
+                               "(enable 'lsfg-vk' Beta)")
+            self.lbl_fg_ready.setText(f"⚠ {message}")
+            self.lbl_fg_ready.setStyleSheet("color: #e0a33a;")
+            self.lbl_fg_ready.setToolTip(
+                "Install the lsfg-vk Vulkan layer and opt Lossless Scaling "
+                "into the 'lsfg-vk' Beta in Steam, then press Re-check.")
+
+        def _refresh_fg_readiness(self):
+            """Offline probe so readiness is visible before any stream starts."""
+            try:
+                probe = probe_lsfg_vk()
+            except Exception:
+                probe = {"layer_found": False, "dll_found": False,
+                         "legacy_dll_found": False, "dll_path": ""}
+            self._set_fg_readiness(
+                bool(probe.get("layer_found")), bool(probe.get("dll_found")),
+                str(probe.get("dll_path") or ""),
+                bool(probe.get("legacy_dll_found")))
+
+        def on_fg_recheck(self):
+            self._refresh_fg_readiness()
+            if not (self._ipc is not None and self._ipc.connected):
+                self._refresh_idle_fg_status()
+
+        def _refresh_idle_fg_status(self):
+            """Reflect the selected Frame Generation preset while idle."""
+            if not hasattr(self, "lbl_fg_status"):
+                return
+            cfg = self._framegen_config()
+            mode = cfg["framegen_mode"]
+            if mode == "off":
+                self.lbl_fg_status.setText(
+                    "Frame generation is off (native zero-latency path).")
+                return
+            if not getattr(self, "_fg_ready_ok", False):
+                self.lbl_fg_status.setText(
+                    "lsfg-vk unavailable - presenting without 2x "
+                    "(check the readiness line above).")
+                return
+            label = ("30→60 FPS (PS5 30 FPS dedup)" if mode == "30to60"
+                     else "60→120 FPS")
+            text = (f"Standby: {label} · "
+                    f"Flow {int(round(cfg['fg_flow_scale'] * 100))}%")
+            if cfg.get("fg_perf_mode"):
+                text += " · Performance"
+            if cfg.get("fg_low_latency"):
+                text += " · Low-Latency"
+            text += " · activates on Start Gaming Screen"
+            self.lbl_fg_status.setText(text)
+
+        def _update_framegen_status(self, fg: Dict, headless: bool = False):
+            """Render the engine's live cadence in the lab card."""
+            if not hasattr(self, "lbl_fg_status") or not isinstance(fg, dict):
+                return
+            mode = FRAMEGEN_ALIASES.get(str(fg.get("mode", "off")).lower(),
+                                        fg.get("mode", "off"))
+            present = float(fg.get("present_fps") or 0.0)
+            output = float(fg.get("output_fps") or 0.0)
+            unique = float(fg.get("unique_fps") or 0.0)
+
+            if mode == "off":
+                self.lbl_fg_status.setText(
+                    "Frame generation is off (native zero-latency path).")
+                return
+
+            if not (fg.get("layer_found") and fg.get("dll_found")):
+                self.lbl_fg_status.setText(
+                    "lsfg-vk unavailable - presenting without 2x "
+                    "(check the readiness line above).")
+                return
+
+            label = ("30→60 FPS (PS5 30 FPS dedup)" if mode == "30to60"
+                     else "60→120 FPS")
+
+            # Studio mode has no window, so no swapchain presents exist yet.
+            # The mode is armed and activates on the next Gaming switch.
+            if headless:
+                self.lbl_fg_status.setText(
+                    f"Armed: {label} · activates when the Gaming Screen opens")
+                return
+
+            if fg.get("vulkan_active") is False:
+                self.lbl_fg_status.setText(
+                    "Vulkan renderer unavailable - presenting through "
+                    "OpenGL without frame generation.")
+                return
+
+            text = f"Live: {label} · {present:.1f} → {output:.1f} FPS"
+            if unique > 0.0:
+                text += f" · source {unique:.1f} FPS"
+            flow = fg.get("flow_scale")
+            if isinstance(flow, (int, float)):
+                text += f" · Flow {int(round(float(flow) * 100))}%"
+            if fg.get("perf_mode"):
+                text += " · Performance"
+            self.lbl_fg_status.setText(text)
 
         def on_preset_changed(self, *_):
             if self.vfio_mode:
@@ -3632,7 +4274,7 @@ if HAS_QT:
                     if not self.streamer._vfio_saw_output:
                         self._set_vfio_notice(
                             "Userspace Engine Stopped",
-                            "See ~/.config/everlive/streamer.log for the hardware error")
+                            "See ~/.config/everlive-experimental/streamer.log for the hardware error")
                     else:
                         self._set_vfio_standby(self.streamer.get_signal_info())
                     return
@@ -3722,7 +4364,7 @@ if HAS_QT:
             icon = QIcon(icon_path) if os.path.isfile(icon_path) else self.windowIcon()
 
             self.tray_icon = QSystemTrayIcon(icon, self)
-            self.tray_icon.setToolTip("EverLive - Console Hub")
+            self.tray_icon.setToolTip(f"{APP_NAME} - Console Hub")
 
             self.tray_menu = QMenu()
             self.tray_menu.setStyleSheet("""
@@ -3764,7 +4406,7 @@ if HAS_QT:
 
             self.tray_menu.addSeparator()
 
-            action_quit = QAction("Quit EverLive", self)
+            action_quit = QAction("Quit EverLive Experimental", self)
             action_quit.triggered.connect(self._force_quit)
             self.tray_menu.addAction(action_quit)
 
@@ -3822,7 +4464,7 @@ if HAS_QT:
                 if not getattr(self, "_tray_notified", False):
                     self._tray_notified = True
                     self.tray_icon.showMessage(
-                        "EverLive hidden to tray",
+                        "EverLive Experimental hidden to tray",
                         "The Console Hub is minimized to the system tray. Click the tray icon to reopen.",
                         QSystemTrayIcon.Information,
                         3000)
@@ -3840,7 +4482,7 @@ if HAS_QT:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="EverLive - Live Gamer 4K Console Gaming Screen")
+    parser = argparse.ArgumentParser(description=f"{APP_NAME} - Live Gamer 4K Console Gaming Screen")
     parser.add_argument("-f", "--fullscreen", action="store_true", help="Launch directly in fullscreen")
     parser.add_argument("-p", "--preset", default="Auto (HDMI Signal)", choices=list(PRESETS.keys()), help="Resolution preset")
     parser.add_argument("--vsync", action="store_true", help="Enable VSync for smooth tearing-free presentation")
@@ -3946,7 +4588,8 @@ def main():
             if not info["locked"]:
                 print("[!] Warning: No active HDMI signal detected on GC573.")
                 print("    Please check if the video source is powered on and sending video.")
-        if not streamer.start(preset_name=args.preset, fullscreen=args.fullscreen, volume=args.volume, vsync=args.vsync, streamer_mode=args.streamer_mode, v4l2_device=args.v4l2, headless=args.headless, aspect=args.aspect):
+        cli_settings = load_settings()
+        if not streamer.start(preset_name=args.preset, fullscreen=args.fullscreen, volume=args.volume, vsync=args.vsync, streamer_mode=args.streamer_mode, v4l2_device=args.v4l2, headless=args.headless, aspect=args.aspect, framegen=cli_settings.get("framegen_mode", "off"), fg_flow_scale=cli_settings.get("fg_flow_scale", 1.0), fg_perf_mode=cli_settings.get("fg_perf_mode", False), fg_low_latency=cli_settings.get("fg_low_latency", True)):
             sys.exit(1)
         if streamer.vfio_mode and args.volume != 1.0:
             # The SDL2 sink-input only exists once audio starts flowing.
@@ -3962,9 +4605,9 @@ def main():
             if not (_proc_running("everlive_userd") and mode == 4):
                 set_vfio_led(mode)
     else:
-        QGuiApplication.setDesktopFileName("everlive")
+        QGuiApplication.setDesktopFileName("everlive-experimental")
         app = QApplication(sys.argv)
-        app.setApplicationName("EverLive")
+        app.setApplicationName(APP_NAME)
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "everlive.png")
         if os.path.isfile(icon_path):
             app.setWindowIcon(QIcon(icon_path))

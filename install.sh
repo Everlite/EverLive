@@ -23,11 +23,14 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}===================================================================${NC}"
-echo -e "${BLUE}     EverLive v1.3.0 - GC573 Userspace Gaming Suite Installer     ${NC}"
+echo -e "${BLUE}   EverLive Experimental (1.4 Lab) - GC573 Gaming Suite Installer   ${NC}"
 echo -e "${BLUE}===================================================================${NC}"
 
 # Optionale Virtual Camera: standardmäßig ja, per --no-loopback abschaltbar.
 WANT_LOOPBACK=1
+# Optionale 2x Frame Generation (lsfg-vk 2.0): standardmäßig interaktiv [y/N],
+# in nicht-interaktiven Läufen aus (oder explizit per --with-framegen).
+WANT_FRAMEGEN="ask"
 
 usage() {
     cat <<EOF
@@ -37,6 +40,13 @@ Usage: sudo ./install.sh [OPTIONS]
       Do not install or configure v4l2loopback. The optional Virtual Camera
       (/dev/video10 for OBS) stays disabled and the system remains free of
       DKMS modules and kernel headers.
+
+  --with-framegen
+      Install the optional lsfg-vk 2.0 Vulkan layer for 2x Console Frame
+      Generation (60->120 / 30->60 FPS) without prompting.
+
+  --no-framegen, --skip-framegen
+      Skip installing the optional lsfg-vk 2.0 Vulkan layer without prompting.
 
   -h, --help
       Show this help and exit.
@@ -48,6 +58,12 @@ parse_args() {
         case "$arg" in
             --no-loopback|--skip-loopback)
                 WANT_LOOPBACK=0
+                ;;
+            --with-framegen)
+                WANT_FRAMEGEN=1
+                ;;
+            --no-framegen|--skip-framegen)
+                WANT_FRAMEGEN=0
                 ;;
             -h|--help)
                 usage
@@ -76,6 +92,25 @@ ask_virtual_camera() {
     esac
 }
 
+ask_framegen() {
+    if [ "$WANT_FRAMEGEN" != "ask" ]; then
+        return 0
+    fi
+    if [ ! -t 0 ]; then
+        WANT_FRAMEGEN=0
+        return 0
+    fi
+
+    local answer=""
+
+    echo ""
+    read -r -p "Install optional 2x Frame Generation layer (lsfg-vk 2.0 for 60->120 / 30->60 FPS)? [y/N] " answer || true
+    case "${answer:-n}" in
+        [yY]|[jJ]*) WANT_FRAMEGEN=1 ;;
+        *)          WANT_FRAMEGEN=0 ;;
+    esac
+}
+
 # Vor der Root-Prüfung parsen, damit --help kein sudo benötigt. Der
 # sudo-Neustart übergibt "$@", wodurch das Kind erneut parst.
 parse_args "$@"
@@ -99,6 +134,11 @@ echo -e "[*] Architektur  : ${GREEN}100% Userspace VFIO (Blob-Free Ring 3)${NC}"
 ask_virtual_camera
 if [ "$WANT_LOOPBACK" -eq 0 ]; then
     echo -e "${GREEN}[*] Virtual Camera installation skipped. EverLive remains 100% module-free.${NC}"
+fi
+
+ask_framegen
+if [ "$WANT_FRAMEGEN" -eq 0 ]; then
+    echo -e "${GREEN}[*] Optional lsfg-vk Frame Generation download skipped (can be installed anytime later).${NC}"
 fi
 
 # 2. Paketmanager & Abhängigkeiten erkennen
@@ -152,6 +192,138 @@ ensure_v4l2loopback() {
     echo -e "${YELLOW}    Debian/Ubuntu: sudo apt install v4l2loopback-dkms v4l2loopback-utils linux-headers-\$(uname -r)${NC}"
     echo -e "${YELLOW}    Fedora:        sudo dnf install akmod-v4l2loopback   (RPM Fusion)${NC}"
     echo -e "${YELLOW}    Arch:          yay -S v4l2loopback-dkms${NC}"
+    return 0
+}
+
+# Prüft, ob das lsfg-vk 2.0 Implicit-Layer-Manifest bereits vorhanden ist.
+has_lsfg_vk_layer() {
+    [ -f "/usr/share/vulkan/implicit_layer.d/VkLayer_LSFGVK_frame_generation.json" ] ||
+    [ -f "/etc/vulkan/implicit_layer.d/VkLayer_LSFGVK_frame_generation.json" ] ||
+    [ -f "${TARGET_HOME}/.local/share/vulkan/implicit_layer.d/VkLayer_LSFGVK_frame_generation.json" ]
+}
+
+# Prüft den Steam-Status von Lossless Scaling (lsfg-vk.dll vs. Windows Lossless.dll)
+# für eine präzise Rückmeldung am Ende der Installation.
+check_steam_lsfg_dll() {
+    LSFG_STEAM_STATUS="missing"
+    LSFG_STEAM_DLL_PATH=""
+
+    local -a roots=(
+        "${TARGET_HOME}/.local/share/Steam"
+        "${TARGET_HOME}/.steam/steam"
+    )
+    local -a libs=()
+    local root vdf line lib game_dir
+
+    for root in "${roots[@]}"; do
+        [ -d "${root}" ] && libs+=("${root}")
+        vdf="${root}/steamapps/libraryfolders.vdf"
+        if [ -r "${vdf}" ]; then
+            while IFS= read -r line; do
+                lib="$(printf '%s\n' "${line}" | sed -n 's/.*"path"[[:space:]]*"\([^"]*\)".*/\1/p' | sed 's/\\\\/\//g')"
+                [ -n "${lib}" ] && libs+=("${lib}")
+            done < "${vdf}"
+        fi
+    done
+
+    for lib in "${libs[@]}"; do
+        game_dir="${lib}/steamapps/common/Lossless Scaling"
+        if [ -r "${game_dir}/lsfg-vk.dll" ]; then
+            LSFG_STEAM_STATUS="ready"
+            LSFG_STEAM_DLL_PATH="${game_dir}/lsfg-vk.dll"
+            return 0
+        fi
+        if [ -r "${game_dir}/Lossless.dll" ]; then
+            LSFG_STEAM_STATUS="wrong_branch"
+        fi
+    done
+    return 0
+}
+
+# Optionaler 2x Frame-Generation-Layer (lsfg-vk 2.0). Darf den Installer niemals
+# abbrechen: bei Fehlern bleibt EverLive im nativen Modus voll funktionsfähig.
+ensure_lsfg_vk() {
+    echo -e "\n${BLUE}[*] Prüfe optionalen Frame-Generation-Layer (lsfg-vk 2.0)...${NC}"
+
+    if has_lsfg_vk_layer; then
+        echo -e "${GREEN}[+] lsfg-vk 2.0 Vulkan-Layer ist bereits installiert.${NC}"
+    else
+        # 1. Vulkan-Loader + Download/Entpack-Werkzeuge sicherstellen
+        if command -v pacman >/dev/null 2>&1; then
+            pacman -S --needed --noconfirm vulkan-icd-loader curl xz >/dev/null 2>&1 || true
+        elif command -v apt-get >/dev/null 2>&1; then
+            apt-get install -y libvulkan1 curl xz-utils >/dev/null 2>&1 || true
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y vulkan-loader curl xz >/dev/null 2>&1 || true
+        fi
+
+        # 2. Distributions-Paket bevorzugen (z. B. CachyOS Repo oder AUR auf Arch)
+        if command -v pacman >/dev/null 2>&1; then
+            if pacman -Si lsfg-vk >/dev/null 2>&1; then
+                echo -e "[*] Installiere lsfg-vk direkt aus dem Paket-Repository..."
+                pacman -S --needed --noconfirm lsfg-vk || true
+            elif [ "${TARGET_USER}" != "root" ] && command -v yay >/dev/null 2>&1; then
+                echo -e "[*] Installiere lsfg-vk über yay (AUR)..."
+                sudo -u "${TARGET_USER}" yay -S --needed --noconfirm lsfg-vk-bin ||
+                sudo -u "${TARGET_USER}" yay -S --needed --noconfirm lsfg-vk || true
+            elif [ "${TARGET_USER}" != "root" ] && command -v paru >/dev/null 2>&1; then
+                echo -e "[*] Installiere lsfg-vk über paru (AUR)..."
+                sudo -u "${TARGET_USER}" paru -S --needed --noconfirm lsfg-vk-bin ||
+                sudo -u "${TARGET_USER}" paru -S --needed --noconfirm lsfg-vk || true
+            fi
+        fi
+
+        # 3. Universeller Fallback (Ubuntu/Debian/Fedora/Arch ohne AUR-Helper):
+        #    Offizielles lsfg-vk 2.0 Release-Archiv von builds.lsfg-vk.dev nach ~/.local
+        if ! has_lsfg_vk_layer && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+            local archive_rel=""
+            local archive_url=""
+            local tmp_tar=""
+
+            archive_rel="$(curl -fsSL --max-time 10 https://builds.lsfg-vk.dev/ 2>/dev/null | \
+                sed -n 's/.*href="\([^"]*\.tar\.xz\)">&gt;&gt; Latest release.*/\1/p' | head -n 1 || true)"
+            [ -z "${archive_rel}" ] && archive_rel="lsfg-vk-2.0.0.tar.xz"
+            archive_url="https://builds.lsfg-vk.dev/${archive_rel}"
+
+            echo -e "[*] Lade offizielles lsfg-vk 2.0 Paket (${archive_rel})..."
+            tmp_tar="$(mktemp /tmp/everlive-lsfg-vk.XXXXXX.tar.xz)"
+            if curl -fL --max-time 60 "${archive_url}" -o "${tmp_tar}" &&
+               tar -tJf "${tmp_tar}" >/dev/null 2>&1; then
+                chmod 644 "${tmp_tar}"
+                if [ "${TARGET_USER}" != "root" ]; then
+                    sudo -u "${TARGET_USER}" mkdir -p "${TARGET_HOME}/.local"
+                    sudo -u "${TARGET_USER}" tar -xJf "${tmp_tar}" -C "${TARGET_HOME}/.local" || true
+                else
+                    mkdir -p "${TARGET_HOME}/.local"
+                    tar -xJf "${tmp_tar}" -C "${TARGET_HOME}/.local" || true
+                fi
+            fi
+            rm -f "${tmp_tar}"
+        fi
+
+        if has_lsfg_vk_layer; then
+            echo -e "${GREEN}[+] lsfg-vk 2.0 Vulkan-Layer erfolgreich eingerichtet!${NC}"
+        else
+            echo -e "${YELLOW}[!] lsfg-vk 2.0 konnte nicht automatisch geladen werden.${NC}"
+            echo -e "${YELLOW}    Manuelle Anleitung: https://lsfg-vk.dev/docs/installation/${NC}"
+            return 0
+        fi
+    fi
+
+    check_steam_lsfg_dll
+    case "${LSFG_STEAM_STATUS}" in
+        ready)
+            echo -e "${GREEN}[+] Steam-Shader gefunden: ${LSFG_STEAM_DLL_PATH}${NC}"
+            ;;
+        wrong_branch)
+            echo -e "${YELLOW}[!] Lossless Scaling in Steam gefunden, aber 'lsfg-vk.dll' fehlt noch:${NC}"
+            echo -e "${YELLOW}    Steam -> Rechtsklick auf 'Lossless Scaling' -> Eigenschaften -> Betas -> 'lsfg-vk' auswählen.${NC}"
+            ;;
+        *)
+            echo -e "${YELLOW}[*] Hinweis für Frame Generation: 'Lossless Scaling' in Steam installieren und${NC}"
+            echo -e "${YELLOW}    unter Eigenschaften -> Betas den Branch 'lsfg-vk' aktivieren (danach im Hub 'Re-check' klicken).${NC}"
+            ;;
+    esac
     return 0
 }
 
@@ -211,6 +383,10 @@ detect_and_install_deps() {
 
     if [ "$WANT_LOOPBACK" -eq 1 ]; then
         ensure_v4l2loopback
+    fi
+
+    if [ "$WANT_FRAMEGEN" -eq 1 ]; then
+        ensure_lsfg_vk
     fi
 }
 
@@ -363,9 +539,20 @@ udevadm trigger 2>/dev/null || true
 usermod -aG video,audio "${TARGET_USER}" 2>/dev/null || true
 
 # 6. Desktop-Verknüpfung & Application-Icon (Startmenü)
-echo -e "\n${BLUE}[5/5] Installiere EverLive Desktop-Starter & Anwendungs-Icon ins System...${NC}"
+#
+# Side-by-side: this branch installs everlive-experimental.desktop.  A stable
+# EverLive installed from another directory keeps its own everlive.desktop,
+# config directory and control socket and is never overwritten here.
+echo -e "\n${BLUE}[5/5] Installiere EverLive Experimental Desktop-Starter & Anwendungs-Icon ins System...${NC}"
 APPS_DIR="${TARGET_HOME}/.local/share/applications"
 mkdir -p "${APPS_DIR}"
+
+# The repository path is normally space-free; quote it only when needed so the
+# Exec= line stays exactly "<abs path>/play.sh" otherwise.
+case "${SCRIPT_DIR}" in
+    *" "*) DESKTOP_EXEC="\"${SCRIPT_DIR}/play.sh\"" ;;
+    *)     DESKTOP_EXEC="${SCRIPT_DIR}/play.sh" ;;
+esac
 
 ICONS_BASE="${TARGET_HOME}/.local/share/icons/hicolor"
 for sz in 16 32 48 64 128 256 512; do
@@ -384,29 +571,50 @@ if [ -f "${VIEWER_DIR}/icons/scalable/apps/everlive.png" ]; then
     cp -f "${VIEWER_DIR}/everlive.bmp" "/usr/share/pixmaps/everlive.bmp" 2>/dev/null || true
 fi
 
-cat > "${APPS_DIR}/everlive.desktop" <<EOF
+cat > "${APPS_DIR}/everlive-experimental.desktop" <<EOF
 [Desktop Entry]
-Name=EverLive
-GenericName=Console Gaming Screen
-Comment=Ultra-Low-Latency HDMI Gaming Screen für PS5 & Konsolen (AVerMedia GC573 - 100% Userspace VFIO)
-Exec=${SCRIPT_DIR}/play.sh
+Name=EverLive Experimental
+GenericName=Console Gaming Screen (Experimental FrameGen)
+Comment=EverLive 1.4 Lab - Lossless Scaling 2x Console Frame Generation
+Exec=${DESKTOP_EXEC}
 Icon=everlive
 Terminal=false
 Type=Application
 Categories=Game;AudioVideo;Video;
-Keywords=EverLive;PS5;Capture;AVerMedia;GC573;HDMI;Gaming;Console;VFIO;
-StartupWMClass=EverLive
+Keywords=EverLive;Experimental;FrameGen;LSFG;Vulkan;PS5;Capture;AVerMedia;GC573;HDMI;Gaming;Console;VFIO;
+StartupWMClass=EverLiveExperimental
 EOF
-chmod +x "${APPS_DIR}/everlive.desktop"
-chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive.desktop" 2>/dev/null || true
+chmod +x "${APPS_DIR}/everlive-experimental.desktop"
+chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive-experimental.desktop" 2>/dev/null || true
 
-# Entferne ggf. veraltete Test-Starter
+# Entferne ggf. veraltete Test-Starter dieses Branches.  everlive.desktop der
+# stabilen Installation bleibt unangetastet.
 rm -f "${APPS_DIR}/everlive-intern.desktop" 2>/dev/null || true
 
+# Experimental-Konfiguration vorbereiten (nur Benutzerverzeichnis).  Beim
+# ersten Start seedet die GUI ihre Defaults aus der stabilen
+# ~/.config/everlive/settings.json (read-only).
+EXP_CONFIG_DIR="${TARGET_HOME}/.config/everlive-experimental"
+mkdir -p "${EXP_CONFIG_DIR}"
+chown -R "${TARGET_USER}:${TARGET_USER}" "${EXP_CONFIG_DIR}" 2>/dev/null || true
+
 echo -e "\n${GREEN}===================================================================${NC}"
-echo -e "${GREEN}      EverLive v1.3.0 erfolgreich installiert & einsatzbereit!      ${NC}"
+echo -e "${GREEN}   EverLive Experimental (1.4 Lab) erfolgreich installiert!        ${NC}"
 echo -e "${GREEN}===================================================================${NC}"
-echo -e "Du kannst EverLive ab sofort direkt über dein Startmenü starten,"
-echo -e "oder im Terminal mit: ${BLUE}./play.sh${NC}"
+echo -e "Du kannst EverLive Experimental ab sofort direkt über dein Startmenü"
+echo -e "starten (Eintrag \"EverLive Experimental\"), oder im Terminal mit:"
+echo -e "  ${BLUE}./play.sh${NC}"
 echo -e ""
-echo -e "Viel Spaß beim Zocken mit 1440p120, nativem 4K und Null Kernel-Gefrickel!"
+echo -e "Stabile EverLive-Installation bleibt unberührt:"
+echo -e "  Launcher : ~/.local/share/applications/everlive.desktop"
+echo -e "  Config   : ~/.config/everlive/"
+echo -e "  Socket   : \$XDG_RUNTIME_DIR/everlive.sock"
+echo -e ""
+echo -e "Experimental nutzt eigene Pfade:"
+echo -e "  Launcher : ~/.local/share/applications/everlive-experimental.desktop"
+echo -e "  Config   : ~/.config/everlive-experimental/"
+echo -e "  Socket   : \$XDG_RUNTIME_DIR/everlive-experimental.sock"
+echo -e ""
+echo -e "Frame Generation im Spielfenster: 'g' = Off -> 60->120 -> 30->60."
+echo -e "Voraussetzung: lsfg-vk 2.0 + Lossless Scaling in Steam (Beta-Branch 'lsfg-vk')."
+echo -e "Viel Spaß beim Zocken mit 60->120 / 30->60 FPS!"

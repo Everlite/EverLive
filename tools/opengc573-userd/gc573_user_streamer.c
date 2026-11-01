@@ -28,6 +28,7 @@
 #include "gc573_user_ipc.h"
 #include "gc573_user_audio_tap.h"
 #include "gc573_user_hdr.h"
+#include "gc573_user_framegen.h"
 #include "gc573_user_font8x8.h"
 #include <SDL2/SDL.h>
 #include <libswscale/swscale.h>
@@ -50,8 +51,13 @@
  * tools/everlive/everlive_viewer.py.
  */
 #ifndef EVERLIVE_VERSION
-#define EVERLIVE_VERSION "1.3.0"
+#define EVERLIVE_VERSION "1.4.0-experimental"
 #endif
+
+/* Side-by-side identity: never claim the stable app's WM class or title. */
+#define EVERLIVE_WINDOW_TITLE	"EverLive Experimental"
+#define EVERLIVE_WM_CLASS	"EverLiveExperimental"
+#define EVERLIVE_APP_NAME	"EverLive Experimental"
 
 /* SDL_HINT_APP_NAME was added after the 2.0.20 headers some distros ship. */
 #ifndef SDL_HINT_APP_NAME
@@ -124,6 +130,57 @@ static bool g_trace_requested;
 static bool g_headless;
 /* Pending mode.set request (0 = none, GC573_IPC_MODE_*). Render thread only. */
 static int g_mode_request;
+
+/*
+ * Experimental presentation state.  Frame generation is delegated to the
+ * system lsfg-vk Vulkan layer, so there is no GL context any more: the window
+ * owns either an "opengl" SDL_Renderer (mode OFF) or a "vulkan" one (the two
+ * LSFG modes).  g_present_driver records which one is live; g_framegen is the
+ * capture ring and exists for the whole process lifetime.
+ *
+ * g_fg_fallback is set when the Vulkan renderer could not be created.  It
+ * suppresses the presentation rebuild so a broken setup cannot loop.
+ */
+enum present_driver {
+	PRESENT_DRIVER_OPENGL = 0,
+	PRESENT_DRIVER_VULKAN = 1,
+};
+
+static struct gc573_framegen *g_framegen;
+static enum present_driver g_present_driver = PRESENT_DRIVER_OPENGL;
+static bool g_fg_fallback;
+static bool g_present_rebuild;
+/*
+ * Guards g_framegen and g_fg_config against the capture thread feeding the
+ * interpolation ring while the presentation layer is rebuilt.
+ */
+static pthread_mutex_t g_framegen_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct gc573_fg_config g_fg_config = {
+	.mode = GC573_FG_OFF,
+	.flow_scale = 1.0f,
+	.perf_mode = false,
+	.low_latency = true,
+};
+
+/*
+ * Non-zero while the preview ring still needs its per-frame copy.  The capture
+ * thread skips that copy when the Vulkan path is live and no V4L2 consumer is
+ * attached, because the framegen ring already holds the frame.
+ */
+static int g_preview_needed = 1;
+/*
+ * Low-rate keepalive for an idle /dev/video10.  When frame generation is live
+ * and no capture reader has the node open, copying and writing a 7.2 MB frame
+ * 120 times a second is pure waste.  A 4 Hz keepalive still keeps the loopback
+ * node's buffers warm, so OBS can open with "Leave Unchanged" instantly; the
+ * first 500 ms poll that sees state == "capture" restores the full frame rate.
+ */
+static int g_preview_keepalive;
+#define V4L2_READER_POLL_MS	500U
+#define V4L2_SINK_KEEPALIVE_MS	250U
+static int g_v4l2_sink_idle;
+/* Non-zero while the capture thread should feed the framegen ring. */
+static int g_fg_feed;
 
 /*
  * LED colour used while streaming.  Cyan is the verified default; it can be
@@ -404,7 +461,7 @@ static void print_usage(const char *prog)
 	       DEFAULT_V4L2_DEVICE);
 	printf("  --headless        No SDL window/video output; capture, V4L2 and audio only.\n");
 	printf("  --ipc-socket PATH Control socket for the Control Hub remote mode\n");
-	printf("                    (default: $XDG_RUNTIME_DIR/everlive.sock).\n");
+	printf("                    (default: $XDG_RUNTIME_DIR/everlive-experimental.sock).\n");
 	printf("  --no-ipc          Do not open the control socket.\n");
 	printf("  --audio-tap [NAME] Mirror the mixed audio into a PipeWire sink\n");
 	printf("                    (default: %s).\n",
@@ -412,7 +469,36 @@ static void print_usage(const char *prog)
 	printf("                    Add 'Monitor of EverLive Capture Audio' in OBS.\n");
 	printf("  --no-hdr          Disable HDR10/HLG -> SDR tonemapping (bypass).\n");
 	printf("  --hdr-exposure EV Exposure bias for the tonemapper, -2.0 .. +2.0.\n");
+	printf("  --framegen MODE   off|60to120|30to60 (native lsfg-vk 2x).\n");
+	printf("                    60to120: 60 FPS games -> 120 FPS (alias: 2x).\n");
+	printf("                    30to60: PS5 30 FPS games in a 60 Hz container.\n");
+	printf("  --fg-flow-scale F Optical flow quality, 0.5 .. 1.0 (default 1.0).\n");
+	printf("  --fg-perf         LSFG performance mode (lower latency, less quality).\n");
+	printf("  --no-fg-perf      Full LSFG quality (default).\n");
+	printf("  --fg-low-latency  Preserve the minimal Vulkan swapchain image count\n");
+	printf("                    (LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT=1, default).\n");
+	printf("  --no-fg-low-latency  Let lsfg-vk add its default buffering.\n");
+	printf("  Hotkeys: g cycles frame generation Off -> 60->120 -> 30->60.\n");
 	printf("  EVERLIVE_LED      fallback used when --led is not given.\n");
+}
+
+static bool parse_unit_float(const char *text, float *out)
+{
+	char *end = NULL;
+	double value;
+
+	if (!text || !*text)
+		return false;
+
+	value = strtod(text, &end);
+	if (!end || end == text || *end != '\0')
+		return false;
+	if (value < 0.0)
+		value = 0.0;
+	if (value > 1.0)
+		value = 1.0;
+	*out = (float)value;
+	return true;
 }
 
 static void stop_led_daemon(void)
@@ -1084,6 +1170,9 @@ static int configure_and_start(struct gc573_vfio_ctx *ctx,
 	return 0;
 }
 
+static SDL_Surface *osd_create_surface(int scale, const char *text);
+static void framegen_describe(char *out, size_t len);
+
 /*
  * Minimal bitmap-font OSD.  The text is rasterised into an ARGB surface only
  * when its content or pixel scale changes, then composited over the video
@@ -1101,7 +1190,7 @@ struct osd_overlay {
 	int width;
 	int height;
 	int scale;
-	char text[512];
+	char text[640];
 };
 
 static struct osd_overlay g_osd;
@@ -1182,7 +1271,7 @@ static void osd_draw_text(SDL_Surface *surface, const char *text, int scale)
 	}
 }
 
-static void osd_rebuild(SDL_Renderer *renderer, int scale, const char *text)
+static SDL_Surface *osd_create_surface(int scale, const char *text)
 {
 	const int pad = osd_pad_for_scale(scale);
 	const int line_height = 8 * scale;
@@ -1192,7 +1281,6 @@ static void osd_rebuild(SDL_Renderer *renderer, int scale, const char *text)
 	unsigned int line_len = 0;
 	unsigned int lines = 1;
 	SDL_Surface *surface;
-	SDL_Texture *texture;
 	SDL_Rect edge;
 	Uint32 bg;
 	Uint32 border_color;
@@ -1216,10 +1304,15 @@ static void osd_rebuild(SDL_Renderer *renderer, int scale, const char *text)
 	height = pad * 2 + (int)lines * line_height +
 		 ((int)lines - 1) * line_gap;
 
+	/*
+	 * RGBA32 is byte-order-correct R, G, B, A in memory, which is what
+	 * SDL_CreateTextureFromSurface() expects for the OSD overlay on both the
+	 * OpenGL and the Vulkan SDL renderer.
+	 */
 	surface = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32,
-						 SDL_PIXELFORMAT_ARGB8888);
+						 SDL_PIXELFORMAT_RGBA32);
 	if (!surface)
-		return;
+		return NULL;
 
 	bg = SDL_MapRGBA(surface->format, 12, 16, 22, 210);
 	SDL_FillRect(surface, NULL, bg);
@@ -1240,20 +1333,36 @@ static void osd_rebuild(SDL_Renderer *renderer, int scale, const char *text)
 	SDL_FillRect(surface, &edge, border_color);
 
 	osd_draw_text(surface, text, scale);
+	return surface;
+}
+
+static void osd_rebuild(SDL_Renderer *renderer, int scale, const char *text)
+{
+	SDL_Surface *surface;
+	SDL_Texture *texture;
+
+	if (!renderer)
+		return;
+
+	surface = osd_create_surface(scale, text);
+	if (!surface)
+		return;
 
 	texture = SDL_CreateTextureFromSurface(renderer, surface);
-	SDL_FreeSurface(surface);
-	if (!texture)
+	if (!texture) {
+		SDL_FreeSurface(surface);
 		return;
+	}
 	SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
 
 	if (g_osd.texture)
 		SDL_DestroyTexture(g_osd.texture);
 	g_osd.texture = texture;
-	g_osd.width = width;
-	g_osd.height = height;
+	g_osd.width = surface->w;
+	g_osd.height = surface->h;
 	g_osd.scale = scale;
 	snprintf(g_osd.text, sizeof(g_osd.text), "%s", text);
+	SDL_FreeSurface(surface);
 }
 
 static int osd_scale_for_height(int win_h)
@@ -1271,12 +1380,13 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 		       const char *hdr_text)
 {
 	char line2[384];
-	char text[512];
+	char line3[128];
+	char text[640];
 	char tail[96] = "";
 	int win_h = 0;
 	int scale;
 
-	if (!g_osd_enabled || !renderer || !window)
+	if (!g_osd_enabled || !window)
 		return;
 
 	if (hdr_text && *hdr_text)
@@ -1296,13 +1406,22 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 			 fps, OSD_BULLET, aspect_label(g_aspect),
 			 OSD_BULLET, audio_text, tail);
 
-	snprintf(text, sizeof(text),
-		 "EVERLIVE %c %ux%u%s @ %.2f Hz\n%s",
-		 OSD_BULLET, in_w, in_h, interlaced ? "i" : "p",
-		 (double)rate_x100 / 100.0, line2);
+	framegen_describe(line3, sizeof(line3));
+
+	if (line3[0])
+		snprintf(text, sizeof(text),
+			 "EVERLIVE EXPERIMENTAL %c %ux%u%s @ %.2f Hz\n%s\n%s",
+			 OSD_BULLET, in_w, in_h, interlaced ? "i" : "p",
+			 (double)rate_x100 / 100.0, line2, line3);
+	else
+		snprintf(text, sizeof(text),
+			 "EVERLIVE EXPERIMENTAL %c %ux%u%s @ %.2f Hz\n%s",
+			 OSD_BULLET, in_w, in_h, interlaced ? "i" : "p",
+			 (double)rate_x100 / 100.0, line2);
 
 	if (scale == g_osd.scale && strcmp(text, g_osd.text) == 0)
 		return;
+
 	osd_rebuild(renderer, scale, text);
 }
 
@@ -1421,6 +1540,9 @@ struct frame_preview {
 	uint64_t taken_age_us;
 };
 
+/* Defined with the V4L2 sink, further down; joined before the ring is freed. */
+static void v4l2_pump_stop(void);
+
 static struct frame_preview g_preview;
 
 static void *preview_thread(void *arg)
@@ -1460,6 +1582,56 @@ static void *preview_thread(void *arg)
 				       p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
 				       p[8], p[9], p[10], p[11], p[12], p[13], p[14],
 				       p[15]);
+			}
+		}
+
+		/*
+		 * Experimental frame generation: feed the capture ring on EVERY DMA
+		 * frame while a frame generation mode is selected.  The ring runs the
+		 * deduplicator internally, so a real 30/60 FPS transition frame can
+		 * never be skipped just because the renderer was busy.
+		 */
+		pthread_mutex_lock(&g_framegen_lock);
+		if (g_framegen &&
+		    __atomic_load_n(&g_fg_feed, __ATOMIC_RELAXED)) {
+			uint64_t fg_ts = gc573_user_video_frame_time_us(
+				preview->video, index);
+
+			gc573_framegen_input(
+				g_framegen,
+				(const uint8_t *)preview->video->buffers[index].vaddr,
+				fg_ts);
+		}
+		pthread_mutex_unlock(&g_framegen_lock);
+
+		/*
+		 * The Vulkan path renders from the framegen ring and the async V4L2
+		 * pump drains the preview ring on its own.  With neither consumer the
+		 * per-frame copy would only be wasted bandwidth, so skip it.  When the
+		 * sink is idle a low-rate keepalive copy keeps OBS instant-open safe.
+		 */
+		{
+			bool need = __atomic_load_n(&g_preview_needed,
+						    __ATOMIC_RELAXED) != 0;
+
+			if (!need &&
+			    __atomic_load_n(&g_preview_keepalive,
+					    __ATOMIC_RELAXED)) {
+				static uint64_t last_keepalive_us;
+				uint64_t n = now_us();
+
+				if (!last_keepalive_us ||
+				    n - last_keepalive_us >=
+					    (uint64_t)V4L2_SINK_KEEPALIVE_MS * 1000ULL) {
+					last_keepalive_us = n;
+					need = true;
+				}
+			}
+
+			if (!need) {
+				gc573_user_video_release(preview->video,
+							 index);
+				continue;
 			}
 		}
 
@@ -1510,6 +1682,11 @@ static void preview_free_buffers(void)
 
 static void preview_stop(void)
 {
+	/*
+	 * The asynchronous V4L2 pump consumes preview slots; it must be joined
+	 * before the ring buffers are freed.
+	 */
+	v4l2_pump_stop();
 	if (g_preview.started) {
 		g_preview.stop = true;
 		pthread_join(g_preview.thread, NULL);
@@ -1849,6 +2026,67 @@ static int v4l2_sysfs_format(const char *device, struct v4l2_pix_format *out)
 	return 0;
 }
 
+/*
+ * Does a capture consumer currently own the loopback node?
+ *
+ * v4l2loopback exports its live state through sysfs.  "capture" means a
+ * capture application (OBS) has buffers allocated, so the writer must not
+ * churn its fd: the reader's format survives a writer reopen and S_FMT still
+ * fails with EBUSY.  "idle", "output" or a missing attribute means only our
+ * writer holds the node, so closing the fd really does release the stale
+ * ready_for_output buffers.
+ *
+ * The "buffers" attribute is only a fallback for kernels that do not export
+ * "state": a positive count there means capture buffers exist.
+ */
+static bool v4l2_reader_active(const char *device)
+{
+	const char *name;
+	char path[PATH_MAX];
+	char buf[64];
+	ssize_t n;
+	int fd;
+
+	if (!device || !*device)
+		return false;
+	name = strrchr(device, '/');
+	name = name ? name + 1 : device;
+	if (!*name)
+		return false;
+
+	if (snprintf(path, sizeof(path),
+		     "/sys/class/video4linux/%s/state", name) <
+			(int)sizeof(path)) {
+		fd = open(path, O_RDONLY | O_CLOEXEC);
+		if (fd >= 0) {
+			const char *p = buf;
+
+			n = read(fd, buf, sizeof(buf) - 1);
+			close(fd);
+			if (n > 0) {
+				buf[n] = '\0';
+				while (*p == ' ' || *p == '\t' || *p == '\n')
+					p++;
+				return strncasecmp(p, "capture", 7) == 0;
+			}
+		}
+	}
+
+	if (snprintf(path, sizeof(path),
+		     "/sys/class/video4linux/%s/buffers", name) >=
+			(int)sizeof(path))
+		return false;
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return false;
+	n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n <= 0)
+		return false;
+	buf[n] = '\0';
+	return strtoul(buf, NULL, 10) > 0;
+}
+
 static void v4l2_sink_drop_scaler(struct v4l2_sink *sink)
 {
 	if (sink->sws) {
@@ -1997,6 +2235,8 @@ static int v4l2_sink_configure(struct v4l2_sink *sink,
 	struct v4l2_format fmt;
 	struct v4l2_pix_format granted = { 0 };
 	unsigned int colorspace;
+	unsigned int prev_target_w, prev_target_h;
+	bool geometry_change;
 	bool granted_valid = false;
 	int err;
 
@@ -2007,11 +2247,23 @@ static int v4l2_sink_configure(struct v4l2_sink *sink,
 		sink->target_colorspace = v4l2_colorspace_for_signal(sig);
 	colorspace = sink->target_colorspace;
 
+	prev_target_w = sink->target_width;
+	prev_target_h = sink->target_height;
+
 	/* Remember what the stream needs, even if the driver refuses it now. */
 	if (sink->target_width != width || sink->target_height != height)
 		sink->last_upgrade_ms = 0;
 	sink->target_width = width;
 	sink->target_height = height;
+
+	/*
+	 * Either the published mode is changing, or the requested geometry just
+	 * moved (first negotiation included).  Both mean a refused S_FMT may be
+	 * self-inflicted rather than caused by a capture reader.
+	 */
+	geometry_change = (!sink->scaled && sink->configured &&
+			   (sink->width != width || sink->height != height)) ||
+			  (prev_target_w != width || prev_target_h != height);
 
 	if (sink->fd < 0 && v4l2_sink_reopen(sink) < 0)
 		return -EBADF;
@@ -2043,6 +2295,42 @@ static int v4l2_sink_configure(struct v4l2_sink *sink,
 		pr_err("V4L2 sink: VIDIOC_S_FMT %ux%u YUYV failed on %s: %s",
 		       width, height, sink->path, strerror(err));
 		return -err;
+	}
+
+	/*
+	 * EBUSY can be self-inflicted.  Once this fd has called write(),
+	 * v4l2loopback allocates ready_for_output buffers on it and then refuses
+	 * VIDIOC_S_FMT on that SAME fd until they are released - even with zero
+	 * capture readers.  With no reader those buffers die with the fd, so close
+	 * and reopen once and retry the native format natively.  If a reader does
+	 * hold buffers, the driver preserves them across the reopen and the retry
+	 * stays EBUSY; the scaler fallback below then takes over.
+	 */
+	if ((geometry_change || sink->scaled) && !v4l2_reader_active(sink->path)) {
+		sink->last_upgrade_ms = now_ms();
+		if (v4l2_sink_reopen(sink) != 0) {
+			sink->configured = false;
+			return -EBUSY;
+		}
+		memset(&fmt, 0, sizeof(fmt));
+		v4l2_fill_pix_format(&fmt, width, height, colorspace);
+		if (ioctl(sink->fd, VIDIOC_S_FMT, &fmt) == 0) {
+			if (fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_YUYV &&
+			    fmt.fmt.pix.width == width &&
+			    fmt.fmt.pix.height == height)
+				return v4l2_sink_adopt_native(
+					sink, &fmt.fmt.pix);
+			return v4l2_sink_adopt_scaled(
+				sink, &fmt.fmt.pix,
+				"granted after writer reopen");
+		}
+		err = errno;
+		if (err != EBUSY) {
+			sink->configured = false;
+			pr_err("V4L2 sink: VIDIOC_S_FMT %ux%u YUYV failed after reopen on %s: %s",
+			       width, height, sink->path, strerror(err));
+			return -err;
+		}
 	}
 
 	/*
@@ -2120,14 +2408,18 @@ static void v4l2_sink_write(struct v4l2_sink *sink, const void *data,
 	/*
 	 * A reader-locked geometry is only a fallback: keep asking for the native
 	 * mode, and drop the scaler as soon as the reader releases or
-	 * renegotiates.  No user interaction required.
+	 * renegotiates.  While a capture consumer really is streaming, skip the
+	 * attempt entirely so its buffers (and the writer fd) are never churned.
 	 */
 	if (sink->scaled) {
 		now = now_ms();
 		if (now - sink->last_upgrade_ms >= V4L2_SINK_UPGRADE_MS) {
 			sink->last_upgrade_ms = now;
-			(void)v4l2_sink_configure(sink, sink->target_width,
-						  sink->target_height, NULL);
+			if (!v4l2_reader_active(sink->path))
+				(void)v4l2_sink_configure(sink,
+							  sink->target_width,
+							  sink->target_height,
+							  NULL);
 		}
 	}
 
@@ -2205,6 +2497,153 @@ static void v4l2_sink_close(struct v4l2_sink *sink)
 	sink->path[0] = '\0';
 }
 
+/*
+ * The loopback sink can now be driven from two threads (the OpenGL render
+ * thread and the asynchronous pump), while attach/detach and format changes
+ * still happen on the render thread.  Every entry point that touches the fd,
+ * the SwsContext or the counters takes this lock; the per-frame write paths
+ * never call each other recursively.
+ */
+static pthread_mutex_t g_v4l2_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int v4l2_sink_open_guarded(struct v4l2_sink *sink, const char *path)
+{
+	int ret;
+
+	pthread_mutex_lock(&g_v4l2_lock);
+	ret = v4l2_sink_open(sink, path);
+	pthread_mutex_unlock(&g_v4l2_lock);
+	return ret;
+}
+
+static int v4l2_sink_configure_guarded(struct v4l2_sink *sink,
+				       unsigned int width, unsigned int height,
+				       const struct gc573_user_video_signal *sig)
+{
+	int ret;
+
+	pthread_mutex_lock(&g_v4l2_lock);
+	ret = v4l2_sink_configure(sink, width, height, sig);
+	pthread_mutex_unlock(&g_v4l2_lock);
+	return ret;
+}
+
+static void v4l2_sink_write_guarded(struct v4l2_sink *sink, const void *data,
+				    size_t bytes, unsigned int width,
+				    unsigned int height)
+{
+	pthread_mutex_lock(&g_v4l2_lock);
+	if (sink && (sink->fd >= 0 || sink->path[0]))
+		v4l2_sink_write(sink, data, bytes, width, height);
+	pthread_mutex_unlock(&g_v4l2_lock);
+}
+
+static void v4l2_sink_close_guarded(struct v4l2_sink *sink)
+{
+	pthread_mutex_lock(&g_v4l2_lock);
+	v4l2_sink_close(sink);
+	pthread_mutex_unlock(&g_v4l2_lock);
+}
+
+/*
+ * ------------------------------------------------------------------ *
+ * Asynchronous V4L2 loopback pump
+ * ------------------------------------------------------------------ *
+ *
+ * A 2560x1440 -> 1920x1080 sws_scale plus write() costs several milliseconds.
+ * Running it on the OpenGL VSync thread right before the frame swap dragged
+ * output_fps down to 94-117 FPS instead of a locked 120 and produced 1+3
+ * refresh judder.  In the GL path a dedicated consumer thread now drains the
+ * existing preview ring (no extra copy, no extra latency); the render thread
+ * only reads a frame counter.
+ */
+static void *v4l2_pump_thread(void *arg);
+
+struct v4l2_pump {
+	pthread_t thread;
+	bool started;
+	int stop;		/* __atomic */
+	uint64_t frames;	/* __atomic */
+	uint64_t writes;
+	struct v4l2_sink *sink;
+	unsigned int width;
+	unsigned int height;
+	size_t bytes;
+};
+
+static struct v4l2_pump g_v4l2_pump;
+
+static bool v4l2_pump_running(void)
+{
+	return g_v4l2_pump.started;
+}
+
+static void v4l2_pump_stop(void)
+{
+	struct v4l2_pump *pump = &g_v4l2_pump;
+
+	if (!pump->started)
+		return;
+
+	__atomic_store_n(&pump->stop, 1, __ATOMIC_RELEASE);
+	pthread_join(pump->thread, NULL);
+	pump->started = false;
+	pump->sink = NULL;
+}
+
+static int v4l2_pump_start(struct v4l2_sink *sink, unsigned int width,
+			   unsigned int height, size_t bytes)
+{
+	struct v4l2_pump *pump = &g_v4l2_pump;
+
+	v4l2_pump_stop();
+	if (!sink || !width || !height || !bytes)
+		return -EINVAL;
+
+	pump->sink = sink;
+	pump->width = width;
+	pump->height = height;
+	pump->bytes = bytes;
+	__atomic_store_n(&pump->stop, 0, __ATOMIC_RELEASE);
+
+	if (pthread_create(&pump->thread, NULL, v4l2_pump_thread, pump) != 0) {
+		pump->sink = NULL;
+		return -EAGAIN;
+	}
+
+	pump->started = true;
+	pr_info("V4L2 sink offloaded to its own thread (%ux%u)", width, height);
+	return 0;
+}
+
+static void *v4l2_pump_thread(void *arg)
+{
+	struct v4l2_pump *pump = arg;
+
+	while (!__atomic_load_n(&pump->stop, __ATOMIC_ACQUIRE)) {
+		void *pixels = NULL;
+		int ph = preview_take(&pixels);
+
+		if (ph <= 0) {
+			SDL_Delay(1);
+			continue;
+		}
+
+		/* Tonemap the loopback copy only: the window has its own copy. */
+		if (gc573_hdr_active())
+			gc573_hdr_tonemap_yuyv(pixels, pump->width, pump->height);
+
+		v4l2_sink_write_guarded(pump->sink, pixels, pump->bytes,
+					pump->width, pump->height);
+		preview_release(ph);
+
+		__atomic_fetch_add(&pump->writes, 1, __ATOMIC_RELAXED);
+		__atomic_fetch_add(&pump->frames, 1, __ATOMIC_RELAXED);
+	}
+
+	return NULL;
+}
+
 /* ------------------------------------------------------------------ */
 /* No-signal standby screen                                          */
 /* ------------------------------------------------------------------ */
@@ -2222,6 +2661,17 @@ struct standby_state {
 /* Set by main() so the signal-loss helpers can reach the shared state. */
 static struct standby_state *g_standby;
 static struct v4l2_sink *g_standby_sink;
+
+/*
+ * Startup grace: give a connected console a moment to lock its HDMI signal
+ * before the standby card claims the loopback node at the 1080p default.
+ * Writing first would self-lock /dev/video10 at 1920x1080 and force a rescale
+ * even after the native 1440p/4K signal arrives.  Once a signal has ever been
+ * streamed (or the input geometry is already known) standby feeds immediately.
+ */
+#define SINK_STARTUP_GRACE_MS	600U
+static uint64_t g_loop_start_ms;
+static bool g_ever_streamed;
 
 /*
  * Render the standby card at the geometry the loopback node currently
@@ -2291,15 +2741,30 @@ static void standby_present(SDL_Window *window, SDL_Renderer *renderer,
 	 * standby card instead of a frozen last frame.  The target geometry is
 	 * recorded once; a reader still holding the old mode is handled by the
 	 * sink's own 250 ms retry path.
+	 *
+	 * At cold start the sink is left alone for a short grace window while a
+	 * live console may still be locking: the first write creates writer
+	 * buffers at the fallback geometry and would pin the node there.
 	 */
 	if (sink && sink->path[0]) {
-		/* Seed the target once; v4l2_sink_write() owns retry/upgrade. */
-		if (!sink->target_width || !sink->target_height)
-			(void)v4l2_sink_configure(sink, width, height, NULL);
-		v4l2_sink_write(sink, frame, bytes, width, height);
+		bool ready = g_ever_streamed ||
+			     (sink->target_width && sink->target_height) ||
+			     (g_loop_start_ms &&
+			      now - g_loop_start_ms >= SINK_STARTUP_GRACE_MS);
+
+		if (ready) {
+			/* Seed the target once; v4l2_sink_write() owns retry/upgrade. */
+			if (!sink->target_width || !sink->target_height)
+				(void)v4l2_sink_configure_guarded(sink, width,
+								  height, NULL);
+			v4l2_sink_write_guarded(sink, frame, bytes, width, height);
+		}
 	}
 
-	if (!window || !renderer)
+	if (!window)
+		return;
+
+	if (!renderer)
 		return;
 
 	if (ensure_texture(renderer, &g_standby->texture, width, height) < 0)
@@ -2562,6 +3027,35 @@ static bool audio_output_muted(const struct audio_stream *as)
 		return false;
 	/* Compressed carriers and the LPCM verification window stay silent. */
 	return as->non_pcm || !as->lpcm_verified;
+}
+
+/*
+ * Compact audio description for the OSD, shared by the SDL_Renderer and the
+ * OpenGL presentation paths so both always show the same text.
+ */
+static const char *audio_osd_text(const struct audio_stream *as, char *buf,
+				  size_t len)
+{
+	if (as->streaming) {
+		if (as->bt_playing) {
+			snprintf(buf, len, "%s 5.1 -> Stereo",
+				 audio_bitstream_osd_name(as->bitstream));
+		} else if (audio_output_muted(as)) {
+			if (as->non_pcm || as->preamble_muted)
+				snprintf(buf, len, "%s (Muted)",
+					 audio_bitstream_osd_name(as->bitstream));
+			else
+				snprintf(buf, len, "Audio (Muted)");
+		} else {
+			snprintf(buf, len, "L-PCM %ukHz",
+				 (as->format_rate + 500U) / 1000U);
+		}
+		return buf;
+	}
+
+	if (as->sdl_ready && as->dma_ready)
+		return "No HDMI audio";
+	return "Audio unavailable";
 }
 
 /*
@@ -3660,23 +4154,24 @@ static void run_teardown_trace(struct gc573_vfio_ctx *ctx,
  */
 static void apply_app_identity(void)
 {
-	SDL_SetHint(SDL_HINT_APP_NAME, "EverLive");
-	SDL_SetHint("SDL_AUDIO_DEVICE_APP_NAME", "EverLive");
-	SDL_SetHint("SDL_AUDIO_DEVICE_STREAM_NAME", "EverLive Audio");
+	SDL_SetHint(SDL_HINT_APP_NAME, EVERLIVE_APP_NAME);
+	SDL_SetHint("SDL_AUDIO_DEVICE_APP_NAME", EVERLIVE_APP_NAME);
+	SDL_SetHint("SDL_AUDIO_DEVICE_STREAM_NAME", EVERLIVE_APP_NAME " Audio");
 	SDL_SetHint("SDL_AUDIO_DEVICE_STREAM_ROLE", "game");
-	SDL_SetHint("SDL_VIDEO_X11_WMCLASS", "EverLive");
-	SDL_SetHint("SDL_VIDEO_WAYLAND_WMCLASS", "EverLive");
+	SDL_SetHint("SDL_VIDEO_X11_WMCLASS", EVERLIVE_WM_CLASS);
+	SDL_SetHint("SDL_VIDEO_WAYLAND_WMCLASS", EVERLIVE_WM_CLASS);
 
 	/*
 	 * PipeWire and PulseAudio read these while creating the stream.  A
 	 * non-overwriting setenv() keeps an explicit user override intact.
 	 */
 	(void)setenv("PIPEWIRE_PROPS",
-		     "{ application.name = \"EverLive\" "
+		     "{ application.name = \"" EVERLIVE_APP_NAME "\" "
 		     "application.icon-name = \"everlive\" "
-		     "application.id = \"everlive\" media.role = \"game\" }",
+		     "application.id = \"everlive-experimental\" "
+		     "media.role = \"game\" }",
 		     0);
-	(void)setenv("PULSE_PROP_application.name", "EverLive", 0);
+	(void)setenv("PULSE_PROP_application.name", EVERLIVE_APP_NAME, 0);
 	(void)setenv("PULSE_PROP_application.icon_name", "everlive", 0);
 	(void)setenv("PULSE_PROP_media.role", "game", 0);
 }
@@ -3767,6 +4262,266 @@ static void set_window_icon(SDL_Window *window)
 }
 
 /*
+ * Experimental presentation layer: the window owns an "opengl" SDL_Renderer
+ * when frame generation is off, and a "vulkan" one when lsfg-vk should
+ * synthesize the in-between frames.  Nothing here touches the DMA ring, so a
+ * live switch only blinks the window for a frame.
+ */
+
+static const char *framegen_mode_name(int mode)
+{
+	return gc573_fg_mode_name(mode);
+}
+
+static int framegen_mode_parse(const char *name)
+{
+	return gc573_fg_mode_parse(name);
+}
+
+static bool framegen_path_wanted(void)
+{
+	return g_fg_config.mode != GC573_FG_OFF;
+}
+
+/* Driver the current mode asks for; a Vulkan failure pins us to OpenGL. */
+static enum present_driver framegen_desired_driver(void)
+{
+	if (!g_fg_fallback && framegen_path_wanted())
+		return PRESENT_DRIVER_VULKAN;
+	return PRESENT_DRIVER_OPENGL;
+}
+
+static void framegen_apply_config(void)
+{
+	pthread_mutex_lock(&g_framegen_lock);
+	if (g_framegen)
+		gc573_framegen_set_config(g_framegen, &g_fg_config);
+	pthread_mutex_unlock(&g_framegen_lock);
+}
+
+/* Runs on the capture thread for every accepted frame copied into the ring. */
+static void framegen_frame_filter(uint8_t *yuyv, uint32_t width,
+				  uint32_t height, void *opaque)
+{
+	(void)opaque;
+	if (gc573_hdr_active())
+		gc573_hdr_tonemap_yuyv(yuyv, width, height);
+}
+
+static void framegen_describe(char *out, size_t len)
+{
+	struct gc573_fg_stats st;
+	bool ready;
+
+	out[0] = '\0';
+	if (!g_framegen)
+		return;
+
+	gc573_framegen_get_stats(g_framegen, &st);
+	if (st.mode == GC573_FG_OFF)
+		return;
+
+	ready = st.layer_found && st.dll_found && st.vulkan_active;
+	if (!ready) {
+		const char *why = !st.layer_found ? "LAYER" :
+				  (!st.dll_found ? "DLL" : "VULKAN");
+
+		snprintf(out, len, "LSFG 2x [MISSING %s]", why);
+		return;
+	}
+
+	if (st.mode == GC573_FG_30_TO_60)
+		snprintf(out, len, "LSFG 2x (30p): %.1f -> %.1f FPS | Flow %d%%",
+			 st.present_fps, st.output_fps,
+			 (int)(st.flow_scale * 100.0f + 0.5f));
+	else
+		snprintf(out, len, "LSFG 2x: %.1f -> %.1f FPS",
+			 st.present_fps, st.output_fps);
+}
+
+static void framegen_teardown(void)
+{
+	pthread_mutex_lock(&g_framegen_lock);
+	if (g_framegen) {
+		gc573_framegen_destroy(g_framegen);
+		g_framegen = NULL;
+	}
+	pthread_mutex_unlock(&g_framegen_lock);
+	g_present_driver = PRESENT_DRIVER_OPENGL;
+}
+
+/*
+ * Point the process at lsfg-vk before SDL creates the Vulkan instance.  The
+ * probe is re-run on every open so installing the layer or Lossless Scaling
+ * while the Hub is running is picked up by the next presentation rebuild.
+ */
+static bool framegen_prepare_vulkan(void)
+{
+	struct gc573_fg_probe probe;
+	struct gc573_fg_config cfg;
+	bool ready;
+
+	pthread_mutex_lock(&g_framegen_lock);
+	cfg = g_fg_config;
+	pthread_mutex_unlock(&g_framegen_lock);
+
+	ready = gc573_fg_apply_env(&cfg, &probe);
+	gc573_fg_write_toml(&cfg, &probe);
+
+	if (g_framegen) {
+		gc573_framegen_set_probe(g_framegen, &probe);
+		gc573_framegen_set_config(g_framegen, &cfg);
+	}
+
+	if (!ready) {
+		pr_warn("lsfg-vk incomplete: layer %s, lsfg-vk.dll %s "
+			"(select 'lsfg-vk' beta in Steam -> Lossless Scaling -> Properties -> Betas)",
+			probe.layer_found ? "found" : "missing",
+			probe.dll_found ? probe.dll_path : "missing");
+		pr_warn("Frame generation will present without 2x until this is fixed");
+	}
+	return ready;
+}
+
+static int framegen_create_window(SDL_Window **window, Uint32 flags)
+{
+	*window = SDL_CreateWindow(EVERLIVE_WINDOW_TITLE,
+				   SDL_WINDOWPOS_CENTERED,
+				   SDL_WINDOWPOS_CENTERED,
+				   DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT,
+				   flags);
+	if (!*window) {
+		pr_err("SDL_CreateWindow failed: %s", SDL_GetError());
+		return -EIO;
+	}
+	set_window_icon(*window);
+	if (g_fullscreen)
+		SDL_SetWindowFullscreen(*window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+	return 0;
+}
+
+static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
+			     SDL_Texture **texture,
+			     unsigned int tex_w, unsigned int tex_h)
+{
+	const Uint32 base_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
+	bool want_vk = framegen_desired_driver() == PRESENT_DRIVER_VULKAN &&
+		       !g_headless;
+	Uint32 flags = base_flags;
+	Uint32 renderer_flags = SDL_RENDERER_ACCELERATED;
+
+	(void)tex_w;
+	(void)tex_h;
+	*texture = NULL;
+
+	if (want_vk) {
+		(void)framegen_prepare_vulkan();
+		SDL_SetHint(SDL_HINT_RENDER_DRIVER, "vulkan");
+		flags |= SDL_WINDOW_VULKAN;
+		renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
+	} else {
+		SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
+		SDL_SetHint(SDL_HINT_RENDER_VSYNC, g_vsync ? "1" : "0");
+		if (g_vsync)
+			renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
+	}
+
+	if (framegen_create_window(window, flags) < 0 && want_vk) {
+		pr_warn("Vulkan window creation failed; falling back to opengl");
+		g_fg_fallback = true;
+		want_vk = false;
+		g_present_driver = PRESENT_DRIVER_OPENGL;
+		SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
+		renderer_flags = SDL_RENDERER_ACCELERATED;
+		if (g_vsync)
+			renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
+		if (framegen_create_window(window, base_flags) < 0)
+			return -EIO;
+	} else if (!*window) {
+		return -EIO;
+	}
+
+	*renderer = SDL_CreateRenderer(*window, -1, renderer_flags);
+	if (!*renderer && want_vk) {
+		pr_warn("Vulkan renderer unavailable (%s); falling back to opengl",
+			SDL_GetError());
+		g_fg_fallback = true;
+		SDL_DestroyWindow(*window);
+		*window = NULL;
+		SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
+		if (framegen_create_window(window, base_flags) < 0)
+			return -EIO;
+		*renderer = SDL_CreateRenderer(*window, -1,
+					       SDL_RENDERER_ACCELERATED);
+	}
+	if (!*renderer && g_vsync)
+		*renderer = SDL_CreateRenderer(*window, -1,
+					       SDL_RENDERER_ACCELERATED);
+	if (!*renderer)
+		*renderer = SDL_CreateRenderer(*window, -1, 0);
+	if (!*renderer) {
+		pr_err("SDL_CreateRenderer failed: %s", SDL_GetError());
+		SDL_DestroyWindow(*window);
+		*window = NULL;
+		return -EIO;
+	}
+
+	if (want_vk && !g_fg_fallback) {
+		SDL_RendererInfo info;
+
+		/* A driver hint can silently degrade; verify it really is Vulkan. */
+		if (SDL_GetRendererInfo(*renderer, &info) == 0 && info.name &&
+		    !strstr(info.name, "vulkan")) {
+			pr_warn("Renderer '%s' is not Vulkan; frame generation disabled",
+				info.name);
+			g_fg_fallback = true;
+		}
+	}
+
+	if (want_vk && !g_fg_fallback) {
+		g_present_driver = PRESENT_DRIVER_VULKAN;
+		/* lsfg-vk only doubles present() calls it actually sees. */
+		if (SDL_RenderSetVSync(*renderer, 1) < 0)
+			pr_warn("Vulkan renderer rejected VSync; lsfg-vk pacing may jitter");
+	} else {
+		g_present_driver = PRESENT_DRIVER_OPENGL;
+		if (SDL_RenderSetVSync(*renderer, g_vsync ? 1 : 0) < 0 &&
+		    g_vsync) {
+			pr_warn("VSync not available on this renderer; using present-on-new-frame pacing");
+			g_vsync = false;
+		}
+	}
+
+	if (g_framegen)
+		gc573_framegen_set_vulkan_active(g_framegen,
+						 g_present_driver ==
+						 PRESENT_DRIVER_VULKAN);
+
+	SDL_ShowCursor(g_osd_enabled ? SDL_ENABLE : SDL_DISABLE);
+	return 0;
+}
+
+static void presentation_destroy(SDL_Window **window, SDL_Renderer **renderer,
+				 SDL_Texture **texture)
+{
+	if (*texture) {
+		SDL_DestroyTexture(*texture);
+		*texture = NULL;
+	}
+	if (*renderer) {
+		SDL_DestroyRenderer(*renderer);
+		*renderer = NULL;
+	}
+	if (*window) {
+		SDL_DestroyWindow(*window);
+		*window = NULL;
+	}
+	g_present_driver = PRESENT_DRIVER_OPENGL;
+	if (g_framegen)
+		gc573_framegen_set_vulkan_active(g_framegen, false);
+}
+
+/*
  * Switch the presentation layer between the interactive window and headless
  * operation without touching the DMA ring, the V4L2 sink or the audio path.
  *
@@ -3779,29 +4534,16 @@ static void switch_output_mode(bool want_gaming, SDL_Window **window,
 			       SDL_Renderer **renderer, SDL_Texture **texture,
 			       struct standby_state *standby)
 {
-	Uint32 renderer_flags;
-
 	if (want_gaming == !g_headless)
 		return;		/* already in the requested mode */
 
 	if (!want_gaming) {
-		if (*texture) {
-			SDL_DestroyTexture(*texture);
-			*texture = NULL;
-		}
 		if (standby->texture) {
 			SDL_DestroyTexture(standby->texture);
 			standby->texture = NULL;
 		}
 		osd_destroy();
-		if (*renderer) {
-			SDL_DestroyRenderer(*renderer);
-			*renderer = NULL;
-		}
-		if (*window) {
-			SDL_DestroyWindow(*window);
-			*window = NULL;
-		}
+		presentation_destroy(window, renderer, texture);
 		g_headless = true;
 		printf("[MODE] Headless: DMA, V4L2 and audio keep running\n");
 		fflush(stdout);
@@ -3819,44 +4561,21 @@ static void switch_output_mode(bool want_gaming, SDL_Window **window,
 		return;
 	}
 
-	*window = SDL_CreateWindow("EverLive",
-				   SDL_WINDOWPOS_CENTERED,
-				   SDL_WINDOWPOS_CENTERED,
-				   DEFAULT_WINDOW_WIDTH,
-				   DEFAULT_WINDOW_HEIGHT,
-				   SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
-	if (!*window) {
-		pr_warn("Mode switch: SDL_CreateWindow failed (%s)",
-			SDL_GetError());
-		return;
-	}
-
-	set_window_icon(*window);
-	SDL_SetHint(SDL_HINT_RENDER_VSYNC, g_vsync ? "1" : "0");
-
-	renderer_flags = SDL_RENDERER_ACCELERATED;
-	if (g_vsync)
-		renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
-
-	*renderer = SDL_CreateRenderer(*window, -1, renderer_flags);
-	if (!*renderer && g_vsync)
-		*renderer = SDL_CreateRenderer(*window, -1,
-					       SDL_RENDERER_ACCELERATED);
-	if (!*renderer)
-		*renderer = SDL_CreateRenderer(*window, -1, 0);
-	if (!*renderer) {
-		pr_warn("Mode switch: SDL_CreateRenderer failed (%s)",
-			SDL_GetError());
-		SDL_DestroyWindow(*window);
-		*window = NULL;
-		return;
-	}
-
-	if (g_fullscreen)
-		SDL_SetWindowFullscreen(*window, SDL_WINDOW_FULLSCREEN_DESKTOP);
-	SDL_ShowCursor(g_osd_enabled ? SDL_ENABLE : SDL_DISABLE);
-
+	/*
+	 * presentation_open() derives the renderer driver from g_headless and
+	 * g_fg_fallback, so both must describe the TARGET mode before the window
+	 * exists.  Leaving g_headless set made every Studio -> Gaming switch open
+	 * an OpenGL window and silently lose lsfg-vk.  Resetting the fallback
+	 * flag gives the fresh window a clean Vulkan attempt.
+	 */
 	g_headless = false;
+	g_fg_fallback = false;
+	if (presentation_open(window, renderer, texture, 0, 0) < 0) {
+		pr_warn("Mode switch: presentation setup failed; staying headless");
+		g_headless = true;
+		return;
+	}
+
 	printf("[MODE] Gaming window opened; DMA ring untouched\n");
 	fflush(stdout);
 }
@@ -3876,6 +4595,7 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 			      const struct v4l2_sink *sink)
 {
 	struct gc573_stats st;
+	struct gc573_fg_stats fgst;
 
 	memset(&st, 0, sizeof(st));
 	st.timestamp_ms = now_ms();
@@ -3928,14 +4648,19 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 	st.audio_muted = __atomic_load_n(&g_audio_mute_flag,
 					 __ATOMIC_RELAXED) != 0;
 
-	if (sink && sink->path[0]) {
-		snprintf(st.v4l2_path, sizeof(st.v4l2_path), "%.63s",
-			 sink->path);
-		st.v4l2_configured = sink->configured;
-		st.v4l2_width = sink->width;
-		st.v4l2_height = sink->height;
-		st.v4l2_frames = sink->frames;
-		st.v4l2_dropped = sink->dropped;
+	if (sink) {
+		/* The pump thread updates these counters; take a coherent snapshot. */
+		pthread_mutex_lock(&g_v4l2_lock);
+		if (sink->path[0]) {
+			snprintf(st.v4l2_path, sizeof(st.v4l2_path), "%.63s",
+				 sink->path);
+			st.v4l2_configured = sink->configured;
+			st.v4l2_width = sink->width;
+			st.v4l2_height = sink->height;
+			st.v4l2_frames = sink->frames;
+			st.v4l2_dropped = sink->dropped;
+		}
+		pthread_mutex_unlock(&g_v4l2_lock);
 	}
 
 	st.osd_enabled = g_osd_enabled;
@@ -3947,6 +4672,26 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 	st.led_r = g_led_r;
 	st.led_g = g_led_g;
 	st.led_b = g_led_b;
+
+	/* Experimental lsfg-vk frame generation telemetry. */
+	memset(&fgst, 0, sizeof(fgst));
+	if (g_framegen)
+		gc573_framegen_get_stats(g_framegen, &fgst);
+	snprintf(st.framegen_mode, sizeof(st.framegen_mode), "%s",
+		 gc573_fg_mode_name(g_fg_config.mode));
+	st.framegen_present_fps = fgst.present_fps;
+	st.framegen_output_fps = fgst.output_fps;
+	st.framegen_unique_fps = fgst.unique_fps;
+	st.framegen_raw_fps = fgst.raw_fps;
+	st.framegen_flow_scale = g_fg_config.flow_scale;
+	st.framegen_perf_mode = g_fg_config.perf_mode;
+	st.framegen_low_latency = g_fg_config.low_latency;
+	st.framegen_layer_found = fgst.layer_found;
+	st.framegen_dll_found = fgst.dll_found;
+	st.framegen_vulkan_active = fgst.vulkan_active;
+	st.framegen_dedup_active = fgst.deduplicator_active;
+	snprintf(st.framegen_dll_path, sizeof(st.framegen_dll_path), "%.159s",
+		 fgst.dll_path);
 
 	gc573_ipc_publish_stats(&st);
 }
@@ -4069,6 +4814,52 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		       g_hdr_enabled ? "auto" : "bypass",
 		       (double)g_hdr_exposure_ev);
 		break;
+	case GC573_IPC_CMD_FRAMEGEN: {
+		int mode = g_fg_config.mode;
+		float flow = g_fg_config.flow_scale;
+		bool perf = g_fg_config.perf_mode;
+		bool low_latency = g_fg_config.low_latency;
+		bool settings_changed = false;
+
+		if (cmd->a >= 0 && cmd->a <= GC573_FG_30_TO_60)
+			mode = cmd->a;
+		if (cmd->f >= 0.5f && cmd->f <= 1.0f && cmd->f != flow) {
+			flow = cmd->f;
+			settings_changed = true;
+		}
+		if (cmd->b >= 0 && (cmd->b != 0) != perf) {
+			perf = cmd->b != 0;
+			settings_changed = true;
+		}
+		if (cmd->c >= 0 && (cmd->c != 0) != low_latency) {
+			low_latency = cmd->c != 0;
+			settings_changed = true;
+		}
+
+		if (mode != g_fg_config.mode) {
+			/* A mode change retries a previously failed Vulkan open. */
+			g_fg_fallback = false;
+			g_present_rebuild = true;
+		}
+		/* Swapchain/layer settings only take effect on a fresh instance. */
+		if (settings_changed && mode != GC573_FG_OFF)
+			g_present_rebuild = true;
+
+		pthread_mutex_lock(&g_framegen_lock);
+		g_fg_config.mode = mode;
+		g_fg_config.flow_scale = flow;
+		g_fg_config.perf_mode = perf;
+		g_fg_config.low_latency = low_latency;
+		pthread_mutex_unlock(&g_framegen_lock);
+
+		framegen_apply_config();
+		printf("[IPC] Frame generation: %s (flow %d%%, perf %s, low-latency %s)\n",
+		       framegen_mode_name(mode),
+		       (int)(flow * 100.0f + 0.5f),
+		       perf ? "on" : "off",
+		       low_latency ? "on" : "off");
+		break;
+	}
 	case GC573_IPC_CMD_V4L2: {
 		const char *path = cmd->path[0] ? cmd->path :
 				   DEFAULT_V4L2_DEVICE;
@@ -4081,8 +4872,8 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 			}
 			/* open() memsets the sink, so drop an old fd first. */
 			if (sink->fd >= 0 || sink->path[0])
-				v4l2_sink_close(sink);
-			if (v4l2_sink_open(sink, path) < 0) {
+				v4l2_sink_close_guarded(sink);
+			if (v4l2_sink_open_guarded(sink, path) < 0) {
 				pr_warn("V4L2 live attach failed: %s", path);
 				break;
 			}
@@ -4093,13 +4884,13 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 			 * frame after the writer's own retry interval.
 			 */
 			if (have_signal && out_w && out_h)
-				(void)v4l2_sink_configure(sink, out_w, out_h, sig);
+				(void)v4l2_sink_configure_guarded(sink, out_w, out_h, sig);
 		} else {
 			if (sink->fd < 0 && !sink->path[0]) {
 				printf("[V4L2] Live detach ignored: no sink attached\n");
 				break;
 			}
-			v4l2_sink_close(sink);
+			v4l2_sink_close_guarded(sink);
 			printf("[V4L2] Live detach\n");
 		}
 		break;
@@ -4202,6 +4993,49 @@ int main(int argc, char *argv[])
 			g_hdr_exposure_ev = (float)atof(argv[++i]);
 		} else if (strncmp(argv[i], "--hdr-exposure=", 15) == 0) {
 			g_hdr_exposure_ev = (float)atof(argv[i] + 15);
+		} else if (strcmp(argv[i], "--framegen") == 0 && i + 1 < argc) {
+			int mode = framegen_mode_parse(argv[++i]);
+
+			if (mode < 0)
+				fprintf(stderr, "[FRAMEGEN] Unknown mode '%s'; using off\n",
+					argv[i]);
+			else
+				g_fg_config.mode = mode;
+		} else if (strncmp(argv[i], "--framegen=", 11) == 0) {
+			int mode = framegen_mode_parse(argv[i] + 11);
+
+			if (mode < 0)
+				fprintf(stderr, "[FRAMEGEN] Unknown mode '%s'; using off\n",
+					argv[i] + 11);
+			else
+				g_fg_config.mode = mode;
+		} else if (strcmp(argv[i], "--fg-flow-scale") == 0 &&
+			   i + 1 < argc) {
+			float scale = 1.0f;
+
+			if (parse_unit_float(argv[++i], &scale))
+				g_fg_config.flow_scale =
+					scale < 0.5f ? 0.5f : scale;
+			else
+				fprintf(stderr, "[FRAMEGEN] Invalid flow scale '%s'; using 100%%\n",
+					argv[i]);
+		} else if (strncmp(argv[i], "--fg-flow-scale=", 16) == 0) {
+			float scale = 1.0f;
+
+			if (parse_unit_float(argv[i] + 16, &scale))
+				g_fg_config.flow_scale =
+					scale < 0.5f ? 0.5f : scale;
+			else
+				fprintf(stderr, "[FRAMEGEN] Invalid flow scale '%s'; using 100%%\n",
+					argv[i] + 16);
+		} else if (strcmp(argv[i], "--fg-perf") == 0) {
+			g_fg_config.perf_mode = true;
+		} else if (strcmp(argv[i], "--no-fg-perf") == 0) {
+			g_fg_config.perf_mode = false;
+		} else if (strcmp(argv[i], "--fg-low-latency") == 0) {
+			g_fg_config.low_latency = true;
+		} else if (strcmp(argv[i], "--no-fg-low-latency") == 0) {
+			g_fg_config.low_latency = false;
 		} else if (strcmp(argv[i], "--audio-tap") == 0) {
 			if (i + 1 < argc && argv[i + 1][0] != '-')
 				audio_tap_node = argv[++i];
@@ -4249,6 +5083,8 @@ int main(int argc, char *argv[])
 	}
 	if (g_headless)
 		g_vsync = false;
+	if (g_headless && framegen_path_wanted())
+		pr_info("Frame generation stays idle until the gaming window is opened");
 
 	/* --led wins; EVERLIVE_LED is the GUI-friendly fallback. */
 	if (!led_spec || !*led_spec)
@@ -4279,7 +5115,7 @@ int main(int argc, char *argv[])
 	}
 
 	printf("==================================================================\n");
-	printf("  EverLive Userspace VFIO Streamer [INTERN TEST - EXPERIMENTAL]  \n");
+	printf("  EverLive Experimental — Userspace VFIO Streamer [1.4 LAB]     \n");
 	printf("==================================================================\n\n");
 	if (g_trace_mode)
 		printf("[TRACE] Teardown trace enabled: press T while streaming to start the phase test.\n");
@@ -4463,47 +5299,31 @@ int main(int argc, char *argv[])
 		       SDL_GetError());
 	}
 
+	/*
+	 * Build the capture ring once for the whole session.  It is pure CPU and
+	 * inactive in mode OFF; keeping it alive means a live hotkey switch can
+	 * start feeding frames immediately without touching the DMA path.
+	 */
+	g_framegen = gc573_framegen_create(&g_fg_config);
+	if (!g_framegen) {
+		pr_warn("Frame generation ring allocation failed; continuing without it");
+	} else {
+		struct gc573_fg_probe probe;
+
+		gc573_framegen_set_frame_filter(g_framegen, framegen_frame_filter,
+						NULL);
+		/* Publish readiness immediately, even before the window opens. */
+		gc573_fg_probe_system(&probe);
+		gc573_framegen_set_probe(g_framegen, &probe);
+	}
+
 	if (!g_headless) {
-		window = SDL_CreateWindow(
-			"EverLive",
-			SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-			DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT,
-			SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
-		if (!window) {
-			fprintf(stderr, "[ERROR] SDL_CreateWindow failed: %s\n",
-				SDL_GetError());
+		if (presentation_open(&window, &renderer, &texture, 0, 0) < 0) {
+			fprintf(stderr, "[ERROR] Presentation setup failed\n");
 			SDL_Quit();
 			gc573_vfio_cleanup(&ctx);
 			return 1;
 		}
-
-		set_window_icon(window);
-
-		SDL_SetHint(SDL_HINT_RENDER_VSYNC, g_vsync ? "1" : "0");
-		Uint32 renderer_flags = SDL_RENDERER_ACCELERATED;
-
-		if (g_vsync)
-			renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
-		renderer = SDL_CreateRenderer(window, -1, renderer_flags);
-		if (!renderer && g_vsync)
-			renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-		if (!renderer)
-			renderer = SDL_CreateRenderer(window, -1, 0);
-		if (!renderer) {
-			fprintf(stderr, "[ERROR] SDL_CreateRenderer failed: %s\n",
-				SDL_GetError());
-			SDL_DestroyWindow(window);
-			SDL_Quit();
-			gc573_vfio_cleanup(&ctx);
-			return 1;
-		}
-		if (SDL_RenderSetVSync(renderer, g_vsync ? 1 : 0) < 0 && g_vsync) {
-			pr_warn("VSync not available on this renderer; using present-on-new-frame pacing");
-			g_vsync = false;
-		}
-
-		if (g_fullscreen)
-			SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
 	}
 
 	texture = NULL;
@@ -4513,7 +5333,7 @@ int main(int argc, char *argv[])
 	 * preview ring, so the sink works with or without an SDL window.
 	 */
 	if (v4l2_device) {
-		if (v4l2_sink_open(&v4l2_sink, v4l2_device) < 0) {
+		if (v4l2_sink_open_guarded(&v4l2_sink, v4l2_device) < 0) {
 			fprintf(stderr, "[ERROR] V4L2 loopback sink unavailable (%s).\n",
 				v4l2_device);
 			fprintf(stderr, "        Create it with: sudo modprobe v4l2loopback video_nr=10 card_label=\"EverLive Capture\" exclusive_caps=0\n");
@@ -4562,17 +5382,20 @@ int main(int argc, char *argv[])
 	if (g_headless) {
 		printf("[*] Userspace streamer active (headless). Send SIGINT/SIGTERM to exit.\n");
 	} else {
-		printf("[*] Userspace streamer active. Press 'q' or ESC to exit, 'f' fullscreen, 'a' aspect, 'p' OSD position, Tab/'o' OSD.\n");
-		printf("[OSD] Start: fullscreen=%s vsync=%s aspect=%s overlay=%s pos=%s\n",
+		printf("[*] Userspace streamer active. Press 'q' or ESC to exit, 'f' fullscreen, 'a' aspect, 'p' OSD position, Tab/'o' OSD, 'g' frame generation, 'u' CAS.\n");
+		printf("[OSD] Start: fullscreen=%s vsync=%s aspect=%s overlay=%s pos=%s framegen=%s flow=%d%% perf=%s\n",
 		       g_fullscreen ? "on" : "off",
 		       g_vsync ? "on" : "off", aspect_name(g_aspect),
-		       g_osd_enabled ? "on" : "off", osd_pos_name(g_osd_pos));
+		       g_osd_enabled ? "on" : "off", osd_pos_name(g_osd_pos),
+		       framegen_mode_name(g_fg_config.mode),
+		       (int)(g_fg_config.flow_scale * 100.0f + 0.5f),
+		       g_fg_config.perf_mode ? "on" : "off");
 		SDL_ShowCursor(g_osd_enabled ? SDL_ENABLE : SDL_DISABLE);
 	}
 	if (v4l2_sink.fd >= 0)
 		printf("[V4L2] Loopback output active on %s\n", v4l2_sink.path);
 	render_standby(window, renderer,
-		       "EverLive [USERSPACE VFIO] — Waiting for HDMI signal...");
+		       "EverLive Experimental — Waiting for HDMI signal...");
 
 	/*
 	 * Open the control socket last: every earlier failure path returns
@@ -4601,6 +5424,7 @@ int main(int argc, char *argv[])
 	last_stats_us = now_us();
 	last_status_poll = 0;
 	last_service = 0;
+	g_loop_start_ms = now_ms();
 
 	while (g_running) {
 		SDL_Event event;
@@ -4640,7 +5464,7 @@ int main(int argc, char *argv[])
 					printf("[OSD] Aspect: %s\n", aspect_name(g_aspect));
 					fflush(stdout);
 					snprintf(title, sizeof(title),
-						 "EverLive [USERSPACE VFIO] — Aspect: %s",
+						 "EverLive Experimental — Aspect: %s",
 						 aspect_name(g_aspect));
 					SDL_SetWindowTitle(window, title);
 				} else if (event.key.keysym.sym == SDLK_p) {
@@ -4654,6 +5478,18 @@ int main(int argc, char *argv[])
 					hdr_apply(&current_sig, have_signal);
 					printf("[HDR] Tonemapping: %s\n",
 					       g_hdr_enabled ? "auto" : "bypass");
+					fflush(stdout);
+				} else if (event.key.keysym.sym == SDLK_g) {
+					pthread_mutex_lock(&g_framegen_lock);
+					g_fg_config.mode = (g_fg_config.mode + 1) %
+							   (GC573_FG_30_TO_60 + 1);
+					pthread_mutex_unlock(&g_framegen_lock);
+					/* Retry Vulkan on an explicit user action. */
+					g_fg_fallback = false;
+					g_present_rebuild = true;
+					framegen_apply_config();
+					printf("[FRAMEGEN] Mode: %s\n",
+					       framegen_mode_name(g_fg_config.mode));
 					fflush(stdout);
 				} else if (event.key.keysym.sym == SDLK_TAB ||
 					   event.key.keysym.sym == SDLK_i ||
@@ -4692,6 +5528,43 @@ int main(int argc, char *argv[])
 				switch_output_mode(
 					request == GC573_IPC_MODE_GAMING,
 					&window, &renderer, &texture, &standby);
+		}
+
+		/*
+		 * Switching frame generation changes the SDL renderer driver
+		 * ("opengl" <-> "vulkan"), which cannot share a window.  Flow scale /
+		 * performance-mode changes also rebuild once so the lsfg-vk swapchain
+		 * and layer pick up the new settings.  The rebuild is rare and leaves
+		 * the DMA ring, V4L2 feed and audio untouched.
+		 */
+		{
+			enum present_driver want = framegen_desired_driver();
+			bool rebuild = g_present_rebuild ||
+				       (want != g_present_driver);
+
+			if (rebuild && !g_headless && window) {
+				if (standby.texture) {
+					SDL_DestroyTexture(standby.texture);
+					standby.texture = NULL;
+				}
+				osd_destroy();
+				presentation_destroy(&window, &renderer, &texture);
+				if (presentation_open(&window, &renderer, &texture,
+						      output_width, output_height) < 0) {
+					pr_warn("Presentation rebuild failed; continuing headless");
+					g_headless = true;
+				} else {
+					printf("[FRAMEGEN] Presentation: %s\n",
+					       g_present_driver == PRESENT_DRIVER_VULKAN ?
+					       "Vulkan (lsfg-vk)" : "OpenGL");
+				}
+				fflush(stdout);
+			}
+			/*
+			 * Clear even while headless: a later mode switch re-opens the
+			 * window from the current settings anyway.
+			 */
+			g_present_rebuild = false;
 		}
 
 		now = now_ms();
@@ -4774,7 +5647,7 @@ int main(int argc, char *argv[])
 							texture = NULL;
 						}
 						render_standby(window, renderer,
-							       "EverLive [USERSPACE VFIO] — Signal lost, waiting...");
+							       "EverLive Experimental — Signal lost, waiting...");
 					}
 				} else if (!probe.width || !probe.height) {
 					/* Timing register snapshot not ready; retry next poll. */
@@ -4812,7 +5685,7 @@ int main(int argc, char *argv[])
 								texture = NULL;
 							}
 							render_standby(window, renderer,
-								       "EverLive [USERSPACE VFIO] — Signal lost, waiting...");
+								       "EverLive Experimental — Signal lost, waiting...");
 						} else if (have_signal &&
 							   signal_parameters_equal(&fresh,
 									   &current_sig,
@@ -4858,7 +5731,7 @@ int main(int argc, char *argv[])
 										     new_out_w,
 										     new_out_h);
 							if (ret == 0 && v4l2_sink.path[0])
-								(void)v4l2_sink_configure(&v4l2_sink,
+								(void)v4l2_sink_configure_guarded(&v4l2_sink,
 											  new_out_w,
 											  new_out_h,
 											  &fresh);
@@ -4887,11 +5760,12 @@ int main(int argc, char *argv[])
 								}
 								render_standby(window, renderer,
 									       ret == -ENOMEM ?
-									       "EverLive [USERSPACE VFIO] — Native mode exceeds RLIMIT_MEMLOCK" :
-									       "EverLive [USERSPACE VFIO] — Hot switch failed, waiting...");
+									       "EverLive Experimental — Native mode exceeds RLIMIT_MEMLOCK" :
+									       "EverLive Experimental — Hot switch failed, waiting...");
 							} else {
 								streaming = true;
 								have_signal = true;
+								g_ever_streamed = true;
 								rate_probe_after_scdt = false;
 								current_sig = fresh;
 								output_width = new_out_w;
@@ -4902,6 +5776,10 @@ int main(int argc, char *argv[])
 								input_height = fresh.height;
 								input_rate_x100 =
 									fresh.frame_rate_x100;
+								if (g_framegen)
+									gc573_framegen_set_source_hz(
+										g_framegen,
+										input_rate_x100);
 								last_frames = __atomic_load_n(&video.frames,
 											      __ATOMIC_RELAXED);
 								last_stats = now_ms();
@@ -4948,7 +5826,7 @@ int main(int argc, char *argv[])
 									     new_out_w,
 									     new_out_h);
 						if (ret == 0 && v4l2_sink.path[0])
-							(void)v4l2_sink_configure(&v4l2_sink,
+							(void)v4l2_sink_configure_guarded(&v4l2_sink,
 										  new_out_w,
 										  new_out_h,
 										  &sig);
@@ -4967,11 +5845,12 @@ int main(int argc, char *argv[])
 								VIDEO_STOP_HOT_MS);
 							render_standby(window, renderer,
 								       ret == -ENOMEM ?
-								       "EverLive [USERSPACE VFIO] — Native mode exceeds RLIMIT_MEMLOCK" :
-								       "EverLive [USERSPACE VFIO] — Waiting for HDMI signal...");
+								       "EverLive Experimental — Native mode exceeds RLIMIT_MEMLOCK" :
+								       "EverLive Experimental — Waiting for HDMI signal...");
 						} else {
 							streaming = true;
 							have_signal = true;
+							g_ever_streamed = true;
 							signal_lost_hits = 0;
 							rate_probe_after_scdt = false;
 							current_sig = sig;
@@ -4983,6 +5862,9 @@ int main(int argc, char *argv[])
 							input_height = sig.height;
 							input_rate_x100 =
 								sig.frame_rate_x100;
+							if (g_framegen)
+								gc573_framegen_set_source_hz(
+									g_framegen, input_rate_x100);
 							last_frames = __atomic_load_n(&video.frames,
 									      __ATOMIC_RELAXED);
 							last_stats = now_ms();
@@ -5027,94 +5909,237 @@ int main(int argc, char *argv[])
 				texture = NULL;
 			}
 			render_standby(window, renderer,
-				       "EverLive [USERSPACE VFIO] — DMA stall, reconnecting...");
+				       "EverLive Experimental — DMA stall, reconnecting...");
 		}
 
 		if (streaming) {
 			void *pixels = NULL;
 			int ph;
 			bool have_frame = false;
+			/*
+			 * The lsfg-vk path is live when a Vulkan SDL_Renderer owns the
+			 * window and a frame generation mode is selected.  The capture ring
+			 * is then the only frame source for the window.
+			 */
+			bool fg_live = !g_headless && renderer && g_framegen &&
+				       g_present_driver == PRESENT_DRIVER_VULKAN &&
+				       g_fg_config.mode != GC573_FG_OFF;
+			bool want_pump;
+
+			/* The capture thread only feeds the ring while this path is live. */
+			__atomic_store_n(&g_fg_feed, fg_live ? 1 : 0, __ATOMIC_RELAXED);
+
+			/* Follow a capture geometry change; cheap no-op when unchanged. */
+			if (fg_live)
+				(void)gc573_framegen_resize(g_framegen, output_width,
+							    output_height);
 
 			/*
 			 * A mode switch (or a failed allocation during a hot switch)
-			 * leaves texture == NULL.  Rebuild it from the current geometry;
-			 * the DMA ring is not involved.
+			 * leaves texture == NULL.  Rebuild it from the current geometry.
 			 */
-			if (!g_headless && renderer && !texture &&
-			    output_width && output_height)
+			if (!g_headless && renderer && !texture && output_width &&
+			    output_height)
 				(void)ensure_texture(renderer, &texture,
 						     output_width, output_height);
 
-			ph = preview_take(&pixels);
-
-			if (ph > 0) {
-				have_frame = true;
-				/*
-				 * Tonemap once, in place, before both consumers read
-				 * the slot: the window and the OBS feed then show the
-				 * same picture.  SDR is a pure pass-through.
-				 */
-				if (gc573_hdr_active())
-					gc573_hdr_tonemap_yuyv(pixels, output_width,
-							       output_height);
-				if (v4l2_sink.path[0])
-					v4l2_sink_write(&v4l2_sink, pixels,
-							g_preview.bytes,
-							output_width, output_height);
-				if (texture) {
-					int uret = SDL_UpdateTexture(texture, NULL,
-								     pixels,
-								     output_width * 2);
-
-					if (uret < 0) {
-						static bool reported = false;
-
-						if (!reported) {
-							printf("[SDL-ERR] SDL_UpdateTexture failed: %s\n",
-							       SDL_GetError());
-							reported = true;
-						}
-					}
-				}
-				preview_release(ph);
+			/*
+			 * The loopback sink runs off the render thread whenever it is not the
+			 * window's own frame source: the Vulkan path (where a 1440p -> 1080p
+			 * sws_scale on the swapchain thread would break 120 Hz pacing) and
+			 * Studio/headless mode (where it would stall the IPC/IT6664 service
+			 * loop).  Plain OpenGL gaming keeps the cheap synchronous write.
+			 */
+			want_pump = (fg_live || g_headless) &&
+				    v4l2_sink.path[0] != '\0';
+			if (want_pump) {
+				if (!v4l2_pump_running())
+					(void)v4l2_pump_start(
+						&v4l2_sink, output_width,
+						output_height,
+						(size_t)output_width *
+							output_height * 2U);
+			} else if (v4l2_pump_running()) {
+				v4l2_pump_stop();
 			}
 
 			/*
-			 * With VSync, present once per display refresh even when no new
-			 * source frame is ready.  A frame arriving just after a refresh
-			 * then repeats the previous frame instead of producing a 33 ms
-			 * hitch (the 60.03 vs 60.00 Hz phase drift).
+			 * Idle-sink throttling.  With lsfg-vk rendering from its own ring,
+			 * the loopback pump only exists for OBS.  Poll the cheap sysfs
+			 * state every 500 ms (never per frame): when no capture reader is
+			 * attached and the node already serves the native geometry, a
+			 * 7.2 MB preview copy + write 120 times a second is wasted
+			 * bandwidth.  A 4 Hz keepalive keeps the format and buffers warm,
+			 * so OBS "Leave Unchanged" still opens instantly; the poll that
+			 * sees state == "capture" restores the full frame rate within
+			 * 500 ms.  Headless/Studio always streams at full rate.
 			 */
-			if (texture && (have_frame || g_vsync)) {
-				{
-					char audio_text[64];
-					const char *audio_desc;
+			{
+				static uint64_t last_reader_poll_ms;
+				bool sink_throttle = false;
 
-					if (audio.streaming) {
-						if (audio.bt_playing) {
-							snprintf(audio_text, sizeof(audio_text),
-								 "%s 5.1 -> Stereo",
-								 audio_bitstream_osd_name(audio.bitstream));
-						} else if (audio_output_muted(&audio)) {
-							if (audio.non_pcm ||
-							    audio.preamble_muted)
-								snprintf(audio_text, sizeof(audio_text),
-									 "%s (Muted)",
-									 audio_bitstream_osd_name(audio.bitstream));
-							else
-								snprintf(audio_text, sizeof(audio_text),
-									 "Audio (Muted)");
-						} else {
-							snprintf(audio_text, sizeof(audio_text),
-								 "L-PCM %ukHz",
-								 (audio.format_rate + 500U) / 1000U);
+				if (want_pump) {
+					uint64_t nowm = now_ms();
+
+					if (!last_reader_poll_ms ||
+					    nowm - last_reader_poll_ms >=
+						    V4L2_READER_POLL_MS) {
+						int was_idle =
+							__atomic_load_n(&g_v4l2_sink_idle,
+									__ATOMIC_RELAXED);
+						bool idle;
+
+						last_reader_poll_ms = nowm;
+						/*
+						 * Non-blocking: the pump holds this lock
+						 * while it rescales and writes, and the
+						 * render thread must never stall on that.
+						 * If it is busy, keep the previous decision
+						 * and retry on the next 500 ms tick.
+						 */
+						if (pthread_mutex_trylock(&g_v4l2_lock) == 0) {
+							idle = !v4l2_reader_active(
+								       v4l2_sink.path) &&
+							       v4l2_sink.configured &&
+							       !v4l2_sink.scaled;
+							if (!idle && was_idle &&
+							    v4l2_sink.target_width &&
+							    v4l2_sink.target_height) {
+								/*
+								 * A reader just attached:
+								 * renegotiate against its
+								 * locked format now, before the
+								 * next full-rate write.
+								 */
+								(void)v4l2_sink_configure(
+									&v4l2_sink,
+									v4l2_sink.target_width,
+									v4l2_sink.target_height,
+									NULL);
+							}
+							pthread_mutex_unlock(&g_v4l2_lock);
+							__atomic_store_n(
+								&g_v4l2_sink_idle,
+								idle ? 1 : 0,
+								__ATOMIC_RELAXED);
 						}
-						audio_desc = audio_text;
-					} else if (audio.sdl_ready && audio.dma_ready) {
-						audio_desc = "No HDMI audio";
-					} else {
-						audio_desc = "Audio unavailable";
 					}
+					sink_throttle = fg_live &&
+						__atomic_load_n(&g_v4l2_sink_idle,
+								__ATOMIC_RELAXED);
+				} else {
+					last_reader_poll_ms = 0;
+					__atomic_store_n(&g_v4l2_sink_idle, 0,
+							 __ATOMIC_RELAXED);
+				}
+
+				__atomic_store_n(&g_preview_needed,
+						 ((!g_headless && !fg_live) ||
+						  (want_pump && !sink_throttle)) ? 1 : 0,
+						 __ATOMIC_RELAXED);
+				__atomic_store_n(&g_preview_keepalive,
+						 sink_throttle ? 1 : 0,
+						 __ATOMIC_RELAXED);
+			}
+
+			if (fg_live) {
+				const uint8_t *fg_pixels = NULL;
+
+				/*
+				 * Present exactly once per accepted frame and NEVER on an
+				 * idle refresh: lsfg-vk synthesizes its in-between frame
+				 * from the swapchain presents it observes, so a repeated
+				 * present would make it interpolate a frozen pair.
+				 */
+				if (gc573_framegen_take(g_framegen, &fg_pixels)) {
+					if (texture && output_width && output_height) {
+						if (SDL_UpdateTexture(texture, NULL,
+								      fg_pixels,
+								      output_width * 2) < 0) {
+							static bool reported;
+
+							if (!reported) {
+								printf("[SDL-ERR] SDL_UpdateTexture failed: %s\n",
+								       SDL_GetError());
+								reported = true;
+							}
+						}
+						{
+							char audio_text[64];
+							const char *audio_desc =
+								audio_osd_text(
+									&audio, audio_text,
+									sizeof(audio_text));
+
+							osd_update(
+								renderer, window,
+								input_width, input_height,
+								current_sig.interlaced,
+								input_rate_x100,
+								displayed_fps,
+								audio_desc,
+								gc573_hdr_active() ?
+								gc573_hdr_label() :
+								NULL);
+						}
+						render_frame(
+							window, renderer, texture,
+							aspect_ratio(g_aspect,
+								     video_aspect));
+					}
+					gc573_framegen_release(g_framegen);
+				} else {
+					/*
+					 * Event-driven wait: the DMA thread signals as soon as a
+					 * new frame is queued, so a 120 Hz VBlank is never slept
+					 * through.  The 1.5 ms cap keeps SDL events, hotkeys, IPC
+					 * commands and the IT6664 service loop responsive when
+					 * capture is momentarily idle.
+					 */
+					(void)gc573_framegen_wait(g_framegen, 1500);
+				}
+			} else if (!g_headless) {
+				ph = preview_take(&pixels);
+
+				if (ph > 0) {
+					have_frame = true;
+					/*
+					 * Tonemap once, in place, before both consumers read
+					 * the slot: the window and the OBS feed then show the
+					 * same picture.  SDR is a pure pass-through.
+					 */
+					if (gc573_hdr_active())
+						gc573_hdr_tonemap_yuyv(
+							pixels, output_width,
+							output_height);
+					if (v4l2_sink.path[0])
+						v4l2_sink_write_guarded(
+							&v4l2_sink, pixels,
+							g_preview.bytes, output_width,
+							output_height);
+					if (texture) {
+						int uret = SDL_UpdateTexture(
+							texture, NULL, pixels,
+							output_width * 2);
+
+						if (uret < 0) {
+							static bool reported = false;
+
+							if (!reported) {
+								printf("[SDL-ERR] SDL_UpdateTexture failed: %s\n",
+								       SDL_GetError());
+								reported = true;
+							}
+						}
+					}
+					preview_release(ph);
+				}
+
+				if (texture && (have_frame || g_vsync)) {
+					char audio_text[64];
+					const char *audio_desc =
+						audio_osd_text(&audio, audio_text,
+							       sizeof(audio_text));
 
 					osd_update(renderer, window,
 						   input_width, input_height,
@@ -5123,16 +6148,40 @@ int main(int argc, char *argv[])
 						   displayed_fps, audio_desc,
 						   gc573_hdr_active() ?
 						   gc573_hdr_label() : NULL);
+					render_frame(window, renderer, texture,
+						     aspect_ratio(g_aspect,
+								  video_aspect));
+				} else {
+					/*
+					 * Present-on-new-frame pacing: poll often enough
+					 * that a frame arriving mid-sleep is picked up
+					 * within ~1 ms.
+					 */
+					SDL_Delay(1);
 				}
-				render_frame(window, renderer, texture,
-					     aspect_ratio(g_aspect, video_aspect));
 			} else {
 				/*
-				 * Present-on-new-frame pacing: poll just often enough that a
-				 * frame arriving mid-sleep is picked up within ~1 ms.  The old
-				 * 2 ms blind delay added up to a full refresh of phase error
-				 * on 59.72/60.03 Hz sources and showed up as micro-stutter.
+				 * Headless: the async pump owns the preview ring when a
+				 * loopback sink is attached.  Without one, drain the ring so
+				 * slots keep rotating, but never write from this thread while
+				 * the pump is live.
 				 */
+				if (!v4l2_pump_running()) {
+					ph = preview_take(&pixels);
+					if (ph > 0) {
+						if (gc573_hdr_active())
+							gc573_hdr_tonemap_yuyv(
+								pixels, output_width,
+								output_height);
+						if (v4l2_sink.path[0])
+							v4l2_sink_write_guarded(
+								&v4l2_sink, pixels,
+								g_preview.bytes,
+								output_width,
+								output_height);
+						preview_release(ph);
+					}
+				}
 				SDL_Delay(1);
 			}
 		} else {
@@ -5140,8 +6189,12 @@ int main(int argc, char *argv[])
 			 * No live DMA: run the generated standby card at ~30 fps on
 			 * screen and on the loopback node.  The tick throttles itself,
 			 * so the short sleep only keeps events and status polling
-			 * responsive.
+			 * responsive.  The pump must be gone before standby writes
+			 * to the sink from this thread.
 			 */
+			__atomic_store_n(&g_fg_feed, 0, __ATOMIC_RELAXED);
+			__atomic_store_n(&g_preview_keepalive, 0, __ATOMIC_RELAXED);
+			v4l2_pump_stop();
 			standby_tick(window, renderer);
 			SDL_Delay(5);
 		}
@@ -5199,8 +6252,16 @@ int main(int argc, char *argv[])
 					  fps, frames, &video, &audio, &v4l2_sink);
 
 			if (streaming) {
+				char fg_title[128] = "";
+				char fg_line[128] = "";
+
+				framegen_describe(fg_line, sizeof(fg_line));
+				if (fg_line[0])
+					snprintf(fg_title, sizeof(fg_title),
+						 " | %s", fg_line);
+
 				snprintf(title, sizeof(title),
-					 "EverLive [USERSPACE VFIO] — %ux%u%s @ %u.%02u Hz -> %ux%u YUYV @ %.2f FPS | ring %u/%uch | AR %s%s%s",
+					 "EverLive Experimental — %ux%u%s @ %u.%02u Hz -> %ux%u YUYV @ %.2f FPS | ring %u/%uch | AR %s%s%s%s",
 					 input_width, input_height,
 					 current_sig.interlaced ? "i" : "p",
 					 input_rate_x100 / 100,
@@ -5211,7 +6272,9 @@ int main(int argc, char *argv[])
 					 (window &&
 					  (SDL_GetWindowFlags(window) &
 					   SDL_WINDOW_FULLSCREEN_DESKTOP)) ? " | FS" : "",
-					 g_vsync ? " | VSync" : "");
+					 g_vsync ? " | VSync" : "", fg_title);
+				if (fg_line[0])
+					printf("[FRAMEGEN] %s\n", fg_line);
 				printf("[STREAM] %ux%u%s @ %u.%02u Hz -> %ux%u | FPS: %.2f | Frames: %lu | ring %u/%uch | preview drops: %lu | age %.1f ms\n",
 				       input_width, input_height,
 				       current_sig.interlaced ? "i" : "p",
@@ -5223,6 +6286,7 @@ int main(int argc, char *argv[])
 							      __ATOMIC_RELAXED),
 				       (double)g_preview.taken_age_us / 1000.0);
 				if (v4l2_sink.path[0]) {
+					pthread_mutex_lock(&g_v4l2_lock);
 					if (v4l2_sink.configured)
 						printf("[V4L2] %ux%u YUYV%s | written %lu | dropped %lu\n",
 						       v4l2_sink.width, v4l2_sink.height,
@@ -5235,6 +6299,7 @@ int main(int argc, char *argv[])
 						       v4l2_sink.target_height,
 						       v4l2_sink.path,
 						       (unsigned long)v4l2_sink.dropped);
+					pthread_mutex_unlock(&g_v4l2_lock);
 				}
 				if (audio.streaming && audio.bt_playing) {
 					printf("[AUDIO] Decoding %s -> Stereo | bursts %lu | frames %lu | errors %lu\n",
@@ -5279,7 +6344,7 @@ int main(int argc, char *argv[])
 				}
 			} else {
 				snprintf(title, sizeof(title),
-					 "EverLive [USERSPACE VFIO] — Waiting for HDMI signal...");
+					 "EverLive Experimental — Waiting for HDMI signal...");
 			}
 			if (g_trace_mode)
 				strncat(title, " | T=teardown trace",
@@ -5300,12 +6365,18 @@ int main(int argc, char *argv[])
 	if (g_trace_requested) {
 		audio_cleanup(&audio);
 		gc573_user_it6805_audio_disable(ctx.bar0);
-		v4l2_sink_close(&v4l2_sink);
+		/*
+		 * Join the capture thread and the V4L2 pump before closing the sink:
+		 * the pump must never write into a fd that is being torn down.
+		 */
+		preview_stop();
+		v4l2_sink_close_guarded(&v4l2_sink);
 		if (standby.texture) {
 			SDL_DestroyTexture(standby.texture);
 			standby.texture = NULL;
 		}
 		gc573_no_signal_destroy(&standby.frame);
+		framegen_teardown();
 		run_teardown_trace(&ctx, &video, video_ready, window, renderer,
 				   texture);
 		return 0;
@@ -5323,19 +6394,17 @@ int main(int argc, char *argv[])
 	audio_cleanup(&audio);
 	gc573_user_it6805_audio_disable(ctx.bar0);
 	preview_stop();
-	v4l2_sink_close(&v4l2_sink);
+	/* The capture thread is joined; the framegen ring is now safe to free. */
+	framegen_teardown();
+	v4l2_sink_close_guarded(&v4l2_sink);
 	if (video_ready)
 		gc573_user_video_cleanup(&video);
-	if (texture)
-		SDL_DestroyTexture(texture);
 	if (standby.texture)
 		SDL_DestroyTexture(standby.texture);
 	gc573_no_signal_destroy(&standby.frame);
 	osd_destroy();
-	if (renderer)
-		SDL_DestroyRenderer(renderer);
-	if (window)
-		SDL_DestroyWindow(window);
+	/* preview_stop() has joined the capture thread, so the teardown is safe. */
+	presentation_destroy(&window, &renderer, &texture);
 	SDL_Quit();
 
 	if (g_led_thread_running) {

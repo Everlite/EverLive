@@ -14,11 +14,15 @@
  * snapshot once per second through a seqlock, so the control thread never
  * blocks the DMA or render path and never touches a shared mutex.
  *
- * The socket lives at $XDG_RUNTIME_DIR/everlive.sock (fallback
+ * The socket lives at $XDG_RUNTIME_DIR/everlive-experimental.sock (fallback
  * /run/user/<uid>, then /tmp/everlive-<uid>) and is protected by a lock file.
  * The lock file — not the socket — is the authoritative "is a streamer
  * running?" signal: a crashed process leaves a stale socket behind, and only
  * flock() reliably distinguishes that from a live owner.
+ *
+ * The experimental name is deliberate: the stable EverLive hub keeps its own
+ * everlive.sock, so both engines can be installed side by side and never
+ * collide.
  */
 
 #ifndef GC573_USER_IPC_H
@@ -60,7 +64,7 @@ enum gc573_ipc_mode {
 	GC573_IPC_MODE_GAMING = 1,
 };
 
-enum gc573_ipc_cmd_kind {
+	enum gc573_ipc_cmd_kind {
 	GC573_IPC_CMD_LED_SET = 0,
 	GC573_IPC_CMD_LED_MODE,
 	GC573_IPC_CMD_AUDIO_GAIN,
@@ -71,6 +75,18 @@ enum gc573_ipc_cmd_kind {
 	GC573_IPC_CMD_MODE,
 	GC573_IPC_CMD_V4L2,
 	GC573_IPC_CMD_HDR,
+	GC573_IPC_CMD_FRAMEGEN,
+};
+
+/*
+ * Frame generation mode values on the wire.  Kept in sync with
+ * enum gc573_fg_mode in gc573_user_framegen.h without including it here, so
+ * the IPC layer stays independent of the presentation pipeline.
+ */
+enum gc573_ipc_framegen_mode {
+	GC573_IPC_FG_OFF = 0,
+	GC573_IPC_FG_60_TO_120 = 1,
+	GC573_IPC_FG_30_TO_60 = 2,
 };
 
 /*
@@ -141,6 +157,20 @@ struct gc573_stats {
 	uint8_t led_r;
 	uint8_t led_g;
 	uint8_t led_b;
+
+	/* Experimental lsfg-vk frame generation */
+	char framegen_mode[12];	/* "off" | "60to120" | "30to60" */
+	double framegen_present_fps;	/* real SDL_RenderPresent rate */
+	double framegen_output_fps;	/* present_fps * 2 with lsfg-vk */
+	double framegen_unique_fps;	double framegen_raw_fps;
+	float framegen_flow_scale;
+	bool framegen_perf_mode;
+	bool framegen_low_latency;
+	bool framegen_layer_found;
+	bool framegen_dll_found;
+	bool framegen_vulkan_active;
+	bool framegen_dedup_active;
+	char framegen_dll_path[160];
 };
 
 /**
