@@ -445,6 +445,7 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 	char label_esc[64];
 	char pos_esc[24];
 	char aspect_esc[24];
+	char scale_esc[24];
 	uint64_t age_ms;
 	int n;
 
@@ -455,6 +456,7 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 	json_escape_into(label_esc, sizeof(label_esc), st.audio_label);
 	json_escape_into(pos_esc, sizeof(pos_esc), st.osd_position);
 	json_escape_into(aspect_esc, sizeof(aspect_esc), st.aspect);
+	json_escape_into(scale_esc, sizeof(scale_esc), st.scale);
 
 	n = snprintf(result, sizeof(result),
 		     "{\"proto\":%d,\"version\":\"%s\",\"pid\":%ld,"
@@ -472,7 +474,8 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 		     "\"width\":%u,\"height\":%u,\"frames\":%llu,"
 		     "\"dropped\":%llu},"
 		     "\"osd\":{\"enabled\":%s,\"position\":\"%s\"},"
-		     "\"aspect\":\"%s\",\"vsync\":%s,\"fullscreen\":%s,"
+		     "\"aspect\":\"%s\",\"scale\":\"%s\","
+		     "\"vsync\":%s,\"fullscreen\":%s,"
 		     "\"led\":{\"r\":%u,\"g\":%u,\"b\":%u},"
 		     "\"clients\":%u,\"age_ms\":%llu}",
 		     GC573_IPC_PROTO_VERSION, s->version, (long)getpid(),
@@ -494,7 +497,7 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 		     (unsigned long long)st.v4l2_frames,
 		     (unsigned long long)st.v4l2_dropped,
 		     st.osd_enabled ? "true" : "false", pos_esc,
-		     aspect_esc, st.vsync ? "true" : "false",
+		     aspect_esc, scale_esc, st.vsync ? "true" : "false",
 		     st.fullscreen ? "true" : "false",
 		     st.led_r, st.led_g, st.led_b,
 		     (unsigned int)gc573_ipc_has_clients(),
@@ -521,7 +524,7 @@ static void ipc_send_hello(struct ipc_server *s, struct ipc_client *c,
 		     "\"led.set\",\"led.mode.set\",\"audio.volume.set\","
 		     "\"audio.mute.set\",\"osd.set\",\"osd.position.set\","
 		     "\"aspect.set\",\"mode.set\",\"v4l2.set\","
-		     "\"hdr.set\"]}",
+		     "\"hdr.set\",\"scale.set\"]}",
 		     GC573_IPC_PROTO_VERSION, s->version, (long)getpid(),
 		     path_esc);
 	if (n > 0 && (size_t)n < sizeof(result))
@@ -719,6 +722,29 @@ static void ipc_handle_aspect(struct ipc_client *c, const char *id,
 	ipc_push_and_reply(c, id, &cmd);
 }
 
+static void ipc_handle_scale(struct ipc_client *c, const char *id,
+			     const char *line)
+{
+	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_SCALE };
+	char mode[16];
+
+	if (!json_get_string(line, "mode", mode, sizeof(mode))) {
+		ipc_error(c, id, -32602, "invalid params: mode required");
+		return;
+	}
+
+	if (!strcasecmp(mode, "integer") || !strcasecmp(mode, "nearest"))
+		cmd.a = 1;
+	else if (!strcasecmp(mode, "fit") || !strcasecmp(mode, "aspect"))
+		cmd.a = 0;
+	else {
+		ipc_error(c, id, -32602, "unknown mode: fit|integer");
+		return;
+	}
+
+	ipc_push_and_reply(c, id, &cmd);
+}
+
 static void ipc_handle_hdr(struct ipc_client *c, const char *id,
 			   const char *line)
 {
@@ -844,6 +870,8 @@ static void ipc_handle_line(struct ipc_server *s, struct ipc_client *c,
 		ipc_handle_v4l2(c, has_id ? id : NULL, line);
 	} else if (strcmp(method, "hdr.set") == 0) {
 		ipc_handle_hdr(c, has_id ? id : NULL, line);
+	} else if (strcmp(method, "scale.set") == 0) {
+		ipc_handle_scale(c, has_id ? id : NULL, line);
 	} else {
 		ipc_error(c, has_id ? id : NULL, -32601, "method not found");
 	}

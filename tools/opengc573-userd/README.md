@@ -86,8 +86,9 @@ gc573_user_streamer [PCI_ADDRESS] [OPTIONS]
   --hdr-exposure EV    Exposure bias for the tonemapper (-2.0 .. +2.0)
 ```
 
-Game-window hotkeys: <kbd>f</kbd>/<kbd>F11</kbd> fullscreen, <kbd>h</kbd> HDR tonemapper, <kbd>a</kbd> aspect ratio,
-<kbd>p</kbd> OSD position, <kbd>o</kbd>/<kbd>i</kbd>/<kbd>Tab</kbd> stats overlay,
+Game-window hotkeys: <kbd>f</kbd>/<kbd>F11</kbd> fullscreen, <kbd>1</kbd>/<kbd>l</kbd> scaling (fit/integer),
+<kbd>h</kbd> HDR tonemapper, <kbd>a</kbd> aspect ratio, <kbd>↑</kbd>/<kbd>↓</kbd> (or <kbd>+</kbd>/<kbd>-</kbd>) volume, <kbd>m</kbd> mute,
+<kbd>F1</kbd>/<kbd>?</kbd> help overlay, <kbd>p</kbd> OSD position, <kbd>o</kbd>/<kbd>i</kbd>/<kbd>Tab</kbd> stats overlay,
 <kbd>s</kbd>/<kbd>F10</kbd> overlay + cursor, <kbd>Esc</kbd>/<kbd>q</kbd> quit.
 
 ## Remote Control Socket
@@ -115,7 +116,7 @@ render loop through a seqlock, so remote queries never touch the DMA path.
 ```console
 $ printf '{"jsonrpc":"2.0","id":1,"method":"status.get"}\n' \
     | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/everlive.sock"
-{"jsonrpc":"2.0","id":1,"result":{"proto":1,"version":"1.3.0",...}}
+{"jsonrpc":"2.0","id":1,"result":{"proto":1,"version":"1.3.1",...}}
 ```
 
 ## HDR10 / HLG to SDR

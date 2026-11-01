@@ -22,7 +22,7 @@ except ImportError:  # imported as a module from another working directory
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from everlive_client import EverLiveIpcClient, probe as ipc_probe
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 CONFIG_DIR = os.path.expanduser("~/.config/everlive")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
@@ -49,6 +49,12 @@ OSD_POSITION_OPTIONS = [
     ("Top Left", "tl"),
 ]
 
+SCALE_OPTIONS = [
+    ("Aspect Fit (Bilinear)", "fit"),
+    ("Integer Scale (Nearest)", "integer"),
+]
+SCALE_MODES = {key for _, key in SCALE_OPTIONS}
+
 DEFAULT_SETTINGS = {
     "v4l2_loopback": True,
     "aspect_ratio": "auto",
@@ -57,6 +63,7 @@ DEFAULT_SETTINGS = {
     "audio_tap": False,
     "hdr_tonemap": True,
     "hdr_exposure": 0.0,
+    "scale_mode": "fit",
     "minimize_to_tray": True,
 }
 
@@ -91,6 +98,8 @@ def load_settings() -> dict:
     if not isinstance(settings.get("hdr_exposure"), (int, float)):
         settings["hdr_exposure"] = 0.0
     settings["hdr_exposure"] = max(-2.0, min(2.0, float(settings["hdr_exposure"])))
+    if settings.get("scale_mode") not in SCALE_MODES:
+        settings["scale_mode"] = "fit"
     # "bitstream" used to be a separate EDID profile.  Every built-in profile
     # now advertises AC-3/DTS, so old settings migrate to the unified default.
     if settings.get("edid_profile") == "bitstream":
@@ -1223,7 +1232,9 @@ class GameStreamer:
                     osd_pos: str = "tr",
                     audio_tap: Optional[str] = None,
                     hdr: bool = True,
-                    hdr_exposure: float = 0.0) -> bool:
+                    hdr_exposure: float = 0.0,
+                    scale: str = "fit",
+                    volume: float = 1.0) -> bool:
         """Launch the blob-free userspace VFIO streamer directly."""
         if _vfio_streamer_running():
             print("[!] A userspace streamer is already running; refusing to start a second instance.")
@@ -1290,6 +1301,11 @@ class GameStreamer:
         if aspect != "auto":
             cmd.extend(["--aspect", aspect])
 
+        if scale not in SCALE_MODES:
+            scale = "fit"
+        cmd.extend(["--scale", scale])
+        cmd.extend(["--volume", f"{volume:.2f}"])
+
         if v4l2_device:
             cmd.extend(["--v4l2", v4l2_device])
         if audio_tap:
@@ -1350,7 +1366,7 @@ class GameStreamer:
             return False
         return True
 
-    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None, osd: bool = True, osd_pos: str = "tr", audio_tap: Optional[str] = None, hdr: bool = True, hdr_exposure: float = 0.0) -> bool:
+    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None, osd: bool = True, osd_pos: str = "tr", audio_tap: Optional[str] = None, hdr: bool = True, hdr_exposure: float = 0.0, scale: str = "fit") -> bool:
         if self.is_running:
             return True
 
@@ -1367,7 +1383,9 @@ class GameStreamer:
                                     osd_pos=osd_pos,
                                     audio_tap=audio_tap,
                                     hdr=hdr,
-                                    hdr_exposure=hdr_exposure)
+                                    hdr_exposure=hdr_exposure,
+                                    scale=scale,
+                                    volume=volume)
 
         if headless:
             print("[!] Headless/Studio mode requires the userspace VFIO engine.")
@@ -1688,7 +1706,7 @@ if HAS_QT:
             self.setWindowTitle("EverLive - Console Hub")
             # Compact console-hub layout: the cards below are sized so the
             # window never needs more than ~1080p of vertical space.
-            self.setFixedSize(920, 760)
+            self.setFixedSize(920, 800)
 
             # Application & Window Icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "everlive.png")
@@ -2467,6 +2485,26 @@ if HAS_QT:
 
             grid_video.addLayout(h_exposure, 1, 3)
 
+            grid_video.addWidget(_field(
+                "Scaling Mode",
+                "Integer Scale picks the largest whole multiple of the "
+                "source (crisp pixels for retro/720p). Falls back to Aspect "
+                "Fit when the monitor is smaller or the content is anamorphic."),
+                2, 0)
+
+            self.combo_scale = QComboBox()
+            for text, key in SCALE_OPTIONS:
+                self.combo_scale.addItem(text, key)
+            saved_scale = self.saved_cfg.get("scale_mode", "fit")
+            scale_idx = self.combo_scale.findData(saved_scale)
+            if scale_idx >= 0:
+                self.combo_scale.setCurrentIndex(scale_idx)
+            self.combo_scale.setToolTip(
+                "Forwarded as --scale. Applies live over IPC while the "
+                "engine runs. Hotkey 'L' in the gaming window cycles it.")
+            self.combo_scale.currentIndexChanged.connect(self.on_scale_changed)
+            grid_video.addWidget(self.combo_scale, 2, 1)
+
             root_layout.addWidget(card_video)
 
             # --- Section B: audio & hardware ----------------------------
@@ -2882,21 +2920,22 @@ if HAS_QT:
                 self._set_launch_running(False)
 
         def _poll_remote_status(self):
-            if self._remote and self._ipc is not None:
+            if self._ipc is not None and self._ipc.connected:
                 self._ipc.request_status()
 
         def _on_remote_status(self, status: Dict):
             """Render a snapshot published by the remote streamer."""
             self._remote_status = status
-            if not self._remote or self.streamer.is_running:
-                return
-
             signal_info = status.get("signal") or {}
             video = status.get("video") or {}
             audio = status.get("audio") or {}
             v4l2 = status.get("v4l2") or {}
 
+            # Always sync engine controls (volume, mute, aspect, scale) into the GUI
             self._sync_remote_controls(status, audio)
+
+            if not self._remote or self.streamer.is_running:
+                return
 
             if hasattr(self, "lbl_audio_fmt"):
                 self.lbl_audio_fmt.setText(audio.get("label") or "No Audio")
@@ -2949,6 +2988,14 @@ if HAS_QT:
                     self.combo_aspect.blockSignals(True)
                     self.combo_aspect.setCurrentIndex(idx)
                     self.combo_aspect.blockSignals(False)
+
+            scale = status.get("scale")
+            if scale in SCALE_MODES:
+                idx = self.combo_scale.findData(scale)
+                if idx >= 0 and idx != self.combo_scale.currentIndex():
+                    self.combo_scale.blockSignals(True)
+                    self.combo_scale.setCurrentIndex(idx)
+                    self.combo_scale.blockSignals(False)
 
             osd = status.get("osd") or {}
             if (isinstance(osd.get("enabled"), bool) and
@@ -3173,6 +3220,9 @@ if HAS_QT:
                              if self.chk_audio_tap.isChecked() else None)
                 want_hdr = self.chk_hdr.isChecked()
                 hdr_exposure = float(self.spin_hdr_exposure.value())
+                scale_mode = self.combo_scale.currentData() or "fit"
+                if scale_mode not in SCALE_MODES:
+                    scale_mode = "fit"
 
                 if v4l2_device and not os.path.exists(v4l2_device):
                     self._set_vfio_notice(
@@ -3193,6 +3243,7 @@ if HAS_QT:
                     "audio_tap": bool(audio_tap),
                     "hdr_tonemap": want_hdr,
                     "hdr_exposure": hdr_exposure,
+                    "scale_mode": scale_mode,
                 })
                 self.streamer.aspect = aspect
                 success = self.streamer.start(
@@ -3206,7 +3257,8 @@ if HAS_QT:
                     osd_pos=osd_pos,
                     audio_tap=audio_tap,
                     hdr=want_hdr,
-                    hdr_exposure=hdr_exposure)
+                    hdr_exposure=hdr_exposure,
+                    scale=scale_mode)
                 if success:
                     self._set_launch_running(True, "gaming")
                     self._vfio_notice_until = 0.0
@@ -3266,6 +3318,9 @@ if HAS_QT:
                          if self.chk_audio_tap.isChecked() else None)
             want_hdr = self.chk_hdr.isChecked()
             hdr_exposure = float(self.spin_hdr_exposure.value())
+            scale_mode = self.combo_scale.currentData() or "fit"
+            if scale_mode not in SCALE_MODES:
+                scale_mode = "fit"
             self.streamer.aspect = aspect
             save_settings({
                 "v4l2_loopback": want_v4l2,
@@ -3273,6 +3328,7 @@ if HAS_QT:
                 "audio_tap": bool(audio_tap),
                 "hdr_tonemap": want_hdr,
                 "hdr_exposure": hdr_exposure,
+                "scale_mode": scale_mode,
             })
             success = self.streamer.start(
                 fullscreen=False,
@@ -3283,7 +3339,9 @@ if HAS_QT:
                 aspect=aspect,
                 audio_tap=audio_tap,
                 hdr=want_hdr,
-                hdr_exposure=hdr_exposure)
+                hdr_exposure=hdr_exposure,
+                scale=scale_mode,
+                volume=vol)
             if success:
                 self._set_launch_running(True, "studio")
                 self._vfio_notice_until = 0.0
@@ -3319,6 +3377,18 @@ if HAS_QT:
                 self._ipc.set_aspect(aspect)
             elif self.streamer.is_running:
                 print("[*] Aspect ratio saved; restart the stream to apply it.")
+
+        def on_scale_changed(self, *_):
+            mode = self.combo_scale.currentData() or "fit"
+            if mode not in SCALE_MODES:
+                mode = "fit"
+            self.saved_cfg["scale_mode"] = mode
+            self.streamer.scale_mode = mode
+            save_settings({"scale_mode": mode})
+            if self._ipc is not None and self._ipc.connected:
+                self._ipc.set_scale(mode)
+            elif self.streamer.is_running:
+                print("[*] Scaling mode saved; restart the stream to apply it.")
 
         def on_osd_changed(self, enabled: bool):
             self.saved_cfg["osd_enabled"] = bool(enabled)

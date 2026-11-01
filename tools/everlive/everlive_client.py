@@ -300,6 +300,13 @@ if QSocketNotifier is not None:
                 "exposure": max(-2.0, min(2.0, float(exposure_ev))),
             })
 
+        def set_scale(self, mode: str) -> bool:
+            """Scaling mode: ``fit`` (bilinear) or ``integer`` (nearest).
+
+            Integer scaling picks the largest whole multiple of the source.
+            """
+            return self.request("scale.set", {"mode": str(mode)})
+
         # -- wire ------------------------------------------------------
 
         def _send(self, message) -> bool:

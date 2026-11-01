@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.1] - 2026-11-01
+
+### Added
+- **Pixel-Perfect Integer Scaling Mode:**
+  - Added zero-blur integer scaling mode (`SCALE_INTEGER`) for retro and fixed-resolution console sources (e.g., 720p PS3/Xbox 360/Switch or 1080p sources on 1440p/4K panels). Preserves square Pixel Aspect Ratio (PAR) with nearest-neighbor texture sampling, 4:2:2 chroma alignment (`dst.x &= ~1`), and automatic fallback to bilinear aspect-correct fit when `factor < 1` or aspect ratio is anamorphic.
+  - Switchable via `1` or `l` keyboard hotkeys in the SDL2 gaming window, CLI argument `--scale integer|fit`, and dynamic dropdown in the Console Hub GUI.
+  - Controllable dynamically over JSON-RPC IPC (`scale.set` and `status.get`).
+- **In-Game Audio Controls & 2-Way GUI Synchronization:**
+  - Added keyboard hotkeys `↑` / `↓` (+5% / -5%) and `+` / `-` (including Numpad) for live volume adjustment, and `m` for instant audio mute in the gaming window.
+  - Automatic unmute when raising volume from a muted state.
+  - Real-time 2-way IPC sync: Console Hub GUI continuously polls and reflects keyboard hotkey volume and mute changes on its sliders and buttons.
+  - Added `--volume <0-100>` / `-v` CLI flag to configure startup audio level.
+- **Jitter-Free Stats OSD with Live DMA Latency:**
+  - Added live DMA capture latency measurement (`DMA: %4.1fms`) sourced from DMA ring buffer completion to frame display.
+  - Added active integer scaling factor indicator (e.g., `2x Integer`).
+  - Stabilized OSD layout width to a padded 4-character grid with generous minimum width (`max_len = ((max_len + 3) / 4) * 4 + 2`) to eliminate box twitching/wobbling on fractional latency changes.
+- **F1 / ? Hotkey Help Card Overlay:**
+  - Added on-screen keyboard shortcut reference card centered in the viewport, toggled via `F1` or `?`.
+  - `Esc` cleanly dismisses the help card first before quitting the streamer.
+
+---
+
 ## [1.3.0] - 2026-10-31
 
 ### Added
