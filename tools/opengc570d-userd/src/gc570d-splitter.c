@@ -4193,7 +4193,7 @@ gc570d_splitter_windows_channel2_connect(struct gc570d_dev *gc,
 
 		ret = gc570d_i2c_read8(gc, &gc570d_splitter_bus, 0x70, 0x34,
 				       &edid_ctrl, &last_irq, &last_status);
-		if (!ret && (edid_ctrl & BIT(0)) && bridge_default) {
+		if (!ret && (edid_ctrl & BIT(0)) && bridge_default && READ_ONCE(gc->hdmi1_auto_ready)) {
 			u8 aux88_p1 = 0;
 			u8 auxc1_p1 = 0;
 
