@@ -351,8 +351,7 @@ void *dma_alloc_coherent(struct device *dev, size_t size,
 	if (vaddr == MAP_FAILED)
 		return NULL;
 
-	/* Lock pages in RAM for IOMMU DMA */
-	mlock(vaddr, aligned);
+	/* Fault in pages before VFIO_IOMMU_MAP_DMA pins them in the kernel */
 	memset(vaddr, 0, aligned);
 
 	pthread_mutex_lock(&g_dma_map_lock);
@@ -383,8 +382,10 @@ void *dma_alloc_coherent(struct device *dev, size_t size,
 			int err = errno;
 			pthread_mutex_unlock(&g_dma_map_lock);
 			fprintf(stderr,
-				"[gc570d ERR ] VFIO_IOMMU_MAP_DMA failed (size=%zu iova=0x%llx): %s (check RLIMIT_MEMLOCK)\n",
-				aligned, (unsigned long long)iova, strerror(err));
+				"[gc570d ERR ] VFIO_IOMMU_MAP_DMA failed (size=%zu iova=0x%llx): %s\n"
+				"              Fix: sudo setcap cap_ipc_lock=+ep %s/opengc570d-userd\n",
+				aligned, (unsigned long long)iova, strerror(err),
+				"tools/opengc570d-userd");
 			munmap(vaddr, aligned);
 			return NULL;
 		}
@@ -2633,7 +2634,12 @@ int main(int argc, char **argv)
 
 	/* Raise RLIMIT_MEMLOCK so VFIO_IOMMU_MAP_DMA can pin DMA buffers */
 	struct rlimit rlim = { RLIM_INFINITY, RLIM_INFINITY };
-	setrlimit(RLIMIT_MEMLOCK, &rlim);
+	if (setrlimit(RLIMIT_MEMLOCK, &rlim) < 0) {
+		if (getrlimit(RLIMIT_MEMLOCK, &rlim) == 0 && rlim.rlim_cur < rlim.rlim_max) {
+			rlim.rlim_cur = rlim.rlim_max;
+			(void)setrlimit(RLIMIT_MEMLOCK, &rlim);
+		}
+	}
 
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);

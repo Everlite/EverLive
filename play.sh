@@ -52,11 +52,29 @@ fi
 if ! make -C "${USERD_DIR}" -q >/dev/null 2>&1; then
     echo "[*] Aktualisiere/Kompiliere EverLive Userspace VFIO Engine..."
     make -C "${USERD_DIR}" -j"$(nproc)"
-    setcap cap_ipc_lock=+ep "${STREAMER_BIN}" 2>/dev/null || true
 fi
 
-# 2. Raise soft memlock limit to hard limit for native 4K DMA mapping
-ulimit -S -l unlimited 2>/dev/null || true
+# 2. Raise soft memlock limit to hard limit and ensure cap_ipc_lock=+ep on the binary
+# (rebuilding with make strips file capabilities, which otherwise caps VFIO DMA at 8 MiB)
+ulimit -S -l unlimited 2>/dev/null || ulimit -S -l "$(ulimit -H -l)" 2>/dev/null || true
+if [ -f "${STREAMER_BIN}" ] && command -v setcap >/dev/null 2>&1; then
+    NEED_CAP=1
+    if command -v getcap >/dev/null 2>&1; then
+        if getcap "${STREAMER_BIN}" 2>/dev/null | grep -q "cap_ipc_lock"; then
+            NEED_CAP=0
+        fi
+    fi
+    if [ "$NEED_CAP" -eq 1 ]; then
+        if ! setcap cap_ipc_lock=+ep "${STREAMER_BIN}" 2>/dev/null; then
+            echo "[*] Setze cap_ipc_lock=+ep auf $(basename "${STREAMER_BIN}") (für VFIO IOMMU DMA Mapping)..."
+            if command -v pkexec >/dev/null 2>&1 && [ ! -t 0 ]; then
+                pkexec setcap cap_ipc_lock=+ep "${STREAMER_BIN}" || true
+            else
+                sudo setcap cap_ipc_lock=+ep "${STREAMER_BIN}" || true
+            fi
+        fi
+    fi
+fi
 
 # 3. Check PCI driver binding: if not bound to vfio-pci, bind seamlessly
 IS_VFIO=0
