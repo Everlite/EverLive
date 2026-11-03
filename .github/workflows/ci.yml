@@ -34,11 +34,14 @@ jobs:
       - name: Compile EverLive Userspace Engine (GCC)
         run: |
           make -C tools/opengc573-userd -j"$(nproc)"
+          make -C tools/opengc570d-userd CC=gcc -j"$(nproc)"
           make -C tools/opengc573-userd clean
+          make -C tools/opengc570d-userd clean
 
       - name: Compile EverLive Userspace Engine (Clang)
         run: |
           make -C tools/opengc573-userd CC=clang -j"$(nproc)"
+          make -C tools/opengc570d-userd CC=clang -j"$(nproc)"
 
       - name: Verify Python syntax
         run: |
@@ -52,3 +55,5 @@ jobs:
           bash -n play.sh
           bash -n build.sh
           bash -n tools/opengc573-userd/vfio_pci_bind.sh
+          bash -n tools/opengc570d-userd/gc570d-vfio-bind.sh
+          bash -n tools/opengc570d-userd/gc570d-sleep.sh

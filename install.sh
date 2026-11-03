@@ -13,6 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 USERD_DIR="${SCRIPT_DIR}/tools/opengc573-userd"
+GC570D_DIR="${SCRIPT_DIR}/tools/opengc570d-userd"
 VIEWER_DIR="${SCRIPT_DIR}/tools/everlive"
 
 # ANSI Farben
@@ -220,9 +221,14 @@ detect_and_install_deps
 echo -e "\n${BLUE}[2/5] Kompiliere EverLive Userspace VFIO Engine...${NC}"
 make -C "${USERD_DIR}" clean >/dev/null 2>&1 || true
 make -C "${USERD_DIR}" -j"$(nproc)"
-chmod +x "${USERD_DIR}/gc573_user_streamer" "${USERD_DIR}/everlive_userd" "${USERD_DIR}/gc573_user_probe" "${SCRIPT_DIR}/play.sh"
+echo -e "${BLUE}[*] Kompiliere GC570D (Live Gamer DUO) Userspace Engine...${NC}"
+make -C "${GC570D_DIR}" clean >/dev/null 2>&1 || true
+make -C "${GC570D_DIR}" -j"$(nproc)"
+chmod +x "${USERD_DIR}/gc573_user_streamer" "${USERD_DIR}/everlive_userd" "${USERD_DIR}/gc573_user_probe" \
+    "${GC570D_DIR}/opengc570d-userd" "${GC570D_DIR}/gc570d-ctl" "${SCRIPT_DIR}/play.sh"
 setcap cap_ipc_lock=+ep "${USERD_DIR}/gc573_user_streamer" 2>/dev/null || true
-echo -e "${GREEN}[+] Userspace VFIO Engine erfolgreich gebaut & berechtigt!${NC}"
+setcap cap_ipc_lock=+ep "${GC570D_DIR}/opengc570d-userd" 2>/dev/null || true
+echo -e "${GREEN}[+] Userspace VFIO Engines erfolgreich gebaut & berechtigt!${NC}"
 
 # Python GUI-Umgebung (PySide6) für Benutzer prüfen und bei Bedarf einrichten
 echo -e "\n[*] Prüfe Python-Umgebung für EverLive Studio..."
@@ -262,23 +268,27 @@ elif modinfo v4l2loopback >/dev/null 2>&1; then
     mkdir -p /etc/modules-load.d /etc/modprobe.d
     echo "v4l2loopback" > /etc/modules-load.d/everlive-v4l2loopback.conf
     cat > /etc/modprobe.d/everlive-v4l2loopback.conf <<EOF
-# Managed by EverLive: virtual camera node for OBS / Discord / FFmpeg.
-# exclusive_caps=0 keeps VIDEO_CAPTURE advertised while no writer is active,
-# so OBS never drops the device from its list.
-options v4l2loopback video_nr=10 card_label="EverLive Capture" exclusive_caps=0
+# Managed by EverLive: virtual camera nodes for OBS / Discord / FFmpeg.
+# /dev/video10 carries HDMI 1 (GC570D) or the GC573 feed; /dev/video11 is
+# HDMI 2 on the Live Gamer DUO.  exclusive_caps=0 keeps VIDEO_CAPTURE
+# advertised while no writer is active, so OBS never drops the devices.
+options v4l2loopback video_nr=10,11 card_label="EverLive Capture,EverLive Capture HDMI 2" exclusive_caps=0
 EOF
     if ! lsmod | grep -q '^v4l2loopback'; then
         modprobe v4l2loopback 2>/dev/null || true
     fi
-    if [ -e /dev/video10 ]; then
+    if [ -e /dev/video10 ] && [ -e /dev/video11 ]; then
         if [ "$(cat /sys/module/v4l2loopback/parameters/exclusive_caps 2>/dev/null || echo 0)" = "1" ]; then
-            echo -e "${YELLOW}[!] /dev/video10 existiert, aber die laufende Instanz nutzt noch exclusive_caps=1.${NC}"
-            echo -e "${YELLOW}    Nach einem Neustart (oder 'sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback') gilt exclusive_caps=0.${NC}"
+            echo -e "${YELLOW}[!] /dev/video10 and /dev/video11 exist, but the running instance still uses exclusive_caps=1.${NC}"
+            echo -e "${YELLOW}    After a reboot (or 'sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback') exclusive_caps=0 applies.${NC}"
         else
-            echo -e "${GREEN}[+] /dev/video10 'EverLive Capture' bereit (exclusive_caps=0).${NC}"
+            echo -e "${GREEN}[+] /dev/video10 'EverLive Capture' and /dev/video11 'EverLive Capture HDMI 2' ready (exclusive_caps=0).${NC}"
         fi
+    elif [ -e /dev/video10 ]; then
+        echo -e "${YELLOW}[!] /dev/video10 exists, but /dev/video11 (DUO HDMI 2) is missing.${NC}"
+        echo -e "${YELLOW}    Reload: sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback video_nr=10,11 card_label=\"EverLive Capture,EverLive Capture HDMI 2\" exclusive_caps=0${NC}"
     else
-        echo -e "${YELLOW}[!] v4l2loopback konfiguriert, aber /dev/video10 fehlt noch (Neustart nötig).${NC}"
+        echo -e "${YELLOW}[!] v4l2loopback configured, but /dev/video10 and /dev/video11 are still missing (reboot required).${NC}"
     fi
 else
     echo -e "${YELLOW}[!] v4l2loopback nicht verfügbar; Virtual Camera bleibt bis zur Installation aus.${NC}"
@@ -333,7 +343,8 @@ vfio_iommu_type1
 EOF
 
 cat > /etc/modprobe.d/everlive-vfio.conf <<EOF
-# EverLive: Auto-bind AVerMedia Live Gamer 4K (GC573) and Live Gamer BOLT (GC555) to vfio-pci at boot
+# EverLive: Auto-bind AVerMedia Live Gamer 4K (GC573), Live Gamer BOLT (GC555)
+# and Live Gamer DUO (GC570D, same 1461:0054 device ID) to vfio-pci at boot
 options vfio-pci ids=1461:0054,1461:0055
 EOF
 

@@ -15,7 +15,9 @@ TARGET_HOME=$(eval echo "~${TARGET_USER}")
 echo "[*] Deinstalliere EverLive..."
 
 # 1. Laufende Daemons beenden
-killall -9 everlive_userd gc573_user_streamer 2>/dev/null || true
+killall -9 everlive_userd gc573_user_streamer opengc570d-userd gc570d-ctl 2>/dev/null || true
+rm -f "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/gc570d/control.sock" 2>/dev/null || true
+rm -f /dev/shm/gc570d_v4l2_shm 2>/dev/null || true
 
 # 2. VFIO & Memlock Regeln entfernen
 rm -f /etc/udev/rules.d/99-gc573-vfio.rules
