@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.2] - 2026-11-03
+
+### Fixed
+- **Direct Headless / Studio Mode Launch:**
+  - Resolved an unassigned volume variable in Console Hub GUI (`start_studio()`) that prevented launching directly into Headless/OBS mode without starting the Gaming Screen first.
+- **PipeWire Virtual Audio Tap Isolation:**
+  - Added `PW_STREAM_FLAG_DONT_RECONNECT` and `"node.dont-reconnect" = "true"` to the in-process audio tap stream, preventing WirePlumber from falling back to default playback devices (speakers/headphones).
+  - Hardened runtime sink provisioning via `pactl load-module module-null-sink` fallback so the virtual capture sink remains persistent across client lifecycles, eliminating duplicate audio playback when Virtual Audio Track is enabled.
+
+---
+
 ## [1.3.1] - 2026-11-01
 
 ### Added

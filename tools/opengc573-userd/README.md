@@ -116,7 +116,7 @@ render loop through a seqlock, so remote queries never touch the DMA path.
 ```console
 $ printf '{"jsonrpc":"2.0","id":1,"method":"status.get"}\n' \
     | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/everlive.sock"
-{"jsonrpc":"2.0","id":1,"result":{"proto":1,"version":"1.3.1",...}}
+{"jsonrpc":"2.0","id":1,"result":{"proto":1,"version":"1.3.2",...}}
 ```
 
 ## HDR10 / HLG to SDR

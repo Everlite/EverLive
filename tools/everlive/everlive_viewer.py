@@ -22,7 +22,7 @@ except ImportError:  # imported as a module from another working directory
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from everlive_client import EverLiveIpcClient, probe as ipc_probe
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 CONFIG_DIR = os.path.expanduser("~/.config/everlive")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
@@ -3321,6 +3321,7 @@ if HAS_QT:
             scale_mode = self.combo_scale.currentData() or "fit"
             if scale_mode not in SCALE_MODES:
                 scale_mode = "fit"
+            vol = self.slider_vol.value() / 100.0
             self.streamer.aspect = aspect
             save_settings({
                 "v4l2_loopback": want_v4l2,

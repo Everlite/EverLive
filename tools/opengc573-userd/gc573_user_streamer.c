@@ -50,7 +50,7 @@
  * tools/everlive/everlive_viewer.py.
  */
 #ifndef EVERLIVE_VERSION
-#define EVERLIVE_VERSION "1.3.1"
+#define EVERLIVE_VERSION "1.3.2"
 #endif
 
 /* SDL_HINT_APP_NAME was added after the 2.0.20 headers some distros ship. */
