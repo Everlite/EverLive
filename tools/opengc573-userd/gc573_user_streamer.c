@@ -6669,7 +6669,6 @@ int main(int argc, char *argv[])
 				       (double)g_preview.taken_age_us / 1000.0);
 				pthread_mutex_lock(&g_v4l2_lock);
 				if (v4l2_sink.path[0]) {
-					pthread_mutex_lock(&g_v4l2_lock);
 					if (v4l2_sink.configured)
 						printf("[V4L2] %ux%u YUYV%s | written %lu | dropped %lu\n",
 						       v4l2_sink.width, v4l2_sink.height,
@@ -6682,7 +6681,6 @@ int main(int argc, char *argv[])
 						       v4l2_sink.target_height,
 						       v4l2_sink.path,
 						       (unsigned long)v4l2_sink.dropped);
-					pthread_mutex_unlock(&g_v4l2_lock);
 				}
 				pthread_mutex_unlock(&g_v4l2_lock);
 				if (audio.streaming && audio.bt_playing) {

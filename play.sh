@@ -262,6 +262,7 @@ fi
 # The GC570D daemon defaults to headless, so add --sdl unless the caller
 # explicitly asked for headless/studio mode.
 streamer_exec() {
+    pkill -x everlive_userd 2>/dev/null || true
     local -a extra=()
     if [ "$CARD_MODEL" = "gc570d" ]; then
         local headless=0 has_sdl=0 has_v4l2_2=0
