@@ -970,14 +970,15 @@ def _wpctl_everlive_stream_ids() -> list:
     except Exception:
         return ids
 
-    in_audio = False
+    in_streams = False
     for line in out.splitlines():
         line_s = line.strip()
-        if line_s.startswith("Audio"):
-            in_audio = True
-        elif in_audio and (line_s.startswith("Video") or line_s.startswith("Settings")):
-            in_audio = False
-        if in_audio and _is_everlive_audio_line(line_s):
+        if "Streams:" in line_s:
+            in_streams = True
+        elif in_streams and ("Video" in line_s or "Settings" in line_s or
+                             (line_s.endswith(":") and "Streams:" not in line_s)):
+            in_streams = False
+        if in_streams and _is_everlive_audio_line(line_s):
             for part in line_s.split():
                 clean = part.strip(".│*")
                 if clean.isdigit():
@@ -1014,11 +1015,34 @@ def _pactl_everlive_sink_ids() -> list:
     return ids
 
 
+def set_audio_stream_unity():
+    """Sets the userspace SDL2 sink-input in PipeWire to 100% (unity gain).
+
+    Userspace VFIO engines (gc573_user_streamer and gc570d-user) perform
+    software volume scaling internally with a clickless ramp and hotkey
+    controls. The host PipeWire stream must remain at unity (100%) so that
+    volume is not double-attenuated.
+    """
+    try:
+        for target in _wpctl_everlive_stream_ids():
+            subprocess.run(["wpctl", "set-volume", target, "1.00"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+    try:
+        for target in _pactl_everlive_sink_ids():
+            subprocess.run(["pactl", "set-sink-input-volume", target, "100%"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
 def set_audio_volume(vol_pct: int):
     """Sets EverLive stream volume via wpctl / pactl (0-150%).
 
-    Covers both the kernel PipeWire stream and the SDL2 sink-input created by
-    gc573_user_streamer in VFIO mode.
+    Used primarily for kernel mode playback where the kernel ALSA stream
+    is controlled directly through the host audio server.
     """
     vol_float = vol_pct / 100.0
     try:
@@ -3530,8 +3554,11 @@ if HAS_QT:
             # SDL creates its sink-input only once the first HDMI audio
             # format arrives, so apply volume/mute twice.
             for delay in (1200, 3000):
-                QTimer.singleShot(
-                    delay, lambda: set_audio_volume(self.slider_vol.value()))
+                if self.vfio_mode:
+                    QTimer.singleShot(delay, set_audio_stream_unity)
+                else:
+                    QTimer.singleShot(
+                        delay, lambda: set_audio_volume(self.slider_vol.value()))
                 QTimer.singleShot(delay, lambda: set_audio_mute(self.muted))
 
         def _check_audio_sink(self):
@@ -4092,8 +4119,13 @@ if HAS_QT:
                 vsync=is_vsync, streamer_mode=is_streamer)
             if success:
                 self._set_launch_running(True, "gaming")
-                set_audio_volume(self.slider_vol.value())
-                QTimer.singleShot(600, lambda: set_audio_volume(self.slider_vol.value()))
+                if self.vfio_mode:
+                    set_audio_stream_unity()
+                    QTimer.singleShot(600, set_audio_stream_unity)
+                else:
+                    set_audio_volume(self.slider_vol.value())
+                    QTimer.singleShot(600, lambda: set_audio_volume(self.slider_vol.value()))
+                set_audio_mute(self.muted)
 
         def start_studio(self):
             if self.streamer.is_running:
@@ -4595,7 +4627,6 @@ if HAS_QT:
             self._set_mute_visual(not self.muted)
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_mute(self.muted)
-                return
             if self.duo_mode and self.streamer.is_running:
                 self.streamer.ctl("mute", "1" if self.muted else "0")
             set_audio_mute(self.muted)
@@ -4619,10 +4650,10 @@ if HAS_QT:
                 return
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_volume(val / 100.0)
-                return
-            if self.duo_mode and self.streamer.is_running:
+            elif self.duo_mode and self.streamer.is_running:
                 self.streamer.ctl("volume", str(val))
-            set_audio_volume(val)
+            elif not self.vfio_mode:
+                set_audio_volume(val)
             if self.vfio_mode:
                 self._vfio_volume_applies = 0
 
@@ -4759,7 +4790,10 @@ if HAS_QT:
                     # Re-apply a few times: the SDL sink-input appears only after
                     # the first audio period, and the status poll is cheap.
                     if self._vfio_volume_applies < 4:
-                        set_audio_volume(self.slider_vol.value())
+                        if self.vfio_mode:
+                            set_audio_stream_unity()
+                        else:
+                            set_audio_volume(self.slider_vol.value())
                         set_audio_mute(self.muted)
                         self._vfio_volume_applies += 1
                     self._show_live(info)
@@ -5098,10 +5132,12 @@ def main():
         cli_settings = load_settings()
         if not streamer.start(preset_name=args.preset, fullscreen=args.fullscreen, volume=args.volume, vsync=args.vsync, streamer_mode=args.streamer_mode, v4l2_device=args.v4l2, headless=args.headless, aspect=args.aspect, framegen=cli_settings.get("framegen_mode", "off"), fg_flow_scale=cli_settings.get("fg_flow_scale", 1.0), fg_perf_mode=cli_settings.get("fg_perf_mode", False), fg_low_latency=cli_settings.get("fg_low_latency", True)):
             sys.exit(1)
-        if streamer.vfio_mode and args.volume != 1.0:
+        if streamer.vfio_mode:
             # The SDL2 sink-input only exists once audio starts flowing.
+            # Ensure host PipeWire stream is at 100% unity gain so --volume
+            # applies cleanly without double-scaling.
             time.sleep(1.5)
-            set_audio_volume(int(args.volume * 100))
+            set_audio_stream_unity()
         print("[+] Window opened. Press 'q' in window or Ctrl+C to exit.")
         while streamer.poll():
             time.sleep(0.5)
