@@ -258,19 +258,52 @@ static void tap_teardown_locked(struct gc573_audio_tap *tap)
 /*
  * Create the sink in-process when the config drop-in is not installed.
  *
- * PipeWire's module loader is an internal (impl) API, so the sink is created
- * through the public tooling instead: `pw-cli load-module` asks the running
- * daemon to add the adapter node.  fork/exec keeps the arguments out of a
- * shell, so the node name can never be interpreted as shell syntax.
+ * We try `pactl load-module module-null-sink` first: modules loaded through
+ * the PulseAudio server protocol remain persistent across client lifecycles
+ * within the user's session daemon.  If pactl is not available, fall back to
+ * pw-cli.
  */
 static void tap_ensure_sink(struct gc573_audio_tap *tap)
 {
+	char sink_arg[128];
 	char args[512];
 	pid_t pid;
 
 	if (__atomic_load_n(&tap->target_seen, __ATOMIC_RELAXED))
 		return;
 
+	snprintf(sink_arg, sizeof(sink_arg), "sink_name=%s", tap->node_name);
+
+	/* 1. Try pactl */
+	pid = fork();
+	if (pid == 0) {
+		int devnull = open("/dev/null", O_RDWR);
+
+		if (devnull >= 0) {
+			dup2(devnull, STDOUT_FILENO);
+			dup2(devnull, STDERR_FILENO);
+			if (devnull > STDERR_FILENO)
+				close(devnull);
+		}
+		execlp("pactl", "pactl", "load-module",
+		       "module-null-sink", sink_arg,
+		       "sink_properties=device.description=\"EverLive Capture Audio\"",
+		       (char *)NULL);
+		_exit(127);
+	}
+
+	if (pid > 0) {
+		int status = 0;
+
+		if (waitpid(pid, &status, 0) > 0 &&
+		    WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+			pr_info("Audio tap: created persistent sink '%s' via pactl",
+				tap->node_name);
+			return;
+		}
+	}
+
+	/* 2. Fallback to pw-cli */
 	snprintf(args, sizeof(args),
 		 "{ factory.name = support.null-audio-sink "
 		 "node.name = %s "
@@ -427,6 +460,7 @@ void gc573_audio_tap_set_format(unsigned int rate_hz)
 				  "EverLive Capture Tap",
 				  PW_KEY_NODE_VIRTUAL, "false",
 				  PW_KEY_TARGET_OBJECT, tap->node_name,
+				  "node.dont-reconnect", "true",
 				  NULL);
 	if (!props) {
 		pw_thread_loop_unlock(tap->loop);
@@ -453,6 +487,7 @@ void gc573_audio_tap_set_format(unsigned int rate_hz)
 
 	res = pw_stream_connect(tap->stream, PW_DIRECTION_OUTPUT, PW_ID_ANY,
 				PW_STREAM_FLAG_AUTOCONNECT |
+				PW_STREAM_FLAG_DONT_RECONNECT |
 				PW_STREAM_FLAG_MAP_BUFFERS |
 				PW_STREAM_FLAG_RT_PROCESS,
 				params, 1);
