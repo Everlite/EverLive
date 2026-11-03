@@ -37,8 +37,17 @@ STABLE_CONFIG_FILE = os.path.expanduser("~/.config/everlive/settings.json")
 
 GC573_VENDOR_ID = "0x1461"
 GC573_DEVICE_IDS = {"0x0054", "0x0055"}
+GC570D_SUBSYSTEM_ID = "0x5700"
+GC573_SUBSYSTEM_ID = "0x5730"
+MODEL_GC573 = "gc573"
+MODEL_GC570D = "gc570d"
+MODEL_NAMES = {
+    MODEL_GC573: "GC573 · LIVE GAMER 4K",
+    MODEL_GC570D: "GC570D · LIVE GAMER DUO",
+}
 ENGINE_VFIO_TEXT = "● Userspace VFIO"
 V4L2_DEFAULT_DEVICE = "/dev/video10"
+V4L2_DUO_SECOND_DEVICE = "/dev/video11"
 AUDIO_TAP_NODE = "everlive-capture-audio"
 
 ASPECT_OPTIONS = [
@@ -101,6 +110,8 @@ DEFAULT_SETTINGS = {
     "fg_flow_scale": 1.0,
     "fg_perf_mode": False,
     "fg_low_latency": True,
+    "duo_input": 0,
+    "duo_edid_bridge": True,
 }
 
 
@@ -180,6 +191,10 @@ def load_settings() -> dict:
     # The OpenGL shader pipeline (HUD protection, CAS) no longer exists.
     for stale in ("framegen_hud_protect", "cas_enabled", "cas_strength"):
         settings.pop(stale, None)
+    if settings.get("duo_input") not in (0, 1):
+        settings["duo_input"] = 0
+    if not isinstance(settings.get("duo_edid_bridge"), bool):
+        settings["duo_edid_bridge"] = True
     # "bitstream" used to be a separate EDID profile.  Every built-in profile
     # now advertises AC-3/DTS, so old settings migrate to the unified default.
     if settings.get("edid_profile") == "bitstream":
@@ -363,10 +378,13 @@ def _read_sysfs(path: str) -> str:
 
 
 def detect_gc573_driver() -> Dict[str, Optional[str]]:
-    """Return the GC573 PCI binding: vfio, kernel, or unknown.
+    """Return the capture card binding and model: vfio, kernel, or unknown.
 
-    In VFIO mode there is intentionally no /dev/video* node and no ALSA card;
-    the userspace engine owns the device instead.
+    GC573 (Live Gamer 4K) and GC570D (Live Gamer DUO) both use PCI device
+    1461:0054.  Only ``subsystem_device`` separates them: 0x5730 is the GC573
+    and 0x5700 is the GC570D.  The BOLT (1461:0055) is always a GC573-class
+    device.  In VFIO mode there is intentionally no /dev/video* node and no
+    ALSA card; the userspace engine owns the device instead.
     """
     import glob
 
@@ -374,6 +392,8 @@ def detect_gc573_driver() -> Dict[str, Optional[str]]:
         "mode": "unknown",
         "driver": None,
         "pci": None,
+        "subsystem": None,
+        "model": MODEL_GC573,
     }
 
     for dev in sorted(glob.glob("/sys/bus/pci/devices/*")):
@@ -382,7 +402,14 @@ def detect_gc573_driver() -> Dict[str, Optional[str]]:
         if vendor != GC573_VENDOR_ID or device not in GC573_DEVICE_IDS:
             continue
 
+        subsystem = _read_sysfs(os.path.join(dev, "subsystem_device")).lower()
         result["pci"] = os.path.basename(dev)
+        result["subsystem"] = subsystem or None
+        if device == "0x0054" and subsystem == GC570D_SUBSYSTEM_ID:
+            result["model"] = MODEL_GC570D
+        else:
+            result["model"] = MODEL_GC573
+
         driver_link = os.path.join(dev, "driver")
         try:
             if os.path.islink(driver_link):
@@ -390,7 +417,7 @@ def detect_gc573_driver() -> Dict[str, Optional[str]]:
                 result["driver"] = driver
                 if driver == "vfio-pci":
                     result["mode"] = "vfio"
-                elif driver == "open_gc573":
+                elif driver in ("open_gc573", "gc570d"):
                     result["mode"] = "kernel"
         except OSError:
             pass
@@ -418,20 +445,22 @@ def _proc_running(name_prefix: str) -> bool:
     return False
 
 
-def userd_dir() -> str:
+def userd_dir(model: str = MODEL_GC573) -> str:
+    folder = "opengc570d-userd" if model == MODEL_GC570D else "opengc573-userd"
     return os.path.normpath(
         os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                     "..", "opengc573-userd"))
+                     "..", folder))
 
 
-def userd_bin(name: str) -> str:
-    return os.path.join(userd_dir(), name)
+def userd_bin(name: str, model: str = MODEL_GC573) -> str:
+    return os.path.join(userd_dir(model), name)
 
 
 def _stop_vfio_daemon(wait_s: float = 0.8):
     """Release BAR0/VFIO before the userspace streamer starts."""
     for cmd in (["systemctl", "--user", "stop", "everlive-userd"],
-                ["pkill", "-x", "everlive_userd"]):
+                ["pkill", "-x", "everlive_userd"],
+                ["pkill", "-x", "opengc570d-userd"]):
         try:
             subprocess.run(cmd, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL)
@@ -439,15 +468,17 @@ def _stop_vfio_daemon(wait_s: float = 0.8):
             pass
     deadline = time.time() + wait_s
     while time.time() < deadline:
-        if not _proc_running("everlive_userd"):
+        if not (_proc_running("everlive_userd") or
+                _proc_running("opengc570d-user")):
             return
         time.sleep(0.05)
 
 
 def _vfio_streamer_running() -> bool:
-    # The binary name is longer than 15 chars, so /proc/<pid>/comm is
-    # truncated to "gc573_user_stre".
-    return _proc_running("gc573_user_stre")
+    # Both binaries are longer than 15 chars, so /proc/<pid>/comm is
+    # truncated to "gc573_user_stre" or "opengc570d-user".
+    return (_proc_running("gc573_user_stre") or
+            _proc_running("opengc570d-user"))
 
 
 def _raise_memlock_limit():
@@ -714,6 +745,35 @@ def led_hex_for_mode(mode: int) -> str:
     return f"#{red:02x}{green:02x}{blue:02x}"
 
 
+def send_gc570d_ctl(*args: str) -> Optional[str]:
+    """Send one command to a running GC570D daemon."""
+    ctl = userd_bin("gc570d-ctl", MODEL_GC570D)
+    if not os.access(ctl, os.X_OK):
+        return None
+    try:
+        return subprocess.check_output(
+            [ctl, *args], text=True, stderr=subprocess.DEVNULL, timeout=2.0)
+    except Exception:
+        return None
+
+
+def set_gc570d_led(mode: int) -> bool:
+    """Apply a GC570D LED effect through gc570d-ctl."""
+    mode = int(mode)
+    if mode == 0:
+        effect = "off"
+    elif mode == 8:
+        effect = "colorful"
+    elif mode == 9:
+        effect = "breathing"
+    else:
+        effect = "static"
+    if send_gc570d_ctl("led", effect) is None:
+        return False
+    save_settings({"led_mode": mode})
+    return True
+
+
 def set_vfio_led(mode: int) -> bool:
     """Apply an LED colour through everlive_userd (VFIO mode).
 
@@ -892,7 +952,8 @@ def _is_everlive_audio_line(line: str) -> bool:
     process binary instead.
     """
     low = line.lower()
-    if "gc573_user_streamer" in low or "sdl application" in low:
+    if ("gc573_user_streamer" in low or "opengc570d-user" in low or
+            "sdl application" in low):
         return True
     if "avermedia live gamer 4k pro" in low and "pro 1" not in low:
         return True
@@ -1031,6 +1092,9 @@ class GameStreamer:
     def __init__(self, vdev: Optional[str] = None, adev: Optional[str] = None, force_mpv: bool = False):
         self.hw_info = detect_gc573_driver()
         self.mode = self.hw_info.get("mode", "unknown")
+        self.model = self.hw_info.get("model", MODEL_GC573)
+        self.duo_mode = self.model == MODEL_GC570D
+        self.model_label = MODEL_NAMES.get(self.model, MODEL_NAMES[MODEL_GC573])
         self.vfio_mode = self.mode == "vfio"
         self.kernel_mode = self.mode == "kernel"
 
@@ -1054,21 +1118,29 @@ class GameStreamer:
         # Userspace VFIO engine status cache.  The streamer writes a
         # line-buffered log which is parsed below; the last signal is also
         # persisted so standby can show it without touching the hardware.
-        self.streamer_bin = userd_bin("gc573_user_streamer")
-        self.userd_bin = userd_bin("everlive_userd")
-        # Available for manual hardware diagnostics; standby status deliberately
-        # uses the cached streamer log instead of resetting BAR0 via the probe.
-        self.probe_bin = userd_bin("gc573_user_probe")
+        if self.duo_mode:
+            self.streamer_bin = userd_bin("opengc570d-userd", self.model)
+            self.userd_bin = self.streamer_bin
+            self.probe_bin = ""
+            self.ctl_bin = userd_bin("gc570d-ctl", self.model)
+        else:
+            self.streamer_bin = userd_bin("gc573_user_streamer", self.model)
+            self.userd_bin = userd_bin("everlive_userd", self.model)
+            self.probe_bin = userd_bin("gc573_user_probe", self.model)
+            self.ctl_bin = ""
         self._vfio_log_path = os.path.join(CONFIG_DIR, "streamer.log")
         self._vfio_log_pos = 0
         self._vfio_live = False
         self._vfio_saw_output = False
+        self._duo_no_signal = False
         # Last audio state parsed from the streamer log; shown in the capsule.
         self._vfio_audio = {"state": "unknown", "detail": "", "kind": ""}
         saved_aspect = load_settings().get("aspect_ratio", "auto")
         self.aspect = saved_aspect if saved_aspect in ASPECT_KEYS else "auto"
         self.headless = False
         self.v4l2_device: Optional[str] = None
+        self.v4l2_device_2: Optional[str] = None
+        self.duo_input = 0
         saved_signal = load_settings().get("last_signal")
         self._vfio_signal = saved_signal if isinstance(saved_signal, dict) else None
 
@@ -1089,7 +1161,7 @@ class GameStreamer:
             "hdr": previous.get("hdr", ""),
         }
         self._vfio_signal = info
-        self._vfio_live = True
+        self._vfio_live = not getattr(self, "_duo_no_signal", False)
 
         if (previous.get("resolution") != resolution or
                 previous.get("framerate") != framerate or
@@ -1130,8 +1202,11 @@ class GameStreamer:
         # [STREAM] 2560x1440p @ 120.00 Hz -> 2560x1440 | FPS: 120.0 | Frames: ...
         m = re.search(
             r"\[STREAM\] (\d+)x(\d+)([ip]) @ (\d+)\.(\d+) Hz -> "
-            r"(\d+)x(\d+) \| FPS:", line)
+            r"(\d+)x(\d+) \| FPS: ([0-9.]+)", line)
         if m:
+            fps = float(m.group(8))
+            if fps > 0.5:
+                self._duo_no_signal = False
             self._update_vfio_signal(
                 int(m.group(1)), int(m.group(2)), m.group(3),
                 int(m.group(4)), int(m.group(5)))
@@ -1198,6 +1273,10 @@ class GameStreamer:
         if ("HDMI signal lost" in line or
                 "Signal vanished" in line or
                 "Waiting for HDMI signal" in line):
+            self._vfio_live = False
+            return
+        if "EVERLIVE DUO" in line and "no signal" in line.lower():
+            self._duo_no_signal = True
             self._vfio_live = False
 
     def _read_vfio_log(self):
@@ -1459,6 +1538,172 @@ class GameStreamer:
         except Exception:
             return False
 
+    def ctl(self, *args: str) -> Optional[str]:
+        """Run gc570d-ctl and return its output (None when unavailable)."""
+        if not self.ctl_bin or not os.access(self.ctl_bin, os.X_OK):
+            return None
+        try:
+            return subprocess.check_output(
+                [self.ctl_bin, *args], text=True,
+                stderr=subprocess.DEVNULL, timeout=2.0)
+        except Exception:
+            return None
+
+    def set_duo_input(self, port: int) -> bool:
+        """Select HDMI 1 (0) or HDMI 2 (1) on the Live Gamer DUO."""
+        port = 1 if int(port) else 0
+        self.duo_input = port
+        save_settings({"duo_input": port})
+        if not self.duo_mode:
+            return False
+        if not self.is_running:
+            return True
+        return self.ctl("input", str(port + 1)) is not None
+
+    def apply_duo_led(self, mode: int) -> bool:
+        """Map an EverLive LED mode to the GC570D effect interface."""
+        mode = int(mode)
+        if mode == 0:
+            effect = "off"
+        elif mode == 8:
+            effect = "colorful"
+        elif mode == 9:
+            effect = "breathing"
+        else:
+            effect = "static"
+        return self.ctl("led", effect) is not None
+
+    def duo_hotplug(self, port: int = 0) -> bool:
+        """Pulse HPD on IT68051 (HDMI 1) or IT6802 (HDMI 2)."""
+        node = "it68051_hpd" if int(port) == 0 else "it6802_hpd"
+        return self.ctl("action", node, "1") is not None
+
+    def duo_edid_policy(self, bridge: bool) -> bool:
+        """Select internal bridge EDID (True) or downstream copy (False)."""
+        node = ("splitter_windows_bridge_edid" if bridge
+                else "splitter_windows_edid_copy")
+        return self.ctl("action", node, "1") is not None
+
+    def _start_vfio_duo(self, fullscreen: bool, vsync: bool,
+                        streamer_mode: bool, v4l2_device: Optional[str],
+                        headless: bool, aspect: Optional[str], osd: bool,
+                        osd_pos: str, scale: str,
+                        volume: float) -> bool:
+        """Launch the GC570D (Live Gamer DUO) userspace engine."""
+        if _vfio_streamer_running():
+            print("[!] A userspace streamer is already running; refusing to start a second instance.")
+            return False
+
+        if not (os.path.isfile(self.streamer_bin) and
+                os.access(self.streamer_bin, os.X_OK)):
+            print(f"[!] Userspace streamer not found: {self.streamer_bin}")
+            print("    Build it with: make -C tools/opengc570d-userd")
+            return False
+
+        _stop_vfio_daemon()
+        _raise_memlock_limit()
+
+        cmd = [self.streamer_bin]
+        if self.hw_info.get("pci"):
+            cmd.append(self.hw_info["pci"])
+
+        if headless:
+            cmd.append("--headless")
+            # Studio/streamer mode publishes a clean OBS feed without OSD.
+            cmd.append("--no-osd" if streamer_mode or not osd else "--osd")
+        else:
+            cmd.append("--sdl")
+            if fullscreen:
+                cmd.append("--fullscreen")
+            cmd.append("--vsync" if vsync else "--no-vsync")
+            if streamer_mode:
+                cmd.append("--streamer-mode")
+            else:
+                cmd.append("--osd" if osd else "--no-osd")
+        if osd_pos not in ("tr", "br", "bl", "tl"):
+            osd_pos = "tr"
+        cmd.extend(["--osd-pos", osd_pos])
+
+        if aspect is None:
+            aspect = getattr(self, "aspect", "auto")
+        if aspect not in ASPECT_KEYS:
+            aspect = "auto"
+        self.aspect = aspect
+        if aspect != "auto":
+            cmd.extend(["--aspect", aspect])
+
+        if scale not in SCALE_MODES:
+            scale = "fit"
+        cmd.extend(["--scale", scale])
+        cmd.extend(["--volume", f"{volume:.2f}"])
+
+        duo_input = load_settings().get("duo_input", 0)
+        self.duo_input = 1 if duo_input == 1 else 0
+        cmd.extend(["--port", str(self.duo_input + 1)])
+
+        if not load_settings().get("duo_edid_bridge", True):
+            cmd.append("--copy-edid")
+
+        self.v4l2_device = v4l2_device
+        self.v4l2_device_2 = None
+        if v4l2_device:
+            cmd.extend(["--v4l2", v4l2_device])
+            if os.path.exists(V4L2_DUO_SECOND_DEVICE):
+                self.v4l2_device_2 = V4L2_DUO_SECOND_DEVICE
+                cmd.extend(["--v4l2-2", V4L2_DUO_SECOND_DEVICE])
+
+        self.headless = bool(headless)
+        try:
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            log = open(self._vfio_log_path, "wb")
+        except OSError:
+            log = subprocess.DEVNULL
+
+        stdbuf = shutil.which("stdbuf")
+        if stdbuf:
+            cmd = [stdbuf, "-oL", "-eL"] + cmd
+
+        try:
+            self.mpv_proc = subprocess.Popen(
+                cmd, stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True)
+        except Exception as e:
+            print(f"[!] Failed to launch userspace streamer: {e}")
+            self.headless = False
+            self.v4l2_device = None
+            self.v4l2_device_2 = None
+            if log is not subprocess.DEVNULL:
+                log.close()
+            return False
+        finally:
+            if log is not subprocess.DEVNULL and not log.closed:
+                log.close()
+
+        self._vfio_log_pos = 0
+        self._vfio_live = False
+        self._vfio_saw_output = False
+        self._duo_no_signal = False
+        self._vfio_audio = {"state": "unknown", "detail": "", "kind": ""}
+        self.is_running = True
+        print(f"[*] Starting Userspace VFIO engine (DUO): {' '.join(cmd)}")
+
+        time.sleep(0.25)
+        if self.mpv_proc.poll() is not None:
+            self._read_vfio_log()
+            self.is_running = False
+            self.mpv_proc = None
+            self.headless = False
+            self.v4l2_device = None
+            self.v4l2_device_2 = None
+            print(f"[!] Userspace streamer exited at startup; see {self._vfio_log_path}")
+            return False
+
+        # Apply the saved LED effect once the daemon owns BAR0.
+        mode = load_settings().get("led_mode", 4)
+        if isinstance(mode, int):
+            self.apply_duo_led(mode)
+        return True
+
     def _start_vfio(self, fullscreen: bool = False, vsync: bool = False,
                     streamer_mode: bool = False,
                     v4l2_device: Optional[str] = None,
@@ -1476,6 +1721,14 @@ class GameStreamer:
                     fg_perf_mode: bool = False,
                     fg_low_latency: bool = True) -> bool:
         """Launch the blob-free userspace VFIO streamer directly."""
+        if self.duo_mode:
+            return self._start_vfio_duo(
+                fullscreen=fullscreen, vsync=vsync,
+                streamer_mode=streamer_mode,
+                v4l2_device=v4l2_device, headless=headless,
+                aspect=aspect, osd=osd, osd_pos=osd_pos,
+                scale=scale, volume=volume)
+
         if _vfio_streamer_running():
             print("[!] A userspace streamer is already running; refusing to start a second instance.")
             return False
@@ -1577,6 +1830,7 @@ class GameStreamer:
 
         self.headless = bool(headless)
         self.v4l2_device = v4l2_device
+        self.v4l2_device_2 = None
 
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -1608,6 +1862,7 @@ class GameStreamer:
         self._vfio_log_pos = 0
         self._vfio_live = False
         self._vfio_saw_output = False
+        self._duo_no_signal = False
         self._vfio_audio = {"state": "unknown", "detail": "", "kind": ""}
         self.is_running = True
         print(f"[*] Starting Userspace VFIO engine: {' '.join(cmd)}")
@@ -1813,6 +2068,7 @@ class GameStreamer:
         if self.vfio_mode:
             self._read_vfio_log()
             self._vfio_live = False
+            self._duo_no_signal = False
         if self.mpv_proc:
             try:
                 pgid = os.getpgid(self.mpv_proc.pid)
@@ -1883,6 +2139,7 @@ class GameStreamer:
 
         self.headless = False
         self.v4l2_device = None
+        self.v4l2_device_2 = None
 
     def poll(self) -> bool:
         """Returns True while the stream process is still alive."""
@@ -1905,6 +2162,8 @@ if HAS_QT:
             super().__init__()
             self.streamer = streamer
             self.vfio_mode = streamer.vfio_mode
+            self.duo_mode = getattr(streamer, "duo_mode", False)
+            self.model = getattr(streamer, "model", MODEL_GC573)
             self.enable_vsync = vsync
             self.muted = False
             self.saved_cfg = load_settings()
@@ -2490,11 +2749,14 @@ if HAS_QT:
             lbl_lab.setFixedHeight(20)
             lbl_lab.setToolTip(
                 "EverLive 1.4 Lab: Lossless Scaling frame generation through "
-                "the native lsfg-vk Vulkan layer. Installed side by side "
-                "with the stable release.")
+                "the native lsfg-vk Vulkan layer and Live Gamer DUO support. "
+                "Installed side by side with the stable release.")
             top_bar.addWidget(lbl_lab, 0, Qt.AlignVCenter)
 
-            lbl_badge = QLabel("GC573 · LIVE GAMER 4K" if self.vfio_mode else "GC573")
+            model_label = MODEL_NAMES.get(
+                self.model, MODEL_NAMES[MODEL_GC573])
+            lbl_badge = QLabel(model_label if self.vfio_mode
+                               else model_label.split(" · ", 1)[0])
             lbl_badge.setObjectName("badgeModel")
             lbl_badge.setFixedHeight(24)
             lbl_badge.setAlignment(Qt.AlignCenter)
@@ -2577,6 +2839,23 @@ if HAS_QT:
                 "IT6805 / SDL2 stream log.")
             h_telemetry.addWidget(self.lbl_audio_fmt, 0, Qt.AlignVCenter)
             h_telemetry.addStretch(1)
+
+            if self.duo_mode:
+                lbl_duo = QLabel("DUO Input")
+                lbl_duo.setObjectName("heroMeta")
+                h_telemetry.addWidget(lbl_duo, 0, Qt.AlignVCenter)
+                self.combo_duo_input = QComboBox()
+                self.combo_duo_input.addItem("HDMI 1", 0)
+                self.combo_duo_input.addItem("HDMI 2", 1)
+                saved_input = load_settings().get("duo_input", 0)
+                self.combo_duo_input.setCurrentIndex(1 if saved_input == 1 else 0)
+                self.combo_duo_input.setToolTip(
+                    "Select which Live Gamer DUO HDMI input is shown in the "
+                    "gaming window and published to /dev/video10.")
+                self.combo_duo_input.currentIndexChanged.connect(
+                    self.on_duo_input_changed)
+                h_telemetry.addWidget(self.combo_duo_input, 0, Qt.AlignVCenter)
+
             v_hero.addLayout(h_telemetry)
 
             # Runtime actions in one row: start/stop, studio, re-sync.
@@ -2618,6 +2897,37 @@ if HAS_QT:
             h_actions.addWidget(self.btn_resync, 0)
 
             v_hero.addLayout(h_actions)
+
+            if self.duo_mode:
+                h_duo = QHBoxLayout()
+                h_duo.setSpacing(8)
+                btn_bridge = QPushButton("EDID: Internal Bridge")
+                btn_bridge.setObjectName("btnGhost")
+                btn_bridge.setCursor(Qt.PointingHandCursor)
+                btn_bridge.setToolTip(
+                    "Advertise the internal 4K60 bridge EDID to HDMI IN 1. "
+                    "Required for standalone capture without a downstream TV.")
+                btn_bridge.clicked.connect(
+                    lambda: self._duo_edid_action(True))
+                h_duo.addWidget(btn_bridge)
+                btn_copy = QPushButton("EDID: Downstream Copy")
+                btn_copy.setObjectName("btnGhost")
+                btn_copy.setCursor(Qt.PointingHandCursor)
+                btn_copy.setToolTip(
+                    "Copy the EDID of the display/AVR connected to HDMI OUT.")
+                btn_copy.clicked.connect(
+                    lambda: self._duo_edid_action(False))
+                h_duo.addWidget(btn_copy)
+                btn_hpd = QPushButton("Pulse HPD")
+                btn_hpd.setObjectName("btnGhost")
+                btn_hpd.setCursor(Qt.PointingHandCursor)
+                btn_hpd.setToolTip(
+                    "Re-trigger the HDMI hot-plug handshake on the selected input.")
+                btn_hpd.clicked.connect(self._duo_hpd_action)
+                h_duo.addWidget(btn_hpd)
+                h_duo.addStretch(1)
+                v_hero.addLayout(h_duo)
+
             root_layout.addWidget(card_hero)
 
             # -------------------------------------------------------------
@@ -2660,7 +2970,6 @@ if HAS_QT:
             if self.vfio_mode:
                 for text, key in EDID_PROFILES:
                     self.combo_presets.addItem(text, key)
-
                 saved_profile = self.saved_cfg.get("edid_profile", "default")
                 custom_path = self.saved_cfg.get("edid_custom_path", "")
                 if saved_profile == "custom":
@@ -2686,6 +2995,11 @@ if HAS_QT:
             # activated (not currentIndexChanged) so re-picking the custom
             # entry opens the file dialog again.
             self.combo_presets.activated.connect(self.on_preset_changed)
+            if self.duo_mode:
+                self.combo_presets.setEnabled(False)
+                self.combo_presets.setToolTip(
+                    "The Live Gamer DUO selects the EDID policy with the "
+                    "Internal Bridge / Downstream Copy buttons above.")
             grid_video.addWidget(self.combo_presets, 0, 1)
 
             grid_video.addWidget(_field(
@@ -2963,7 +3277,14 @@ if HAS_QT:
                     self.combo_led.setCurrentIndex(idx)
                 will_autostart = self._headless_start or self.saved_cfg.get("autostart", False) or getattr(self.streamer, "_cli_autostart", False)
                 if isinstance(saved_led, int) and 0 <= saved_led <= 9 and not will_autostart:
-                    set_vfio_led(saved_led)
+                    if self.duo_mode:
+                        # The DUO has no standby LED daemon; only talk to a
+                        # running engine, otherwise the mode is applied by the
+                        # next launch.
+                        if _vfio_streamer_running():
+                            set_gc570d_led(saved_led)
+                    else:
+                        set_vfio_led(saved_led)
             else:
                 if saved_led is not None and isinstance(saved_led, int) and 0 <= saved_led <= 7:
                     write_led_mode(saved_led)
@@ -3230,9 +3551,11 @@ if HAS_QT:
                 return False
             if not (os.path.isfile(self.streamer.streamer_bin) and
                     os.access(self.streamer.streamer_bin, os.X_OK)):
+                folder = ("opengc570d-userd" if self.duo_mode
+                          else "opengc573-userd")
                 self._set_vfio_notice(
                     "Userspace Engine Missing",
-                    "Build it with: make -C tools/opengc573-userd")
+                    f"Build it with: make -C tools/{folder}")
                 return False
             if self._remote or ipc_probe() is not None:
                 self._set_vfio_notice(
@@ -3242,9 +3565,11 @@ if HAS_QT:
                     seconds=8.0)
                 return False
             if _vfio_streamer_running():
+                engine = ("opengc570d-userd" if self.duo_mode
+                          else "gc573_user_streamer")
                 self._set_vfio_notice(
                     "Userspace Engine Active",
-                    "An external gc573_user_streamer instance already owns the device")
+                    f"An external {engine} instance already owns the device")
                 return False
             return True
 
@@ -3253,7 +3578,7 @@ if HAS_QT:
         # -----------------------------------------------------------------
         def _ipc_try_attach(self):
             """Attach to a running streamer (local or external)."""
-            if self._ipc is None or self._ipc_shutdown:
+            if self.duo_mode or self._ipc is None or self._ipc_shutdown:
                 return
             if self._ipc.connected:
                 return
@@ -3469,6 +3794,10 @@ if HAS_QT:
             """The streamer hands off; restore the hub's saved colour."""
             if not self.vfio_mode:
                 return
+            if self.duo_mode:
+                # The DUO engine keeps the last LED effect in hardware; there
+                # is no separate standby daemon to hand the colour back to.
+                return
             mode = load_settings().get("led_mode",
                                        self.saved_cfg.get("led_mode"))
             if not isinstance(mode, int) or not 0 <= mode <= 9:
@@ -3488,6 +3817,11 @@ if HAS_QT:
             if self._ipc is not None and self._ipc.connected:
                 return self._send_ipc_led(mode)
             if self.vfio_mode:
+                if self.duo_mode:
+                    if self.streamer.is_running:
+                        return self.streamer.apply_duo_led(mode)
+                    print("[*] LED mode saved; it is applied when the DUO engine starts.")
+                    return True
                 ok = set_vfio_led(mode)
                 if self.streamer.is_running:
                     print("[*] LED colour saved; the active userspace stream keeps cyan until it exits.")
@@ -3839,6 +4173,51 @@ if HAS_QT:
                     "See ~/.config/everlive-experimental/streamer.log for the hardware error")
                 QTimer.singleShot(300, self._restore_led_after_stream)
 
+        def _duo_edid_action(self, bridge: bool):
+            if not self.duo_mode:
+                return
+            save_settings({"duo_edid_bridge": bool(bridge)})
+            self._update_vdev_label()
+            if not self.streamer.is_running:
+                self._set_vfio_notice(
+                    "EDID Policy Saved",
+                    "Start the engine to apply it", seconds=4.0)
+                return
+            ok = self.streamer.duo_edid_policy(bridge)
+            self._set_vfio_notice(
+                "EDID Policy Applied" if ok else "EDID Policy Failed",
+                "Internal bridge" if bridge else "Downstream copy",
+                seconds=5.0)
+
+        def _duo_hpd_action(self):
+            if not self.duo_mode or not self.streamer.is_running:
+                self._set_vfio_notice(
+                    "HPD Unavailable",
+                    "Start the engine before pulsing hot-plug", seconds=4.0)
+                return
+            port = 0
+            if hasattr(self, "combo_duo_input"):
+                port = 1 if self.combo_duo_input.currentData() == 1 else 0
+            ok = self.streamer.duo_hotplug(port)
+            self._set_vfio_notice(
+                "HPD Pulse Sent" if ok else "HPD Pulse Failed",
+                "HDMI 1" if port == 0 else "HDMI 2", seconds=4.0)
+
+        def on_duo_input_changed(self, index: int):
+            if not self.duo_mode:
+                return
+            port = 1 if self.combo_duo_input.itemData(index) == 1 else 0
+            self.streamer.set_duo_input(port)
+            label = "HDMI 1" if port == 0 else "HDMI 2"
+            if self.streamer.is_running:
+                self._set_vfio_notice(
+                    f"DUO Input: {label}",
+                    "Switch applied to the running engine", seconds=4.0)
+            else:
+                self._set_vfio_notice(
+                    f"DUO Input: {label}",
+                    "The next launch will use this input", seconds=4.0)
+
         def on_aspect_changed(self, *_):
             aspect = self.combo_aspect.currentData() or "auto"
             if aspect not in ASPECT_KEYS:
@@ -3848,6 +4227,8 @@ if HAS_QT:
             save_settings({"aspect_ratio": aspect})
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_aspect(aspect)
+            elif self.duo_mode and self.streamer.is_running:
+                self.streamer.ctl("aspect", aspect)
             elif self.streamer.is_running:
                 print("[*] Aspect ratio saved; restart the stream to apply it.")
 
@@ -3860,6 +4241,8 @@ if HAS_QT:
             save_settings({"scale_mode": mode})
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_scale(mode)
+            elif self.duo_mode and self.streamer.is_running:
+                self.streamer.ctl("scale", mode)
             elif self.streamer.is_running:
                 print("[*] Scaling mode saved; restart the stream to apply it.")
 
@@ -3870,6 +4253,8 @@ if HAS_QT:
                 self.combo_osd_pos.setEnabled(bool(enabled))
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_osd(bool(enabled))
+            elif self.duo_mode and self.streamer.is_running:
+                self.streamer.ctl("osd", "1" if enabled else "0")
             elif self.streamer.is_running:
                 print("[*] OSD setting saved; use Tab/o in the gaming window "
                       "to toggle the running overlay.")
@@ -3882,6 +4267,8 @@ if HAS_QT:
             save_settings({"osd_position": pos})
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_osd_position(pos)
+            elif self.duo_mode and self.streamer.is_running:
+                self.streamer.ctl("osd_pos", pos)
 
         def on_v4l2_toggled(self, enabled: bool):
             """Persist the preference and apply it live when an engine runs."""
@@ -4126,6 +4513,16 @@ if HAS_QT:
             if not self.vfio_mode or not hasattr(self, "lbl_vdev"):
                 return
             pci = self.streamer.hw_info.get("pci") or "auto"
+            if self.duo_mode:
+                out = (f"{self.streamer.v4l2_device or V4L2_DEFAULT_DEVICE}"
+                       f" + {self.streamer.v4l2_device_2 or V4L2_DUO_SECOND_DEVICE}")
+                edid = ("internal bridge"
+                        if load_settings().get("duo_edid_bridge", True)
+                        else "downstream copy")
+                self.lbl_vdev.setText(
+                    f"VFIO: {pci} • EDID: {edid} • Audio: SDL2/PipeWire "
+                    f"(Userspace) • Out: {out}")
+                return
             loop = (f" • Out: {self.streamer.v4l2_device}"
                     if getattr(self.streamer, "v4l2_device", None) else "")
             self.lbl_vdev.setText(
@@ -4199,6 +4596,8 @@ if HAS_QT:
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_mute(self.muted)
                 return
+            if self.duo_mode and self.streamer.is_running:
+                self.streamer.ctl("mute", "1" if self.muted else "0")
             set_audio_mute(self.muted)
             if self.vfio_mode:
                 # Re-arm the retry window if the sink-input is not there yet.
@@ -4221,6 +4620,8 @@ if HAS_QT:
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_volume(val / 100.0)
                 return
+            if self.duo_mode and self.streamer.is_running:
+                self.streamer.ctl("volume", str(val))
             set_audio_volume(val)
             if self.vfio_mode:
                 self._vfio_volume_applies = 0
@@ -4572,8 +4973,20 @@ def main():
                         const=V4L2_DEFAULT_DEVICE, default=None,
                         help="Publish native YUYV frames to a v4l2loopback device "
                              f"(default: {V4L2_DEFAULT_DEVICE})")
-    parser.add_argument("--headless", action="store_true",
+    parser.add_argument("--headless", "--studio", dest="headless", action="store_true",
                         help="Capture and publish/play without an SDL window")
+    parser.add_argument("--sdl", action="store_true",
+                        help="Open the interactive SDL2 gaming window")
+    parser.add_argument("--port", type=int, choices=[1, 2], default=None,
+                        help="Select initial HDMI input on Live Gamer DUO (1 or 2)")
+    parser.add_argument("--pip", action="store_true",
+                        help="Enable picture-in-picture on Live Gamer DUO")
+    parser.add_argument("--v4l2-2", "--loopback-2", dest="v4l2_2", default=None,
+                        help="Secondary v4l2loopback device for Live Gamer DUO HDMI 2")
+    parser.add_argument("--copy-edid", action="store_true",
+                        help="Copy downstream EDID on Live Gamer DUO")
+    parser.add_argument("--scale", choices=["fit", "integer"], default=None,
+                        help="Scaling mode override (fit or integer)")
     parser.add_argument("--tray", "--minimized", dest="tray", action="store_true",
                         help="Launch Console Hub directly hidden into the system tray")
     parser.add_argument("--wave", action="store_true",
@@ -4581,6 +4994,13 @@ def main():
     parser.add_argument("--rainbow", action="store_true",
                         help="Set GC573 LED to whole-card spectrum cycle")
     args = parser.parse_args()
+
+    if args.port in (1, 2):
+        save_settings({"duo_input": args.port - 1})
+    if args.copy_edid:
+        save_settings({"duo_edid_bridge": False})
+    if args.scale in SCALE_MODES:
+        save_settings({"scale_mode": args.scale})
 
     if args.wave:
         args.led = "wave"
@@ -4601,6 +5021,8 @@ def main():
                 pass
         if val is not None and 0 <= val <= 9:
             hw = detect_gc573_driver()
+            model = hw.get("model", MODEL_GC573)
+            model_name = "GC570D" if model == MODEL_GC570D else "GC573"
             if hw.get("mode") == "vfio":
                 save_settings({"led_mode": val})
                 is_launching = args.cli or args.tray or any(
@@ -4610,7 +5032,15 @@ def main():
                         "--streamer-mode", "-s"
                     ]
                 )
-                if _vfio_streamer_running():
+                if model == MODEL_GC570D:
+                    if _vfio_streamer_running():
+                        if set_gc570d_led(val):
+                            print(f"[+] {model_name} LED effect set to mode {val}.")
+                        else:
+                            print(f"[*] {model_name} streamer is running; LED mode {val} saved for the next session.")
+                    else:
+                        print(f"[*] {model_name} LED mode {val} saved; it is applied by the engine.")
+                elif _vfio_streamer_running():
                     print(f"[*] Userspace streamer is running; LED mode {val} saved for the next session.")
                 elif not is_launching:
                     if set_vfio_led(val):
@@ -4621,9 +5051,9 @@ def main():
                     print(f"[+] GC573 LED lighting set to mode {val} for stream.")
             else:
                 if write_led_mode(val):
-                    print(f"[+] GC573 LED lighting set to mode {val}.")
+                    print(f"[+] {model_name} LED lighting set to mode {val}.")
                 else:
-                    print(f"[!] Failed to set GC573 LED to mode {val}.")
+                    print(f"[!] Failed to set {model_name} LED to mode {val}.")
         else:
             print(f"[!] Invalid LED mode '{args.led}'. Valid: {list(LED_NAME_MAP.keys())}")
         if not args.cli and not args.tray and not any(arg in sys.argv for arg in ["-f", "--fullscreen", "-p", "--preset", "--headless", "--v4l2", "--loopback"]):
@@ -4635,12 +5065,14 @@ def main():
         streamer._cli_autostart = True
 
     if streamer.vfio_mode:
-        print(f"[*] GC573: Userspace VFIO engine (PCI {streamer.hw_info.get('pci') or 'auto'}), "
+        print(f"[*] {streamer.model_label}: Userspace VFIO engine "
+              f"(PCI {streamer.hw_info.get('pci') or 'auto'}), "
               "no V4L2/ALSA device required.")
         if args.device or args.audio or args.mpv:
             print("[*] Note: --device/--audio/--mpv apply only to the kernel V4L2 path.")
     else:
-        print(f"[*] GC573 Hardware: Video={streamer.vdev}, Audio={streamer.adev} "
+        print(f"[*] {streamer.model_label} Hardware: Video={streamer.vdev}, "
+              f"Audio={streamer.adev} "
               f"(driver={streamer.hw_info.get('driver') or 'unknown'})")
 
     # Graceful shutdown on Ctrl+C
@@ -4653,13 +5085,15 @@ def main():
     if args.cli or not HAS_QT:
         print("[*] Launching Gaming Screen in low-latency mode...")
         if streamer.vfio_mode:
-            print("[*] Userspace VFIO engine: video and HDMI audio run inside gc573_user_streamer.")
+            engine = ("opengc570d-userd" if streamer.duo_mode
+                      else "gc573_user_streamer")
+            print(f"[*] Userspace VFIO engine: video and HDMI audio run inside {engine}.")
         else:
             info = streamer.get_signal_info()
             chroma_disp = f" [{info['chroma']}]" if info.get('chroma') else ""
             print(f"[*] Signal: {info['resolution']} {info['framerate']}{chroma_disp}".strip())
             if not info["locked"]:
-                print("[!] Warning: No active HDMI signal detected on GC573.")
+                print(f"[!] Warning: No active HDMI signal detected on {streamer.model_label}.")
                 print("    Please check if the video source is powered on and sending video.")
         cli_settings = load_settings()
         if not streamer.start(preset_name=args.preset, fullscreen=args.fullscreen, volume=args.volume, vsync=args.vsync, streamer_mode=args.streamer_mode, v4l2_device=args.v4l2, headless=args.headless, aspect=args.aspect, framegen=cli_settings.get("framegen_mode", "off"), fg_flow_scale=cli_settings.get("fg_flow_scale", 1.0), fg_perf_mode=cli_settings.get("fg_perf_mode", False), fg_low_latency=cli_settings.get("fg_low_latency", True)):
@@ -4672,7 +5106,7 @@ def main():
         while streamer.poll():
             time.sleep(0.5)
         streamer.stop()
-        if streamer.vfio_mode:
+        if streamer.vfio_mode and not streamer.duo_mode:
             saved_led = load_settings().get("led_mode")
             mode = saved_led if isinstance(saved_led, int) and 0 <= saved_led <= 9 else 4
             if not (_proc_running("everlive_userd") and mode == 4):
