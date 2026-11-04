@@ -86,6 +86,7 @@ install: all
 	install -d $(BINDIR) $(LIBDIR) $(LIBEXECDIR) $(SYSTEMD_USER_DIR)
 	install -d $(SYSTEM_SLEEP_DIR) $(UDEV_RULES_DIR) $(LIMITS_DIR)
 	install -m 0755 opengc570d-userd gc570d-ctl $(BINDIR)/
+	command -v setcap >/dev/null 2>&1 && setcap cap_ipc_lock=+ep $(BINDIR)/opengc570d-userd 2>/dev/null || true
 	install -m 0755 libgc570d-v4l2.so $(LIBDIR)/
 	install -m 0755 gc570d-vfio-bind.sh $(LIBEXECDIR)/
 	sed 's|/usr/local|$(PREFIX)|g' gc570d-sleep.sh > $(LIBEXECDIR)/gc570d-sleep.sh

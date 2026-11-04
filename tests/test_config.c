@@ -78,11 +78,60 @@ static void test_missing_config_fallback(void)
 	      "Default enable_led preserved", "defaults modified");
 }
 
+static void test_invalid_values_rejection(void)
+{
+	printf("\n--- Test: Invalid & Out-of-Range Value Rejection ---\n");
+
+	/* Reset to known baseline */
+	gc570d_cfg.width = 1920;
+	gc570d_cfg.height = 1080;
+	gc570d_cfg.hdmi1_poll_ms = 50;
+	gc570d_cfg.hdmi2_poll_ms = 50;
+	gc570d_cfg.enable_led = true;
+
+	char tmp_path[] = "/tmp/gc570d_test_conf_inv_XXXXXX";
+	int fd = mkstemp(tmp_path);
+	check(fd >= 0, "Created temporary invalid config file", "mkstemp failed");
+
+	const char *content =
+		"# Non-numeric strings (must be rejected)\n"
+		"width = auto\n"
+		"height = 1080p\n"
+		"\n"
+		"# Out of range values (must be rejected)\n"
+		"hdmi1_poll_ms = 2\n"
+		"hdmi2_poll_ms = 9999\n"
+		"\n"
+		"# Unrecognized boolean (must be rejected)\n"
+		"enable_led = unknown_state\n";
+
+	ssize_t written = write(fd, content, strlen(content));
+	close(fd);
+	check(written == (ssize_t)strlen(content), "Wrote invalid config content", "write failed");
+
+	int ret = gc570d_load_config(tmp_path);
+	check(ret == 0, "gc570d_load_config returned 0 (success)", "load failed");
+
+	check(gc570d_cfg.width == 1920,
+	      "Non-numeric 'width = auto' rejected (1920 preserved)", "width corrupted");
+	check(gc570d_cfg.height == 1080,
+	      "Trailing unit 'height = 1080p' rejected (1080 preserved)", "height corrupted");
+	check(gc570d_cfg.hdmi1_poll_ms == 50,
+	      "Under-range 'hdmi1_poll_ms = 2' rejected (50 preserved)", "poll ms corrupted");
+	check(gc570d_cfg.hdmi2_poll_ms == 50,
+	      "Over-range 'hdmi2_poll_ms = 9999' rejected (50 preserved)", "poll ms corrupted");
+	check(gc570d_cfg.enable_led == true,
+	      "Invalid boolean 'enable_led = unknown_state' rejected (true preserved)", "led corrupted");
+
+	unlink(tmp_path);
+}
+
 int main(void)
 {
 	printf("=== Running OpenGC570D Runtime Config Unit Tests ===\n");
 	test_config_parsing();
 	test_missing_config_fallback();
+	test_invalid_values_rejection();
 
 	if (failures == 0) {
 		printf("\n>>> All Config tests passed successfully! <<<\n");
