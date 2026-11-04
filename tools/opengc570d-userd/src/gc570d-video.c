@@ -479,13 +479,15 @@ static int gc570d_video_thread(void *data)
 		       gc->bar0 + GC570D_DMA_DESC_CONTROL);
 
 		completed = 0;
+		int poll_ms = gc570d_cfg.hdmi2_poll_ms > 0 ?
+			      gc570d_cfg.hdmi2_poll_ms : GC570D_HDMI2_DMA_POLL_MS;
 		for (dma_poll = 0;
 		     dma_poll < DIV_ROUND_UP(GC570D_HDMI2_DMA_TIMEOUT_MS,
-						 GC570D_HDMI2_DMA_POLL_MS);
+						 poll_ms);
 		     dma_poll++) {
 			completed = wait_for_completion_timeout(
 				&gc->dma_completion,
-				msecs_to_jiffies(GC570D_HDMI2_DMA_POLL_MS));
+				msecs_to_jiffies(poll_ms));
 			if (completed || READ_ONCE(gc->video_stopping) ||
 			    kthread_should_stop())
 				break;
@@ -806,7 +808,7 @@ static int gc570d_video_querycap(struct file *file, void *priv,
 	strscpy(cap->driver, "gc570d", sizeof(cap->driver));
 	strscpy(cap->card, "AVerMedia Live Gamer DUO HDMI 2",
 		sizeof(cap->card));
-	snprintf(cap->bus_info, sizeof(cap->bus_info), "PCI:%s:hdmi2",
+	snprintf(cap->bus_info, sizeof(cap->bus_info), "PCI:%.20s:hdmi2",
 		 pci_name(gc->pdev));
 	return 0;
 }
@@ -1185,9 +1187,11 @@ static int gc570d_video0_thread(void *data)
 	int ret;
 
 	while (!kthread_should_stop()) {
+		int poll_ms = gc570d_cfg.hdmi1_poll_ms > 0 ?
+			      gc570d_cfg.hdmi1_poll_ms : GC570D_HDMI1_DMA_POLL_MS;
 		ret = wait_event_interruptible_timeout(gc->video0_wait,
 			kthread_should_stop() || gc570d_video0_work_pending(gc),
-			msecs_to_jiffies(GC570D_HDMI1_DMA_POLL_MS));
+			msecs_to_jiffies(poll_ms));
 		if (ret < 0)
 			continue;
 		if (kthread_should_stop() || READ_ONCE(gc->video0_stopping))
@@ -1198,7 +1202,7 @@ static int gc570d_video0_thread(void *data)
 				ret = 1;
 			} else if (++dma_idle_polls <
 				   DIV_ROUND_UP(GC570D_HDMI1_DMA_TIMEOUT_MS,
-						GC570D_HDMI1_DMA_POLL_MS)) {
+						poll_ms)) {
 				continue;
 			}
 		}
@@ -2009,7 +2013,7 @@ static int gc570d_video0_querycap(struct file *file, void *priv,
 	strscpy(cap->driver, "gc570d", sizeof(cap->driver));
 	strscpy(cap->card, "AVerMedia Live Gamer DUO HDMI 1",
 		sizeof(cap->card));
-	snprintf(cap->bus_info, sizeof(cap->bus_info), "PCI:%s:hdmi1",
+	snprintf(cap->bus_info, sizeof(cap->bus_info), "PCI:%.20s:hdmi1",
 		 pci_name(gc->pdev));
 	return 0;
 }

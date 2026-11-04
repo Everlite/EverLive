@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive Experimental - One-Click Launcher for the 1.4 Lab Console Suite
-# 100% Blob-Free Userspace VFIO Engine + lsfg-vk Frame Generation (v1.4.0-experimental)
-# Supports AVerMedia Live Gamer 4K (GC573) and Live Gamer DUO (GC570D)
+# EverLive - One-Click Launcher for Console Gaming Suite (v1.3.1)
+# 100% Blob-Free Userspace VFIO Engine for AVerMedia Live Gamer 4K (GC573)
+# and Live Gamer DUO (GC570D)
 # ==============================================================================
 set -euo pipefail
 
@@ -280,7 +280,6 @@ fi
 # The GC570D daemon defaults to headless, so add --sdl unless the caller
 # explicitly asked for headless/studio mode.
 streamer_exec() {
-    pkill -x everlive_userd 2>/dev/null || true
     local -a extra=()
     if [ "$CARD_MODEL" = "gc570d" ]; then
         local headless=0 has_sdl=0 has_v4l2_2=0

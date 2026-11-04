@@ -36,6 +36,7 @@
 #include <sound/jack.h>
 #include <sound/control.h>
 #endif
+#include "gc570d-config.h"
 
 /* DEFINE_SHOW_ATTRIBUTE keeps its fops static; probe assembles ours centrally. */
 #ifdef GC570D_USERSPACE
@@ -297,6 +298,14 @@ struct gc570d_dev {
 	resource_size_t bar0_len;
 	struct dentry *debugfs_dir;
 	struct mutex i2c_lock;
+	/*
+	 * Lock Hierarchy (outer to inner):
+	 *   1. capture_lock   (protects splitter state machine & hardware streaming switches)
+	 *   2. video_lock / video0_lock (protects V4L2 device state per channel)
+	 *   3. i2c_lock       (serializes hardware I2C bus transactions)
+	 *   4. led_lock       (protects LED breathing/RGB register writes)
+	 * Never acquire capture_lock while holding video_lock, video0_lock, or i2c_lock.
+	 */
 	struct mutex capture_lock;
 	struct completion dma_completion;
 	struct completion dma0_completion;
@@ -449,6 +458,7 @@ struct gc570d_dev {
 	bool splitter_video_stable_pending;
 	u8 splitter_channel_active_mask;
 	u8 splitter_video_stable_mask;
+	u8 splitter_worker_completed_mask;
 	u8 splitter_worker_state4_mask;
 	u8 splitter_eq_state;
 	u8 splitter_eq_retry;
@@ -463,6 +473,7 @@ struct gc570d_dev {
 	struct delayed_work hdmi1_auto_work;
 	u8 hdmi1_auto_phase;
 	bool hdmi1_auto_ready;
+	bool splitter_edid_published;
 	bool removing;
 	bool suspended;
 	struct led_classdev_mc led_mcdev;
@@ -689,6 +700,8 @@ extern const struct gc570d_i2c_bus gc570d_splitter_bus;
 extern const struct gc570d_i2c_bus gc570d_led_bus;
 extern const struct gc570d_i2c_bus gc570d_probe_buses[3];
 extern const u8 gc570d_it68051_edid[256];
+void gc570d_splitter_build_bridge_edid(u8 *edid);
+void gc570d_splitter_merge_cta_data_blocks(u8 *dst_cta, const u8 *src_cta);
 
 
 #endif /* GC570D_H */

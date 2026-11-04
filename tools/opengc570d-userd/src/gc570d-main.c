@@ -603,21 +603,25 @@ static int gc570d_probe(struct pci_dev *pdev,
 		return dev_err_probe(&pdev->dev, ret,
 				     "failed to register HDMI IN 1 V4L2 device\n");
 	}
-	ret = gc570d_audio_register(gc);
-	if (ret) {
-		video_unregister_device(&gc->video0_dev);
-		video_unregister_device(&gc->video_dev);
-		v4l2_device_unregister(&gc->v4l2_dev);
-		free_irq(gc->irq, gc);
-		pci_free_irq_vectors(pdev);
-		return dev_err_probe(&pdev->dev, ret,
-				     "failed to register ALSA device\n");
+	if (gc570d_cfg.enable_audio) {
+		ret = gc570d_audio_register(gc);
+		if (ret) {
+			video_unregister_device(&gc->video0_dev);
+			video_unregister_device(&gc->video_dev);
+			v4l2_device_unregister(&gc->v4l2_dev);
+			free_irq(gc->irq, gc);
+			pci_free_irq_vectors(pdev);
+			return dev_err_probe(&pdev->dev, ret,
+					     "failed to register ALSA device\n");
+		}
 	}
-	ret = gc570d_led_register(gc);
-	if (ret)
-		dev_warn(&pdev->dev,
-			 "LED class registration/default breathing failed: %d\n",
-			 ret);
+	if (gc570d_cfg.enable_led) {
+		ret = gc570d_led_register(gc);
+		if (ret)
+			dev_warn(&pdev->dev,
+				 "LED class registration/default breathing failed: %d\n",
+				 ret);
+	}
 
 #ifdef GC570D_DEVELOPER_DEBUGFS
 	gc->debugfs_dir = debugfs_create_dir("gc570d", NULL);
@@ -984,12 +988,14 @@ void gc570d_reset_resume_state(struct gc570d_dev *gc)
 	gc->splitter_video_stable_pending = false;
 	gc->splitter_channel_active_mask = 0;
 	gc->splitter_video_stable_mask = 0;
+	gc->splitter_worker_completed_mask = 0;
 	gc->splitter_worker_state4_mask = 0;
 	gc->splitter_eq_state = 0;
 	gc->splitter_eq_retry = 0;
 	memset(gc->splitter_pclk, 0, sizeof(gc->splitter_pclk));
 	memset(gc->splitter_vclk, 0, sizeof(gc->splitter_vclk));
 	gc->splitter_receiver_hdcp_off = false;
+	gc->splitter_edid_published = false;
 	gc->video0_receiver_output_valid = false;
 	gc->video0_receiver_width = 0;
 	gc->video0_receiver_height = 0;

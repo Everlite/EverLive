@@ -1339,7 +1339,7 @@ out_free:
 					slot_image_cpu[i], slot_image_dma[i]);
 		}
 	} else {
-		/* FIX: Free dynamically calculated `capture_bytes` instead of fixed GC570D_DMA_IMAGE_SIZE */
+		// Fixed: free buffers using dynamically calculated sizes
 		if (sg_cpu)
 			dma_free_coherent(&gc->pdev->dev, sg_alloc_size,
 					  sg_cpu, sg_dma);

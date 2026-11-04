@@ -2048,7 +2048,7 @@ void snd_card_free(struct snd_card *card)
  * ========================================================================= */
 
 static int g_ctl_listen_fd = -1;
-static char g_ctl_sock_path[256];
+static char g_ctl_sock_path[280];
 static char g_ctl_dir_path[256];
 
 static void gc570d_get_runtime_dir(char *buf, size_t size)
@@ -2644,6 +2644,9 @@ int main(int argc, char **argv)
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
 	signal(SIGPIPE, SIG_IGN);
+
+	/* Load optional runtime configuration */
+	gc570d_load_config(NULL);
 
 	ret = gc570d_vfio_open(&g_pdev, requested_bdf);
 	if (ret < 0)

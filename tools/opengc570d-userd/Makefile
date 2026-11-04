@@ -11,7 +11,7 @@ CFLAGS ?= -O2 -g -Wall -Wextra -pthread
 LDFLAGS ?= -pthread
 
 USER_CFLAGS := -O2 -g -Wall -Wextra -Wno-unused-parameter \
-	-Wno-sign-compare -Wno-format-truncation -std=gnu11 \
+	-Wno-sign-compare -std=gnu11 \
 	-D_GNU_SOURCE -DGC570D_USERSPACE -DGC570D_DEVELOPER_DEBUGFS \
 	-Isrc -I.
 USER_LDFLAGS := -pthread -lm -lrt
@@ -33,6 +33,7 @@ endif
 
 USERD_SRCS := \
 	src/gc570d-userspace.c \
+	src/gc570d-config.c \
 	src/gc570d-main.c \
 	src/gc570d-hw.c \
 	src/gc570d-i2c.c \
@@ -46,6 +47,7 @@ USERD_SRCS := \
 
 USER_HEADERS := \
 	src/gc570d.h \
+	src/gc570d-config.h \
 	src/gc570d-user-compat.h \
 	src/gc570d-shm.h \
 	src/gc570d_everlive.h \
@@ -67,7 +69,10 @@ libgc570d-v4l2.so: src/gc570d-v4l2-preload.c src/gc570d-shm.h
 	$(CC) -O2 -g -Wall -Wextra -Wno-unused-parameter \
 		-std=gnu11 -D_GNU_SOURCE -shared -fPIC -Isrc -o $@ $< -ldl -lrt -pthread
 
+test selftest:
+	$(MAKE) -C ../../tests test
+
 clean:
 	rm -f $(TARGETS)
 
-.PHONY: all clean
+.PHONY: all clean test selftest

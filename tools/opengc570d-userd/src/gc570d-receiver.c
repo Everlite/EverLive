@@ -151,9 +151,9 @@ const u8 gc570d_it68051_edid[256] = {
 	0x50, 0x30, 0x20, 0x35, 0x00, 0x55, 0x50, 0x21,
 	0x00, 0x00, 0x1e, 0x9e, 0xe8, 0x00, 0x78, 0xa0,
 	0xa0, 0x67, 0x50, 0x08, 0x20, 0x98, 0x04, 0x55,
-	0x50, 0x21, 0x00, 0x00, 0x1e, 0x56, 0x5e, 0x00,
-	0xa0, 0xa0, 0xa0, 0x29, 0x50, 0x30, 0x20, 0x35,
-	0x00, 0x55, 0x50, 0x21, 0x00, 0x00, 0x18, 0x88,
+	0x50, 0x21, 0x00, 0x00, 0x1e, 0xfc, 0x7e, 0x80,
+	0x88, 0x70, 0x38, 0x12, 0x40, 0x18, 0x20, 0x35,
+	0x00, 0x20, 0x2f, 0x21, 0x00, 0x00, 0x1e, 0x81,
 };
 
 /* Exact customer_edidGC570D_fhd.bin payload bundled by AVerMedia. */
@@ -1828,6 +1828,15 @@ int gc570d_it68051_video_output_on(struct gc570d_dev *gc)
 	int restore_ret;
 	int ret;
 
+	if ((gc->hdmi1_auto_phase && !READ_ONCE(gc->hdmi1_auto_ready)) ||
+	    (READ_ONCE(gc->splitter_pump_thread) &&
+	     (gc->splitter_video_stable_pending ||
+	      !(gc->splitter_worker_completed_mask & BIT(1)) ||
+	      (gc->splitter_worker_state4_mask & BIT(1))))) {
+		WRITE_ONCE(gc->video0_receiver_output_valid, false);
+		return -ENOLINK;
+	}
+
 	/* The official driver: stable-state marker. */
 	/* Verify IT68051 has a locked input signal before measuring timing. */
 	ret = gc570d_it68051_select_page(gc, 0);
@@ -1904,7 +1913,13 @@ int gc570d_it68051_video_output_on(struct gc570d_dev *gc)
 				 rx_timing.pixel_clock);
 			goto out_restore_page;
 		}
-		gc->video0_receiver_output_valid = false;
+		WRITE_ONCE(gc->video0_receiver_output_valid, false);
+	}
+
+	WRITE_ONCE(gc->video0_receiver_output_valid, false);
+	if (READ_ONCE(gc->audio0_prepared) && READ_ONCE(gc->audio0_running)) {
+		WRITE_ONCE(gc->audio0_recovering, true);
+		wake_up_interruptible(&gc->audio0_wait);
 	}
 
 	/* The official driver prologue. */
@@ -2213,6 +2228,10 @@ int gc570d_it68051_video_output_on(struct gc570d_dev *gc)
 			 rx_timing.vactive, mode, c5, c6,
 			 avmute_packet & BIT(3) ? "yes" : "no",
 			 avmute_control);
+	if (!ret && (c5 & BIT(7))) {
+		ret = -EAGAIN;
+		goto out_restore_page;
+	}
 	if (!ret && !(avmute_control & BIT(5))) {
 		gc->video0_receiver_width = rx_timing.hactive;
 		gc->video0_receiver_height = rx_timing.vactive;
@@ -2221,9 +2240,9 @@ int gc570d_it68051_video_output_on(struct gc570d_dev *gc)
 		gc->video0_receiver_extended_colorimetry =
 			extended_colorimetry;
 		gc->video0_receiver_dual_pixel = dual_pixel;
-		gc->video0_receiver_output_valid = true;
+		WRITE_ONCE(gc->video0_receiver_output_valid, true);
 	} else {
-		gc->video0_receiver_output_valid = false;
+		WRITE_ONCE(gc->video0_receiver_output_valid, false);
 	}
 
 out_restore_page:

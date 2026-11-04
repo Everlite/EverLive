@@ -438,22 +438,25 @@ int closedir(DIR *dirp)
 	return real_closedir(dirp);
 }
 
-static void fill_fake_video_stat(int port, struct stat *st)
+static int fill_fake_video_stat(int port, struct stat *st)
 {
+	if ((uintptr_t)st == 0) {
+		errno = EFAULT;
+		return -1;
+	}
 	memset(st, 0, sizeof(*st));
 	st->st_mode = S_IFCHR | 0666;
 	st->st_rdev = makedev(81, 60 + port);
 	st->st_nlink = 1;
+	return 0;
 }
 
 int stat(const char *path, struct stat *buf)
 {
 	init_real_funcs();
 	int port = match_virtual_video_path(path);
-	if (port >= 0) {
-		fill_fake_video_stat(port, buf);
-		return 0;
-	}
+	if (port >= 0)
+		return fill_fake_video_stat(port, buf);
 	return real_stat(path, buf);
 }
 
@@ -461,10 +464,8 @@ int lstat(const char *path, struct stat *buf)
 {
 	init_real_funcs();
 	int port = match_virtual_video_path(path);
-	if (port >= 0) {
-		fill_fake_video_stat(port, buf);
-		return 0;
-	}
+	if (port >= 0)
+		return fill_fake_video_stat(port, buf);
 	return real_lstat(path, buf);
 }
 
@@ -478,8 +479,7 @@ int fstat(int fd, struct stat *buf)
 	if (h) {
 		int port = h->port;
 		pthread_mutex_unlock(&g_v4l2_lock);
-		fill_fake_video_stat(port, buf);
-		return 0;
+		return fill_fake_video_stat(port, buf);
 	}
 	pthread_mutex_unlock(&g_v4l2_lock);
 	return real_fstat(fd, buf);
@@ -489,10 +489,8 @@ int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags)
 {
 	init_real_funcs();
 	int port = match_virtual_video_path(pathname);
-	if (port >= 0) {
-		fill_fake_video_stat(port, buf);
-		return 0;
-	}
+	if (port >= 0)
+		return fill_fake_video_stat(port, buf);
 	return real_fstatat(dirfd, pathname, buf, flags);
 }
 
