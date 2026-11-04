@@ -1963,9 +1963,9 @@ if HAS_QT:
 
         def init_ui(self):
             self.setWindowTitle("EverLive - Console Hub")
-            # Compact console-hub layout: the cards below are sized so the
-            # window never needs more than ~1080p of vertical space.
-            self.setFixedSize(920, 800)
+            # Compact console-hub layout: sized so the cards below never
+            # squash on Live Gamer DUO (with secondary action bar) or GC573.
+            self.setFixedSize(920, 856 if self.duo_mode else 800)
 
             # Application & Window Icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "everlive.png")
@@ -2029,10 +2029,14 @@ if HAS_QT:
                     color: #ffffff;
                     font-size: 18px;
                     font-weight: 700;
+                    padding-bottom: 3px;
+                    min-height: 26px;
                 }
                 QLabel#heroMeta {
                     color: #94a3b8;
                     font-size: 12px;
+                    padding-bottom: 2px;
+                    min-height: 18px;
                 }
                 QLabel#engineBadge {
                     background-color: #0d2318;
@@ -2058,6 +2062,22 @@ if HAS_QT:
                 QComboBox::drop-down {
                     border: none;
                     width: 20px;
+                }
+                QDoubleSpinBox {
+                    background-color: #171b26;
+                    color: #f1f5f9;
+                    border: 1px solid #2b3348;
+                    border-radius: 6px;
+                    padding: 6px 10px;
+                    font-size: 12px;
+                    min-height: 22px;
+                }
+                QDoubleSpinBox QLineEdit {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    background: transparent;
+                    color: #f1f5f9;
+                    border: none;
                 }
                 QCheckBox {
                     color: #94a3b8;
@@ -2270,8 +2290,15 @@ if HAS_QT:
                     color: #f2f4f8;
                     font-size: 20px;
                     font-weight: 600;
+                    padding-bottom: 4px;
+                    min-height: 28px;
                 }
-                QLabel#heroMeta { color: #8b93a7; font-size: 12px; }
+                QLabel#heroMeta {
+                    color: #8b93a7;
+                    font-size: 12px;
+                    padding-bottom: 2px;
+                    min-height: 18px;
+                }
                 QLabel#engineBadge {
                     background-color: #12261f;
                     color: #8fd6b4;
@@ -2298,13 +2325,20 @@ if HAS_QT:
                     font-size: 12px;
                 }
                 QDoubleSpinBox {
-                    min-height: 0px;
+                    min-height: 24px;
                     padding: 4px 10px;
                     font-size: 12px;
                     background-color: #171d29;
                     color: #e6e9ef;
                     border: 1px solid #2a3242;
                     border-radius: 6px;
+                }
+                QDoubleSpinBox QLineEdit {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    background: transparent;
+                    color: #e6e9ef;
+                    border: none;
                 }
                 QDoubleSpinBox:hover { border-color: #3a465e; }
                 QDoubleSpinBox:focus { border-color: #4b6ea8; }
@@ -2518,14 +2552,16 @@ if HAS_QT:
             h_sig_info = QHBoxLayout()
             h_sig_info.setSpacing(12)
             v_sig_text = QVBoxLayout()
-            v_sig_text.setSpacing(4)
+            v_sig_text.setSpacing(6)
 
             self.lbl_hero_signal = QLabel("Waiting for HDMI signal...")
             self.lbl_hero_signal.setObjectName("heroSignal")
+            self.lbl_hero_signal.setMinimumHeight(28)
             v_sig_text.addWidget(self.lbl_hero_signal)
 
             self.lbl_hero_meta = QLabel("Checking input source (Console / PC)...")
             self.lbl_hero_meta.setObjectName("heroMeta")
+            self.lbl_hero_meta.setMinimumHeight(18)
             v_sig_text.addWidget(self.lbl_hero_meta)
 
             h_sig_info.addLayout(v_sig_text, 1)
@@ -2616,11 +2652,13 @@ if HAS_QT:
             v_hero.addLayout(h_actions)
 
             if self.duo_mode:
+                v_hero.addSpacing(2)
                 h_duo = QHBoxLayout()
                 h_duo.setSpacing(8)
                 btn_bridge = QPushButton("EDID: Internal Bridge")
                 btn_bridge.setObjectName("btnGhost")
                 btn_bridge.setCursor(Qt.PointingHandCursor)
+                btn_bridge.setMinimumHeight(32)
                 btn_bridge.setToolTip(
                     "Advertise the internal 4K60 bridge EDID to HDMI IN 1. "
                     "Required for standalone capture without a downstream TV.")
@@ -2630,6 +2668,7 @@ if HAS_QT:
                 btn_copy = QPushButton("EDID: Downstream Copy")
                 btn_copy.setObjectName("btnGhost")
                 btn_copy.setCursor(Qt.PointingHandCursor)
+                btn_copy.setMinimumHeight(32)
                 btn_copy.setToolTip(
                     "Copy the EDID of the display/AVR connected to HDMI OUT.")
                 btn_copy.clicked.connect(
@@ -2638,6 +2677,7 @@ if HAS_QT:
                 btn_hpd = QPushButton("Pulse HPD")
                 btn_hpd.setObjectName("btnGhost")
                 btn_hpd.setCursor(Qt.PointingHandCursor)
+                btn_hpd.setMinimumHeight(32)
                 btn_hpd.setToolTip(
                     "Re-trigger the HDMI hot-plug handshake on the selected input.")
                 btn_hpd.clicked.connect(self._duo_hpd_action)
@@ -2766,6 +2806,8 @@ if HAS_QT:
             self.spin_hdr_exposure.setSuffix(" EV")
             self.spin_hdr_exposure.setValue(
                 float(self.saved_cfg.get("hdr_exposure", 0.0)))
+            self.spin_hdr_exposure.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            self.spin_hdr_exposure.lineEdit().setTextMargins(10, 0, 10, 0)
             self.spin_hdr_exposure.setToolTip(
                 "Linear exposure bias for the tonemapper (-2.0 .. +2.0 EV).")
             self.spin_hdr_exposure.setEnabled(self.chk_hdr.isChecked())
