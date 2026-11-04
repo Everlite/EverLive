@@ -580,7 +580,7 @@ static void *vfio_irq_thread_fn(void *arg)
 	while (!atomic_load(&g_irq_thread_stop)) {
 		bool triggered = false;
 
-		if (pdev->irq_event_valid) {
+		if (pdev->irq_event_valid && pdev->msi_enabled) {
 			struct pollfd pfd = {
 				.fd = pdev->irq_eventfd,
 				.events = POLLIN,
@@ -599,8 +599,12 @@ static void *vfio_irq_thread_fn(void *arg)
 			}
 		} else {
 			/*
-			 * No VFIO eventfd is available: fall back to a 2 ms
-			 * low-latency MMIO poll of the level-triggered IRQ.
+			 * INTx is level-triggered, so its VFIO eventfd stays
+			 * silent whenever the line is still asserted (and some
+			 * hosts never deliver the event at all).  A device with
+			 * no eventfd has no notification either.  Poll the MMIO
+			 * status every 2 ms in both cases; the handler is a
+			 * no-op when the status register is clear.
 			 */
 			usleep(2000);
 			triggered = true;
@@ -626,6 +630,7 @@ int pci_alloc_irq_vectors(struct pci_dev *pdev, unsigned int min_vecs,
 {
 	(void)min_vecs;
 	(void)max_vecs;
+	(void)flags;
 
 	pdev->irq_eventfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 	if (pdev->irq_eventfd < 0)
@@ -633,15 +638,16 @@ int pci_alloc_irq_vectors(struct pci_dev *pdev, unsigned int min_vecs,
 	pdev->irq_event_valid = false;
 
 	/*
-	 * Prefer INTx first to match GC570D_REG_IRQ_MODE = 5 in
-	 * gc570d_bridge_init(), then fall back to MSI if INTx is unavailable.
-	 * PCI_IRQ_MSI-only callers get MSI first.
+	 * Try MSI first.  On the GC570D the VFIO INTx path (mask/unmask via
+	 * VFIO_DEVICE_SET_IRQS) can stall the bridge I2C engine: the HDMI IN 2
+	 * probe then times out at its first receiver register write and the
+	 * whole device fails to initialize.  MSI delivers the same bridge,
+	 * DMA and audio interrupts reliably, so only fall back to INTx when
+	 * the device does not advertise MSI.
 	 */
 	uint32_t indices[2] = {
-		(flags & PCI_IRQ_MSI) ? VFIO_PCI_MSI_IRQ_INDEX :
-					VFIO_PCI_INTX_IRQ_INDEX,
-		(flags & PCI_IRQ_MSI) ? VFIO_PCI_INTX_IRQ_INDEX :
-					VFIO_PCI_MSI_IRQ_INDEX,
+		VFIO_PCI_MSI_IRQ_INDEX,
+		VFIO_PCI_INTX_IRQ_INDEX,
 	};
 	for (int i = 0; i < 2; i++) {
 		struct vfio_irq_info irq_info = {

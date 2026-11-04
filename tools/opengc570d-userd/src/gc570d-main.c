@@ -559,7 +559,7 @@ static int gc570d_probe(struct pci_dev *pdev,
 	gc->video0_frame_interval = 166666;
 	pci_set_drvdata(pdev, gc);
 
-	ret = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_INTX);
+	ret = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI);
 	if (ret < 0) {
 		dev_err_probe(&pdev->dev, ret,
 			      "failed to allocate PCI interrupt\n");
