@@ -23,6 +23,21 @@ Dependencies: a C11 compiler, `pkg-config`, SDL2 and PipeWire development
 headers. Without SDL2 the daemon still builds as a headless capture engine;
 without PipeWire the capture rings and control socket remain available.
 
+## Permissions and interrupts
+
+VFIO pins every DMA buffer, so the daemon needs either `CAP_IPC_LOCK` on the
+binary (`cap_ipc_lock=+ep`) or an `RLIMIT_MEMLOCK` large enough for both video
+rings. The packaged `99-gc570d-memlock.conf` and the per-user systemd unit
+raise the memlock budget; alternatively, grant the file capability. No root
+privileges are needed once either is in place. Rebuilding with `make` replaces
+the binary and clears its file capability, so re-apply `cap_ipc_lock=+ep` if
+you rely on the capability instead of a session memlock limit.
+
+VFIO interrupts are allocated MSI-first. INTx is only a fallback because its
+mask/unmask path can stall the bridge I2C engine on some hosts. When INTx or
+no VFIO eventfd is available, the IRQ thread polls the MMIO status register
+every 2 ms.
+
 ## Run
 
 ```sh

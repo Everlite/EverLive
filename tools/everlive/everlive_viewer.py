@@ -22,7 +22,7 @@ except ImportError:  # imported as a module from another working directory
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from everlive_client import EverLiveIpcClient, probe as ipc_probe
 
-__version__ = "1.3.1"
+__version__ = "1.4.0"
 
 CONFIG_DIR = os.path.expanduser("~/.config/everlive")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")

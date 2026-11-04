@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.4.0] - 2026-11-03
+## [1.4.0] - 2026-11-04
 
 ### Added
 - **AVerMedia Live Gamer DUO (`GC570D`) Userspace VFIO Engine (`tools/opengc570d-userd`):**
@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Console Hub DUO Controls & Runtime CLI (`gc570d-ctl`):**
   - Added Live Gamer DUO controls to `everlive_viewer.py`: **DUO Input** selector (`HDMI 1` / `HDMI 2`), **EDID: Internal Bridge** vs. **EDID: Downstream Copy** policy buttons, **Pulse HPD** hot-plug button, and DUO RGB LED effect mapping (`colorful`, `breathing`, `static`, `off`) over `$XDG_RUNTIME_DIR/gc570d/control.sock`.
   - Updated `build.sh`, `install.sh`, `uninstall.sh`, and `.github/workflows/ci.yml` to build, configure, and verify both `opengc573-userd` and `opengc570d-userd`.
+
+### Fixed
+- **GC570D VFIO interrupt allocation:** Restored MSI-first ordering in `pci_alloc_irq_vectors()`. The INTx-first sequence introduced during the 1.4.0 hardening work could stall the bridge I2C engine, causing the HDMI IN 2 receiver probe to time out at register `0x0f` (`-110`) and aborting probe on real GC570D hardware. INTx remains the fallback, and the 2 ms MMIO status poll covers INTx and eventfd-less setups.
+- **GC570D hardware validation:** VFIO probe, MSI interrupt delivery, IT68051/IT6802 initialization and IRQ handling verified on a physical Live Gamer DUO.
 
 ---
 

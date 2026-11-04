@@ -48,7 +48,15 @@ This document tracks completed milestones, upcoming architectural goals, and res
 
 ---
 
-## 🚀 Planned for v1.3+ (Detailed Specification in `docs/ROADMAP_v1.1.md`)
+## ✅ Completed in v1.4.0
+
+- **AVerMedia Live Gamer DUO (`GC570D`) userspace engine:** Added `tools/opengc570d-userd` with simultaneous dual-HDMI capture, HDMI 1 HDR preprocessor path, HDMI 2 secondary capture, dual virtual cameras, DUO Console Hub controls and `gc570d-ctl`.
+- **Interrupt reliability:** VFIO interrupts are allocated MSI-first with INTx only as a fallback, preventing the INTx mask/unmask path from stalling the bridge I2C engine during probe.
+- **Documentation and versioning:** README, installer, launcher, Console Hub and IPC version metadata aligned to 1.4.0.
+
+---
+
+## 🚀 Planned for v1.5+ (Detailed Specification in `docs/ROADMAP_v1.1.md`)
 
 > `docs/ROADMAP_v1.1.md` is a historical engineering document. Its `LD_PRELOAD`
 > shim was **not** implemented; v1.2.0 solved virtual-camera support with the
@@ -69,7 +77,7 @@ This document tracks completed milestones, upcoming architectural goals, and res
 
 ### 4. GUI Polish & Multi-Card Core Abstraction (`libeverlive-core`)
 - **RGB Color Picker:** Full 24-bit hex color wheel via `QColorDialog` in `everlive_viewer.py`.
-- **Modular Hardware Abstraction:** Decouple the PCIe DMA streaming engine from card-specific register tables (laying the groundwork for GC570D Live Gamer DUO and GC575 4K 2.1).
+- **Modular Hardware Abstraction:** Decouple the PCIe DMA streaming engine from card-specific register tables (laying the groundwork for the GC575 4K 2.1 and future AVerMedia cards).
 
 ### 5. Audio Subsystem
 - **Multichannel Output:** Optional native 5.1/7.1 playback instead of the stereo downmix (today AC-3/DTS are decoded and downmixed via `libswresample`).
