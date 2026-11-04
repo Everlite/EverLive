@@ -18,6 +18,7 @@
 #include <sys/eventfd.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <linux/vfio.h>
 #include <linux/pci_regs.h>
@@ -577,26 +578,44 @@ static void *vfio_irq_thread_fn(void *arg)
 
 	pthread_setname_np(pthread_self(), "gc570d-vfio-irq");
 	while (!atomic_load(&g_irq_thread_stop)) {
-		struct pollfd pfd = {
-			.fd = pdev->irq_eventfd,
-			.events = POLLIN,
-		};
-		int pr = poll(&pfd, pdev->irq_eventfd >= 0 ? 1 : 0, 1);
-		if (atomic_load(&g_irq_thread_stop))
-			break;
-		if (pr > 0 && (pfd.revents & POLLIN)) {
-			uint64_t cnt = 0;
-			if (read(pdev->irq_eventfd, &cnt, sizeof(cnt)) < 0) {
-				/* ignore EAGAIN */
+		bool triggered = false;
+
+		if (pdev->irq_event_valid) {
+			struct pollfd pfd = {
+				.fd = pdev->irq_eventfd,
+				.events = POLLIN,
+			};
+			int pr = poll(&pfd, 1, 100);
+
+			if (atomic_load(&g_irq_thread_stop))
+				break;
+			if (pr > 0 && (pfd.revents & POLLIN)) {
+				uint64_t cnt;
+
+				while (read(pdev->irq_eventfd, &cnt,
+					    sizeof(cnt)) == sizeof(cnt))
+					;
+				triggered = true;
 			}
+		} else {
+			/*
+			 * No VFIO eventfd is available: fall back to a 2 ms
+			 * low-latency MMIO poll of the level-triggered IRQ.
+			 */
+			usleep(2000);
+			triggered = true;
 		}
+
+		if (!triggered)
+			continue;
+
 		if (atomic_load(&g_irq_enabled) && g_irq_handler && g_irq_dev_id) {
 			pthread_mutex_lock(&g_irq_sync_lock);
 			if (atomic_load(&g_irq_enabled))
 				g_irq_handler(1, g_irq_dev_id);
 			pthread_mutex_unlock(&g_irq_sync_lock);
 		}
-		if (pr > 0)
+		if (pdev->irq_event_valid)
 			vfio_unmask_intx(pdev);
 	}
 	return NULL;
@@ -607,16 +626,23 @@ int pci_alloc_irq_vectors(struct pci_dev *pdev, unsigned int min_vecs,
 {
 	(void)min_vecs;
 	(void)max_vecs;
-	(void)flags;
 
 	pdev->irq_eventfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 	if (pdev->irq_eventfd < 0)
 		return -errno;
+	pdev->irq_event_valid = false;
 
-	/* Prefer INTx first to match GC570D_REG_IRQ_MODE = 5 in gc570d_bridge_init(),
-	 * then fall back to MSI if INTx is unavailable.
+	/*
+	 * Prefer INTx first to match GC570D_REG_IRQ_MODE = 5 in
+	 * gc570d_bridge_init(), then fall back to MSI if INTx is unavailable.
+	 * PCI_IRQ_MSI-only callers get MSI first.
 	 */
-	uint32_t indices[2] = { VFIO_PCI_MSI_IRQ_INDEX, VFIO_PCI_INTX_IRQ_INDEX };
+	uint32_t indices[2] = {
+		(flags & PCI_IRQ_MSI) ? VFIO_PCI_MSI_IRQ_INDEX :
+					VFIO_PCI_INTX_IRQ_INDEX,
+		(flags & PCI_IRQ_MSI) ? VFIO_PCI_INTX_IRQ_INDEX :
+					VFIO_PCI_MSI_IRQ_INDEX,
+	};
 	for (int i = 0; i < 2; i++) {
 		struct vfio_irq_info irq_info = {
 			.argsz = sizeof(irq_info),
@@ -636,6 +662,7 @@ int pci_alloc_irq_vectors(struct pci_dev *pdev, unsigned int min_vecs,
 			if (ioctl(pdev->vfio_device_fd, VFIO_DEVICE_SET_IRQS, irq_set) == 0) {
 				pdev->irq_index = indices[i];
 				pdev->msi_enabled = (indices[i] == VFIO_PCI_MSI_IRQ_INDEX);
+				pdev->irq_event_valid = true;
 				dev_info(&pdev->dev,
 					 "VFIO interrupt configured using %s\n",
 					 pdev->msi_enabled ? "MSI" : "INTx");
@@ -648,6 +675,8 @@ int pci_alloc_irq_vectors(struct pci_dev *pdev, unsigned int min_vecs,
 
 	dev_warn(&pdev->dev,
 		 "VFIO_DEVICE_SET_IRQS unavailable; using 2ms low-latency MMIO IRQ polling\n");
+	pdev->msi_enabled = false;
+	pdev->irq_event_valid = false;
 	return 1;
 }
 
@@ -679,6 +708,7 @@ void pci_free_irq_vectors(struct pci_dev *pdev)
 		close(pdev->irq_eventfd);
 		pdev->irq_eventfd = -1;
 	}
+	pdev->irq_event_valid = false;
 }
 
 int request_irq(unsigned int irq, irq_handler_t handler, unsigned long flags,
@@ -864,6 +894,8 @@ struct gc570d_user_video_stream {
 	pthread_mutex_t frame_lock;
 	uint8_t *latest_yuy2;
 	size_t latest_size;
+	uint32_t latest_width;
+	uint32_t latest_height;
 	uint64_t latest_seq;
 	uint64_t latest_ts_ns;
 	uint64_t last_pushed_seq;
@@ -894,6 +926,19 @@ struct gc570d_user_audio_stream {
 
 static struct gc570d_user_video_stream g_vstreams[2];
 static struct gc570d_user_audio_stream g_astreams[2];
+
+/*
+ * The PipeWire process thread reads the video frame under frame_lock, so the
+ * locks must survive a hardware reinit.  Initialize them exactly once instead
+ * of calling pthread_mutex_init() on a possibly-held mutex.
+ */
+static pthread_once_t g_vstream_locks_once = PTHREAD_ONCE_INIT;
+
+static void gc570d_vstream_locks_init(void)
+{
+	for (int i = 0; i < 2; i++)
+		pthread_mutex_init(&g_vstreams[i].frame_lock, NULL);
+}
 
 #ifdef HAVE_LIBPIPEWIRE
 static struct pw_thread_loop *g_pw_loop = NULL;
@@ -1113,8 +1158,12 @@ static void on_video_process(void *data)
 		       ep->negotiated_format.format : SPA_VIDEO_FORMAT_YUY2;
 
 	pthread_mutex_lock(&vs->frame_lock);
-	if (vs->latest_yuy2 && vs->latest_size >= 1920 * 1080 * 2) {
-		written = gc570d_convert_frame(vs->latest_yuy2, 1920, 1080,
+	uint32_t src_w = vs->latest_width ? vs->latest_width : 1920;
+	uint32_t src_h = vs->latest_height ? vs->latest_height : 1080;
+
+	if (vs->latest_yuy2 &&
+	    vs->latest_size >= (size_t)src_w * src_h * 2) {
+		written = gc570d_convert_frame(vs->latest_yuy2, src_w, src_h,
 					       dst, buf->datas[0].maxsize,
 					       fmt, w, h, &stride);
 		vs->last_pushed_seq = vs->latest_seq;
@@ -1685,27 +1734,48 @@ void vb2_buffer_done(struct vb2_buffer *vb, enum vb2_buffer_state state)
 		struct gc570d_user_video_stream *vs = &g_vstreams[port];
 		pthread_mutex_lock(&vs->frame_lock);
 		if (vs->latest_yuy2 && vb->payload <= vs->latest_size) {
-			memcpy(vs->latest_yuy2, vb->vaddr, vb->payload);
+			u32 frame_w = GC570D_WIDTH;
+			u32 frame_h = GC570D_HEIGHT;
+
+			if (port == 0 && g_gc) {
+				frame_w = READ_ONCE(g_gc->video0_width);
+				frame_h = READ_ONCE(g_gc->video0_height);
+			}
+			if ((size_t)frame_w * frame_h * 2 == vb->payload) {
+				memcpy(vs->latest_yuy2, vb->vaddr, vb->payload);
+				vs->latest_width = frame_w;
+				vs->latest_height = frame_h;
+			}
 			vs->latest_seq++;
 			vs->latest_ts_ns = vb->timestamp;
 			if (g_shm && vb->payload <= GC570D_SHM_FRAME_BYTES) {
 				struct gc570d_shm_port *sp = &g_shm->ports[port];
-				u32 width = GC570D_WIDTH;
-				u32 height = GC570D_HEIGHT;
 
-				if (port == 0 && g_gc) {
-					width = READ_ONCE(g_gc->video0_width);
-					height = READ_ONCE(g_gc->video0_height);
-				}
-				if ((size_t)width * height * 2 == vb->payload) {
+				if ((size_t)frame_w * frame_h * 2 == vb->payload) {
+					uint64_t seq = __atomic_load_n(&sp->seq,
+								       __ATOMIC_RELAXED);
+
+					/* Seqlock: odd while the payload is in flux. */
+					__atomic_store_n(&sp->seq, seq + 1,
+							 __ATOMIC_RELAXED);
+					__atomic_thread_fence(__ATOMIC_RELEASE);
 					memcpy(sp->yuy2, vb->vaddr, vb->payload);
-					sp->width = width;
-					sp->height = height;
-					sp->no_signal = g_gc ? (port == 0 ? READ_ONCE(g_gc->video0_no_signal) :
-									    READ_ONCE(g_gc->video_no_signal)) : 0;
-					sp->streaming = 1;
-					sp->timestamp_ns = vb->timestamp;
-					__atomic_store_n(&sp->seq, vs->latest_seq, __ATOMIC_RELEASE);
+					__atomic_store_n(&sp->width, frame_w,
+							 __ATOMIC_RELAXED);
+					__atomic_store_n(&sp->height, frame_h,
+							 __ATOMIC_RELAXED);
+					__atomic_store_n(&sp->no_signal,
+							 g_gc ? (port == 0 ? READ_ONCE(g_gc->video0_no_signal) :
+								 READ_ONCE(g_gc->video_no_signal)) : 0,
+							 __ATOMIC_RELAXED);
+					__atomic_store_n(&sp->streaming, 1,
+							 __ATOMIC_RELAXED);
+					__atomic_store_n(&sp->timestamp_ns,
+							 vb->timestamp,
+							 __ATOMIC_RELAXED);
+					__atomic_thread_fence(__ATOMIC_RELEASE);
+					__atomic_store_n(&sp->seq, seq + 2,
+							 __ATOMIC_RELEASE);
 				}
 			}
 		}
@@ -1731,8 +1801,12 @@ int video_register_device(struct video_device *vdev, int type, int nr)
 	vs->port_index = port;
 	vs->vdev = vdev;
 	vs->vq = vdev->queue;
-	pthread_mutex_init(&vs->frame_lock, NULL);
+	pthread_once(&g_vstream_locks_once, gc570d_vstream_locks_init);
+	pthread_mutex_lock(&vs->frame_lock);
+	free(vs->latest_yuy2);
 	vs->latest_size = GC570D_DMA_FRAME_SIZE;
+	vs->latest_width = GC570D_WIDTH;
+	vs->latest_height = GC570D_HEIGHT;
 	vs->latest_yuy2 = calloc(1, vs->latest_size);
 	if (vs->latest_yuy2) {
 		for (size_t i = 0; i < vs->latest_size; i += 4) {
@@ -1742,6 +1816,7 @@ int video_register_device(struct video_device *vdev, int type, int nr)
 			vs->latest_yuy2[i + 3] = 128;
 		}
 	}
+	pthread_mutex_unlock(&vs->frame_lock);
 	return 0;
 }
 
@@ -1771,8 +1846,18 @@ void video_unregister_device(struct video_device *vdev)
 		vb->vaddr = NULL;
 		vb->dma_addr = 0;
 	}
+	/*
+	 * Keep the PipeWire reader from touching the old buffer after it is
+	 * released, and never re-initialize a mutex that may be held by the
+	 * PipeWire thread during a reinit.
+	 */
+	pthread_mutex_lock(&vs->frame_lock);
 	free(vs->latest_yuy2);
 	vs->latest_yuy2 = NULL;
+	vs->latest_size = 0;
+	vs->latest_width = 0;
+	vs->latest_height = 0;
+	pthread_mutex_unlock(&vs->frame_lock);
 }
 
 static int gc570d_start_user_video_streams(void)
@@ -1825,6 +1910,13 @@ static int gc570d_start_user_video_streams(void)
 
 /* ALSA PCM Callbacks */
 static int g_next_card_num = 0;
+static pthread_once_t g_astream_locks_once = PTHREAD_ONCE_INIT;
+
+static void gc570d_astream_locks_init(void)
+{
+	for (int i = 0; i < 2; i++)
+		pthread_mutex_init(&g_astreams[i].ring_lock, NULL);
+}
 
 int snd_card_new(struct device *parent, int idx, const char *xid, void *module,
 		 int extra_size, struct snd_card **card_ret)
@@ -1929,10 +2021,19 @@ int snd_card_register(struct snd_card *card)
 	int ch = (strstr(card->id, "HDMI1") != NULL) ? 0 : 1;
 	card->pcm->substream.channel_index = ch;
 	struct gc570d_user_audio_stream *as = &g_astreams[ch];
+	pthread_once(&g_astream_locks_once, gc570d_astream_locks_init);
+	pthread_mutex_lock(&as->ring_lock);
 	as->channel_index = ch;
 	as->card = card;
 	as->pcm = card->pcm;
-	pthread_mutex_init(&as->ring_lock, NULL);
+	as->head = 0;
+	as->tail = 0;
+	as->fill = 0;
+	as->periods_published = 0;
+#ifdef HAVE_LIBPIPEWIRE
+	as->prebuffering = true;
+#endif
+	pthread_mutex_unlock(&as->ring_lock);
 	return 0;
 }
 
@@ -2036,6 +2137,12 @@ void snd_card_free(struct snd_card *card)
 {
 	if (!card)
 		return;
+	for (int i = 0; i < 2; i++) {
+		if (g_astreams[i].card == card) {
+			g_astreams[i].card = NULL;
+			g_astreams[i].pcm = NULL;
+		}
+	}
 	if (card->pcm) {
 		free(card->pcm->runtime.dma_area);
 		free(card->pcm);
@@ -2063,7 +2170,24 @@ static void gc570d_get_runtime_dir(char *buf, size_t size)
 static void gc570d_handle_ctl_client(int client_fd)
 {
 	char cmd[256] = { 0 };
-	ssize_t n = read(client_fd, cmd, sizeof(cmd) - 1);
+	struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+	struct pollfd pfd = {
+		.fd = client_fd,
+		.events = POLLIN,
+	};
+	ssize_t n;
+
+	/*
+	 * Bound every operation on the client socket: a client that connects
+	 * and never speaks, or never drains its response, must not stall the
+	 * daemon's single-threaded control loop.
+	 */
+	setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+	if (poll(&pfd, 1, 250) <= 0 || !(pfd.revents & POLLIN))
+		return;
+	n = read(client_fd, cmd, sizeof(cmd) - 1);
 	if (n <= 0)
 		return;
 	while (n > 0 && (cmd[n - 1] == '\n' || cmd[n - 1] == '\r'))
@@ -2245,7 +2369,15 @@ static int gc570d_ctl_server_init(void)
 		g_ctl_listen_fd = -1;
 		return -errno;
 	}
-	listen(g_ctl_listen_fd, 8);
+	if (listen(g_ctl_listen_fd, 8) < 0) {
+		int err = -errno;
+
+		close(g_ctl_listen_fd);
+		g_ctl_listen_fd = -1;
+		return err;
+	}
+	/* Only the owning user may issue diagnostic or LED commands. */
+	chmod(g_ctl_sock_path, 0600);
 	return 0;
 }
 
@@ -2289,13 +2421,20 @@ static int find_gc570d_pci_bdf(char *bdf_out, size_t bdf_size)
 		if (ent->d_name[0] == '.')
 			continue;
 		char dir[512];
-		uint32_t vendor = 0, device = 0, subdev = 0;
+		uint32_t vendor = 0, device = 0, subvend = 0, subdev = 0;
 		snprintf(dir, sizeof(dir), "/sys/bus/pci/devices/%s", ent->d_name);
 		if (read_sysfs_hex(dir, "vendor", &vendor) == 0 &&
 		    read_sysfs_hex(dir, "device", &device) == 0 &&
 		    vendor == GC570D_VENDOR_ID && device == GC570D_DEVICE_ID) {
-			if (read_sysfs_hex(dir, "subsystem_device", &subdev) == 0 &&
-			    subdev != 0 && subdev != GC570D_SUBSYSTEM_ID)
+			/*
+			 * 1461:0054 is shared with other AVerMedia cards
+			 * (GC573/GC555).  Only the DUO exposes subsystem
+			 * 1461:5700; skip anything we cannot positively identify.
+			 */
+			if (read_sysfs_hex(dir, "subsystem_vendor", &subvend) < 0 ||
+			    read_sysfs_hex(dir, "subsystem_device", &subdev) < 0 ||
+			    subvend != GC570D_SUBSYSTEM_VENDOR_ID ||
+			    subdev != GC570D_SUBSYSTEM_ID)
 				continue;
 			strscpy(bdf_out, ent->d_name, bdf_size);
 			closedir(d);
@@ -2316,6 +2455,7 @@ static int gc570d_vfio_open(struct pci_dev *pdev, const char *requested_bdf)
 	pdev->vfio_group_fd = -1;
 	pdev->vfio_device_fd = -1;
 	pdev->irq_eventfd = -1;
+	pdev->irq_event_valid = false;
 	pdev->dev.pdev = pdev;
 
 	if (requested_bdf && requested_bdf[0]) {
@@ -2653,6 +2793,8 @@ int main(int argc, char **argv)
 		return 1;
 
 	struct pci_driver *drv = gc570d_get_pci_driver();
+	bool probed = false;
+
 	ret = drv->probe(&g_pdev, drv->id_table);
 	if (ret < 0) {
 		fprintf(stderr, "[gc570d ERR ] Driver probe failed: %d\n", ret);
@@ -2660,11 +2802,12 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	g_gc = pci_get_drvdata(&g_pdev);
+	probed = true;
 
 	/* Initialize POSIX shared-memory frame store for libgc570d-v4l2.so */
-	g_shm_fd = shm_open(GC570D_SHM_NAME, O_CREAT | O_RDWR, 0666);
+	g_shm_fd = shm_open(GC570D_SHM_NAME, O_CREAT | O_RDWR, 0600);
 	if (g_shm_fd >= 0) {
-		fchmod(g_shm_fd, 0666);
+		fchmod(g_shm_fd, 0600);
 		if (ftruncate(g_shm_fd, sizeof(struct gc570d_shm_region)) == 0) {
 			g_shm = mmap(NULL, sizeof(struct gc570d_shm_region),
 				     PROT_READ | PROT_WRITE, MAP_SHARED, g_shm_fd, 0);
@@ -2674,8 +2817,10 @@ int main(int argc, char **argv)
 				g_shm->version = 1;
 				strscpy(g_shm->pci_bdf, g_pdev.bdf, sizeof(g_shm->pci_bdf));
 				for (int p = 0; p < 2; p++) {
-					g_shm->ports[p].width = GC570D_WIDTH;
-					g_shm->ports[p].height = GC570D_HEIGHT;
+					g_shm->ports[p].width = p == 0 ?
+						gc570d_cfg.width : GC570D_WIDTH;
+					g_shm->ports[p].height = p == 0 ?
+						gc570d_cfg.height : GC570D_HEIGHT;
 				}
 			} else {
 				g_shm = NULL;
@@ -2764,12 +2909,14 @@ int main(int argc, char **argv)
 			fprintf(stderr, "[gc570d INFO] Re-initializing GC570D hardware pipeline in place...\n");
 			gc570d_everlive_set_dev(NULL);
 			drv->remove(&g_pdev);
+			probed = false;
 			g_gc = NULL;
 			g_next_card_num = 0;
 			g_reinit_requested = false;
 			usleep(200000);
 			if (drv->probe(&g_pdev, drv->id_table) == 0) {
 				g_gc = pci_get_drvdata(&g_pdev);
+				probed = true;
 				gc570d_everlive_set_dev(g_gc);
 				gc570d_start_user_video_streams();
 				gc570d_start_user_audio_streams();
@@ -2789,16 +2936,35 @@ int main(int argc, char **argv)
 #ifdef HAVE_LIBPIPEWIRE
 	gc570d_pipewire_shutdown();
 #endif
-	drv->remove(&g_pdev);
+	if (probed)
+		drv->remove(&g_pdev);
 	gc570d_vfio_close(&g_pdev);
 	if (g_shm) {
 		munmap(g_shm, sizeof(struct gc570d_shm_region));
 		g_shm = NULL;
 	}
 	if (g_shm_fd >= 0) {
+		struct stat st_fd, st_obj;
+		bool ours = false;
+		int probe_fd = shm_open(GC570D_SHM_NAME, O_RDONLY, 0);
+
+		if (probe_fd >= 0) {
+			if (fstat(g_shm_fd, &st_fd) == 0 &&
+			    fstat(probe_fd, &st_obj) == 0 &&
+			    st_fd.st_dev == st_obj.st_dev &&
+			    st_fd.st_ino == st_obj.st_ino)
+				ours = true;
+			close(probe_fd);
+		}
+
 		close(g_shm_fd);
 		g_shm_fd = -1;
-		shm_unlink(GC570D_SHM_NAME);
+		/*
+		 * Only remove the object if it is still the one we created;
+		 * a concurrently started instance may have replaced it.
+		 */
+		if (ours)
+			shm_unlink(GC570D_SHM_NAME);
 	}
 	return 0;
 }

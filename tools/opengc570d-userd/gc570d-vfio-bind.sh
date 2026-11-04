@@ -33,11 +33,13 @@ for devpath in /sys/bus/pci/devices/*; do
 done
 
 if [ -e "/dev/vfio/vfio" ]; then
-    chmod 0666 /dev/vfio/vfio 2>/dev/null || true
+    chown root:video /dev/vfio/vfio 2>/dev/null || true
+    chmod 0660 /dev/vfio/vfio 2>/dev/null || true
 fi
 for devnode in /dev/vfio/*; do
     if [ -e "$devnode" ] && [ "$devnode" != "/dev/vfio/vfio" ]; then
-        chmod 0666 "$devnode" 2>/dev/null || true
+        chown root:video "$devnode" 2>/dev/null || true
+        chmod 0660 "$devnode" 2>/dev/null || true
     fi
 done
 

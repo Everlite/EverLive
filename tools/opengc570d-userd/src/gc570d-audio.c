@@ -1662,6 +1662,7 @@ int gc570d_audio_register(struct gc570d_dev *gc)
 				THIS_MODULE, 0, &card2);
 	if (ret)
 		return ret;
+	gc->audio_card_hdmi2 = card2;
 	strscpy(card2->driver, "gc570d", sizeof(card2->driver));
 	strscpy(card2->shortname, "Live Gamer DUO - HDMI 2",
 		sizeof(card2->shortname));
@@ -1671,6 +1672,7 @@ int gc570d_audio_register(struct gc570d_dev *gc)
 	ret = snd_pcm_new(card2, "HDMI 2 Capture Only", 0, 0, 1, &pcm);
 	if (ret)
 		return ret;
+	gc->audio_pcm = pcm;
 	pcm->private_data = gc;
 	strscpy(pcm->name, "HDMI 2 (Capture Only)", sizeof(pcm->name));
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &gc570d_audio_pcm_ops);
@@ -1701,9 +1703,6 @@ int gc570d_audio_register(struct gc570d_dev *gc)
 	if (ret)
 		return ret;
 
-	gc->audio_card_hdmi2 = card2;
-	gc->audio_pcm = pcm;
-
 	/* --- HDMI 1 as its own card --- */
 	ret = snd_devm_card_new(&gc->pdev->dev, -1, "GC570D-HDMI1",
 				THIS_MODULE, 0, &card1);
@@ -1714,10 +1713,12 @@ int gc570d_audio_register(struct gc570d_dev *gc)
 		sizeof(card1->shortname));
 	snprintf(card1->longname, sizeof(card1->longname),
 		 "AVerMedia Live Gamer DUO HDMI 1 at %s", pci_name(gc->pdev));
+	gc->audio_card_hdmi1 = card1;
 
 	ret = snd_pcm_new(card1, "HDMI 1 Passthrough", 0, 0, 1, &pcm0);
 	if (ret)
 		return ret;
+	gc->audio0_pcm = pcm0;
 	pcm0->private_data = gc;
 	strscpy(pcm0->name, "HDMI 1 (Passthrough)", sizeof(pcm0->name));
 	snd_pcm_set_ops(pcm0, SNDRV_PCM_STREAM_CAPTURE, &gc570d_audio0_pcm_ops);
@@ -1748,13 +1749,45 @@ int gc570d_audio_register(struct gc570d_dev *gc)
 	if (ret)
 		return ret;
 
-	gc->audio_card_hdmi1 = card1;
-	gc->audio0_pcm = pcm0;
-
 	dev_info(&gc->pdev->dev,
 		 "registered HDMI IN 2 (card %d) and HDMI IN 1 (card %d) as distinct stereo ALSA cards\n",
 		 card2->number, card1->number);
 	return 0;
+}
+
+/*
+ * Tear down both ALSA cards.  Safe to call repeatedly and after a partial
+ * gc570d_audio_register() failure.
+ */
+void gc570d_audio_unregister(struct gc570d_dev *gc)
+{
+	if (!gc)
+		return;
+
+	if (gc->audio_card_hdmi2) {
+		snd_pcm_suspend_all(gc->audio_pcm);
+		snd_card_disconnect_sync(gc->audio_card_hdmi2);
+#ifdef GC570D_USERSPACE
+		snd_card_free(gc->audio_card_hdmi2);
+#endif
+		gc->audio_card_hdmi2 = NULL;
+		gc->audio_pcm = NULL;
+	}
+	if (gc->audio_card_hdmi1) {
+		snd_pcm_suspend_all(gc->audio0_pcm);
+		snd_card_disconnect_sync(gc->audio_card_hdmi1);
+#ifdef GC570D_USERSPACE
+		snd_card_free(gc->audio_card_hdmi1);
+#endif
+		gc->audio_card_hdmi1 = NULL;
+		gc->audio0_pcm = NULL;
+	}
+#ifdef GC570D_USERSPACE
+	free(gc->hdmi1_jack);
+	gc->hdmi1_jack = NULL;
+	free(gc->hdmi2_jack);
+	gc->hdmi2_jack = NULL;
+#endif
 }
 
 

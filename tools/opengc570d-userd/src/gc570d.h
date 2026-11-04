@@ -494,6 +494,7 @@ struct gc570d_dev {
 };
 
 int gc570d_audio_register(struct gc570d_dev *gc);
+void gc570d_audio_unregister(struct gc570d_dev *gc);
 int gc570d_audio_recover_locked(struct gc570d_dev *gc);
 int gc570d_audio0_recover_locked(struct gc570d_dev *gc);
 int gc570d_i2c_read8(struct gc570d_dev *gc,

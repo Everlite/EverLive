@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Per-user service for the GC570D userspace VFIO engine.
+# Install with `make install`, then enable it for the desktop user that owns
+# the video group membership and the PipeWire session:
+#
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now opengc570d-userd.service
+#
+# Adjust ExecStart if the nodes or input selection differ on this machine.
+
+[Unit]
+Description=EverLive GC570D (Live Gamer DUO) userspace capture engine
+After=pipewire.service wireplumber.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/opengc570d-userd --headless --loopback
+Restart=on-failure
+RestartSec=2
+# VFIO DMA pinning; the binary also carries cap_ipc_lock=+ep when installed
+# by gc570d-vfio-bind.sh.
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=default.target

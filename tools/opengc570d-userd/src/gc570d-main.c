@@ -554,65 +554,57 @@ static int gc570d_probe(struct pci_dev *pdev,
 	atomic_set(&gc->control_irq_seen, 0);
 	atomic_set(&gc->audio_irq_pending, 0);
 	atomic_set(&gc->audio0_irq_pending, 0);
-	gc->video0_width = 1920;
-	gc->video0_height = 1080;
+	gc->video0_width = gc570d_cfg.width;
+	gc->video0_height = gc570d_cfg.height;
 	gc->video0_frame_interval = 166666;
 	pci_set_drvdata(pdev, gc);
 
 	ret = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_INTX);
-	if (ret < 0)
-		return dev_err_probe(&pdev->dev, ret,
-				     "failed to allocate PCI interrupt\n");
+	if (ret < 0) {
+		dev_err_probe(&pdev->dev, ret,
+			      "failed to allocate PCI interrupt\n");
+		goto err_free_gc;
+	}
 	gc->irq = pci_irq_vector(pdev, 0);
 	ret = request_irq(gc->irq, gc570d_irq_handler,
 			  pci_dev_msi_enabled(pdev) ? 0 : IRQF_SHARED,
 			  "gc570d", gc);
 	if (ret) {
-		pci_free_irq_vectors(pdev);
-		return dev_err_probe(&pdev->dev, ret,
-				     "failed to request PCI interrupt\n");
+		dev_err_probe(&pdev->dev, ret,
+			      "failed to request PCI interrupt\n");
+		goto err_vectors;
 	}
 	disable_irq(gc->irq);
 	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (ret) {
-		free_irq(gc->irq, gc);
-		pci_free_irq_vectors(pdev);
-		return dev_err_probe(&pdev->dev, ret,
-				     "failed to configure DMA mask\n");
+		dev_err_probe(&pdev->dev, ret,
+			      "failed to configure DMA mask\n");
+		goto err_irq;
 	}
 	ret = gc570d_hdmi2_base_init(gc);
 	if (ret) {
-		free_irq(gc->irq, gc);
-		pci_free_irq_vectors(pdev);
-		return dev_err_probe(&pdev->dev, ret,
-				     "failed to initialize HDMI IN 2\n");
+		dev_err_probe(&pdev->dev, ret,
+			      "failed to initialize HDMI IN 2\n");
+		goto err_irq;
 	}
 	ret = gc570d_video_register(gc);
 	if (ret) {
-		free_irq(gc->irq, gc);
-		pci_free_irq_vectors(pdev);
-		return dev_err_probe(&pdev->dev, ret,
-				     "failed to register V4L2 device\n");
+		dev_err_probe(&pdev->dev, ret,
+			      "failed to register V4L2 device\n");
+		goto err_irq;
 	}
 	ret = gc570d_video0_register(gc);
 	if (ret) {
-		video_unregister_device(&gc->video_dev);
-		v4l2_device_unregister(&gc->v4l2_dev);
-		free_irq(gc->irq, gc);
-		pci_free_irq_vectors(pdev);
-		return dev_err_probe(&pdev->dev, ret,
-				     "failed to register HDMI IN 1 V4L2 device\n");
+		dev_err_probe(&pdev->dev, ret,
+			      "failed to register HDMI IN 1 V4L2 device\n");
+		goto err_video;
 	}
 	if (gc570d_cfg.enable_audio) {
 		ret = gc570d_audio_register(gc);
 		if (ret) {
-			video_unregister_device(&gc->video0_dev);
-			video_unregister_device(&gc->video_dev);
-			v4l2_device_unregister(&gc->v4l2_dev);
-			free_irq(gc->irq, gc);
-			pci_free_irq_vectors(pdev);
-			return dev_err_probe(&pdev->dev, ret,
-					     "failed to register ALSA device\n");
+			dev_err_probe(&pdev->dev, ret,
+				      "failed to register ALSA device\n");
+			goto err_video0;
 		}
 	}
 	if (gc570d_cfg.enable_led) {
@@ -946,11 +938,34 @@ static int gc570d_probe(struct pci_dev *pdev,
 		schedule_delayed_work(&gc->hdmi1_auto_work, 0);
 
 	return 0;
+
+err_video0:
+	gc570d_audio_unregister(gc);
+	video_unregister_device(&gc->video0_dev);
+err_video:
+	video_unregister_device(&gc->video_dev);
+	v4l2_device_unregister(&gc->v4l2_dev);
+err_irq:
+	free_irq(gc->irq, gc);
+err_vectors:
+	pci_free_irq_vectors(pdev);
+err_free_gc:
+	vfree(gc->capture_data);
+	vfree(gc->audio_capture_data);
+	vfree(gc->audio0_capture_data);
+	pci_set_drvdata(pdev, NULL);
+#ifdef GC570D_USERSPACE
+	kfree(gc);
+#endif
+	return ret;
 }
 
 static void gc570d_remove(struct pci_dev *pdev)
 {
 	struct gc570d_dev *gc = pci_get_drvdata(pdev);
+
+	if (!gc)
+		return;
 
 	WRITE_ONCE(gc->removing, true);
 	cancel_work_sync(&gc->resume_work);
@@ -960,14 +975,7 @@ static void gc570d_remove(struct pci_dev *pdev)
 	if (!IS_ERR_OR_NULL(gc->debugfs_dir))
 		debugfs_remove_recursive(gc->debugfs_dir);
 	gc570d_led_unregister(gc);
-	if (gc->audio_card_hdmi2) {
-		snd_pcm_suspend_all(gc->audio_pcm);
-		snd_card_disconnect_sync(gc->audio_card_hdmi2);
-	}
-	if (gc->audio_card_hdmi1) {
-		snd_pcm_suspend_all(gc->audio0_pcm);
-		snd_card_disconnect_sync(gc->audio_card_hdmi1);
-	}
+	gc570d_audio_unregister(gc);
 	video_unregister_device(&gc->video0_dev);
 	video_unregister_device(&gc->video_dev);
 	v4l2_device_unregister(&gc->v4l2_dev);
@@ -977,6 +985,11 @@ static void gc570d_remove(struct pci_dev *pdev)
 	vfree(gc->audio_capture_data);
 	vfree(gc->audio0_capture_data);
 	dev_info(&pdev->dev, "diagnostic probe removed\n");
+	pci_set_drvdata(pdev, NULL);
+#ifdef GC570D_USERSPACE
+	/* devm_kzalloc() is a plain calloc() in the userspace shim. */
+	kfree(gc);
+#endif
 }
 
 void gc570d_reset_resume_state(struct gc570d_dev *gc)

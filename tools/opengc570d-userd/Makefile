@@ -72,7 +72,40 @@ libgc570d-v4l2.so: src/gc570d-v4l2-preload.c src/gc570d-shm.h
 test selftest:
 	$(MAKE) -C ../../tests test
 
+PREFIX ?= /usr/local
+DESTDIR ?=
+BINDIR := $(DESTDIR)$(PREFIX)/bin
+LIBDIR := $(DESTDIR)$(PREFIX)/lib
+LIBEXECDIR := $(DESTDIR)$(PREFIX)/libexec
+SYSTEMD_USER_DIR := $(DESTDIR)$(PREFIX)/lib/systemd/user
+SYSTEM_SLEEP_DIR := $(DESTDIR)/usr/lib/systemd/system-sleep
+UDEV_RULES_DIR := $(DESTDIR)/etc/udev/rules.d
+LIMITS_DIR := $(DESTDIR)/etc/security/limits.d
+
+install: all
+	install -d $(BINDIR) $(LIBDIR) $(LIBEXECDIR) $(SYSTEMD_USER_DIR)
+	install -d $(SYSTEM_SLEEP_DIR) $(UDEV_RULES_DIR) $(LIMITS_DIR)
+	install -m 0755 opengc570d-userd gc570d-ctl $(BINDIR)/
+	install -m 0755 libgc570d-v4l2.so $(LIBDIR)/
+	install -m 0755 gc570d-vfio-bind.sh $(LIBEXECDIR)/
+	sed 's|/usr/local|$(PREFIX)|g' gc570d-sleep.sh > $(LIBEXECDIR)/gc570d-sleep.sh
+	chmod 0755 $(LIBEXECDIR)/gc570d-sleep.sh
+	install -m 0755 $(LIBEXECDIR)/gc570d-sleep.sh $(SYSTEM_SLEEP_DIR)/gc570d-sleep.sh
+	sed 's|/usr/local|$(PREFIX)|g' 99-gc570d-vfio.rules > $(UDEV_RULES_DIR)/99-gc570d-vfio.rules
+	install -m 0644 99-gc570d-memlock.conf $(LIMITS_DIR)/99-gc570d-memlock.conf
+	sed 's|/usr/local|$(PREFIX)|g' opengc570d-userd.service > $(SYSTEMD_USER_DIR)/opengc570d-userd.service
+	install -m 0644 gc570d.conf.example $(DESTDIR)/etc/gc570d.conf.example
+
+uninstall:
+	rm -f $(BINDIR)/opengc570d-userd $(BINDIR)/gc570d-ctl
+	rm -f $(LIBDIR)/libgc570d-v4l2.so
+	rm -f $(LIBEXECDIR)/gc570d-vfio-bind.sh $(LIBEXECDIR)/gc570d-sleep.sh
+	rm -f $(SYSTEM_SLEEP_DIR)/gc570d-sleep.sh
+	rm -f $(UDEV_RULES_DIR)/99-gc570d-vfio.rules
+	rm -f $(LIMITS_DIR)/99-gc570d-memlock.conf
+	rm -f $(SYSTEMD_USER_DIR)/opengc570d-userd.service
+
 clean:
 	rm -f $(TARGETS)
 
-.PHONY: all clean test selftest
+.PHONY: all clean test selftest install uninstall

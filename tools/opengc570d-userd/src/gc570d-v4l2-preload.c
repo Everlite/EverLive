@@ -37,6 +37,7 @@
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <sys/timerfd.h>
+#include <poll.h>
 #include <linux/videodev2.h>
 
 #include "gc570d-shm.h"
@@ -176,6 +177,55 @@ static struct gc570d_shm_region *get_shm(void)
 	return g_shm_ptr;
 }
 
+static void convert_yuy2_frame(const uint8_t *src, uint32_t src_w, uint32_t src_h,
+			       uint8_t *dst, size_t dst_max,
+			       uint32_t dst_w, uint32_t dst_h, uint32_t pixfmt);
+
+/*
+ * Snapshot and convert one SHM port under its seqlock.  The publisher makes
+ * seq odd before touching the payload and even again afterwards, so a frame
+ * is only accepted when seq is even and unchanged across the conversion.
+ */
+static void shm_convert_port(int port, uint8_t *dst, size_t dst_max,
+			     uint32_t dst_w, uint32_t dst_h, uint32_t pixfmt)
+{
+	struct gc570d_shm_region *shm = get_shm();
+	uint32_t src_w, src_h;
+	uint64_t seq;
+	int tries;
+
+	if (!shm || shm->magic != GC570D_SHM_MAGIC) {
+		convert_yuy2_frame(NULL, 0, 0, dst, dst_max,
+				   dst_w, dst_h, pixfmt);
+		return;
+	}
+
+	for (tries = 0; tries < 8; tries++) {
+		seq = __atomic_load_n(&shm->ports[port].seq, __ATOMIC_ACQUIRE);
+		if (!seq || (seq & 1)) {
+			usleep(100);
+			continue;
+		}
+
+		src_w = __atomic_load_n(&shm->ports[port].width,
+					__ATOMIC_ACQUIRE);
+		src_h = __atomic_load_n(&shm->ports[port].height,
+					__ATOMIC_ACQUIRE);
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);
+
+		convert_yuy2_frame(shm->ports[port].yuy2, src_w, src_h,
+				   dst, dst_max, dst_w, dst_h, pixfmt);
+
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);
+		if (__atomic_load_n(&shm->ports[port].seq, __ATOMIC_ACQUIRE) == seq)
+			return;
+		usleep(100);
+	}
+
+	/* Writer kept changing the frame: emit a black frame instead. */
+	convert_yuy2_frame(NULL, 0, 0, dst, dst_max, dst_w, dst_h, pixfmt);
+}
+
 static int match_virtual_video_path(const char *path)
 {
 	if (!path)
@@ -244,6 +294,12 @@ static void convert_yuy2_frame(const uint8_t *src, uint32_t src_w, uint32_t src_
 		src_w = 1920;
 	if (src_h < 2 || src_h > 1080)
 		src_h = 1080;
+	src_w &= ~1U; /* YUV 4:2:2 requires an even width */
+	src_h &= ~1U;
+	if (dst_w & 1U)
+		dst_w &= ~1U;
+	if (dst_h & 1U)
+		dst_h &= ~1U;
 	size_t needed = calc_sizeimage(dst_w, dst_h, pixfmt);
 	if (!dst || dst_max < needed)
 		return;
@@ -504,6 +560,7 @@ int access(const char *pathname, int mode)
 
 static int open_virtual_video(int port, int flags)
 {
+	(void)flags;
 	pthread_mutex_lock(&g_v4l2_lock);
 	int slot = -1;
 	for (int i = 0; i < GC570D_V4L2_MAX_FDS; i++) {
@@ -517,8 +574,7 @@ static int open_virtual_video(int port, int flags)
 		errno = EMFILE;
 		return -1;
 	}
-	int tfd = timerfd_create(CLOCK_MONOTONIC,
-		TFD_CLOEXEC | ((flags & O_NONBLOCK) ? TFD_NONBLOCK : 0));
+	int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
 	if (tfd < 0) {
 		pthread_mutex_unlock(&g_v4l2_lock);
 		return -1;
@@ -701,6 +757,9 @@ static int handle_virtual_ioctl(struct gc570d_v4l2_handle *h,
 		if (w <= 640 && ht <= 480) { w = 640; ht = 360; }
 		else if (w <= 1280 && ht <= 720) { w = 1280; ht = 720; }
 		else { w = 1920; ht = 1080; }
+		/* YUV 4:2:2 and the scaler require even dimensions. */
+		w &= ~1U;
+		ht &= ~1U;
 
 		uint32_t pf = f->fmt.pix.pixelformat;
 		if (pf != V4L2_PIX_FMT_YUYV && pf != V4L2_PIX_FMT_UYVY &&
@@ -720,6 +779,12 @@ static int handle_virtual_ioctl(struct gc570d_v4l2_handle *h,
 		f->fmt.pix.quantization = V4L2_QUANTIZATION_LIM_RANGE;
 		f->fmt.pix.xfer_func = V4L2_XFER_FUNC_709;
 		if (request == VIDIOC_S_FMT) {
+			if (h->req_count > 0 &&
+			    (w != h->width || ht != h->height || pf != h->pixfmt)) {
+				errno = EBUSY;
+				ret = -1;
+				break;
+			}
 			h->width = w;
 			h->height = ht;
 			h->pixfmt = pf;
@@ -863,22 +928,28 @@ static int handle_virtual_ioctl(struct gc570d_v4l2_handle *h,
 		if (found < 0) {
 			errno = EAGAIN; ret = -1; break;
 		}
-		uint64_t expirations = 0;
-		if (read(h->fd, &expirations, sizeof(expirations)) < 0 && errno == EAGAIN) {
+		if (!h->streaming) {
 			errno = EAGAIN; ret = -1; break;
 		}
-
-		struct gc570d_shm_region *shm = get_shm();
-		const uint8_t *src_yuy2 = NULL;
-		uint32_t src_w = 1920, src_h = 1080;
-		if (shm && shm->magic == GC570D_SHM_MAGIC) {
-			src_yuy2 = shm->ports[h->port].yuy2;
-			src_w = __atomic_load_n(&shm->ports[h->port].width, __ATOMIC_RELAXED);
-			src_h = __atomic_load_n(&shm->ports[h->port].height, __ATOMIC_RELAXED);
+		struct pollfd pfd = {
+			.fd = h->fd,
+			.events = POLLIN,
+		};
+		int pr = poll(&pfd, 1, 1000);
+		if (pr <= 0) {
+			if (pr == 0)
+				errno = EAGAIN;
+			ret = -1;
+			break;
 		}
-		convert_yuy2_frame(src_yuy2, src_w, src_h,
-				   h->bufs[found].addr, h->bufs[found].size,
-				   h->width, h->height, h->pixfmt);
+		uint64_t expirations;
+		while (read(h->fd, &expirations, sizeof(expirations)) ==
+		       sizeof(expirations))
+			;
+
+		shm_convert_port(h->port, h->bufs[found].addr,
+				 h->bufs[found].size,
+				 h->width, h->height, h->pixfmt);
 
 		h->bufs[found].queued = false;
 		h->bufs[found].done = true;
@@ -1119,16 +1190,8 @@ ssize_t v4l2_read(int fd, void *buffer, size_t n)
 			errno = EINVAL;
 			return -1;
 		}
-		struct gc570d_shm_region *shm = get_shm();
-		const uint8_t *src_yuy2 = NULL;
-		uint32_t src_w = 1920, src_h = 1080;
-		if (shm && shm->magic == GC570D_SHM_MAGIC) {
-			src_yuy2 = shm->ports[h->port].yuy2;
-			src_w = __atomic_load_n(&shm->ports[h->port].width, __ATOMIC_RELAXED);
-			src_h = __atomic_load_n(&shm->ports[h->port].height, __ATOMIC_RELAXED);
-		}
-		convert_yuy2_frame(src_yuy2, src_w, src_h, buffer, n,
-				   h->width, h->height, h->pixfmt);
+		shm_convert_port(h->port, buffer, n,
+				 h->width, h->height, h->pixfmt);
 		pthread_mutex_unlock(&g_v4l2_lock);
 		return (ssize_t)sz;
 	}

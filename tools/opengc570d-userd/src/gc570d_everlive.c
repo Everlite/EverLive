@@ -287,19 +287,22 @@ static bool everlive_snapshot(struct everlive_state *st, int port)
 	uint32_t bytes;
 	unsigned int tries;
 
-	for (tries = 0; tries < 6; tries++) {
+	for (tries = 0; tries < 8; tries++) {
 		seq = __atomic_load_n(&sp->seq, __ATOMIC_ACQUIRE);
-		if (!seq || seq == st->last_seen[port])
+		if (!seq || (seq & 1))
+			continue;
+		if (seq == st->last_seen[port])
 			return false;
 
-		width = __atomic_load_n(&sp->width, __ATOMIC_RELAXED);
-		height = __atomic_load_n(&sp->height, __ATOMIC_RELAXED);
+		width = __atomic_load_n(&sp->width, __ATOMIC_ACQUIRE);
+		height = __atomic_load_n(&sp->height, __ATOMIC_ACQUIRE);
 		if (width < 2 || height < 2 || width > 1920 || height > 1080)
 			return false;
 		bytes = width * height * 2;
 		if (bytes > EVERLIVE_FRAME_BYTES)
 			return false;
 
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);
 		memcpy(frame->pixels, sp->yuy2, bytes);
 		frame->width = width;
 		frame->height = height;
@@ -308,6 +311,7 @@ static bool everlive_snapshot(struct everlive_state *st, int port)
 		frame->timestamp_ns = __atomic_load_n(&sp->timestamp_ns,
 						      __ATOMIC_RELAXED);
 
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);
 		if (__atomic_load_n(&sp->seq, __ATOMIC_ACQUIRE) == seq) {
 			frame->seq = seq;
 			st->last_seen[port] = seq;

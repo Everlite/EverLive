@@ -524,12 +524,12 @@ cat > /etc/modprobe.d/everlive-vfio.conf <<EOF
 options vfio-pci ids=1461:0054,1461:0055
 EOF
 
-# Memlock Limits für native 4K DMA Mappings
+# Memlock Limits für native 4K DMA Mappings (nur Mitglieder der video-Gruppe)
 mkdir -p /etc/security/limits.d
 cat > /etc/security/limits.d/99-everlive-memlock.conf <<EOF
-# EverLive GC573 VFIO DMA memory pinning
-*       soft    memlock   unlimited
-*       hard    memlock   unlimited
+# EverLive VFIO DMA memory pinning (video group only)
+@video  soft    memlock   unlimited
+@video  hard    memlock   unlimited
 EOF
 
 # Udev-Regel: Bindet AVerMedia GC573 (1461:0054 / 1461:5550) an vfio-pci

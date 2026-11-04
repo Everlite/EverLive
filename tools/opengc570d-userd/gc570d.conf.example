@@ -2,7 +2,8 @@
 # Syntax: key=value (whitespace around key and value is ignored)
 # Blank lines and lines starting with '#' or ';' are ignored.
 
-# Default capture frame width and height (default: 1920x1080)
+# Default capture frame width and height before a source is detected
+# (default: 1920x1080). Detected HDMI modes override these values.
 # width=1920
 # height=1080
 

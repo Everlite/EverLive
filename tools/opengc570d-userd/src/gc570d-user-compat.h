@@ -671,6 +671,7 @@ struct resource {
 #define PCIE_LINK_STATE_L1    BIT(1)
 #define PCIE_LINK_STATE_CLKPM BIT(2)
 #define PCI_IRQ_INTX          BIT(0)
+#define PCI_IRQ_MSI           BIT(1)
 #define IRQF_SHARED           0x00000080
 
 struct pci_device_id {
@@ -692,6 +693,7 @@ struct pci_dev {
 	uint64_t config_offset;
 	int irq_eventfd;
 	uint32_t irq_index;
+	bool irq_event_valid;
 	bool msi_enabled;
 };
 
