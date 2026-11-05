@@ -47,6 +47,10 @@ jobs:
         run: |
           make -C tools/opengc573-userd selftest
 
+      - name: OpenGC570D EDID & config unit tests
+        run: |
+          make -C tools/opengc570d-userd selftest
+
       - name: Verify Python syntax
         run: |
           python3 -m py_compile tools/everlive/everlive_viewer.py

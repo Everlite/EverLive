@@ -18,6 +18,7 @@
 #include <sys/eventfd.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <linux/vfio.h>
 #include <linux/pci_regs.h>
@@ -274,12 +275,22 @@ static void *work_worker_thread(void *arg)
 
 void gc570d_init_work(struct work_struct *work, work_func_t func)
 {
+	int ret;
+
 	memset(work, 0, sizeof(*work));
 	work->func = func;
 	pthread_mutex_init(&work->lock, NULL);
 	init_cond_monotonic(&work->cond);
+	ret = pthread_create(&work->thread, NULL, work_worker_thread, work);
+	if (ret) {
+		fprintf(stderr,
+			"[gc570d ERR ] failed to create workqueue thread: %s\n",
+			strerror(ret));
+		pthread_cond_destroy(&work->cond);
+		pthread_mutex_destroy(&work->lock);
+		return;
+	}
 	work->initialized = true;
-	pthread_create(&work->thread, NULL, work_worker_thread, work);
 }
 
 bool gc570d_schedule_work_delay(struct work_struct *work, unsigned long delay_ms)
@@ -311,6 +322,31 @@ bool gc570d_cancel_work_sync(struct work_struct *work)
 	return was_pending;
 }
 
+/*
+ * Userspace-only teardown.  The kernel frees work_structs through devm after
+ * cancel_work_sync(), because the kernel workqueue guarantees the callback
+ * cannot run again once it returns.  Our emulation runs a dedicated pthread
+ * per work_struct, so the thread must be told to exit and joined before the
+ * containing device state is freed, otherwise it keeps waiting on a mutex and
+ * condition variable that no longer exist.
+ */
+void gc570d_destroy_work(struct work_struct *work)
+{
+	if (!work || !work->initialized)
+		return;
+
+	pthread_mutex_lock(&work->lock);
+	work->shutting_down = true;
+	work->pending = false;
+	work->initialized = false;
+	pthread_cond_broadcast(&work->cond);
+	pthread_mutex_unlock(&work->lock);
+
+	pthread_join(work->thread, NULL);
+	pthread_cond_destroy(&work->cond);
+	pthread_mutex_destroy(&work->lock);
+}
+
 /* =========================================================================
  * 2. VFIO-PCI Device Discovery, BAR0 MMIO, IOMMU DMA Mapping, & Eventfd IRQ
  * ========================================================================= */
@@ -323,7 +359,17 @@ struct gc570d_dma_mapping {
 };
 
 #define GC570D_MAX_DMA_MAPPINGS 64
+/*
+ * Keep a bounded cache of freed mappings so repeated prepare/hw_free and
+ * video-recovery cycles do not churn VFIO_IOMMU_MAP/UNMAP ioctls or consume
+ * fresh IOVA space every time.  The kernel module's allocation call pattern
+ * is intentionally left untouched; the recycling happens below its shim.
+ */
+#define GC570D_DMA_CACHE_BLOCKS 16
+#define GC570D_DMA_CACHE_BYTES  (32u * 1024 * 1024)
 static struct gc570d_dma_mapping g_dma_map_table[GC570D_MAX_DMA_MAPPINGS];
+static unsigned int g_dma_cached_blocks;
+static size_t g_dma_cached_bytes;
 static pthread_mutex_t g_dma_map_lock = PTHREAD_MUTEX_INITIALIZER;
 static dma_addr_t g_next_iova = 0x10000000ULL;
 
@@ -333,6 +379,45 @@ static size_t page_align_up(size_t size)
 	if (!pg)
 		pg = 4096;
 	return (size + pg - 1) & ~(pg - 1);
+}
+
+/* Caller must hold g_dma_map_lock. */
+static void gc570d_dma_unmap_locked(struct pci_dev *pdev,
+				    struct gc570d_dma_mapping *m)
+{
+	if (pdev->vfio_container_fd >= 0) {
+		struct vfio_iommu_type1_dma_unmap unmap = {
+			.argsz = sizeof(unmap),
+			.flags = 0,
+			.iova  = m->iova,
+			.size  = m->aligned_size,
+		};
+		ioctl(pdev->vfio_container_fd, VFIO_IOMMU_UNMAP_DMA, &unmap);
+	}
+	munmap(m->vaddr, m->aligned_size);
+	memset(m, 0, sizeof(*m));
+}
+
+/* Caller must hold g_dma_map_lock. */
+static void gc570d_dma_cache_drain_locked(struct pci_dev *pdev)
+{
+	int i;
+
+	for (i = 0; i < GC570D_MAX_DMA_MAPPINGS; i++) {
+		struct gc570d_dma_mapping *m = &g_dma_map_table[i];
+
+		if (!m->in_use && m->vaddr)
+			gc570d_dma_unmap_locked(pdev, m);
+	}
+	g_dma_cached_blocks = 0;
+	g_dma_cached_bytes = 0;
+}
+
+static void gc570d_dma_cache_drain(struct pci_dev *pdev)
+{
+	pthread_mutex_lock(&g_dma_map_lock);
+	gc570d_dma_cache_drain_locked(pdev);
+	pthread_mutex_unlock(&g_dma_map_lock);
 }
 
 void *dma_alloc_coherent(struct device *dev, size_t size,
@@ -346,26 +431,59 @@ void *dma_alloc_coherent(struct device *dev, size_t size,
 	int i;
 
 	(void)gfp;
-	vaddr = mmap(NULL, aligned, PROT_READ | PROT_WRITE,
-		     MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
-	if (vaddr == MAP_FAILED)
-		return NULL;
-
-	/* Fault in pages before VFIO_IOMMU_MAP_DMA pins them in the kernel */
-	memset(vaddr, 0, aligned);
-
 	pthread_mutex_lock(&g_dma_map_lock);
+
+	/* Reuse a cached mapping of exactly the requested size. */
 	for (i = 0; i < GC570D_MAX_DMA_MAPPINGS; i++) {
-		if (!g_dma_map_table[i].in_use) {
+		struct gc570d_dma_mapping *m = &g_dma_map_table[i];
+
+		if (!m->in_use && m->vaddr && m->aligned_size == aligned) {
+			m->in_use = true;
+			g_dma_cached_blocks--;
+			g_dma_cached_bytes -= m->aligned_size;
+			pthread_mutex_unlock(&g_dma_map_lock);
+			/* dma_alloc_coherent() is documented as zeroed memory. */
+			memset(m->vaddr, 0, aligned);
+			if (dma_handle)
+				*dma_handle = m->iova;
+			return m->vaddr;
+		}
+	}
+
+	for (i = 0; i < GC570D_MAX_DMA_MAPPINGS; i++) {
+		if (!g_dma_map_table[i].in_use && !g_dma_map_table[i].vaddr) {
 			slot = i;
 			break;
 		}
 	}
 	if (slot < 0) {
+		/* No pristine slot: evict one cached block to make room. */
+		for (i = 0; i < GC570D_MAX_DMA_MAPPINGS; i++) {
+			struct gc570d_dma_mapping *m = &g_dma_map_table[i];
+
+			if (!m->in_use && m->vaddr) {
+				g_dma_cached_blocks--;
+				g_dma_cached_bytes -= m->aligned_size;
+				gc570d_dma_unmap_locked(pdev, m);
+				slot = i;
+				break;
+			}
+		}
+	}
+	if (slot < 0) {
 		pthread_mutex_unlock(&g_dma_map_lock);
-		munmap(vaddr, aligned);
 		return NULL;
 	}
+
+	vaddr = mmap(NULL, aligned, PROT_READ | PROT_WRITE,
+		     MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+	if (vaddr == MAP_FAILED) {
+		pthread_mutex_unlock(&g_dma_map_lock);
+		return NULL;
+	}
+
+	/* Fault in pages before VFIO_IOMMU_MAP_DMA pins them in the kernel */
+	memset(vaddr, 0, aligned);
 
 	iova = g_next_iova;
 	g_next_iova += aligned + 0x10000ULL; /* 64KB guard page between IOVAs */
@@ -406,30 +524,42 @@ void dma_free_coherent(struct device *dev, size_t size,
 		       void *cpu_addr, dma_addr_t dma_handle)
 {
 	struct pci_dev *pdev = dev && dev->pdev ? dev->pdev : &g_pdev;
+	size_t aligned = page_align_up(size ? size : 4096);
+	struct gc570d_dma_mapping *m = NULL;
 	int i;
 
-	(void)size;
 	if (!cpu_addr)
 		return;
 
 	pthread_mutex_lock(&g_dma_map_lock);
 	for (i = 0; i < GC570D_MAX_DMA_MAPPINGS; i++) {
-		if (g_dma_map_table[i].in_use &&
-		    (g_dma_map_table[i].vaddr == cpu_addr ||
-		     g_dma_map_table[i].iova == dma_handle)) {
-			if (pdev->vfio_container_fd >= 0) {
-				struct vfio_iommu_type1_dma_unmap unmap = {
-					.argsz = sizeof(unmap),
-					.flags = 0,
-					.iova  = g_dma_map_table[i].iova,
-					.size  = g_dma_map_table[i].aligned_size,
-				};
-				ioctl(pdev->vfio_container_fd, VFIO_IOMMU_UNMAP_DMA, &unmap);
-			}
-			munmap(g_dma_map_table[i].vaddr, g_dma_map_table[i].aligned_size);
-			memset(&g_dma_map_table[i], 0, sizeof(g_dma_map_table[i]));
+		struct gc570d_dma_mapping *cand = &g_dma_map_table[i];
+
+		if (cand->in_use && cand->vaddr == cpu_addr &&
+		    (!dma_handle || cand->iova == dma_handle)) {
+			m = cand;
 			break;
 		}
+	}
+	if (!m) {
+		pthread_mutex_unlock(&g_dma_map_lock);
+		fprintf(stderr,
+			"[gc570d WARN] dma_free_coherent: unknown buffer %p (handle 0x%llx)\n",
+			cpu_addr, (unsigned long long)dma_handle);
+		return;
+	}
+	if (size && m->aligned_size != aligned)
+		fprintf(stderr,
+			"[gc570d WARN] dma_free_coherent: size %zu != mapped %zu for %p\n",
+			size, m->aligned_size, cpu_addr);
+
+	if (g_dma_cached_blocks < GC570D_DMA_CACHE_BLOCKS &&
+	    g_dma_cached_bytes + m->aligned_size <= GC570D_DMA_CACHE_BYTES) {
+		m->in_use = false;
+		g_dma_cached_blocks++;
+		g_dma_cached_bytes += m->aligned_size;
+	} else {
+		gc570d_dma_unmap_locked(pdev, m);
 	}
 	pthread_mutex_unlock(&g_dma_map_lock);
 }
@@ -577,26 +707,48 @@ static void *vfio_irq_thread_fn(void *arg)
 
 	pthread_setname_np(pthread_self(), "gc570d-vfio-irq");
 	while (!atomic_load(&g_irq_thread_stop)) {
-		struct pollfd pfd = {
-			.fd = pdev->irq_eventfd,
-			.events = POLLIN,
-		};
-		int pr = poll(&pfd, pdev->irq_eventfd >= 0 ? 1 : 0, 1);
-		if (atomic_load(&g_irq_thread_stop))
-			break;
-		if (pr > 0 && (pfd.revents & POLLIN)) {
-			uint64_t cnt = 0;
-			if (read(pdev->irq_eventfd, &cnt, sizeof(cnt)) < 0) {
-				/* ignore EAGAIN */
+		bool triggered = false;
+
+		if (pdev->irq_event_valid && pdev->msi_enabled) {
+			struct pollfd pfd = {
+				.fd = pdev->irq_eventfd,
+				.events = POLLIN,
+			};
+			int pr = poll(&pfd, 1, 100);
+
+			if (atomic_load(&g_irq_thread_stop))
+				break;
+			if (pr > 0 && (pfd.revents & POLLIN)) {
+				uint64_t cnt;
+
+				while (read(pdev->irq_eventfd, &cnt,
+					    sizeof(cnt)) == sizeof(cnt))
+					;
+				triggered = true;
 			}
+		} else {
+			/*
+			 * INTx is level-triggered, so its VFIO eventfd stays
+			 * silent whenever the line is still asserted (and some
+			 * hosts never deliver the event at all).  A device with
+			 * no eventfd has no notification either.  Poll the MMIO
+			 * status every 2 ms in both cases; the handler is a
+			 * no-op when the status register is clear.
+			 */
+			usleep(2000);
+			triggered = true;
 		}
+
+		if (!triggered)
+			continue;
+
 		if (atomic_load(&g_irq_enabled) && g_irq_handler && g_irq_dev_id) {
 			pthread_mutex_lock(&g_irq_sync_lock);
 			if (atomic_load(&g_irq_enabled))
 				g_irq_handler(1, g_irq_dev_id);
 			pthread_mutex_unlock(&g_irq_sync_lock);
 		}
-		if (pr > 0)
+		if (pdev->irq_event_valid)
 			vfio_unmask_intx(pdev);
 	}
 	return NULL;
@@ -612,11 +764,20 @@ int pci_alloc_irq_vectors(struct pci_dev *pdev, unsigned int min_vecs,
 	pdev->irq_eventfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 	if (pdev->irq_eventfd < 0)
 		return -errno;
+	pdev->irq_event_valid = false;
 
-	/* Prefer INTx first to match GC570D_REG_IRQ_MODE = 5 in gc570d_bridge_init(),
-	 * then fall back to MSI if INTx is unavailable.
+	/*
+	 * Try MSI first.  On the GC570D the VFIO INTx path (mask/unmask via
+	 * VFIO_DEVICE_SET_IRQS) can stall the bridge I2C engine: the HDMI IN 2
+	 * probe then times out at its first receiver register write and the
+	 * whole device fails to initialize.  MSI delivers the same bridge,
+	 * DMA and audio interrupts reliably, so only fall back to INTx when
+	 * the device does not advertise MSI.
 	 */
-	uint32_t indices[2] = { VFIO_PCI_MSI_IRQ_INDEX, VFIO_PCI_INTX_IRQ_INDEX };
+	uint32_t indices[2] = {
+		VFIO_PCI_MSI_IRQ_INDEX,
+		VFIO_PCI_INTX_IRQ_INDEX,
+	};
 	for (int i = 0; i < 2; i++) {
 		struct vfio_irq_info irq_info = {
 			.argsz = sizeof(irq_info),
@@ -636,6 +797,7 @@ int pci_alloc_irq_vectors(struct pci_dev *pdev, unsigned int min_vecs,
 			if (ioctl(pdev->vfio_device_fd, VFIO_DEVICE_SET_IRQS, irq_set) == 0) {
 				pdev->irq_index = indices[i];
 				pdev->msi_enabled = (indices[i] == VFIO_PCI_MSI_IRQ_INDEX);
+				pdev->irq_event_valid = true;
 				dev_info(&pdev->dev,
 					 "VFIO interrupt configured using %s\n",
 					 pdev->msi_enabled ? "MSI" : "INTx");
@@ -648,6 +810,8 @@ int pci_alloc_irq_vectors(struct pci_dev *pdev, unsigned int min_vecs,
 
 	dev_warn(&pdev->dev,
 		 "VFIO_DEVICE_SET_IRQS unavailable; using 2ms low-latency MMIO IRQ polling\n");
+	pdev->msi_enabled = false;
+	pdev->irq_event_valid = false;
 	return 1;
 }
 
@@ -679,6 +843,7 @@ void pci_free_irq_vectors(struct pci_dev *pdev)
 		close(pdev->irq_eventfd);
 		pdev->irq_eventfd = -1;
 	}
+	pdev->irq_event_valid = false;
 }
 
 int request_irq(unsigned int irq, irq_handler_t handler, unsigned long flags,
@@ -864,6 +1029,8 @@ struct gc570d_user_video_stream {
 	pthread_mutex_t frame_lock;
 	uint8_t *latest_yuy2;
 	size_t latest_size;
+	uint32_t latest_width;
+	uint32_t latest_height;
 	uint64_t latest_seq;
 	uint64_t latest_ts_ns;
 	uint64_t last_pushed_seq;
@@ -894,6 +1061,19 @@ struct gc570d_user_audio_stream {
 
 static struct gc570d_user_video_stream g_vstreams[2];
 static struct gc570d_user_audio_stream g_astreams[2];
+
+/*
+ * The PipeWire process thread reads the video frame under frame_lock, so the
+ * locks must survive a hardware reinit.  Initialize them exactly once instead
+ * of calling pthread_mutex_init() on a possibly-held mutex.
+ */
+static pthread_once_t g_vstream_locks_once = PTHREAD_ONCE_INIT;
+
+static void gc570d_vstream_locks_init(void)
+{
+	for (int i = 0; i < 2; i++)
+		pthread_mutex_init(&g_vstreams[i].frame_lock, NULL);
+}
 
 #ifdef HAVE_LIBPIPEWIRE
 static struct pw_thread_loop *g_pw_loop = NULL;
@@ -1113,8 +1293,12 @@ static void on_video_process(void *data)
 		       ep->negotiated_format.format : SPA_VIDEO_FORMAT_YUY2;
 
 	pthread_mutex_lock(&vs->frame_lock);
-	if (vs->latest_yuy2 && vs->latest_size >= 1920 * 1080 * 2) {
-		written = gc570d_convert_frame(vs->latest_yuy2, 1920, 1080,
+	uint32_t src_w = vs->latest_width ? vs->latest_width : 1920;
+	uint32_t src_h = vs->latest_height ? vs->latest_height : 1080;
+
+	if (vs->latest_yuy2 &&
+	    vs->latest_size >= (size_t)src_w * src_h * 2) {
+		written = gc570d_convert_frame(vs->latest_yuy2, src_w, src_h,
 					       dst, buf->datas[0].maxsize,
 					       fmt, w, h, &stride);
 		vs->last_pushed_seq = vs->latest_seq;
@@ -1685,27 +1869,48 @@ void vb2_buffer_done(struct vb2_buffer *vb, enum vb2_buffer_state state)
 		struct gc570d_user_video_stream *vs = &g_vstreams[port];
 		pthread_mutex_lock(&vs->frame_lock);
 		if (vs->latest_yuy2 && vb->payload <= vs->latest_size) {
-			memcpy(vs->latest_yuy2, vb->vaddr, vb->payload);
+			u32 frame_w = GC570D_WIDTH;
+			u32 frame_h = GC570D_HEIGHT;
+
+			if (port == 0 && g_gc) {
+				frame_w = READ_ONCE(g_gc->video0_width);
+				frame_h = READ_ONCE(g_gc->video0_height);
+			}
+			if ((size_t)frame_w * frame_h * 2 == vb->payload) {
+				memcpy(vs->latest_yuy2, vb->vaddr, vb->payload);
+				vs->latest_width = frame_w;
+				vs->latest_height = frame_h;
+			}
 			vs->latest_seq++;
 			vs->latest_ts_ns = vb->timestamp;
 			if (g_shm && vb->payload <= GC570D_SHM_FRAME_BYTES) {
 				struct gc570d_shm_port *sp = &g_shm->ports[port];
-				u32 width = GC570D_WIDTH;
-				u32 height = GC570D_HEIGHT;
 
-				if (port == 0 && g_gc) {
-					width = READ_ONCE(g_gc->video0_width);
-					height = READ_ONCE(g_gc->video0_height);
-				}
-				if ((size_t)width * height * 2 == vb->payload) {
+				if ((size_t)frame_w * frame_h * 2 == vb->payload) {
+					uint64_t seq = __atomic_load_n(&sp->seq,
+								       __ATOMIC_RELAXED);
+
+					/* Seqlock: odd while the payload is in flux. */
+					__atomic_store_n(&sp->seq, seq + 1,
+							 __ATOMIC_RELAXED);
+					__atomic_thread_fence(__ATOMIC_RELEASE);
 					memcpy(sp->yuy2, vb->vaddr, vb->payload);
-					sp->width = width;
-					sp->height = height;
-					sp->no_signal = g_gc ? (port == 0 ? READ_ONCE(g_gc->video0_no_signal) :
-									    READ_ONCE(g_gc->video_no_signal)) : 0;
-					sp->streaming = 1;
-					sp->timestamp_ns = vb->timestamp;
-					__atomic_store_n(&sp->seq, vs->latest_seq, __ATOMIC_RELEASE);
+					__atomic_store_n(&sp->width, frame_w,
+							 __ATOMIC_RELAXED);
+					__atomic_store_n(&sp->height, frame_h,
+							 __ATOMIC_RELAXED);
+					__atomic_store_n(&sp->no_signal,
+							 g_gc ? (port == 0 ? READ_ONCE(g_gc->video0_no_signal) :
+								 READ_ONCE(g_gc->video_no_signal)) : 0,
+							 __ATOMIC_RELAXED);
+					__atomic_store_n(&sp->streaming, 1,
+							 __ATOMIC_RELAXED);
+					__atomic_store_n(&sp->timestamp_ns,
+							 vb->timestamp,
+							 __ATOMIC_RELAXED);
+					__atomic_thread_fence(__ATOMIC_RELEASE);
+					__atomic_store_n(&sp->seq, seq + 2,
+							 __ATOMIC_RELEASE);
 				}
 			}
 		}
@@ -1731,8 +1936,12 @@ int video_register_device(struct video_device *vdev, int type, int nr)
 	vs->port_index = port;
 	vs->vdev = vdev;
 	vs->vq = vdev->queue;
-	pthread_mutex_init(&vs->frame_lock, NULL);
+	pthread_once(&g_vstream_locks_once, gc570d_vstream_locks_init);
+	pthread_mutex_lock(&vs->frame_lock);
+	free(vs->latest_yuy2);
 	vs->latest_size = GC570D_DMA_FRAME_SIZE;
+	vs->latest_width = GC570D_WIDTH;
+	vs->latest_height = GC570D_HEIGHT;
 	vs->latest_yuy2 = calloc(1, vs->latest_size);
 	if (vs->latest_yuy2) {
 		for (size_t i = 0; i < vs->latest_size; i += 4) {
@@ -1742,6 +1951,7 @@ int video_register_device(struct video_device *vdev, int type, int nr)
 			vs->latest_yuy2[i + 3] = 128;
 		}
 	}
+	pthread_mutex_unlock(&vs->frame_lock);
 	return 0;
 }
 
@@ -1771,8 +1981,18 @@ void video_unregister_device(struct video_device *vdev)
 		vb->vaddr = NULL;
 		vb->dma_addr = 0;
 	}
+	/*
+	 * Keep the PipeWire reader from touching the old buffer after it is
+	 * released, and never re-initialize a mutex that may be held by the
+	 * PipeWire thread during a reinit.
+	 */
+	pthread_mutex_lock(&vs->frame_lock);
 	free(vs->latest_yuy2);
 	vs->latest_yuy2 = NULL;
+	vs->latest_size = 0;
+	vs->latest_width = 0;
+	vs->latest_height = 0;
+	pthread_mutex_unlock(&vs->frame_lock);
 }
 
 static int gc570d_start_user_video_streams(void)
@@ -1825,6 +2045,13 @@ static int gc570d_start_user_video_streams(void)
 
 /* ALSA PCM Callbacks */
 static int g_next_card_num = 0;
+static pthread_once_t g_astream_locks_once = PTHREAD_ONCE_INIT;
+
+static void gc570d_astream_locks_init(void)
+{
+	for (int i = 0; i < 2; i++)
+		pthread_mutex_init(&g_astreams[i].ring_lock, NULL);
+}
 
 int snd_card_new(struct device *parent, int idx, const char *xid, void *module,
 		 int extra_size, struct snd_card **card_ret)
@@ -1929,10 +2156,19 @@ int snd_card_register(struct snd_card *card)
 	int ch = (strstr(card->id, "HDMI1") != NULL) ? 0 : 1;
 	card->pcm->substream.channel_index = ch;
 	struct gc570d_user_audio_stream *as = &g_astreams[ch];
+	pthread_once(&g_astream_locks_once, gc570d_astream_locks_init);
+	pthread_mutex_lock(&as->ring_lock);
 	as->channel_index = ch;
 	as->card = card;
 	as->pcm = card->pcm;
-	pthread_mutex_init(&as->ring_lock, NULL);
+	as->head = 0;
+	as->tail = 0;
+	as->fill = 0;
+	as->periods_published = 0;
+#ifdef HAVE_LIBPIPEWIRE
+	as->prebuffering = true;
+#endif
+	pthread_mutex_unlock(&as->ring_lock);
 	return 0;
 }
 
@@ -2036,6 +2272,12 @@ void snd_card_free(struct snd_card *card)
 {
 	if (!card)
 		return;
+	for (int i = 0; i < 2; i++) {
+		if (g_astreams[i].card == card) {
+			g_astreams[i].card = NULL;
+			g_astreams[i].pcm = NULL;
+		}
+	}
 	if (card->pcm) {
 		free(card->pcm->runtime.dma_area);
 		free(card->pcm);
@@ -2048,7 +2290,7 @@ void snd_card_free(struct snd_card *card)
  * ========================================================================= */
 
 static int g_ctl_listen_fd = -1;
-static char g_ctl_sock_path[256];
+static char g_ctl_sock_path[280];
 static char g_ctl_dir_path[256];
 
 static void gc570d_get_runtime_dir(char *buf, size_t size)
@@ -2063,7 +2305,24 @@ static void gc570d_get_runtime_dir(char *buf, size_t size)
 static void gc570d_handle_ctl_client(int client_fd)
 {
 	char cmd[256] = { 0 };
-	ssize_t n = read(client_fd, cmd, sizeof(cmd) - 1);
+	struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+	struct pollfd pfd = {
+		.fd = client_fd,
+		.events = POLLIN,
+	};
+	ssize_t n;
+
+	/*
+	 * Bound every operation on the client socket: a client that connects
+	 * and never speaks, or never drains its response, must not stall the
+	 * daemon's single-threaded control loop.
+	 */
+	setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+	if (poll(&pfd, 1, 250) <= 0 || !(pfd.revents & POLLIN))
+		return;
+	n = read(client_fd, cmd, sizeof(cmd) - 1);
 	if (n <= 0)
 		return;
 	while (n > 0 && (cmd[n - 1] == '\n' || cmd[n - 1] == '\r'))
@@ -2245,7 +2504,15 @@ static int gc570d_ctl_server_init(void)
 		g_ctl_listen_fd = -1;
 		return -errno;
 	}
-	listen(g_ctl_listen_fd, 8);
+	if (listen(g_ctl_listen_fd, 8) < 0) {
+		int err = -errno;
+
+		close(g_ctl_listen_fd);
+		g_ctl_listen_fd = -1;
+		return err;
+	}
+	/* Only the owning user may issue diagnostic or LED commands. */
+	chmod(g_ctl_sock_path, 0600);
 	return 0;
 }
 
@@ -2289,13 +2556,20 @@ static int find_gc570d_pci_bdf(char *bdf_out, size_t bdf_size)
 		if (ent->d_name[0] == '.')
 			continue;
 		char dir[512];
-		uint32_t vendor = 0, device = 0, subdev = 0;
+		uint32_t vendor = 0, device = 0, subvend = 0, subdev = 0;
 		snprintf(dir, sizeof(dir), "/sys/bus/pci/devices/%s", ent->d_name);
 		if (read_sysfs_hex(dir, "vendor", &vendor) == 0 &&
 		    read_sysfs_hex(dir, "device", &device) == 0 &&
 		    vendor == GC570D_VENDOR_ID && device == GC570D_DEVICE_ID) {
-			if (read_sysfs_hex(dir, "subsystem_device", &subdev) == 0 &&
-			    subdev != 0 && subdev != GC570D_SUBSYSTEM_ID)
+			/*
+			 * 1461:0054 is shared with other AVerMedia cards
+			 * (GC573/GC555).  Only the DUO exposes subsystem
+			 * 1461:5700; skip anything we cannot positively identify.
+			 */
+			if (read_sysfs_hex(dir, "subsystem_vendor", &subvend) < 0 ||
+			    read_sysfs_hex(dir, "subsystem_device", &subdev) < 0 ||
+			    subvend != GC570D_SUBSYSTEM_VENDOR_ID ||
+			    subdev != GC570D_SUBSYSTEM_ID)
 				continue;
 			strscpy(bdf_out, ent->d_name, bdf_size);
 			closedir(d);
@@ -2316,6 +2590,7 @@ static int gc570d_vfio_open(struct pci_dev *pdev, const char *requested_bdf)
 	pdev->vfio_group_fd = -1;
 	pdev->vfio_device_fd = -1;
 	pdev->irq_eventfd = -1;
+	pdev->irq_event_valid = false;
 	pdev->dev.pdev = pdev;
 
 	if (requested_bdf && requested_bdf[0]) {
@@ -2348,7 +2623,7 @@ static int gc570d_vfio_open(struct pci_dev *pdev, const char *requested_bdf)
 	pdev->vfio_container_fd = open("/dev/vfio/vfio", O_RDWR | O_CLOEXEC);
 	if (pdev->vfio_container_fd < 0) {
 		fprintf(stderr,
-			"[gc570d ERR ] Cannot open /dev/vfio/vfio: %s (run scripts/install_userspace.sh to load vfio-pci and set permissions)\n",
+			"[gc570d ERR ] Cannot open /dev/vfio/vfio: %s (run ./install.sh to load vfio-pci and set permissions)\n",
 			strerror(errno));
 		return -errno;
 	}
@@ -2434,6 +2709,26 @@ static int gc570d_vfio_open(struct pci_dev *pdev, const char *requested_bdf)
 
 static void gc570d_vfio_close(struct pci_dev *pdev)
 {
+	int leaked = 0;
+	int i;
+
+	/* Release every cached (unused) DMA mapping while the container fd is
+	 * still open.  Live mappings are reported below: freeing them here would
+	 * hide real driver bugs, and the container teardown unmaps any stragglers
+	 * anyway.
+	 */
+	gc570d_dma_cache_drain(pdev);
+	pthread_mutex_lock(&g_dma_map_lock);
+	for (i = 0; i < GC570D_MAX_DMA_MAPPINGS; i++) {
+		if (g_dma_map_table[i].in_use)
+			leaked++;
+	}
+	pthread_mutex_unlock(&g_dma_map_lock);
+	if (leaked)
+		dev_warn(&pdev->dev,
+			 "%d DMA mapping(s) still live at VFIO teardown\n",
+			 leaked);
+
 	if (pdev->bar0_vaddr && pdev->bar0_size) {
 		munmap(pdev->bar0_vaddr, pdev->bar0_size);
 		pdev->bar0_vaddr = NULL;
@@ -2450,6 +2745,155 @@ static void gc570d_vfio_close(struct pci_dev *pdev)
 		close(pdev->vfio_container_fd);
 		pdev->vfio_container_fd = -1;
 	}
+}
+
+/*
+ * Capture-pipeline health watchdog.
+ *
+ * The sleep/PCIe-reset watchdog below only notices a lost link when the
+ * interrupt registers read as all-zero/all-ones.  A stalled DMA engine or a
+ * dead VFIO eventfd can leave those registers looking healthy while no frames
+ * ever complete.  HDMI IN 1's DMA0 ring is continuous, so irq_dma0 is a clean
+ * heartbeat independent of VB2 consumer behaviour.  HDMI IN 2 submits DMA per
+ * buffer, so it is only treated as active while VB2 has buffers queued.
+ *
+ * Audio is deliberately not a trigger: silence from the console is normal.
+ * Its cursors are logged only as corroborating diagnostics.
+ */
+#define GC570D_HEALTH_GRACE_NS  (15ULL * NSEC_PER_SEC)
+#define GC570D_HEALTH_STALL_NS  (5ULL * NSEC_PER_SEC)
+#define GC570D_HEALTH_RETRY_NS  (60ULL * NSEC_PER_SEC)
+#define GC570D_HEALTH_DECAY_NS  (10ULL * 60ULL * NSEC_PER_SEC)
+#define GC570D_HEALTH_MAX_TRIES 3
+
+struct gc570d_health_input {
+	u64 last_irq;
+	u64 stall_since_ns;
+};
+
+struct gc570d_health {
+	struct gc570d_health_input hdmi1;
+	struct gc570d_health_input hdmi2;
+	u64 last_attempt_ns;
+	u64 arm_at_ns;
+	unsigned int attempts;
+};
+
+static void gc570d_health_arm(struct gc570d_dev *gc, struct gc570d_health *health,
+			      u64 now_ns)
+{
+	health->hdmi1.last_irq = 0;
+	health->hdmi1.stall_since_ns = 0;
+	health->hdmi2.last_irq = 0;
+	health->hdmi2.stall_since_ns = 0;
+	health->arm_at_ns = now_ns + GC570D_HEALTH_GRACE_NS;
+	if (!gc)
+		return;
+	health->hdmi1.last_irq = (u64)atomic64_read(&gc->irq_dma0);
+	health->hdmi2.last_irq = (u64)atomic64_read(&gc->irq_dma1);
+}
+
+static bool gc570d_health_hdmi2_has_buffers(struct gc570d_dev *gc)
+{
+	unsigned long flags;
+	bool queued;
+
+	spin_lock_irqsave(&gc->video_qlock, flags);
+	queued = !list_empty(&gc->video_buffers);
+	spin_unlock_irqrestore(&gc->video_qlock, flags);
+	return queued;
+}
+
+/* Caller must hold the input's state.  Returns true once it has stalled. */
+static bool gc570d_health_input_stalled(struct gc570d_health_input *in,
+					u64 counter, bool active, u64 now_ns)
+{
+	if (!active) {
+		in->last_irq = counter;
+		in->stall_since_ns = 0;
+		return false;
+	}
+
+	if (counter != in->last_irq) {
+		in->last_irq = counter;
+		in->stall_since_ns = 0;
+		return false;
+	}
+
+	if (!in->stall_since_ns) {
+		in->stall_since_ns = now_ns;
+		return false;
+	}
+
+	return now_ns - in->stall_since_ns >= GC570D_HEALTH_STALL_NS;
+}
+
+/* Returns true when the caller should request a hardware reinit. */
+static bool gc570d_health_tick(struct gc570d_dev *gc,
+			       struct gc570d_health *health, u64 now_ns)
+{
+	bool hdmi1_active, hdmi2_active;
+	bool hdmi1_stalled, hdmi2_stalled;
+	u64 dma0, dma1;
+
+	if (!gc || READ_ONCE(gc->removing) || READ_ONCE(gc->suspended))
+		return false;
+	if (now_ns < health->arm_at_ns)
+		return false;
+
+	dma0 = (u64)atomic64_read(&gc->irq_dma0);
+	dma1 = (u64)atomic64_read(&gc->irq_dma1);
+
+	hdmi1_active = READ_ONCE(gc->video0_streaming) &&
+		       READ_ONCE(gc->video0_dma_active) &&
+		       !READ_ONCE(gc->video0_no_signal);
+	hdmi2_active = READ_ONCE(gc->video_streaming) &&
+		       READ_ONCE(gc->video_dma_active) &&
+		       !READ_ONCE(gc->video_no_signal) &&
+		       gc570d_health_hdmi2_has_buffers(gc);
+
+	hdmi1_stalled = gc570d_health_input_stalled(&health->hdmi1, dma0,
+						    hdmi1_active, now_ns);
+	hdmi2_stalled = gc570d_health_input_stalled(&health->hdmi2, dma1,
+						    hdmi2_active, now_ns);
+	if (!hdmi1_stalled && !hdmi2_stalled) {
+		/* Let a long healthy run clear the recovery budget again. */
+		if (health->attempts && health->last_attempt_ns &&
+		    now_ns - health->last_attempt_ns >= GC570D_HEALTH_DECAY_NS)
+			health->attempts = 0;
+		return false;
+	}
+
+	if (health->attempts >= GC570D_HEALTH_MAX_TRIES) {
+		if (health->attempts == GC570D_HEALTH_MAX_TRIES) {
+			dev_err(&gc->pdev->dev,
+				"capture pipeline still stalled after %u automatic recoveries; restart the daemon\n",
+				health->attempts);
+			health->attempts++;
+		}
+		return false;
+	}
+	if (health->last_attempt_ns &&
+	    now_ns - health->last_attempt_ns < GC570D_HEALTH_RETRY_NS)
+		return false;
+
+	dev_warn(&gc->pdev->dev,
+		 "capture pipeline stalled on HDMI IN %s%s for %llus (irq_dma0=%llu irq_dma1=%llu audio_cursor=%u/%u); re-initializing\n",
+		 hdmi1_stalled ? "1" : "",
+		 hdmi2_stalled ? (hdmi1_stalled ? "+2" : "2") : "",
+		 (unsigned long long)((now_ns -
+			(hdmi1_stalled ? health->hdmi1.stall_since_ns
+				       : health->hdmi2.stall_since_ns)) /
+			NSEC_PER_SEC),
+		 (unsigned long long)dma0, (unsigned long long)dma1,
+		 READ_ONCE(gc->audio0_pcm_cursor),
+		 READ_ONCE(gc->audio_pcm_cursor));
+
+	health->hdmi1.stall_since_ns = 0;
+	health->hdmi2.stall_since_ns = 0;
+	health->last_attempt_ns = now_ns;
+	health->attempts++;
+	return true;
 }
 
 static void on_signal(int sig)
@@ -2645,11 +3089,16 @@ int main(int argc, char **argv)
 	signal(SIGTERM, on_signal);
 	signal(SIGPIPE, SIG_IGN);
 
+	/* Load optional runtime configuration */
+	gc570d_load_config(NULL);
+
 	ret = gc570d_vfio_open(&g_pdev, requested_bdf);
 	if (ret < 0)
 		return 1;
 
 	struct pci_driver *drv = gc570d_get_pci_driver();
+	bool probed = false;
+
 	ret = drv->probe(&g_pdev, drv->id_table);
 	if (ret < 0) {
 		fprintf(stderr, "[gc570d ERR ] Driver probe failed: %d\n", ret);
@@ -2657,11 +3106,12 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	g_gc = pci_get_drvdata(&g_pdev);
+	probed = true;
 
 	/* Initialize POSIX shared-memory frame store for libgc570d-v4l2.so */
-	g_shm_fd = shm_open(GC570D_SHM_NAME, O_CREAT | O_RDWR, 0666);
+	g_shm_fd = shm_open(GC570D_SHM_NAME, O_CREAT | O_RDWR, 0600);
 	if (g_shm_fd >= 0) {
-		fchmod(g_shm_fd, 0666);
+		fchmod(g_shm_fd, 0600);
 		if (ftruncate(g_shm_fd, sizeof(struct gc570d_shm_region)) == 0) {
 			g_shm = mmap(NULL, sizeof(struct gc570d_shm_region),
 				     PROT_READ | PROT_WRITE, MAP_SHARED, g_shm_fd, 0);
@@ -2671,8 +3121,10 @@ int main(int argc, char **argv)
 				g_shm->version = 1;
 				strscpy(g_shm->pci_bdf, g_pdev.bdf, sizeof(g_shm->pci_bdf));
 				for (int p = 0; p < 2; p++) {
-					g_shm->ports[p].width = GC570D_WIDTH;
-					g_shm->ports[p].height = GC570D_HEIGHT;
+					g_shm->ports[p].width = p == 0 ?
+						gc570d_cfg.width : GC570D_WIDTH;
+					g_shm->ports[p].height = p == 0 ?
+						gc570d_cfg.height : GC570D_HEIGHT;
 				}
 			} else {
 				g_shm = NULL;
@@ -2707,6 +3159,11 @@ int main(int argc, char **argv)
 	clock_gettime(CLOCK_MONOTONIC, &ts_mono_prev);
 	clock_gettime(CLOCK_BOOTTIME, &ts_boot_prev);
 	uint64_t last_watchdog_ns = (uint64_t)ts_mono_prev.tv_sec * 1000000000ULL + ts_mono_prev.tv_nsec;
+	struct gc570d_health health = { 0 };
+
+	gc570d_health_arm(g_gc, &health,
+			  (u64)ts_mono_prev.tv_sec * NSEC_PER_SEC +
+			  (u64)ts_mono_prev.tv_nsec);
 
 	while (!atomic_load(&g_daemon_quit) &&
 	       !gc570d_everlive_quit_requested()) {
@@ -2755,24 +3212,36 @@ int main(int argc, char **argv)
 					g_reinit_requested = true;
 				}
 			}
+
+			/* A stalled DMA/IRQ path can leave the registers above
+			 * looking sane, so also watch the per-input heartbeats.
+			 */
+			if (!g_reinit_requested &&
+			    gc570d_health_tick(g_gc, &health, mono_now_ns))
+				g_reinit_requested = true;
 		}
 
 		if (g_reinit_requested && !atomic_load(&g_daemon_quit)) {
 			fprintf(stderr, "[gc570d INFO] Re-initializing GC570D hardware pipeline in place...\n");
 			gc570d_everlive_set_dev(NULL);
 			drv->remove(&g_pdev);
+			probed = false;
 			g_gc = NULL;
 			g_next_card_num = 0;
 			g_reinit_requested = false;
 			usleep(200000);
 			if (drv->probe(&g_pdev, drv->id_table) == 0) {
 				g_gc = pci_get_drvdata(&g_pdev);
+				probed = true;
 				gc570d_everlive_set_dev(g_gc);
 				gc570d_start_user_video_streams();
 				gc570d_start_user_audio_streams();
 				clock_gettime(CLOCK_MONOTONIC, &ts_mono_prev);
 				clock_gettime(CLOCK_BOOTTIME, &ts_boot_prev);
 				last_watchdog_ns = (uint64_t)ts_mono_prev.tv_sec * 1000000000ULL + ts_mono_prev.tv_nsec;
+				gc570d_health_arm(g_gc, &health,
+						  (u64)ts_mono_prev.tv_sec * NSEC_PER_SEC +
+						  (u64)ts_mono_prev.tv_nsec);
 			} else {
 				fprintf(stderr, "[gc570d ERR ] Hardware re-initialization failed; shutting down\n");
 				break;
@@ -2786,16 +3255,35 @@ int main(int argc, char **argv)
 #ifdef HAVE_LIBPIPEWIRE
 	gc570d_pipewire_shutdown();
 #endif
-	drv->remove(&g_pdev);
+	if (probed)
+		drv->remove(&g_pdev);
 	gc570d_vfio_close(&g_pdev);
 	if (g_shm) {
 		munmap(g_shm, sizeof(struct gc570d_shm_region));
 		g_shm = NULL;
 	}
 	if (g_shm_fd >= 0) {
+		struct stat st_fd, st_obj;
+		bool ours = false;
+		int probe_fd = shm_open(GC570D_SHM_NAME, O_RDONLY, 0);
+
+		if (probe_fd >= 0) {
+			if (fstat(g_shm_fd, &st_fd) == 0 &&
+			    fstat(probe_fd, &st_obj) == 0 &&
+			    st_fd.st_dev == st_obj.st_dev &&
+			    st_fd.st_ino == st_obj.st_ino)
+				ours = true;
+			close(probe_fd);
+		}
+
 		close(g_shm_fd);
 		g_shm_fd = -1;
-		shm_unlink(GC570D_SHM_NAME);
+		/*
+		 * Only remove the object if it is still the one we created;
+		 * a concurrently started instance may have replaced it.
+		 */
+		if (ours)
+			shm_unlink(GC570D_SHM_NAME);
 	}
 	return 0;
 }

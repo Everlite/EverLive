@@ -51,7 +51,7 @@
  * tools/everlive/everlive_viewer.py.
  */
 #ifndef EVERLIVE_VERSION
-#define EVERLIVE_VERSION "1.4.0-experimental"
+#define EVERLIVE_VERSION "1.4.0"
 #endif
 
 /* Side-by-side identity: never claim the stable app's WM class or title. */

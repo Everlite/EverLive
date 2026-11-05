@@ -1,6 +1,6 @@
 # EverLive - AVerMedia GC573 & GC570D Linux Gaming Suite & Userspace Driver
 
-[![Version](https://img.shields.io/badge/version-v1.3.1-blue.svg)](https://github.com/Everlite/EverLive/releases)
+[![Version](https://img.shields.io/badge/version-v1.4.0-blue.svg)](https://github.com/Everlite/EverLive/releases)
 [![Status](https://img.shields.io/badge/status-1440p120%20%2B%204K60%20%2B%20V4L2%20%2B%20Audio%20(Hardware%20Verified)-brightgreen.svg)](#hardware-verified-capabilities)
 [![Driver](https://img.shields.io/badge/driver-Userspace%20VFIO%20(Blob--Free)-2e7d32.svg)](#architecture--design)
 [![Kernel Modules](https://img.shields.io/badge/DKMS-None%20Required-success.svg)](#architecture--design)
@@ -242,7 +242,7 @@ sudo ./install.sh --no-loopback
 ### What the installer does:
 1. Installs the build/runtime dependencies: SDL2, FFmpeg development libraries (`libavcodec`/`libswresample`/`libavutil`), `libcap` (`setcap`), WirePlumber (`wpctl`), `xcb-util-cursor`, PySide6, standard build tools, and `v4l2loopback` where the distribution packages it (skip with `--no-loopback`).
 2. Configures udev rules (`/etc/udev/rules.d/70-everlive.rules`) granting your local user read/write access to the card's VFIO group and binding `vfio-pci`.
-3. Sets `/etc/security/limits.d/99-everlive-memlock.conf` and adds `cap_ipc_lock` capabilities so unprivileged users can pin DMA buffers required for native 4K capture.
+3. Sets `/etc/security/limits.d/99-everlive-memlock.conf` and adds `cap_ipc_lock` capabilities so unprivileged users can pin DMA buffers required for native 4K and dual-HDMI capture.
 4. Blacklists the legacy out-of-tree `open_gc573` module (`/etc/modprobe.d/blacklist-everlive-legacy.conf`) so it cannot race with `vfio-pci` at boot.
 5. Compiles the userspace binaries (`gc573_user_streamer`, `everlive_userd`, `gc573_user_probe`).
 6. Installs the desktop application launcher and icon.
@@ -262,7 +262,7 @@ Or start **EverLive** directly from your desktop application launcher.
 git pull
 ./play.sh
 ```
-*EverLive's launcher (`play.sh`) automatically detects modified source files and incrementally recompiles the userspace binaries on startup.*
+*EverLive's launcher (`play.sh`) automatically detects modified source files and incrementally recompiles the userspace binaries on startup. Rebuilding replaces the binaries and clears their `cap_ipc_lock` file capability; the launcher re-applies it automatically when needed (one authorization prompt).*
 
 ---
 
@@ -357,7 +357,7 @@ Writing clean-room Linux drivers for proprietary capture hardware requires havin
 
 ## Acknowledgements
 
-- **[@PolygonPrincess](https://github.com/PolygonPrincess)**: For pioneering userspace VFIO control of AVerMedia capture hardware in [OpenGC570D](https://github.com/PolygonPrincess/OpenGC570D), which inspired the architecture of the EverLive v1.0.0 userspace driver.
+- **[@PolygonPrincess](https://github.com/PolygonPrincess)**: For pioneering userspace VFIO control of AVerMedia capture hardware, which inspired the architecture of the EverLive v1.0.0 userspace driver.
 - **[@neoyagami](https://github.com/neoyagami)**: For the maintained [OpenGC570D](https://github.com/neoyagami/OpenGC570D) reverse-engineering project, including the validated dual-input GC570D audio and splitter work that EverLive's Live Gamer DUO engine builds on.
 - **[@haxman](https://github.com/haxman)**: For extensive modeline analysis, RetroTINK 4K Pro hardware testing, and verifying high-refresh and retro video timings.
 - **[@ostrich](https://github.com/ostrich)**: Author of the [gc555](https://github.com/ostrich/gc555) driver; his reverse-engineering of the Artix-7 register space laid the foundation for early GC573 open-source development.

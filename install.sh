@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive v1.3.1 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573)
+# EverLive v1.4.0 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573) & Live Gamer DUO (GC570D)
 # ==============================================================================
 # Installiert den 100% blob-freien Userspace VFIO-Treiber, udev-Hardware-Rechte,
 # Speicher-Locking-Limits und die EverLive Desktop-App für HDMI Console Gaming.
@@ -400,8 +400,13 @@ make -C "${USERD_DIR}" -j"$(nproc)"
 echo -e "${BLUE}[*] Kompiliere GC570D (Live Gamer DUO) Userspace Engine...${NC}"
 make -C "${GC570D_DIR}" clean >/dev/null 2>&1 || true
 make -C "${GC570D_DIR}" -j"$(nproc)"
-chmod +x "${USERD_DIR}/gc573_user_streamer" "${USERD_DIR}/everlive_userd" "${USERD_DIR}/gc573_user_probe" \
+# Never leave build artifacts world-writable, and keep the binary setcap-safe.
+chmod 0755 "${USERD_DIR}/gc573_user_streamer" "${USERD_DIR}/everlive_userd" "${USERD_DIR}/gc573_user_probe" \
     "${GC570D_DIR}/opengc570d-userd" "${GC570D_DIR}/gc570d-ctl" "${SCRIPT_DIR}/play.sh"
+chmod 0644 "${GC570D_DIR}/libgc570d-v4l2.so" 2>/dev/null || true
+# Install the GC570D helpers (udev rule, memlock, systemd unit, sleep hook)
+# through the engine's own Makefile so both installers stay in sync.
+make -C "${GC570D_DIR}" install
 setcap cap_ipc_lock=+ep "${USERD_DIR}/gc573_user_streamer" 2>/dev/null || true
 setcap cap_ipc_lock=+ep "${GC570D_DIR}/opengc570d-userd" 2>/dev/null || true
 echo -e "${GREEN}[+] Userspace VFIO Engines erfolgreich gebaut & berechtigt!${NC}"
@@ -524,12 +529,12 @@ cat > /etc/modprobe.d/everlive-vfio.conf <<EOF
 options vfio-pci ids=1461:0054,1461:0055
 EOF
 
-# Memlock Limits für native 4K DMA Mappings
+# Memlock Limits für native 4K DMA Mappings (nur Mitglieder der video-Gruppe)
 mkdir -p /etc/security/limits.d
 cat > /etc/security/limits.d/99-everlive-memlock.conf <<EOF
-# EverLive GC573 VFIO DMA memory pinning
-*       soft    memlock   unlimited
-*       hard    memlock   unlimited
+# EverLive VFIO DMA memory pinning (video group only)
+@video  soft    memlock   unlimited
+@video  hard    memlock   unlimited
 EOF
 
 # Udev-Regel: Bindet AVerMedia GC573 (1461:0054 / 1461:5550) an vfio-pci

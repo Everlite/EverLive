@@ -10,25 +10,45 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
-static void get_sock_path(char *buf, size_t size)
+static int get_sock_path(char *buf, size_t size)
 {
 	const char *xdg = getenv("XDG_RUNTIME_DIR");
+	int n;
+
 	if (xdg && xdg[0])
-		snprintf(buf, size, "%s/gc570d/control.sock", xdg);
+		n = snprintf(buf, size, "%s/gc570d/control.sock", xdg);
 	else
-		snprintf(buf, size, "/tmp/gc570d-%u/control.sock", (unsigned int)geteuid());
+		n = snprintf(buf, size, "/tmp/gc570d-%u/control.sock",
+			     (unsigned int)geteuid());
+
+	return (n >= 0 && (size_t)n < size) ? 0 : -1;
+}
+
+/* Append one argv element plus its separator, refusing to overflow. */
+static int append_arg(char *cmd, size_t size, size_t *off, int i,
+		      const char *arg)
+{
+	size_t avail = size - *off;
+	int n = snprintf(cmd + *off, avail, "%s%s", i > 1 ? " " : "", arg);
+
+	if (n < 0)
+		return -1;
+	if ((size_t)n >= avail)
+		return -1;
+	*off += (size_t)n;
+	return 0;
 }
 
 int main(int argc, char **argv)
 {
-	char sock_path[100];
+	char sock_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
 	char cmd[256] = { 0 };
 	struct sockaddr_un addr;
+	size_t off = 0;
 	int fd;
 
 	if (argc < 2) {
-		strscpy_fallback:
-		snprintf(cmd, sizeof(cmd), "status\n");
+		memcpy(cmd, "status\n", sizeof("status\n"));
 	} else if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
 		printf("Usage:\n"
 		       "  gc570d-ctl status\n"
@@ -47,17 +67,24 @@ int main(int argc, char **argv)
 		       "  gc570d-ctl led <colorful|breathing|static|off>\n");
 		return 0;
 	} else {
-		size_t off = 0;
-		for (int i = 1; i < argc && off + 2 < sizeof(cmd); i++) {
-			off += snprintf(cmd + off, sizeof(cmd) - off, "%s%s",
-					i > 1 ? " " : "", argv[i]);
+		for (int i = 1; i < argc; i++) {
+			if (append_arg(cmd, sizeof(cmd), &off, i, argv[i]) < 0) {
+				fprintf(stderr, "Command too long\n");
+				return 1;
+			}
 		}
-		snprintf(cmd + off, sizeof(cmd) - off, "\n");
-		if (cmd[0] == '\n')
-			goto strscpy_fallback;
+		if (off + 2 > sizeof(cmd)) {
+			fprintf(stderr, "Command too long\n");
+			return 1;
+		}
+		cmd[off++] = '\n';
+		cmd[off] = '\0';
 	}
 
-	get_sock_path(sock_path, sizeof(sock_path));
+	if (get_sock_path(sock_path, sizeof(sock_path)) < 0) {
+		fprintf(stderr, "Control socket path is too long\n");
+		return 1;
+	}
 	fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (fd < 0) {
 		perror("socket");

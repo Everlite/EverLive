@@ -1,0 +1,24 @@
+# /etc/gc570d.conf - EverLive AVerMedia Live Gamer DUO (GC570D) runtime config
+# Syntax: key=value (whitespace around key and value is ignored)
+# Blank lines and lines starting with '#' or ';' are ignored.
+
+# Default capture frame width and height before a source is detected
+# (default: 1920x1080). Detected HDMI modes override these values.
+# width=1920
+# height=1080
+
+# DMA poll interval in milliseconds for HDMI 1 and HDMI 2 (default: 50)
+# hdmi1_poll_ms=50
+# hdmi2_poll_ms=50
+
+# Enable/disable RGB status LED breathing and lighting control (default: true)
+# enable_led=true
+
+# Enable/disable ALSA/PipeWire audio capture (default: true)
+# enable_audio=true
+
+# Default EDID policy for HDMI 1 pass-through splitter (default: true)
+# true  = Internal 4K/1440p60 bridge EDID
+# false = Clone downstream display EDID directly
+# edid_bridge=true
+

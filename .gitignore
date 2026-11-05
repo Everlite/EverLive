@@ -39,6 +39,11 @@ tools/opengc570d-userd/opengc570d-userd
 tools/opengc570d-userd/gc570d-ctl
 tools/opengc570d-userd/libgc570d-v4l2.so
 
+# Test binaries
+tests/test_edid
+tests/test_config
+tools/opengc573-userd/gc573_framegen_selftest
+
 # Raw uncompressed video dumps
 20261010_131220.mp4
 *.mkv

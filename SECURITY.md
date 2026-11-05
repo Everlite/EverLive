@@ -4,10 +4,10 @@
 
 | Version / Branch | Supported |
 |:---|:---|
-| `v1.2.x` | :white_check_mark: |
-| `v1.1.x` | :white_check_mark: |
+| `v1.4.x` | :white_check_mark: |
+| `v1.3.x` | :white_check_mark: |
 | `main` | :white_check_mark: |
-| `v1.0.x` | :white_check_mark: |
+| `v1.2.x` and older | :x: |
 | Legacy (`open_gc573.ko` kernel module) | :x: *(Deprecated & Superseded by Userspace VFIO)* |
 
 ---

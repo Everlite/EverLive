@@ -873,6 +873,8 @@ static int gc570d_audio_pcm_open(struct snd_pcm_substream *substream)
 	int ret;
 
 	substream->runtime->hw = gc570d_audio_pcm_hardware;
+	/* Allow a transient DMA pause without failing a blocking reader. */
+	substream->wait_time = GC570D_AUDIO_WAIT_TIME_MS;
 	ret = snd_pcm_hw_constraint_integer(substream->runtime,
 					    SNDRV_PCM_HW_PARAM_PERIODS);
 	return ret;
@@ -1164,11 +1166,16 @@ int gc570d_audio0_recover_locked(struct gc570d_dev *gc)
 	int i;
 	int ret;
 
-	if (!READ_ONCE(gc->audio0_prepared) ||
+	if (READ_ONCE(gc->suspended) || !READ_ONCE(gc->audio0_prepared) ||
 	    !READ_ONCE(gc->audio0_running) ||
 	    !READ_ONCE(gc->audio0_recovering))
 		return 0;
 
+	if (!READ_ONCE(gc->video0_streaming)) {
+		ret = gc570d_it68051_video_output_on(gc);
+		if (ret)
+			return ret;
+	}
 	ret = gc570d_it68051_audio_output_set(gc, true);
 	if (ret)
 		return ret;
@@ -1294,8 +1301,9 @@ static int gc570d_audio0_pcm_thread(void *data)
 				WRITE_ONCE(gc->audio0_pcm_pos, position);
 				snd_pcm_period_elapsed(substream);
 			}
-			if (!READ_ONCE(gc->video0_no_signal) &&
-			    READ_ONCE(gc->video0_receiver_output_valid) &&
+			if ((!READ_ONCE(gc->video0_streaming) ||
+			     (!READ_ONCE(gc->video0_no_signal) &&
+			      READ_ONCE(gc->video0_receiver_output_valid))) &&
 			    time_after_eq(jiffies, next_recovery) &&
 			    mutex_trylock(&gc->capture_lock)) {
 				ret = gc570d_audio0_recover_locked(gc);
@@ -1379,6 +1387,8 @@ static int gc570d_audio0_pcm_open(struct snd_pcm_substream *substream)
 	int ret;
 
 	substream->runtime->hw = gc570d_audio_pcm_hardware;
+	/* Receiver reconfiguration may take longer than ALSA's minimum wait. */
+	substream->wait_time = GC570D_AUDIO_WAIT_TIME_MS;
 	ret = snd_pcm_hw_constraint_integer(substream->runtime,
 					    SNDRV_PCM_HW_PARAM_PERIODS);
 	return ret;
@@ -1502,7 +1512,8 @@ static int gc570d_audio0_pcm_prepare(struct snd_pcm_substream *substream)
 		if (ret && !gc570d_audio_is_no_signal_error(ret))
 			goto out_unlock;
 		no_signal = ret != 0;
-	} else if (READ_ONCE(gc->video0_no_signal)) {
+	} else if (READ_ONCE(gc->video0_no_signal) ||
+		   !READ_ONCE(gc->video0_receiver_output_valid)) {
 		no_signal = true;
 	}
 	if (!no_signal) {
@@ -1662,6 +1673,7 @@ int gc570d_audio_register(struct gc570d_dev *gc)
 				THIS_MODULE, 0, &card2);
 	if (ret)
 		return ret;
+	gc->audio_card_hdmi2 = card2;
 	strscpy(card2->driver, "gc570d", sizeof(card2->driver));
 	strscpy(card2->shortname, "Live Gamer DUO - HDMI 2",
 		sizeof(card2->shortname));
@@ -1671,6 +1683,7 @@ int gc570d_audio_register(struct gc570d_dev *gc)
 	ret = snd_pcm_new(card2, "HDMI 2 Capture Only", 0, 0, 1, &pcm);
 	if (ret)
 		return ret;
+	gc->audio_pcm = pcm;
 	pcm->private_data = gc;
 	strscpy(pcm->name, "HDMI 2 (Capture Only)", sizeof(pcm->name));
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &gc570d_audio_pcm_ops);
@@ -1701,9 +1714,6 @@ int gc570d_audio_register(struct gc570d_dev *gc)
 	if (ret)
 		return ret;
 
-	gc->audio_card_hdmi2 = card2;
-	gc->audio_pcm = pcm;
-
 	/* --- HDMI 1 as its own card --- */
 	ret = snd_devm_card_new(&gc->pdev->dev, -1, "GC570D-HDMI1",
 				THIS_MODULE, 0, &card1);
@@ -1714,10 +1724,12 @@ int gc570d_audio_register(struct gc570d_dev *gc)
 		sizeof(card1->shortname));
 	snprintf(card1->longname, sizeof(card1->longname),
 		 "AVerMedia Live Gamer DUO HDMI 1 at %s", pci_name(gc->pdev));
+	gc->audio_card_hdmi1 = card1;
 
 	ret = snd_pcm_new(card1, "HDMI 1 Passthrough", 0, 0, 1, &pcm0);
 	if (ret)
 		return ret;
+	gc->audio0_pcm = pcm0;
 	pcm0->private_data = gc;
 	strscpy(pcm0->name, "HDMI 1 (Passthrough)", sizeof(pcm0->name));
 	snd_pcm_set_ops(pcm0, SNDRV_PCM_STREAM_CAPTURE, &gc570d_audio0_pcm_ops);
@@ -1748,13 +1760,45 @@ int gc570d_audio_register(struct gc570d_dev *gc)
 	if (ret)
 		return ret;
 
-	gc->audio_card_hdmi1 = card1;
-	gc->audio0_pcm = pcm0;
-
 	dev_info(&gc->pdev->dev,
 		 "registered HDMI IN 2 (card %d) and HDMI IN 1 (card %d) as distinct stereo ALSA cards\n",
 		 card2->number, card1->number);
 	return 0;
+}
+
+/*
+ * Tear down both ALSA cards.  Safe to call repeatedly and after a partial
+ * gc570d_audio_register() failure.
+ */
+void gc570d_audio_unregister(struct gc570d_dev *gc)
+{
+	if (!gc)
+		return;
+
+	if (gc->audio_card_hdmi2) {
+		snd_pcm_suspend_all(gc->audio_pcm);
+		snd_card_disconnect_sync(gc->audio_card_hdmi2);
+#ifdef GC570D_USERSPACE
+		snd_card_free(gc->audio_card_hdmi2);
+#endif
+		gc->audio_card_hdmi2 = NULL;
+		gc->audio_pcm = NULL;
+	}
+	if (gc->audio_card_hdmi1) {
+		snd_pcm_suspend_all(gc->audio0_pcm);
+		snd_card_disconnect_sync(gc->audio_card_hdmi1);
+#ifdef GC570D_USERSPACE
+		snd_card_free(gc->audio_card_hdmi1);
+#endif
+		gc->audio_card_hdmi1 = NULL;
+		gc->audio0_pcm = NULL;
+	}
+#ifdef GC570D_USERSPACE
+	free(gc->hdmi1_jack);
+	gc->hdmi1_jack = NULL;
+	free(gc->hdmi2_jack);
+	gc->hdmi2_jack = NULL;
+#endif
 }
 
 

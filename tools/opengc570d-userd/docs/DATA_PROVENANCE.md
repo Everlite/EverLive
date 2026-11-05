@@ -12,7 +12,7 @@ observed in the official Windows software. It is not a legal conclusion.
 | HDMI IN 1 and HDMI IN 2 EDID blocks | `src/gc570d-receiver.c` | Byte-identical functional EDID payloads distributed with the official software and required by the validated negotiation paths | Requires explicit distributor/legal review; replacement with independently generated equivalent EDIDs is an open packaging task |
 | Default 3000-nit HDR-to-SDR LUT | `data/gc570d_hdr_lut_3000.inc` | Functional 512-word output produced by the official driver's default 3000-nit path and written to the FPGA preprocessing registers | Requires explicit distributor/legal review; an independently specified generator would improve provenance |
 | Disconnected-input artwork | `assets/no-signal.png` | Original project artwork distributed under GPL-2.0-only | Redistributable project asset |
-| YUYV disconnected-input frame | `data/gc570d_no_signal_640x360.inc` | Deterministically generated from `assets/no-signal.png` by `scripts/generate-no-signal-asset.sh` | Redistributable generated project data |
+| YUYV disconnected-input frame | `data/gc570d_no_signal_640x360.inc` | Generated from `assets/no-signal.png` by `scripts/generate-no-signal-asset.sh`; the checked-in `.inc` is the canonical output | Redistributable generated project data |
 
 The repository contains no vendor firmware image and the driver does not call
 `request_firmware()`. References to receiver or splitter firmware describe

@@ -23,6 +23,35 @@ Dependencies: a C11 compiler, `pkg-config`, SDL2 and PipeWire development
 headers. Without SDL2 the daemon still builds as a headless capture engine;
 without PipeWire the capture rings and control socket remain available.
 
+## Permissions and interrupts
+
+VFIO pins every DMA buffer, so the daemon needs either `CAP_IPC_LOCK` on the
+binary (`cap_ipc_lock=+ep`) or an `RLIMIT_MEMLOCK` large enough for both video
+rings. The packaged `99-gc570d-memlock.conf` and the per-user systemd unit
+raise the memlock budget; alternatively, grant the file capability. No root
+privileges are needed once either is in place. Rebuilding with `make` replaces
+the binary and clears its file capability, so re-apply `cap_ipc_lock=+ep` if
+you rely on the capability instead of a session memlock limit.
+
+VFIO interrupts are allocated MSI-first. INTx is only a fallback because its
+mask/unmask path can stall the bridge I2C engine on some hosts. When INTx or
+no VFIO eventfd is available, the IRQ thread polls the MMIO status register
+every 2 ms.
+
+## Health monitoring
+
+The daemon reinitializes the capture hardware after a system sleep/resume or a
+PCIe power reset. It also watches the per-input DMA completion heartbeats:
+HDMI IN 1 uses the continuous DMA0 ring, while HDMI IN 2 is only checked while
+VB2 has buffers queued. Five seconds without progress triggers the same
+in-place reinitialization path. Recovery is capped at three consecutive
+attempts, and the budget is restored only after ten minutes without a stall,
+so a persistent fault cannot cause a reinit loop. Audio silence is never
+treated as a fault.
+
+Set `GC570D_DEBUG=1` to enable the kernel-parity `dev_dbg()` diagnostics
+(I2C transactions, splitter negotiation details and DMA snapshots).
+
 ## Run
 
 ```sh
@@ -50,7 +79,8 @@ downstream display EDID; without it the internal 4K60 bridge EDID is used.
 
 ## Virtual cameras
 
-`/dev/video10` carries the selected HDMI input (HDMI 1 by default).
+The daemon's `--v4l2`/`--v4l2-2` writers target v4l2loopback nodes:
+`/dev/video10` carries the selected HDMI input (HDMI 1 by default) and
 `/dev/video11` carries HDMI IN 2. `play.sh` and `install.sh` configure
 v4l2loopback with both nodes:
 
@@ -58,6 +88,11 @@ v4l2loopback with both nodes:
 sudo modprobe v4l2loopback video_nr=10,11 \
     card_label="EverLive Capture,EverLive Capture HDMI 2" exclusive_caps=0
 ```
+
+`libgc570d-v4l2.so` is a separate, optional `LD_PRELOAD` bridge that exposes
+the same two feeds as `/dev/video60` (HDMI 1) and `/dev/video61` (HDMI 2) to
+applications that do not use the loopback nodes. It reads the shared-memory
+frame store directly and does not replace the v4l2loopback path.
 
 ## Control socket
 
@@ -76,12 +111,40 @@ gc570d-ctl action it68051_hpd 1   # pulse HDMI IN 1 hot-plug
 gc570d-ctl action it6802_hpd 1    # pulse HDMI IN 2 hot-plug
 ```
 
+## Installation
+
+`make install` installs the daemon, `gc570d-ctl`, the optional preload bridge,
+the udev rule, the VFIO bind helper, the memlock limits and a per-user systemd
+unit. `PREFIX` defaults to `/usr/local`; the udev rule and sleep hook are
+rewritten to match the chosen prefix.
+
+```sh
+sudo make -C tools/opengc570d-userd install
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+sudo usermod -aG video "$USER"   # log out and back in afterwards
+systemctl --user daemon-reload
+systemctl --user enable --now opengc570d-userd.service
+```
+
+The unit starts the engine headless and publishes `/dev/video10`. For the
+optional `LD_PRELOAD` bridge, run the consuming application with:
+
+```sh
+LD_PRELOAD=/usr/local/lib/libgc570d-v4l2.so obs
+```
+
 ## Audio
 
-HDMI IN 1 and HDMI IN 2 are captured as LPCM (stereo or 5.1). The engine
-publishes each input as a PipeWire source node and the SDL2 frontend plays the
-selected input through the default sink. For OBS, add the monitor of the
-`EverLive Capture Audio` sink or capture the exported source nodes directly.
+HDMI IN 1 accepts stereo and 5.1/7.1 LPCM sources. The HDMI OUT passthrough
+keeps the source layout, but the capture side of both inputs is intentionally
+stereo: ALSA and PipeWire expose two channels (FL/FR) only. HDMI IN 2 is stereo
+as well. Multichannel content is therefore passed through to the HDMI output,
+not captured as more than two channels.
+
+The engine publishes each input as a PipeWire source node and the SDL2 frontend
+plays the selected input through the default sink. For OBS, add the monitor of
+the `EverLive Capture Audio` sink or capture the exported source nodes directly.
 
 ## Upstream attribution
 

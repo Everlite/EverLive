@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive Experimental - One-Click Launcher for the 1.4 Lab Console Suite
-# 100% Blob-Free Userspace VFIO Engine + lsfg-vk Frame Generation (v1.4.0-experimental)
-# Supports AVerMedia Live Gamer 4K (GC573) and Live Gamer DUO (GC570D)
+# EverLive - One-Click Launcher for Console Gaming Suite (v1.4.0)
+# 100% Blob-Free Userspace VFIO Engine for AVerMedia Live Gamer 4K (GC573)
+# and Live Gamer DUO (GC570D)
 # ==============================================================================
 set -euo pipefail
 
@@ -111,10 +111,17 @@ fi
 V4L2_DEV=""
 V4L2_DEV_2=""
 WANT_V4L2=0
+NO_LOOPBACK=0
+if [ "${EVERLIVE_NO_LOOPBACK:-0}" -eq 1 ]; then
+    NO_LOOPBACK=1
+fi
 ARGS=("$@")
 for ((i = 0; i < ${#ARGS[@]}; i++)); do
     arg="${ARGS[$i]}"
     case "$arg" in
+        --no-loopback|--skip-loopback)
+            NO_LOOPBACK=1
+            ;;
         --v4l2)
             WANT_V4L2=1
             if [ $((i + 1)) -lt ${#ARGS[@]} ] && [[ "${ARGS[$((i + 1))]}" == /dev/* ]]; then
@@ -158,22 +165,36 @@ for ((i = 0; i < ${#ARGS[@]}; i++)); do
     esac
 done
 
-# If launching the GUI (no CLI args) and the expected node is not present,
-# attempt to load v4l2loopback.  The DUO publishes HDMI 1 to /dev/video10 and
-# HDMI 2 to /dev/video11 so OBS can capture both sources independently.
-if [ "$WANT_V4L2" -eq 0 ] && [ $# -eq 0 ]; then
+if [ "$NO_LOOPBACK" -eq 1 ]; then
+    WANT_V4L2=0
+    V4L2_DEV=""
+    V4L2_DEV_2=""
+fi
+
+# In pure module-free mode (NO_LOOPBACK=1 or when v4l2loopback is not configured),
+# we do NOT auto-load v4l2loopback. If loopback devices are already active on the
+# system, wire them up automatically.
+if [ "$NO_LOOPBACK" -eq 0 ]; then
     if [ "$CARD_MODEL" = "gc570d" ]; then
-        if [ ! -e "/dev/video10" ] || [ ! -e "/dev/video11" ]; then
+        if [ -e "/dev/video10" ] && [ -e "/dev/video11" ]; then
+            WANT_V4L2=1
+            [ -z "$V4L2_DEV" ] && V4L2_DEV="/dev/video10"
+            [ -z "$V4L2_DEV_2" ] && V4L2_DEV_2="/dev/video11"
+        fi
+    elif [ -e "/dev/video10" ]; then
+        WANT_V4L2=1
+        [ -z "$V4L2_DEV" ] && V4L2_DEV="/dev/video10"
+    fi
+
+    # Only attempt to auto-load the module if explicitly configured in /etc
+    # by install.sh and launching with no arguments.
+    if [ "$WANT_V4L2" -eq 0 ] && [ $# -eq 0 ]; then
+        if [ -f "/etc/modprobe.d/everlive-v4l2loopback.conf" ] || [ -f "/etc/modules-load.d/everlive-v4l2loopback.conf" ]; then
             if modprobe -n v4l2loopback >/dev/null 2>&1; then
                 WANT_V4L2=1
                 V4L2_DEV="/dev/video10"
-                V4L2_DEV_2="/dev/video11"
+                [ "$CARD_MODEL" = "gc570d" ] && V4L2_DEV_2="/dev/video11"
             fi
-        fi
-    elif [ ! -e "/dev/video10" ]; then
-        if modprobe -n v4l2loopback >/dev/null 2>&1; then
-            WANT_V4L2=1
-            V4L2_DEV="/dev/video10"
         fi
     fi
 fi
@@ -280,7 +301,6 @@ fi
 # The GC570D daemon defaults to headless, so add --sdl unless the caller
 # explicitly asked for headless/studio mode.
 streamer_exec() {
-    pkill -x everlive_userd 2>/dev/null || true
     local -a extra=()
     if [ "$CARD_MODEL" = "gc570d" ]; then
         local headless=0 has_sdl=0 has_v4l2_2=0
