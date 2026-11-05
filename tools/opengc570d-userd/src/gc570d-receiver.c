@@ -767,6 +767,59 @@ static int gc570d_it6802_read_page(struct gc570d_dev *gc, u8 page,
 	return ret ? ret : restore_ret;
 }
 
+/*
+ * The IT6802 does not expose a directly measured frame rate.  Its AVI VIC
+ * identifies the CEA mode, which is sufficient for the 50/60 Hz reporting
+ * distinction this driver needs.  Zero means "unknown"; callers then fall
+ * back to the configured capture interval instead of inventing a cadence.
+ */
+static u16 gc570d_vic_frame_rate(u8 vic)
+{
+	switch (vic) {
+	case 1 ... 16:
+	case 35 ... 36:
+		return 60;
+	case 17 ... 31:
+	case 37 ... 39:
+		return 50;
+	case 32:
+	case 60:
+		return 24;
+	case 33:
+	case 61:
+		return 25;
+	case 34:
+	case 62:
+		return 30;
+	case 40 ... 45:
+	case 64:
+		return 100;
+	case 46 ... 51:
+	case 63:
+		return 120;
+	case 52 ... 55:
+		return 200;
+	case 56 ... 59:
+		return 240;
+	default:
+		return 0;
+	}
+}
+
+int gc570d_it6802_frame_rate(struct gc570d_dev *gc, u16 *frame_rate)
+{
+	u8 vic;
+	int ret;
+
+	if (!frame_rate)
+		return -EINVAL;
+	ret = gc570d_it6802_read_page(gc, 2, 0x18, &vic);
+	if (ret)
+		return ret;
+	*frame_rate = gc570d_vic_frame_rate(vic);
+	return 0;
+}
+
 static int gc570d_it6802_write_csc(struct gc570d_dev *gc,
 				    const u8 *matrix, size_t size)
 {
@@ -840,6 +893,7 @@ int gc570d_it6802_format_init(struct gc570d_dev *gc)
 				  BIT_ULL(avi_vic));
 	}
 	limited = ((avi_quantization >> 2) & 0x03) == 1;
+	gc->video_input_frame_rate = gc570d_vic_frame_rate(avi_vic);
 
 	/* The official driver clears reg71[2] before selecting the physical output mode. */
 	ret = gc570d_receiver_update8(gc, bus, 0x71, BIT(2), 0);
@@ -950,7 +1004,7 @@ int gc570d_it6802_output_enable(struct gc570d_dev *gc)
 	ret = gc570d_receiver_update8(gc, bus, 0x64, 0x80, 0x00);
 	if (ret)
 		return ret;
-	msleep(10);
+	msleep(50);
 	ret = gc570d_receiver_update8(gc, bus, 0x53, 0x0f, 0x00);
 	if (ret)
 		return ret;
@@ -1818,6 +1872,7 @@ int gc570d_it68051_video_output_on(struct gc570d_dev *gc)
 	u8 colorimetry;
 	u8 extended_colorimetry;
 	bool hdr_bt2020;
+	u8 reg19 = 0;
 	u8 c5;
 	u8 c6;
 	u8 avmute_packet;
@@ -1837,20 +1892,20 @@ int gc570d_it68051_video_output_on(struct gc570d_dev *gc)
 		return -ENOLINK;
 	}
 
-	/* The official driver: stable-state marker. */
-	/* Verify IT68051 has a locked input signal before measuring timing. */
+	/* Require a locked IT68051 signal before querying the splitter or enabling output. */
 	ret = gc570d_it68051_select_page(gc, 0);
 	if (ret)
 		goto out_restore_page;
-	ret = gc570d_receiver_read8(gc, bus, 0x19, &mode,
+	ret = gc570d_receiver_read8(gc, bus, 0x19, &reg19,
 				    &last_irq, &last_status);
 	if (ret)
 		goto out_restore_page;
-	if (!(mode & BIT(7))) {
-		gc->video0_receiver_output_valid = false;
+	if (!(reg19 & BIT(7))) {
+		WRITE_ONCE(gc->video0_receiver_output_valid, false);
 		ret = -ENOLINK;
 		goto out_restore_page;
 	}
+	/* The official driver: stable-state marker. */
 	ret = gc570d_receiver_write8(gc, bus, 0x90, 0x8f);
 	if (ret)
 		goto out_restore_page;
@@ -1886,12 +1941,21 @@ int gc570d_it68051_video_output_on(struct gc570d_dev *gc)
 	ret = gc570d_splitter_measure_rx_timing(gc, input_color, &rx_timing);
 	if (ret)
 		goto out_restore_page;
+	if (rx_timing.hactive < 640 || rx_timing.hactive > 4096 ||
+	    (rx_timing.hactive & 1) ||
+	    rx_timing.vactive < 240 || rx_timing.vactive > 2160) {
+		WRITE_ONCE(gc->video0_receiver_output_valid, false);
+		ret = -ENOLINK;
+		goto out_restore_page;
+	}
 	dual_pixel = input_color == 3 || rx_timing.hactive > 1920 ||
 		(rx_timing.pixel_clock >= 150001 &&
 		 (rx_timing.hactive >= 1920 || rx_timing.vactive >= 2160));
-	if (gc->video0_receiver_output_valid &&
+	if (READ_ONCE(gc->video0_receiver_output_valid) &&
+	    rx_timing.hactive && rx_timing.vactive &&
 	    gc->video0_receiver_width == rx_timing.hactive &&
 	    gc->video0_receiver_height == rx_timing.vactive &&
+	    gc->video0_receiver_interlaced == !!(rx_timing.flags & BIT(0)) &&
 	    gc->video0_receiver_input_color == input_color &&
 	    gc->video0_receiver_colorimetry == colorimetry &&
 	    gc->video0_receiver_extended_colorimetry ==
@@ -1920,6 +1984,16 @@ int gc570d_it68051_video_output_on(struct gc570d_dev *gc)
 	if (READ_ONCE(gc->audio0_prepared) && READ_ONCE(gc->audio0_running)) {
 		WRITE_ONCE(gc->audio0_recovering, true);
 		wake_up_interruptible(&gc->audio0_wait);
+	}
+
+	WRITE_ONCE(gc->video0_receiver_output_valid, false);
+	if (READ_ONCE(gc->audio0_prepared) && READ_ONCE(gc->audio0_running)) {
+		WRITE_ONCE(gc->audio0_recovering, true);
+		wake_up_interruptible(&gc->audio0_wait);
+	}
+	if (READ_ONCE(gc->video0_dma_active)) {
+		WRITE_ONCE(gc->video0_reconfigure_pending, true);
+		wake_up_interruptible(&gc->video0_wait);
 	}
 
 	/* The official driver prologue. */
@@ -2046,6 +2120,15 @@ int gc570d_it68051_video_output_on(struct gc570d_dev *gc)
 	 * the IT68051 output bus as RGB444 (output_color = 0) with the hardware
 	 * YCbCr-to-RGB color space converter enabled.
 	 */
+	/*
+	 * For 4K60 SDR BT.709 YCbCr 4:2:0 (input_color == 3), Windows keeps the
+	 * IT68051 output in YCbCr 4:4:4 (output_color = 2) and uses the Xilinx
+	 * 0x33 path.  For HDR BT.2020 and 4:2:2/4:4:4 SDR YCbCr inputs (such as
+	 * 480p/576p/720p/1080i/1080p YCbCr upscalers and consoles), drive the
+	 * IT68051 output bus as RGB444 (output_color = 0) with the hardware
+	 * YCbCr-to-RGB CSC (whose 0x04/-16 offset and 0x094f/1.164 gain convert
+	 * limited-range YCbCr to full-range RGB).
+	 */
 	output_color = (input_color == 3 && !hdr_bt2020) ? 2 : 0;
 	ret = gc570d_it68051_select_page(gc, 0);
 	if (ret)
@@ -2076,9 +2159,12 @@ int gc570d_it68051_video_output_on(struct gc570d_dev *gc)
 	if (ret)
 		goto out_restore_page;
 	if (output_color == 0 && input_color != 0) {
-		/* HDR BT.2020 branch: DATA_14014d070 table index 8. */
+		/* Select BT.2020 HDR, BT.601 SD, or BT.709 HD YCbCr-to-RGB CSC matrix. */
+		bool bt601 = colorimetry == 1 ||
+			(colorimetry == 0 && rx_timing.vactive <= 576 &&
+			 !(rx_timing.flags & BIT(0)));
 		const u8 *csc = hdr_bt2020 ? yuv_bt2020_to_rgb_full_csc :
-			(colorimetry == 1 ? yuv_bt601_to_rgb_full_csc :
+			(bt601 ? yuv_bt601_to_rgb_full_csc :
 			 yuv_bt709_to_rgb_full_csc);
 
 		ret = gc570d_it68051_select_page(gc, 1);
@@ -2232,17 +2318,16 @@ int gc570d_it68051_video_output_on(struct gc570d_dev *gc)
 		ret = -EAGAIN;
 		goto out_restore_page;
 	}
-	if (!ret && !(avmute_control & BIT(5))) {
+	if (!ret) {
 		gc->video0_receiver_width = rx_timing.hactive;
 		gc->video0_receiver_height = rx_timing.vactive;
+		gc->video0_receiver_interlaced = !!(rx_timing.flags & BIT(0));
 		gc->video0_receiver_input_color = input_color;
 		gc->video0_receiver_colorimetry = colorimetry;
 		gc->video0_receiver_extended_colorimetry =
 			extended_colorimetry;
 		gc->video0_receiver_dual_pixel = dual_pixel;
 		WRITE_ONCE(gc->video0_receiver_output_valid, true);
-	} else {
-		WRITE_ONCE(gc->video0_receiver_output_valid, false);
 	}
 
 out_restore_page:

@@ -873,6 +873,8 @@ static int gc570d_audio_pcm_open(struct snd_pcm_substream *substream)
 	int ret;
 
 	substream->runtime->hw = gc570d_audio_pcm_hardware;
+	/* Allow a transient DMA pause without failing a blocking reader. */
+	substream->wait_time = GC570D_AUDIO_WAIT_TIME_MS;
 	ret = snd_pcm_hw_constraint_integer(substream->runtime,
 					    SNDRV_PCM_HW_PARAM_PERIODS);
 	return ret;
@@ -1164,11 +1166,16 @@ int gc570d_audio0_recover_locked(struct gc570d_dev *gc)
 	int i;
 	int ret;
 
-	if (!READ_ONCE(gc->audio0_prepared) ||
+	if (READ_ONCE(gc->suspended) || !READ_ONCE(gc->audio0_prepared) ||
 	    !READ_ONCE(gc->audio0_running) ||
 	    !READ_ONCE(gc->audio0_recovering))
 		return 0;
 
+	if (!READ_ONCE(gc->video0_streaming)) {
+		ret = gc570d_it68051_video_output_on(gc);
+		if (ret)
+			return ret;
+	}
 	ret = gc570d_it68051_audio_output_set(gc, true);
 	if (ret)
 		return ret;
@@ -1294,8 +1301,9 @@ static int gc570d_audio0_pcm_thread(void *data)
 				WRITE_ONCE(gc->audio0_pcm_pos, position);
 				snd_pcm_period_elapsed(substream);
 			}
-			if (!READ_ONCE(gc->video0_no_signal) &&
-			    READ_ONCE(gc->video0_receiver_output_valid) &&
+			if ((!READ_ONCE(gc->video0_streaming) ||
+			     (!READ_ONCE(gc->video0_no_signal) &&
+			      READ_ONCE(gc->video0_receiver_output_valid))) &&
 			    time_after_eq(jiffies, next_recovery) &&
 			    mutex_trylock(&gc->capture_lock)) {
 				ret = gc570d_audio0_recover_locked(gc);
@@ -1379,6 +1387,8 @@ static int gc570d_audio0_pcm_open(struct snd_pcm_substream *substream)
 	int ret;
 
 	substream->runtime->hw = gc570d_audio_pcm_hardware;
+	/* Receiver reconfiguration may take longer than ALSA's minimum wait. */
+	substream->wait_time = GC570D_AUDIO_WAIT_TIME_MS;
 	ret = snd_pcm_hw_constraint_integer(substream->runtime,
 					    SNDRV_PCM_HW_PARAM_PERIODS);
 	return ret;
@@ -1502,7 +1512,8 @@ static int gc570d_audio0_pcm_prepare(struct snd_pcm_substream *substream)
 		if (ret && !gc570d_audio_is_no_signal_error(ret))
 			goto out_unlock;
 		no_signal = ret != 0;
-	} else if (READ_ONCE(gc->video0_no_signal)) {
+	} else if (READ_ONCE(gc->video0_no_signal) ||
+		   !READ_ONCE(gc->video0_receiver_output_valid)) {
 		no_signal = true;
 	}
 	if (!no_signal) {

@@ -38,6 +38,20 @@ mask/unmask path can stall the bridge I2C engine on some hosts. When INTx or
 no VFIO eventfd is available, the IRQ thread polls the MMIO status register
 every 2 ms.
 
+## Health monitoring
+
+The daemon reinitializes the capture hardware after a system sleep/resume or a
+PCIe power reset. It also watches the per-input DMA completion heartbeats:
+HDMI IN 1 uses the continuous DMA0 ring, while HDMI IN 2 is only checked while
+VB2 has buffers queued. Five seconds without progress triggers the same
+in-place reinitialization path. Recovery is capped at three consecutive
+attempts, and the budget is restored only after ten minutes without a stall,
+so a persistent fault cannot cause a reinit loop. Audio silence is never
+treated as a fault.
+
+Set `GC570D_DEBUG=1` to enable the kernel-parity `dev_dbg()` diagnostics
+(I2C transactions, splitter negotiation details and DMA snapshots).
+
 ## Run
 
 ```sh

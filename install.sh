@@ -400,8 +400,13 @@ make -C "${USERD_DIR}" -j"$(nproc)"
 echo -e "${BLUE}[*] Kompiliere GC570D (Live Gamer DUO) Userspace Engine...${NC}"
 make -C "${GC570D_DIR}" clean >/dev/null 2>&1 || true
 make -C "${GC570D_DIR}" -j"$(nproc)"
-chmod +x "${USERD_DIR}/gc573_user_streamer" "${USERD_DIR}/everlive_userd" "${USERD_DIR}/gc573_user_probe" \
+# Never leave build artifacts world-writable, and keep the binary setcap-safe.
+chmod 0755 "${USERD_DIR}/gc573_user_streamer" "${USERD_DIR}/everlive_userd" "${USERD_DIR}/gc573_user_probe" \
     "${GC570D_DIR}/opengc570d-userd" "${GC570D_DIR}/gc570d-ctl" "${SCRIPT_DIR}/play.sh"
+chmod 0644 "${GC570D_DIR}/libgc570d-v4l2.so" 2>/dev/null || true
+# Install the GC570D helpers (udev rule, memlock, systemd unit, sleep hook)
+# through the engine's own Makefile so both installers stay in sync.
+make -C "${GC570D_DIR}" install
 setcap cap_ipc_lock=+ep "${USERD_DIR}/gc573_user_streamer" 2>/dev/null || true
 setcap cap_ipc_lock=+ep "${GC570D_DIR}/opengc570d-userd" 2>/dev/null || true
 echo -e "${GREEN}[+] Userspace VFIO Engines erfolgreich gebaut & berechtigt!${NC}"

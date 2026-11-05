@@ -73,6 +73,12 @@ const struct file_operations __name ## _fops = {                    \
 #define GC570D_SUBSYSTEM_VENDOR_ID 0x1461
 #define GC570D_SUBSYSTEM_ID       0x5700
 
+
+enum gc570d_hdmi1_hotplug_policy {
+	GC570D_HOTPLUG_PRESERVE = 0,
+	GC570D_HOTPLUG_RENEGOTIATE = 1,
+};
+
 extern bool auto_hdmi1;
 extern bool copy_edid;
 #define GC570D_BAR                0
@@ -170,6 +176,7 @@ extern bool copy_edid;
 #define GC570D_AUDIO_CHANNELS     2
 #define GC570D_AUDIO_PERIOD_FRAMES 480
 #define GC570D_AUDIO_PCM_BUFFER_MAX (GC570D_AUDIO_PERIOD_BYTES * 64)
+#define GC570D_AUDIO_WAIT_TIME_MS 500
 
 #define GC570D_AUDIO0_CHANNEL       0
 #define GC570D_AUDIO0_FORMAT        0x0200
@@ -260,6 +267,7 @@ struct gc570d_video0_signal {
 	u16 frame_rate;
 	u8 working_mode;
 	u8 xilinx_mode;
+	bool interlaced;
 };
 
 struct gc570d_video0_format {
@@ -340,6 +348,13 @@ struct gc570d_dev {
 	u16 video_source_height;
 	u16 video_source_fps;
 	u8 video_source_profile;
+	u16 video_width;
+	u16 video_height;
+	u32 video_frame_interval;
+	u16 video_input_width;
+	u16 video_input_height;
+	u16 video_input_frame_rate;
+	bool video_input_interlaced;
 	bool video_streaming;
 	bool video_stopping;
 	bool video_no_signal;
@@ -370,7 +385,11 @@ struct gc570d_dev {
 	u16 video0_source_fps;
 	u8 video0_source_profile;
 	u32 video0_frame_interval;
+	u16 video0_input_frame_rate;
+	bool video0_input_interlaced;
 	bool video0_receiver_output_valid;
+	bool video0_receiver_interlaced;
+	bool video0_reconfigure_pending;
 	u16 video0_receiver_width;
 	u16 video0_receiver_height;
 	u8 video0_receiver_input_color;
@@ -470,9 +489,11 @@ struct gc570d_dev {
 	u32 splitter_pump_cycles;
 	u32 splitter_pump_events;
 	int splitter_pump_last_error;
+	atomic_t splitter_scdc_errors;
 	struct delayed_work hdmi1_auto_work;
 	u8 hdmi1_auto_phase;
 	bool hdmi1_auto_ready;
+	enum gc570d_hdmi1_hotplug_policy hdmi1_hotplug_policy;
 	bool splitter_edid_published;
 	bool removing;
 	bool suspended;
@@ -519,6 +540,7 @@ int gc570d_control_irq_wait(struct gc570d_dev *gc, u32 irq,
 irqreturn_t gc570d_irq_handler(int irq, void *data);
 int gc570d_it6802_audio_output_set(struct gc570d_dev *gc, bool enable);
 int gc570d_it6802_format_init(struct gc570d_dev *gc);
+int gc570d_it6802_frame_rate(struct gc570d_dev *gc, u16 *frame_rate);
 int gc570d_it6802_init(struct gc570d_dev *gc);
 int gc570d_it6802_link_status(struct gc570d_dev *gc, bool *source_5v,
 				       bool *scdt);
@@ -604,6 +626,9 @@ int gc570d_vip0_detect_signal(
 int gc570d_vip0_program_yuy2(
 	struct gc570d_dev *gc, const struct gc570d_video0_signal *signal,
 	u16 output_width, u16 output_height, u32 frame_interval);
+int gc570d_dma_detect_vip1_format(struct gc570d_dev *gc,
+				  u16 *width_out, u16 *height_out,
+				  bool *interlaced_out);
 int gc570d_vip_init(struct gc570d_dev *gc);
 int gc570d_xilinx_load_hdr_lut_3000(struct gc570d_dev *gc);
 int gc570d_xilinx_prepare_video0(

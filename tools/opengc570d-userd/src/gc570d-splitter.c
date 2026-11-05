@@ -6310,6 +6310,18 @@ static int gc570d_splitter_scdc_byte(struct gc570d_dev *gc, u8 port,
 }
 
 /*
+ * The vendor state machine deliberately ignores the result of the SCDC write
+ * helpers (see the contract comments below).  Preserve that behaviour, but
+ * count failures so a silent FRL/HDMI 2 mis-negotiation is visible through
+ * splitter_pump_status instead of disappearing entirely.
+ */
+static void gc570d_splitter_scdc_note(struct gc570d_dev *gc, int ret)
+{
+	if (ret)
+		atomic_inc(&gc->splitter_scdc_errors);
+}
+
+/*
  * Exact observable return contract of the official driver for HDMI 2.0:
  *
  * - publish source SCDC version 1 at offset 0x02 and read it back;
@@ -6345,15 +6357,18 @@ static bool gc570d_splitter_windows_scdc_hdmi2(struct gc570d_dev *gc,
 	if (ret)
 		return false;
 
-	(void)gc570d_splitter_scdc_byte(gc, port, 0x02, &value, true,
-					ddc_status, last_irq, last_status);
+	gc570d_splitter_scdc_note(gc,
+		gc570d_splitter_scdc_byte(gc, port, 0x02, &value, true,
+					  ddc_status, last_irq, last_status));
 	value = 0;
-	(void)gc570d_splitter_scdc_byte(gc, port, 0x02, &value, false,
-					ddc_status, last_irq, last_status);
+	gc570d_splitter_scdc_note(gc,
+		gc570d_splitter_scdc_byte(gc, port, 0x02, &value, false,
+					  ddc_status, last_irq, last_status));
 
 	value = desired;
-	(void)gc570d_splitter_scdc_byte(gc, port, 0x20, &value, true,
-					ddc_status, last_irq, last_status);
+	gc570d_splitter_scdc_note(gc,
+		gc570d_splitter_scdc_byte(gc, port, 0x20, &value, true,
+					  ddc_status, last_irq, last_status));
 
 	for (*attempts = 1; *attempts <= 11; (*attempts)++) {
 		value = 0;
@@ -6403,8 +6418,9 @@ static void gc570d_splitter_windows_scdc_hdmi14(struct gc570d_dev *gc,
 	if (ret)
 		return;
 
-	(void)gc570d_splitter_scdc_byte(gc, port, 0x20, &value, true,
-					ddc_status, last_irq, last_status);
+	gc570d_splitter_scdc_note(gc,
+		gc570d_splitter_scdc_byte(gc, port, 0x20, &value, true,
+					  ddc_status, last_irq, last_status));
 	value = 0;
 	ret = gc570d_splitter_scdc_byte(gc, port, 0x20, &value, false,
 					 ddc_status, last_irq, last_status);
@@ -6509,13 +6525,14 @@ static int gc570d_splitter_stable_worker_output_setup_port(struct gc570d_dev *gc
 		goto out;
 	stage = "first-windows-scdc-negotiation";
 	scdc_value = 0;
-	if (hdmi2)
-		(void)gc570d_splitter_windows_scdc_hdmi2(gc, port, 0x03,
-							 &scdc_value, &ddc_status,
-							 &scdc_attempts,
-							 &scdc_retried,
-							 &last_irq, &last_status);
-	else
+	if (hdmi2) {
+		if (!gc570d_splitter_windows_scdc_hdmi2(gc, port, 0x03,
+							&scdc_value, &ddc_status,
+							&scdc_attempts,
+							&scdc_retried,
+							&last_irq, &last_status))
+			atomic_inc(&gc->splitter_scdc_errors);
+	} else
 		gc570d_splitter_windows_scdc_hdmi14(gc, port, &scdc_value,
 							 &ddc_status, &scdc_attempts,
 							 &legacy_scdc_read_ok,
@@ -6920,6 +6937,8 @@ static bool gc570d_splitter_pump_transient_error(int ret)
  */
 static int gc570d_splitter_windows_state_pump_once(struct gc570d_dev *gc)
 {
+	bool preserve_hotplug =
+		gc->hdmi1_hotplug_policy == GC570D_HOTPLUG_PRESERVE;
 	u8 main05 = 0;
 	u8 worker_state4_mask = gc->splitter_worker_state4_mask;
 	u32 last_irq = 0;
@@ -6961,7 +6980,7 @@ static int gc570d_splitter_windows_state_pump_once(struct gc570d_dev *gc)
 					       &last_status);
 			if (!ret && (irq10 & 0x03)) {
 				ret = gc570d_splitter_windows_channel2_connect(
-					gc, !copy_edid);
+					gc, preserve_hotplug);
 				if (!ret)
 					events++;
 				else if (!first_error &&
@@ -7108,6 +7127,7 @@ int gc570d_splitter_windows_state_pump_start(struct gc570d_dev *gc)
 	gc->splitter_pump_last_main05 = 0;
 	gc->splitter_pump_cycles = 0;
 	gc->splitter_pump_events = 0;
+	atomic_set(&gc->splitter_scdc_errors, 0);
 	gc->splitter_pump_last_error = 0;
 	thread = kthread_create(gc570d_splitter_windows_state_pump_thread, gc,
 				"gc570d-splitter");
@@ -7156,13 +7176,15 @@ static int gc570d_splitter_pump_status_show(struct seq_file *seq, void *unused)
 	struct gc570d_dev *gc = seq->private;
 
 	seq_printf(seq,
-		   "running=%s cycles=%u events=%u last_main05=%02x last_error=%d auto_enabled=%s auto_phase=%u auto_ready=%s\n",
+		   "running=%s cycles=%u events=%u last_main05=%02x last_error=%d scdc_errors=%d auto_enabled=%s policy=%s auto_phase=%u auto_ready=%s\n",
 		   READ_ONCE(gc->splitter_pump_thread) ? "yes" : "no",
 		   READ_ONCE(gc->splitter_pump_cycles),
 		   READ_ONCE(gc->splitter_pump_events),
 		   READ_ONCE(gc->splitter_pump_last_main05),
 		   READ_ONCE(gc->splitter_pump_last_error),
+		   atomic_read(&gc->splitter_scdc_errors),
 		   auto_hdmi1 ? "yes" : "no",
+		   gc->hdmi1_hotplug_policy == GC570D_HOTPLUG_PRESERVE ? "preserve" : "renegotiate",
 		   READ_ONCE(gc->hdmi1_auto_phase),
 		   READ_ONCE(gc->hdmi1_auto_ready) ? "yes" : "no");
 	return 0;

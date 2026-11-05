@@ -400,6 +400,16 @@ static inline void atomic_set(atomic_t *v, int i)
 	atomic_store_explicit(&v->counter, i, memory_order_release);
 }
 
+static inline void atomic_inc(atomic_t *v)
+{
+	atomic_fetch_add_explicit(&v->counter, 1, memory_order_acq_rel);
+}
+
+static inline void atomic_dec(atomic_t *v)
+{
+	atomic_fetch_sub_explicit(&v->counter, 1, memory_order_acq_rel);
+}
+
 static inline void atomic_or(int i, atomic_t *v)
 {
 	atomic_fetch_or_explicit(&v->counter, i, memory_order_acq_rel);
@@ -644,6 +654,7 @@ static inline struct delayed_work *to_delayed_work(struct work_struct *work)
 void gc570d_init_work(struct work_struct *work, work_func_t func);
 bool gc570d_schedule_work_delay(struct work_struct *work, unsigned long delay_ms);
 bool gc570d_cancel_work_sync(struct work_struct *work);
+void gc570d_destroy_work(struct work_struct *work);
 
 #define INIT_WORK(w, f) gc570d_init_work((w), (f))
 #define INIT_DELAYED_WORK(dw, f) gc570d_init_work(&(dw)->work, (f))
@@ -774,11 +785,31 @@ void gc570d_log_msg(const char *level, const struct device *dev, const char *fmt
 	__attribute__((format(printf, 3, 4)));
 
 #define dev_info(dev, fmt, ...) gc570d_log_msg("INFO", (dev), fmt, ##__VA_ARGS__)
+#define dev_info_ratelimited(dev, fmt, ...) do {                             \
+	static u64 __gc570d_info_next_##__LINE__;                            \
+	u64 __gc570d_info_now_##__LINE__ = ktime_get_ns();                   \
+	if (__gc570d_info_now_##__LINE__ >= __gc570d_info_next_##__LINE__) { \
+		__gc570d_info_next_##__LINE__ =                               \
+			__gc570d_info_now_##__LINE__ + 5ULL * NSEC_PER_SEC;   \
+		gc570d_log_msg("INFO", (dev), fmt, ##__VA_ARGS__);           \
+	}                                                                    \
+} while (0)
 #define dev_warn(dev, fmt, ...) gc570d_log_msg("WARN", (dev), fmt, ##__VA_ARGS__)
 #define dev_err(dev, fmt, ...)  gc570d_log_msg("ERR ", (dev), fmt, ##__VA_ARGS__)
-#define dev_dbg(dev, fmt, ...)  do { if (0) gc570d_log_msg("DBG ", (dev), fmt, ##__VA_ARGS__); } while (0)
+static inline bool gc570d_debug_on(void)
+{
+	static int enabled = -1;
+
+	if (enabled < 0) {
+		const char *env = getenv("GC570D_DEBUG");
+
+		enabled = env && *env && strcmp(env, "0") != 0;
+	}
+	return enabled;
+}
+#define dev_dbg(dev, fmt, ...) do { if (gc570d_debug_on()) gc570d_log_msg("DBG ", (dev), fmt, ##__VA_ARGS__); } while (0)
 #define dev_warn_ratelimited(dev, fmt, ...) gc570d_log_msg("WARN", (dev), fmt, ##__VA_ARGS__)
-#define dev_dbg_ratelimited(dev, fmt, ...)  do { if (0) gc570d_log_msg("DBG ", (dev), fmt, ##__VA_ARGS__); } while (0)
+#define dev_dbg_ratelimited(dev, fmt, ...) do { if (gc570d_debug_on()) gc570d_log_msg("DBG ", (dev), fmt, ##__VA_ARGS__); } while (0)
 
 static inline int dev_err_probe(const struct device *dev, int err, const char *fmt, ...)
 {
@@ -933,7 +964,10 @@ void device_remove_file(struct device *dev, const struct device_attribute *attr)
 #ifndef GC570D_USE_SYSTEM_V4L2
 #define V4L2_PIX_FMT_YUYV 0x56595559U
 #define V4L2_FIELD_NONE 1
+#define V4L2_FIELD_INTERLACED 4
+#define V4L2_COLORSPACE_SMPTE170M 1
 #define V4L2_COLORSPACE_REC709 3
+#define V4L2_YCBCR_ENC_601 1
 #define V4L2_YCBCR_ENC_709 2
 #define V4L2_QUANTIZATION_LIM_RANGE 2
 #define V4L2_XFER_FUNC_709 2
@@ -1281,6 +1315,7 @@ struct snd_pcm_substream {
 	void *private_data;
 	struct snd_pcm_runtime *runtime;
 	int channel_index;
+	int wait_time;
 };
 
 struct snd_pcm_ops {
@@ -1411,6 +1446,7 @@ struct pci_driver {
 };
 
 #define module_param(name, type, perm)
+#define module_param_named(name, value, type, perm)
 #define MODULE_PARM_DESC(name, desc)
 #define MODULE_DEVICE_TABLE(type, name)
 #define MODULE_AUTHOR(a)

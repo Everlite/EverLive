@@ -5,6 +5,10 @@
  */
 #include "gc570d.h"
 
+static u32
+gc570d_xilinx_video0_control(const struct gc570d_video0_signal *signal,
+			     u16 width, u16 height);
+
 void gc570d_reset_channel(struct gc570d_dev *gc, unsigned int channel)
 {
 	u32 status;
@@ -77,17 +81,81 @@ void gc570d_reset_audio_channel(struct gc570d_dev *gc,
 	msleep(30);
 }
 
-static int gc570d_dma_detect_vip1_format(struct gc570d_dev *gc,
-					 u16 *width_out, u16 *height_out)
+static int gc570d_interlaced_frame_height(u16 hactive, u16 vactive,
+					  u16 *frame_height)
+{
+	if (hactive < 640 || hactive > 1920 || (hactive & 1))
+		return -ERANGE;
+
+	/*
+	 * Receivers differ in whether the vertical-active register reports a
+	 * field or the complete frame.  Normalise both conventions so 480i,
+	 * 576i, 1080i, and 1440x1080i all reach the same VIP path.
+	 */
+	switch (vactive) {
+	case 240:
+		*frame_height = 480;
+		break;
+	case 288:
+		*frame_height = 576;
+		break;
+	case 540:
+		*frame_height = 1080;
+		break;
+	case 480:
+	case 576:
+	case 1080:
+		*frame_height = vactive;
+		break;
+	default:
+		return -EINVAL;
+	}
+	return 0;
+}
+
+/*
+ * gc570d_splitter_measure_rx_timing() derives the rate from integer clock and
+ * total divisions, so a nominal 60 Hz source can measure as 57..59 Hz.  Map
+ * the measurement onto the supported HDMI cadence families with a +/-3 Hz
+ * tolerance before it drives mode selection or reaches userspace.  100/120 Hz
+ * inputs are recognised so the high-rate Xilinx mode is retained; the captured
+ * stream itself is capped at 60 fps.  Zero means "unknown" and lets callers
+ * fall back to the configured interval.
+ */
+static u16 gc570d_normalize_frame_rate(u32 measured)
+{
+	static const u16 families[] = { 24, 25, 30, 50, 60, 100, 120 };
+	u16 best = 0;
+	u32 best_delta = U32_MAX;
+	size_t i;
+
+	if (!measured)
+		return 0;
+	for (i = 0; i < ARRAY_SIZE(families); i++) {
+		u32 delta = measured > families[i] ? measured - families[i] :
+			     families[i] - measured;
+
+		if (delta < best_delta) {
+			best_delta = delta;
+			best = families[i];
+		}
+	}
+	return best_delta <= 3 ? best : 0;
+}
+
+int gc570d_dma_detect_vip1_format(struct gc570d_dev *gc,
+				  u16 *width_out, u16 *height_out,
+				  bool *interlaced_out)
 {
 	const struct gc570d_i2c_bus *bus = &gc570d_receiver_buses[1];
-	static const u8 registers[] = { 0x0a, 0x99, 0x9c, 0x9d, 0x9e, 0x9f,
-					0xa3, 0xa4, 0xa5 };
+	static const u8 registers[] = { 0x0a, 0x99, 0x9e, 0x9f, 0xa4, 0xa5 };
 	u8 value[ARRAY_SIZE(registers)];
 	u32 last_irq;
 	u32 last_status;
 	u16 hactive;
 	u16 vactive;
+	u16 frame_height;
+	bool interlaced;
 	size_t i;
 	int ret;
 
@@ -98,37 +166,61 @@ static int gc570d_dma_detect_vip1_format(struct gc570d_dev *gc,
 			return ret;
 	}
 
-	hactive = ((value[5] & 0x3f) << 8) | value[4];
-	vactive = ((value[7] & 0xf0) << 4) | value[8];
+	hactive = ((value[3] & 0x3f) << 8) | value[2];
+	vactive = ((value[4] & 0xf0) << 4) | value[5];
 	if (!(value[0] & BIT(7)))
 		return -ENOLINK;
-	if (value[1] & BIT(1))
-		return -EINVAL;
-	if (hactive < 640 || hactive > 1920 ||
-	    vactive < 480 || vactive > 1080 ||
-	    (hactive & 1) || (vactive & 1))
-		return -ERANGE;
+	/*
+	 * Accept both the interlace flag and the field-height conventions
+	 * used by different receivers (240/288 fields, 540-line 1080i).
+	 */
+	interlaced = !!(value[1] & BIT(1)) ||
+		     vactive == 240 || vactive == 288 ||
+		     (hactive == 1920 && vactive == 540);
+	if (interlaced) {
+		ret = gc570d_interlaced_frame_height(hactive, vactive,
+						     &frame_height);
+		if (ret)
+			return ret;
+	} else {
+		if (hactive < 640 || hactive > 1920 ||
+		    vactive < 480 || vactive > 1080 ||
+		    (hactive & 1) || (vactive & 1))
+			return -ERANGE;
+		frame_height = vactive;
+	}
 
 	if (width_out)
 		*width_out = hactive;
 	if (height_out)
-		*height_out = vactive;
+		*height_out = frame_height;
+	if (interlaced_out)
+		*interlaced_out = interlaced;
 	return 0;
 }
 
 static int gc570d_dma_validate_format(struct gc570d_dev *gc)
 {
-	return gc570d_dma_detect_vip1_format(gc, NULL, NULL);
+	return gc570d_dma_detect_vip1_format(gc, NULL, NULL, NULL);
 }
 
-static void gc570d_vip_program_1080p_yuy2(struct gc570d_dev *gc,
-					  u16 input_width, u16 input_height)
+static void gc570d_vip_program_yuy2(struct gc570d_dev *gc,
+				    u16 input_width, u16 input_height,
+				    u16 output_width, u16 output_height,
+				    bool interlaced)
 {
-	bool scale = input_width != GC570D_WIDTH ||
-		     input_height != GC570D_HEIGHT;
+	u16 out_w = output_width ? output_width : GC570D_WIDTH;
+	u16 out_h = output_height ? output_height : GC570D_HEIGHT;
+	u16 in_h = interlaced ? (input_height >> 1) : input_height;
+	u32 scaler_in_h = in_h;
+	u32 scaler_out_h = out_h;
+	u32 scaler_flags = (out_w * 2 < input_width ? BIT(0) : 0) |
+			   (scaler_in_h > scaler_out_h * 2 ? BIT(4) : 0);
+	bool scale = input_width != out_w || scaler_in_h != scaler_out_h ||
+		     input_width != GC570D_WIDTH || in_h != GC570D_HEIGHT;
 	u32 value;
 
-	/* CVDecVIP::Start, channel 1, no crop or scaling, packed YUY2. */
+	/* CVDecVIP::Start, channel 1, packed YUY2 with optional VIP1 scaling. */
 	value = readl(gc->bar0 + GC570D_VIP_GLOBAL_FORMAT);
 	writel(value & ~GENMASK(1, 0),
 	       gc->bar0 + GC570D_VIP_GLOBAL_FORMAT);
@@ -144,26 +236,26 @@ static void gc570d_vip_program_1080p_yuy2(struct gc570d_dev *gc,
 
 	writel(input_width, gc->bar0 + GC570D_VIP_CROP_WIDTH);
 	writel(input_width, gc->bar0 + GC570D_VIP_OUTPUT_WIDTH);
-	writel(input_height, gc->bar0 + GC570D_VIP_CROP_HEIGHT);
-	writel(input_height, gc->bar0 + GC570D_VIP_OUTPUT_HEIGHT);
+	writel(in_h, gc->bar0 + GC570D_VIP_CROP_HEIGHT);
+	writel(in_h, gc->bar0 + GC570D_VIP_OUTPUT_HEIGHT);
 
 	writel(0, gc->bar0 + GC570D_VIP_SCALER_CTRL);
-	writel(div_u64((u64)input_width << 20, GC570D_WIDTH),
+	writel(div_u64((u64)input_width << 20, out_w),
 	       gc->bar0 + GC570D_VIP_SCALE_X);
-	writel(div_u64((u64)input_height << 20, GC570D_HEIGHT),
+	writel(div_u64((u64)scaler_in_h << 20, scaler_out_h),
 	       gc->bar0 + GC570D_VIP_SCALE_Y);
-	writel(((u32)input_height << 16) | input_width,
+	writel((scaler_in_h << 16) | input_width,
 	       gc->bar0 + GC570D_VIP_INPUT_SIZE);
 	writel(((u32)(input_width - 1)) << 16,
 	       gc->bar0 + GC570D_VIP_INPUT_X_LAST);
-	writel(((u32)(input_height - 1)) << 16,
+	writel((scaler_in_h - 1) << 16,
 	       gc->bar0 + GC570D_VIP_INPUT_Y_LAST);
-	writel((GC570D_HEIGHT << 16) | GC570D_WIDTH,
+	writel((scaler_out_h << 16) | out_w,
 	       gc->bar0 + GC570D_VIP_OUTPUT_SIZE);
 	writel(0x00004040, gc->bar0 + GC570D_VIP_SCALER_PHASE);
-	writel(0, gc->bar0 + GC570D_VIP_SCALER_FLAGS);
-
-	writel(0, gc->bar0 + GC570D_VIP_BYPASS);
+	writel(scaler_flags, gc->bar0 + GC570D_VIP_SCALER_FLAGS);
+	if (!READ_ONCE(gc->video0_dma_active))
+		writel(0, gc->bar0 + GC570D_VIP_BYPASS);
 	writel(3, gc->bar0 + GC570D_VIP_SCALER_CTRL);
 	writel(0, gc->bar0 + GC570D_VIP_AUX_1);
 	writel(0, gc->bar0 + GC570D_VIP_AUX_0);
@@ -172,11 +264,18 @@ static void gc570d_vip_program_1080p_yuy2(struct gc570d_dev *gc,
 
 	value = readl(gc->bar0 + GC570D_VIP_CHANNEL_CTRL);
 	writel(value | BIT(0), gc->bar0 + GC570D_VIP_CHANNEL_CTRL);
-	writel(0, gc->bar0 + GC570D_VIP_COLOR_0);
-	/* GC570D stream-start defaults selected by the official driver for 1080-line input. */
-	writel(0x000005a0, gc->bar0 + GC570D_VIP_COLOR_1);
-	writel(0x00000009, gc->bar0 + GC570D_VIP_COLOR_2);
-	writel(0x000c000c, gc->bar0 + GC570D_VIP_COLOR_3);
+	/*
+	 * The colour-default registers are shared with VIP0.  When HDMI IN 1 is
+	 * already streaming, preserve the values it programmed instead of
+	 * overwriting them from the HDMI IN 2 path.
+	 */
+	if (!READ_ONCE(gc->video0_dma_active)) {
+		writel(0, gc->bar0 + GC570D_VIP_COLOR_0);
+		/* GC570D stream-start defaults selected by the official driver. */
+		writel(0x000005a0, gc->bar0 + GC570D_VIP_COLOR_1);
+		writel(0x00000009, gc->bar0 + GC570D_VIP_COLOR_2);
+		writel(0x000c000c, gc->bar0 + GC570D_VIP_COLOR_3);
+	}
 	value = readl(gc->bar0 + GC570D_VIP_GLOBAL_START);
 	writel(value | BIT(0), gc->bar0 + GC570D_VIP_GLOBAL_START);
 	readl(gc->bar0 + GC570D_VIP_GLOBAL_START);
@@ -186,20 +285,26 @@ int gc570d_vip_init(struct gc570d_dev *gc)
 {
 	u16 input_width = GC570D_WIDTH;
 	u16 input_height = GC570D_HEIGHT;
+	u16 output_width = gc->video_width ? gc->video_width : GC570D_WIDTH;
+	u16 output_height = gc->video_height ? gc->video_height : GC570D_HEIGHT;
+	bool interlaced = false;
 	int ret;
 
-	ret = gc570d_dma_detect_vip1_format(gc, &input_width, &input_height);
-	if (ret) {
-		dev_dbg(&gc->pdev->dev,
-			"VIP init requires progressive 480p..1080p on channel 1: %d\n",
-			ret);
-		return ret;
-	}
+	ret = gc570d_dma_detect_vip1_format(gc, &input_width, &input_height,
+					    &interlaced);
+	if (ret)
+		return dev_err_probe(&gc->pdev->dev, ret,
+				     "VIP init requires 480p..1080p or 1080i on channel 1\n");
 
-	gc570d_vip_program_1080p_yuy2(gc, input_width, input_height);
+	gc->video_input_width = input_width;
+	gc->video_input_height = input_height;
+	gc->video_input_interlaced = interlaced;
+	gc570d_vip_program_yuy2(gc, input_width, input_height,
+				output_width, output_height, interlaced);
 	dev_info(&gc->pdev->dev,
-		 "VIP channel 1 initialized: %ux%u input to 1920x1080 packed YUY2\n",
-		 input_width, input_height);
+		 "VIP channel 1 initialized: %ux%u%s input to %ux%u packed YUY2\n",
+		 input_width, input_height, interlaced ? "i" : "p",
+		 output_width, output_height);
 	return 0;
 }
 
@@ -344,35 +449,52 @@ out_restore_page:
 
 	if (!(value[0] & BIT(7)))
 		return -ENOLINK;
-	if (value[1] & BIT(1))
-		return -EINVAL;
-	if (width < 640 || height < 480 || (width & 1) || (height & 1))
-		return -ENODATA;
+	signal->interlaced = !!(value[1] & BIT(1)) ||
+			     height == 240 || height == 288 ||
+			     (width == 1920 && height == 540);
+	if (signal->interlaced) {
+		u16 frame_height;
+
+		ret = gc570d_interlaced_frame_height(width, height,
+						     &frame_height);
+		if (ret)
+			return ret;
+		height = frame_height;
+	} else if (width < 640 || height < 480 || (width & 1) || (height & 1)) {
+		return -ERANGE;
+	}
+	gc->video0_input_interlaced = signal->interlaced;
+	gc->video0_input_frame_rate = 0;
 	if (colorimetry == 3 &&
 	    (extended_colorimetry == 5 || extended_colorimetry == 6)) {
 		if (output_color != 0)
 			return -EILSEQ;
 		signal->profile = GC570D_VIDEO0_HDR_BT2020;
-	} else if (input_color == 3 && colorimetry == 2 &&
-		   extended_colorimetry == 0 && output_color == 2) {
-		/*
-		 * For the observed 4K60 SDR BT.709 YCbCr 4:2:0 transport, Windows
-		 * keeps the IT68051 output in YCbCr 4:4:4 and takes its no-CSC path.
-		 * FUN_1400a7c50 maps BT.709 to sampling/colorspace nibbles 3/3;
-		 * the negotiated 1080p Capture Video geometry supplies nibble 3.
-		 */
-		signal->profile = GC570D_VIDEO0_SDR_YUV420_BT709;
-	} else if (colorimetry != 3) {
-		if (output_color != 0)
-			return -EILSEQ;
+	} else if (input_color == 0 && colorimetry != 3) {
 		/*
 		 * The official driver leaves CVDecVIP+0x68 at zero when no HDR DRM
-		 * packet is active.  The validated PS5 1440p60 SDR transport is
-		 * RGB444/depth-code zero, while the official driver keeps RGB output and
-		 * takes its no-CSC branch.  Both native RGB SDR and IT68051 CSC-converted
-		 * YCbCr SDR (4:4:4 and 4:2:2) present RGB444 on the IT68051 output bus.
+		 * packet is active.  Native RGB SDR therefore stays RGB444 on the
+		 * IT68051 output bus and uses the SDR RGB transform.
+		 */
+		if (output_color != 0)
+			return -EILSEQ;
+		signal->profile = GC570D_VIDEO0_SDR_RGB;
+	} else if (input_color != 0 && colorimetry != 3 &&
+		   output_color == 0) {
+		/*
+		 * Full-range SDR YCbCr 4:2:2/4:4:4 is converted to RGB444 by the
+		 * receiver and uses the same SDR RGB transform as native RGB.
 		 */
 		signal->profile = GC570D_VIDEO0_SDR_RGB;
+	} else if (input_color != 0 && colorimetry != 3 &&
+		   output_color == 2) {
+		/*
+		 * Limited or unspecified-range SDR YCbCr (including 4:2:0) stays
+		 * YCbCr 4:4:4 and takes the no-CSC Xilinx path.  This avoids
+		 * applying a full-range YCbCr-to-RGB matrix to limited-range
+		 * video, for which no verified matrix is available.
+		 */
+		signal->profile = GC570D_VIDEO0_SDR_YUV420_BT709;
 	} else {
 		return -ENODATA;
 	}
@@ -402,12 +524,15 @@ out_restore_page:
 	ret = gc570d_splitter_measure_rx_timing(gc, 0, &timing);
 	if (ret && signal->working_mode != 2)
 		return ret;
-	signal->frame_rate = ret ? 0 : timing.frame_rate;
+	signal->frame_rate = ret ? 0 :
+		gc570d_normalize_frame_rate(timing.frame_rate);
 	signal->xilinx_mode = signal->working_mode == 2 ||
 				      signal->frame_rate > 60 ? 3 : 0;
+	gc->video0_input_frame_rate = signal->frame_rate;
 
-	dev_info(&gc->pdev->dev,
-		 "VIP0 signal validated: %ux%u@%u class=%u xilinx_mode=%u vip=%ux%u profile=%s input_color=%u C=%u EC=%u output=%s\n",
+	/* Detection also runs from diagnostic paths, so keep the log rate limited. */
+	dev_info_ratelimited(&gc->pdev->dev,
+			     "VIP0 signal validated: %ux%u@%u class=%u xilinx_mode=%u vip=%ux%u profile=%s input_color=%u C=%u EC=%u output=%s\n",
 		 width, height,
 		 signal->frame_rate, signal->working_mode, signal->xilinx_mode,
 		 signal->vip_width, signal->vip_height,
@@ -435,10 +560,8 @@ static int gc570d_vip0_profile_show(struct seq_file *s, void *unused)
 		return 0;
 	}
 
-	control = ((gc570d_video0_geometry_class(gc->video0_width,
-						   gc->video0_height) + 2) << 8) |
-		  (signal.profile == GC570D_VIDEO0_HDR_BT2020 ? 0x05 :
-		   signal.profile == GC570D_VIDEO0_SDR_RGB ? 0x10 : 0x33);
+	control = gc570d_xilinx_video0_control(&signal, gc->video0_width,
+					       gc->video0_height);
 	if (signal.profile == GC570D_VIDEO0_HDR_BT2020)
 		control |= BIT(16);
 	seq_printf(s,
@@ -460,11 +583,14 @@ GC570D_DEFINE_SHOW_ATTRIBUTE(gc570d_vip0_profile);
 static u32 gc570d_xilinx_video0_control(
 	const struct gc570d_video0_signal *signal, u16 width, u16 height)
 {
+	u16 xilinx_width = signal->working_mode < 2 ? signal->vip_width : width;
+	u16 xilinx_height = signal->working_mode < 2 ? signal->vip_height : height;
 	u32 control;
 
-	control = ((gc570d_video0_geometry_class(width, height) + 2) << 8) |
-		  (signal->profile == GC570D_VIDEO0_HDR_BT2020 ? 0x05 :
-		   signal->profile == GC570D_VIDEO0_SDR_RGB ? 0x10 : 0x33);
+	control = ((gc570d_video0_geometry_class(xilinx_width,
+						 xilinx_height) + 2) << 8) |
+		(signal->profile == GC570D_VIDEO0_HDR_BT2020 ? 0x05 :
+		 signal->profile == GC570D_VIDEO0_SDR_RGB ? 0x10 : 0x33);
 	if (signal->profile == GC570D_VIDEO0_HDR_BT2020)
 		control |= BIT(16);
 	return control;
@@ -588,14 +714,30 @@ int gc570d_vip0_program_yuy2(
 	u16 input_height = signal->vip_height;
 	u32 input_field_height = input_height >> 1;
 	u32 output_field_height = output_height >> 1;
+	u32 scaler_in_height = input_field_height;
+	u32 scaler_out_height = output_field_height;
 	u32 scaler_flags = output_width * 2 < input_width ? BIT(0) : 0;
 	bool scale = input_width != output_width || input_height != output_height;
+	/*
+	 * VIP0 consumes a progressive upscale as complete frames.  Applying the
+	 * software-interlace half-height encoding to this case makes the hardware
+	 * deliver duplicated fields at half cadence.  Native, downscale, and true
+	 * interlaced paths retain the recovered field encoding below.
+	 */
+	bool progressive_upscale = !signal->interlaced &&
+		input_height < output_height;
+	u32 clock_interval;
 	u32 value;
 	int ret;
 
 	if (!input_width || !input_field_height ||
 	    !output_width || !output_field_height)
 		return -EINVAL;
+
+	if (progressive_upscale) {
+		scaler_in_height = input_height;
+		scaler_out_height = output_height;
+	}
 
 	/* The official driver preserves every existing 0x1040 bit and sets bit 2. */
 	value = readl(gc->bar0 + GC570D_VIP_GLOBAL_ENABLE);
@@ -631,7 +773,8 @@ int gc570d_vip0_program_yuy2(
 	writel(0, gc->bar0 + GC570D_VIP0_WINDOW_WIDTH);
 	writel(input_width, gc->bar0 + GC570D_VIP0_OUTPUT_WIDTH);
 	writel(0, gc->bar0 + GC570D_VIP0_WINDOW_HEIGHT);
-	writel(((input_height & ~1) << 15) | input_field_height,
+	writel(progressive_upscale ? input_height :
+	       ((input_height & ~1) << 15) | input_field_height,
 	       gc->bar0 + GC570D_VIP0_OUTPUT_HEIGHT);
 
 	/*
@@ -647,32 +790,36 @@ int gc570d_vip0_program_yuy2(
 	writel(0, gc->bar0 + GC570D_VIP0_SCALER_CTRL);
 	writel(div_u64((u64)input_width << 20, output_width),
 	       gc->bar0 + GC570D_VIP0_SCALE_X);
-	writel(div_u64((u64)input_field_height << 20,
-			 output_field_height),
+	writel(div_u64((u64)scaler_in_height << 20, scaler_out_height),
 	       gc->bar0 + GC570D_VIP0_SCALE_Y);
-	writel((input_field_height << 16) | input_width,
+	writel((scaler_in_height << 16) | input_width,
 	       gc->bar0 + GC570D_VIP0_INPUT_SIZE);
 	writel((input_width - 1) << 16,
 	       gc->bar0 + GC570D_VIP0_INPUT_X_LAST);
-	writel((input_field_height - 1) << 16,
+	writel((scaler_in_height - 1) << 16,
 	       gc->bar0 + GC570D_VIP0_INPUT_Y_LAST);
-	writel((output_field_height << 16) | output_width,
+	writel((scaler_out_height << 16) | output_width,
 	       gc->bar0 + GC570D_VIP0_OUTPUT_SIZE);
 	writel(0x00004040, gc->bar0 + GC570D_VIP0_SCALER_PHASE);
-	if (input_field_height > output_field_height * 2)
+	if (scaler_in_height > scaler_out_height * 2)
 		scaler_flags |= BIT(4);
 	writel(scaler_flags, gc->bar0 + GC570D_VIP0_SCALER_FLAGS);
 
 	/*
 	 * The official driver programs the clock only after finishing the scaler
-	 * block.  It derives CVDecVIP+0xc0 from
-	 * the Capture Video pin's negotiated frame interval, mapping
-	 * 166666/166667 ticks to 60 Hz and 200000 to 50 Hz independently of the
-	 * HDMI input rate.  The initial Linux format set uses those exact
-	 * default intervals from the official driver KS tables.
+	 * block.  Prefer the measured source rate so a 50 Hz source is not clocked
+	 * as 60 Hz merely because the application negotiated a 1080p format.
+	 * The 25/50 Hz family uses the 50 Hz PLL; 24/30/60/120 Hz sources use the
+	 * 60 Hz PLL, which is also what the 60 Hz format table entry requests.
 	 */
+	if (signal->frame_rate == 25 || signal->frame_rate == 50)
+		clock_interval = 200000;
+	else if (signal->frame_rate)
+		clock_interval = 166666;
+	else
+		clock_interval = frame_interval;
 	ret = gc570d_xilinx_write32(gc, 0x000008,
-		frame_interval == 200000 ? GC570D_XILINX_50HZ_CLOCK :
+		clock_interval == 200000 ? GC570D_XILINX_50HZ_CLOCK :
 		GC570D_XILINX_60HZ_CLOCK);
 	if (ret)
 		return ret;
@@ -681,12 +828,15 @@ int gc570d_vip0_program_yuy2(
 	 * Equal logical sides take the official driver's bypass branch and clear
 	 * channel bit 7. Scaling sets it. The equal-size working-mode-2 branch
 	 * writes one to BAR+0x1084; scaling and the lower classes write zero.
+	 * BAR+0x1084 is shared with VIP1, so preserve whatever HDMI IN 2 set
+	 * while its DMA is active.
 	 */
 	value = readl(gc->bar0 + GC570D_VIP0_CHANNEL_CTRL);
 	writel(scale ? value | BIT(7) : value & ~BIT(7),
 	       gc->bar0 + GC570D_VIP0_CHANNEL_CTRL);
-	writel(!scale && signal->working_mode == 2 ? 1 : 0,
-	       gc->bar0 + GC570D_VIP_BYPASS);
+	if (!READ_ONCE(gc->video_dma_active))
+		writel(!scale && signal->working_mode == 2 ? 1 : 0,
+		       gc->bar0 + GC570D_VIP_BYPASS);
 	writel(3, gc->bar0 + GC570D_VIP0_SCALER_CTRL);
 	writel(0, gc->bar0 + GC570D_VIP_AUX_1);
 	writel(0, gc->bar0 + GC570D_VIP_AUX_0);
@@ -703,10 +853,12 @@ int gc570d_vip0_program_yuy2(
 	 * all four registers here.  Values 0/0x5a0/9/12 belong exclusively to
 	 * the auxiliary +0x178 path, not this DMA0 stream.
 	 */
-	writel(0, gc->bar0 + GC570D_VIP_COLOR_0);
-	writel(0, gc->bar0 + GC570D_VIP_COLOR_1);
-	writel(0, gc->bar0 + GC570D_VIP_COLOR_2);
-	writel(0, gc->bar0 + GC570D_VIP_COLOR_3);
+	if (!READ_ONCE(gc->video_dma_active)) {
+		writel(0, gc->bar0 + GC570D_VIP_COLOR_0);
+		writel(0, gc->bar0 + GC570D_VIP_COLOR_1);
+		writel(0, gc->bar0 + GC570D_VIP_COLOR_2);
+		writel(0, gc->bar0 + GC570D_VIP_COLOR_3);
+	}
 	/* The official driver preserves the current global state for the start edge. */
 	value = readl(gc->bar0 + GC570D_VIP_GLOBAL_START);
 	writel(value | BIT(0), gc->bar0 + GC570D_VIP_GLOBAL_START);
@@ -810,6 +962,9 @@ static int gc570d_dma_capture_frames_channel(struct gc570d_dev *gc,
 	size_t descriptor_bytes;
 	size_t inspected_bytes;
 	size_t sg_alloc_size;
+	size_t frame_size;
+	u16 capture_width;
+	u16 capture_height;
 	u32 control = 0;
 	u32 irq_status = 0;
 	u32 index = 0;
@@ -871,10 +1026,18 @@ static int gc570d_dma_capture_frames_channel(struct gc570d_dev *gc,
 	desc_address = GC570D_DMA0_DESC_ADDRESS + channel * 0x800;
 	frame_irq = BIT(channel * 2 + 1);
 	ring_slots = channel == 0 ? GC570D_DMA_BURST_FRAMES : 1;
+	capture_width = channel == 0 ? gc->video0_width : gc->video_width;
+	capture_height = channel == 0 ? gc->video0_height : gc->video_height;
+	frame_size = (size_t)capture_width * capture_height * 2;
 	capture_bytes = max_t(unsigned int, buffer_count, ring_slots) *
-		GC570D_DMA_FRAME_SIZE;
-
-	descriptor_bytes = GC570D_DMA_FRAME_SIZE;
+		frame_size;
+	/*
+	 * The official driver fills CVDecVIP +0x90/+0x94 from the negotiated
+	 * Capture Video pin and forwards those fields to the DMA setup.  Size
+	 * the diagnostic descriptors from the negotiated geometry instead of
+	 * assuming 1920x1080.
+	 */
+	descriptor_bytes = frame_size;
 	inspected_bytes = channel == 0 ? ring_slots * descriptor_bytes :
 		capture_bytes;
 	sg_alloc_size = ring_slots * GC570D_DMA_SG_SIZE;
@@ -922,7 +1085,17 @@ static int gc570d_dma_capture_frames_channel(struct gc570d_dev *gc,
 		goto out_status;
 
 	if (channel == 0) {
-		ret = gc570d_xilinx_prepare_video0(gc, &signal, 1920, 1080);
+		/*
+		 * The official driver enables the GC570D Xilinx preprocessing path from the
+		 * decoded-format callback, before stream start publishes descriptors and
+		 * programs the VIP channel.
+		 * Prepare it before the four coherent ring allocations so DMA0 does
+		 * not see the preprocessing edge and the VIP start edge in the same
+		 * immediate sequence. gc570d_vip0_program_yuy2() reapplies
+		 * and verifies the same idempotent format at stream start.
+		 */
+		ret = gc570d_xilinx_prepare_video0(gc, &signal, capture_width,
+						   capture_height);
 		if (ret)
 			goto out_status;
 		if (signal.profile == GC570D_VIDEO0_HDR_BT2020) {
@@ -930,7 +1103,9 @@ static int gc570d_dma_capture_frames_channel(struct gc570d_dev *gc,
 			if (ret)
 				goto out_status;
 		}
-		ret = gc570d_xilinx_prepare_video0(gc, &signal, 1920, 1080);
+		/* The official driver finishes by applying enable and packed format. */
+		ret = gc570d_xilinx_prepare_video0(gc, &signal, capture_width,
+						   capture_height);
 		if (ret)
 			goto out_status;
 		dev_info(&gc->pdev->dev,
@@ -1013,26 +1188,37 @@ static int gc570d_dma_capture_frames_channel(struct gc570d_dev *gc,
 				sg_dma + slot * GC570D_DMA_SG_SIZE;
 			dma_addr_t frame_dma = channel == 0 ?
 				slot_image_dma[slot] :
-				image_dma + (i % buffer_count) * GC570D_DMA_FRAME_SIZE;
+				image_dma + (i % buffer_count) * frame_size;
 			u32 slot_address = desc_address + slot * 0x0c;
 			u32 sg_entries = 1;
 
 			if (channel == 0) {
 				u32 line;
 
-				for (line = 0; line < GC570D_HEIGHT; line++) {
+				/*
+				 * GC570D forces device+0x26c = 1 in the official driver.
+				 * For the 1920x1080 YUY2 KS format, the modern adapter
+				 * path makes local_12c == 1 in the official driver.  That
+				 * branch divides even one contiguous 4,147,200-byte
+				 * KSMAPPING at every 3,840-byte scanline boundary.  Its
+				 * final copy loop reverses the scanline groups for
+				 * Software Flip=1, so a one-fragment-per-line mapping is
+				 * published bottom-to-top as 1,080 entries with
+				 * 0x80008000 flags.
+				 */
+				for (line = 0; line < capture_height; line++) {
 					__le32 *entry = sg_slot + line * 4;
 					dma_addr_t line_dma = frame_dma +
-						(size_t)(GC570D_HEIGHT - 1 - line) *
-						GC570D_WIDTH * 2;
+						(size_t)(capture_height - 1 - line) *
+						capture_width * 2;
 
 					entry[0] = cpu_to_le32(lower_32_bits(line_dma));
 					entry[1] = cpu_to_le32(upper_32_bits(line_dma));
-					entry[2] = cpu_to_le32((GC570D_WIDTH * 2) /
+					entry[2] = cpu_to_le32((capture_width * 2) /
 								 sizeof(u32));
 					entry[3] = cpu_to_le32(GC570D_DMA_STREAM_SG_FLAGS);
 				}
-				sg_entries = GC570D_HEIGHT;
+				sg_entries = capture_height;
 			} else {
 				sg_slot[0] = cpu_to_le32(lower_32_bits(frame_dma));
 				sg_slot[1] = cpu_to_le32(upper_32_bits(frame_dma));
@@ -1085,8 +1271,10 @@ static int gc570d_dma_capture_frames_channel(struct gc570d_dev *gc,
 				       GC570D_VIP0_EVENT_STATUS);
 			dma0_vip_event_after_ack = readl(gc->bar0 +
 							GC570D_VIP0_EVENT_STATUS);
-			ret = gc570d_vip0_program_yuy2(gc, &signal, 1920, 1080,
-						  166666);
+			ret = gc570d_vip0_program_yuy2(gc, &signal,
+						       capture_width,
+						       capture_height,
+						       gc->video0_frame_interval);
 			if (ret)
 				break;
 			dma0_index_after_vip = readl(gc->bar0 + desc_index);
@@ -1144,10 +1332,10 @@ static int gc570d_dma_capture_frames_channel(struct gc570d_dev *gc,
 					 le32_to_cpu(slot_sg[0]),
 					 le32_to_cpu(slot_sg[2]),
 					 le32_to_cpu(slot_sg[3]),
-					 le32_to_cpu(slot_sg[(GC570D_HEIGHT - 1) * 4 + 1]),
-					 le32_to_cpu(slot_sg[(GC570D_HEIGHT - 1) * 4]),
-					 le32_to_cpu(slot_sg[(GC570D_HEIGHT - 1) * 4 + 2]),
-					 le32_to_cpu(slot_sg[(GC570D_HEIGHT - 1) * 4 + 3]),
+					 le32_to_cpu(slot_sg[(capture_height - 1) * 4 + 1]),
+					 le32_to_cpu(slot_sg[(capture_height - 1) * 4]),
+					 le32_to_cpu(slot_sg[(capture_height - 1) * 4 + 2]),
+					 le32_to_cpu(slot_sg[(capture_height - 1) * 4 + 3]),
 					 &slot_image_dma[slot],
 					 &slot_sg_dma[slot]);
 			}
@@ -1309,8 +1497,8 @@ static int gc570d_dma_capture_frames_channel(struct gc570d_dev *gc,
 	if (channel == 0) {
 		for (i = 0; i < ring_slots; i++)
 			memcpy((u8 *)gc->capture_data +
-			       i * GC570D_DMA_FRAME_SIZE,
-			       slot_image_cpu[i], GC570D_DMA_FRAME_SIZE);
+			       i * frame_size,
+			       slot_image_cpu[i], frame_size);
 	} else {
 		memcpy(gc->capture_data, image_cpu, capture_bytes);
 	}

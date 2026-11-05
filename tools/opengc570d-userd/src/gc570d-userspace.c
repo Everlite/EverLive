@@ -275,12 +275,22 @@ static void *work_worker_thread(void *arg)
 
 void gc570d_init_work(struct work_struct *work, work_func_t func)
 {
+	int ret;
+
 	memset(work, 0, sizeof(*work));
 	work->func = func;
 	pthread_mutex_init(&work->lock, NULL);
 	init_cond_monotonic(&work->cond);
+	ret = pthread_create(&work->thread, NULL, work_worker_thread, work);
+	if (ret) {
+		fprintf(stderr,
+			"[gc570d ERR ] failed to create workqueue thread: %s\n",
+			strerror(ret));
+		pthread_cond_destroy(&work->cond);
+		pthread_mutex_destroy(&work->lock);
+		return;
+	}
 	work->initialized = true;
-	pthread_create(&work->thread, NULL, work_worker_thread, work);
 }
 
 bool gc570d_schedule_work_delay(struct work_struct *work, unsigned long delay_ms)
@@ -312,6 +322,31 @@ bool gc570d_cancel_work_sync(struct work_struct *work)
 	return was_pending;
 }
 
+/*
+ * Userspace-only teardown.  The kernel frees work_structs through devm after
+ * cancel_work_sync(), because the kernel workqueue guarantees the callback
+ * cannot run again once it returns.  Our emulation runs a dedicated pthread
+ * per work_struct, so the thread must be told to exit and joined before the
+ * containing device state is freed, otherwise it keeps waiting on a mutex and
+ * condition variable that no longer exist.
+ */
+void gc570d_destroy_work(struct work_struct *work)
+{
+	if (!work || !work->initialized)
+		return;
+
+	pthread_mutex_lock(&work->lock);
+	work->shutting_down = true;
+	work->pending = false;
+	work->initialized = false;
+	pthread_cond_broadcast(&work->cond);
+	pthread_mutex_unlock(&work->lock);
+
+	pthread_join(work->thread, NULL);
+	pthread_cond_destroy(&work->cond);
+	pthread_mutex_destroy(&work->lock);
+}
+
 /* =========================================================================
  * 2. VFIO-PCI Device Discovery, BAR0 MMIO, IOMMU DMA Mapping, & Eventfd IRQ
  * ========================================================================= */
@@ -324,7 +359,17 @@ struct gc570d_dma_mapping {
 };
 
 #define GC570D_MAX_DMA_MAPPINGS 64
+/*
+ * Keep a bounded cache of freed mappings so repeated prepare/hw_free and
+ * video-recovery cycles do not churn VFIO_IOMMU_MAP/UNMAP ioctls or consume
+ * fresh IOVA space every time.  The kernel module's allocation call pattern
+ * is intentionally left untouched; the recycling happens below its shim.
+ */
+#define GC570D_DMA_CACHE_BLOCKS 16
+#define GC570D_DMA_CACHE_BYTES  (32u * 1024 * 1024)
 static struct gc570d_dma_mapping g_dma_map_table[GC570D_MAX_DMA_MAPPINGS];
+static unsigned int g_dma_cached_blocks;
+static size_t g_dma_cached_bytes;
 static pthread_mutex_t g_dma_map_lock = PTHREAD_MUTEX_INITIALIZER;
 static dma_addr_t g_next_iova = 0x10000000ULL;
 
@@ -334,6 +379,45 @@ static size_t page_align_up(size_t size)
 	if (!pg)
 		pg = 4096;
 	return (size + pg - 1) & ~(pg - 1);
+}
+
+/* Caller must hold g_dma_map_lock. */
+static void gc570d_dma_unmap_locked(struct pci_dev *pdev,
+				    struct gc570d_dma_mapping *m)
+{
+	if (pdev->vfio_container_fd >= 0) {
+		struct vfio_iommu_type1_dma_unmap unmap = {
+			.argsz = sizeof(unmap),
+			.flags = 0,
+			.iova  = m->iova,
+			.size  = m->aligned_size,
+		};
+		ioctl(pdev->vfio_container_fd, VFIO_IOMMU_UNMAP_DMA, &unmap);
+	}
+	munmap(m->vaddr, m->aligned_size);
+	memset(m, 0, sizeof(*m));
+}
+
+/* Caller must hold g_dma_map_lock. */
+static void gc570d_dma_cache_drain_locked(struct pci_dev *pdev)
+{
+	int i;
+
+	for (i = 0; i < GC570D_MAX_DMA_MAPPINGS; i++) {
+		struct gc570d_dma_mapping *m = &g_dma_map_table[i];
+
+		if (!m->in_use && m->vaddr)
+			gc570d_dma_unmap_locked(pdev, m);
+	}
+	g_dma_cached_blocks = 0;
+	g_dma_cached_bytes = 0;
+}
+
+static void gc570d_dma_cache_drain(struct pci_dev *pdev)
+{
+	pthread_mutex_lock(&g_dma_map_lock);
+	gc570d_dma_cache_drain_locked(pdev);
+	pthread_mutex_unlock(&g_dma_map_lock);
 }
 
 void *dma_alloc_coherent(struct device *dev, size_t size,
@@ -347,26 +431,59 @@ void *dma_alloc_coherent(struct device *dev, size_t size,
 	int i;
 
 	(void)gfp;
-	vaddr = mmap(NULL, aligned, PROT_READ | PROT_WRITE,
-		     MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
-	if (vaddr == MAP_FAILED)
-		return NULL;
-
-	/* Fault in pages before VFIO_IOMMU_MAP_DMA pins them in the kernel */
-	memset(vaddr, 0, aligned);
-
 	pthread_mutex_lock(&g_dma_map_lock);
+
+	/* Reuse a cached mapping of exactly the requested size. */
 	for (i = 0; i < GC570D_MAX_DMA_MAPPINGS; i++) {
-		if (!g_dma_map_table[i].in_use) {
+		struct gc570d_dma_mapping *m = &g_dma_map_table[i];
+
+		if (!m->in_use && m->vaddr && m->aligned_size == aligned) {
+			m->in_use = true;
+			g_dma_cached_blocks--;
+			g_dma_cached_bytes -= m->aligned_size;
+			pthread_mutex_unlock(&g_dma_map_lock);
+			/* dma_alloc_coherent() is documented as zeroed memory. */
+			memset(m->vaddr, 0, aligned);
+			if (dma_handle)
+				*dma_handle = m->iova;
+			return m->vaddr;
+		}
+	}
+
+	for (i = 0; i < GC570D_MAX_DMA_MAPPINGS; i++) {
+		if (!g_dma_map_table[i].in_use && !g_dma_map_table[i].vaddr) {
 			slot = i;
 			break;
 		}
 	}
 	if (slot < 0) {
+		/* No pristine slot: evict one cached block to make room. */
+		for (i = 0; i < GC570D_MAX_DMA_MAPPINGS; i++) {
+			struct gc570d_dma_mapping *m = &g_dma_map_table[i];
+
+			if (!m->in_use && m->vaddr) {
+				g_dma_cached_blocks--;
+				g_dma_cached_bytes -= m->aligned_size;
+				gc570d_dma_unmap_locked(pdev, m);
+				slot = i;
+				break;
+			}
+		}
+	}
+	if (slot < 0) {
 		pthread_mutex_unlock(&g_dma_map_lock);
-		munmap(vaddr, aligned);
 		return NULL;
 	}
+
+	vaddr = mmap(NULL, aligned, PROT_READ | PROT_WRITE,
+		     MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+	if (vaddr == MAP_FAILED) {
+		pthread_mutex_unlock(&g_dma_map_lock);
+		return NULL;
+	}
+
+	/* Fault in pages before VFIO_IOMMU_MAP_DMA pins them in the kernel */
+	memset(vaddr, 0, aligned);
 
 	iova = g_next_iova;
 	g_next_iova += aligned + 0x10000ULL; /* 64KB guard page between IOVAs */
@@ -407,30 +524,42 @@ void dma_free_coherent(struct device *dev, size_t size,
 		       void *cpu_addr, dma_addr_t dma_handle)
 {
 	struct pci_dev *pdev = dev && dev->pdev ? dev->pdev : &g_pdev;
+	size_t aligned = page_align_up(size ? size : 4096);
+	struct gc570d_dma_mapping *m = NULL;
 	int i;
 
-	(void)size;
 	if (!cpu_addr)
 		return;
 
 	pthread_mutex_lock(&g_dma_map_lock);
 	for (i = 0; i < GC570D_MAX_DMA_MAPPINGS; i++) {
-		if (g_dma_map_table[i].in_use &&
-		    (g_dma_map_table[i].vaddr == cpu_addr ||
-		     g_dma_map_table[i].iova == dma_handle)) {
-			if (pdev->vfio_container_fd >= 0) {
-				struct vfio_iommu_type1_dma_unmap unmap = {
-					.argsz = sizeof(unmap),
-					.flags = 0,
-					.iova  = g_dma_map_table[i].iova,
-					.size  = g_dma_map_table[i].aligned_size,
-				};
-				ioctl(pdev->vfio_container_fd, VFIO_IOMMU_UNMAP_DMA, &unmap);
-			}
-			munmap(g_dma_map_table[i].vaddr, g_dma_map_table[i].aligned_size);
-			memset(&g_dma_map_table[i], 0, sizeof(g_dma_map_table[i]));
+		struct gc570d_dma_mapping *cand = &g_dma_map_table[i];
+
+		if (cand->in_use && cand->vaddr == cpu_addr &&
+		    (!dma_handle || cand->iova == dma_handle)) {
+			m = cand;
 			break;
 		}
+	}
+	if (!m) {
+		pthread_mutex_unlock(&g_dma_map_lock);
+		fprintf(stderr,
+			"[gc570d WARN] dma_free_coherent: unknown buffer %p (handle 0x%llx)\n",
+			cpu_addr, (unsigned long long)dma_handle);
+		return;
+	}
+	if (size && m->aligned_size != aligned)
+		fprintf(stderr,
+			"[gc570d WARN] dma_free_coherent: size %zu != mapped %zu for %p\n",
+			size, m->aligned_size, cpu_addr);
+
+	if (g_dma_cached_blocks < GC570D_DMA_CACHE_BLOCKS &&
+	    g_dma_cached_bytes + m->aligned_size <= GC570D_DMA_CACHE_BYTES) {
+		m->in_use = false;
+		g_dma_cached_blocks++;
+		g_dma_cached_bytes += m->aligned_size;
+	} else {
+		gc570d_dma_unmap_locked(pdev, m);
 	}
 	pthread_mutex_unlock(&g_dma_map_lock);
 }
@@ -2494,7 +2623,7 @@ static int gc570d_vfio_open(struct pci_dev *pdev, const char *requested_bdf)
 	pdev->vfio_container_fd = open("/dev/vfio/vfio", O_RDWR | O_CLOEXEC);
 	if (pdev->vfio_container_fd < 0) {
 		fprintf(stderr,
-			"[gc570d ERR ] Cannot open /dev/vfio/vfio: %s (run scripts/install_userspace.sh to load vfio-pci and set permissions)\n",
+			"[gc570d ERR ] Cannot open /dev/vfio/vfio: %s (run ./install.sh to load vfio-pci and set permissions)\n",
 			strerror(errno));
 		return -errno;
 	}
@@ -2580,6 +2709,26 @@ static int gc570d_vfio_open(struct pci_dev *pdev, const char *requested_bdf)
 
 static void gc570d_vfio_close(struct pci_dev *pdev)
 {
+	int leaked = 0;
+	int i;
+
+	/* Release every cached (unused) DMA mapping while the container fd is
+	 * still open.  Live mappings are reported below: freeing them here would
+	 * hide real driver bugs, and the container teardown unmaps any stragglers
+	 * anyway.
+	 */
+	gc570d_dma_cache_drain(pdev);
+	pthread_mutex_lock(&g_dma_map_lock);
+	for (i = 0; i < GC570D_MAX_DMA_MAPPINGS; i++) {
+		if (g_dma_map_table[i].in_use)
+			leaked++;
+	}
+	pthread_mutex_unlock(&g_dma_map_lock);
+	if (leaked)
+		dev_warn(&pdev->dev,
+			 "%d DMA mapping(s) still live at VFIO teardown\n",
+			 leaked);
+
 	if (pdev->bar0_vaddr && pdev->bar0_size) {
 		munmap(pdev->bar0_vaddr, pdev->bar0_size);
 		pdev->bar0_vaddr = NULL;
@@ -2596,6 +2745,155 @@ static void gc570d_vfio_close(struct pci_dev *pdev)
 		close(pdev->vfio_container_fd);
 		pdev->vfio_container_fd = -1;
 	}
+}
+
+/*
+ * Capture-pipeline health watchdog.
+ *
+ * The sleep/PCIe-reset watchdog below only notices a lost link when the
+ * interrupt registers read as all-zero/all-ones.  A stalled DMA engine or a
+ * dead VFIO eventfd can leave those registers looking healthy while no frames
+ * ever complete.  HDMI IN 1's DMA0 ring is continuous, so irq_dma0 is a clean
+ * heartbeat independent of VB2 consumer behaviour.  HDMI IN 2 submits DMA per
+ * buffer, so it is only treated as active while VB2 has buffers queued.
+ *
+ * Audio is deliberately not a trigger: silence from the console is normal.
+ * Its cursors are logged only as corroborating diagnostics.
+ */
+#define GC570D_HEALTH_GRACE_NS  (15ULL * NSEC_PER_SEC)
+#define GC570D_HEALTH_STALL_NS  (5ULL * NSEC_PER_SEC)
+#define GC570D_HEALTH_RETRY_NS  (60ULL * NSEC_PER_SEC)
+#define GC570D_HEALTH_DECAY_NS  (10ULL * 60ULL * NSEC_PER_SEC)
+#define GC570D_HEALTH_MAX_TRIES 3
+
+struct gc570d_health_input {
+	u64 last_irq;
+	u64 stall_since_ns;
+};
+
+struct gc570d_health {
+	struct gc570d_health_input hdmi1;
+	struct gc570d_health_input hdmi2;
+	u64 last_attempt_ns;
+	u64 arm_at_ns;
+	unsigned int attempts;
+};
+
+static void gc570d_health_arm(struct gc570d_dev *gc, struct gc570d_health *health,
+			      u64 now_ns)
+{
+	health->hdmi1.last_irq = 0;
+	health->hdmi1.stall_since_ns = 0;
+	health->hdmi2.last_irq = 0;
+	health->hdmi2.stall_since_ns = 0;
+	health->arm_at_ns = now_ns + GC570D_HEALTH_GRACE_NS;
+	if (!gc)
+		return;
+	health->hdmi1.last_irq = (u64)atomic64_read(&gc->irq_dma0);
+	health->hdmi2.last_irq = (u64)atomic64_read(&gc->irq_dma1);
+}
+
+static bool gc570d_health_hdmi2_has_buffers(struct gc570d_dev *gc)
+{
+	unsigned long flags;
+	bool queued;
+
+	spin_lock_irqsave(&gc->video_qlock, flags);
+	queued = !list_empty(&gc->video_buffers);
+	spin_unlock_irqrestore(&gc->video_qlock, flags);
+	return queued;
+}
+
+/* Caller must hold the input's state.  Returns true once it has stalled. */
+static bool gc570d_health_input_stalled(struct gc570d_health_input *in,
+					u64 counter, bool active, u64 now_ns)
+{
+	if (!active) {
+		in->last_irq = counter;
+		in->stall_since_ns = 0;
+		return false;
+	}
+
+	if (counter != in->last_irq) {
+		in->last_irq = counter;
+		in->stall_since_ns = 0;
+		return false;
+	}
+
+	if (!in->stall_since_ns) {
+		in->stall_since_ns = now_ns;
+		return false;
+	}
+
+	return now_ns - in->stall_since_ns >= GC570D_HEALTH_STALL_NS;
+}
+
+/* Returns true when the caller should request a hardware reinit. */
+static bool gc570d_health_tick(struct gc570d_dev *gc,
+			       struct gc570d_health *health, u64 now_ns)
+{
+	bool hdmi1_active, hdmi2_active;
+	bool hdmi1_stalled, hdmi2_stalled;
+	u64 dma0, dma1;
+
+	if (!gc || READ_ONCE(gc->removing) || READ_ONCE(gc->suspended))
+		return false;
+	if (now_ns < health->arm_at_ns)
+		return false;
+
+	dma0 = (u64)atomic64_read(&gc->irq_dma0);
+	dma1 = (u64)atomic64_read(&gc->irq_dma1);
+
+	hdmi1_active = READ_ONCE(gc->video0_streaming) &&
+		       READ_ONCE(gc->video0_dma_active) &&
+		       !READ_ONCE(gc->video0_no_signal);
+	hdmi2_active = READ_ONCE(gc->video_streaming) &&
+		       READ_ONCE(gc->video_dma_active) &&
+		       !READ_ONCE(gc->video_no_signal) &&
+		       gc570d_health_hdmi2_has_buffers(gc);
+
+	hdmi1_stalled = gc570d_health_input_stalled(&health->hdmi1, dma0,
+						    hdmi1_active, now_ns);
+	hdmi2_stalled = gc570d_health_input_stalled(&health->hdmi2, dma1,
+						    hdmi2_active, now_ns);
+	if (!hdmi1_stalled && !hdmi2_stalled) {
+		/* Let a long healthy run clear the recovery budget again. */
+		if (health->attempts && health->last_attempt_ns &&
+		    now_ns - health->last_attempt_ns >= GC570D_HEALTH_DECAY_NS)
+			health->attempts = 0;
+		return false;
+	}
+
+	if (health->attempts >= GC570D_HEALTH_MAX_TRIES) {
+		if (health->attempts == GC570D_HEALTH_MAX_TRIES) {
+			dev_err(&gc->pdev->dev,
+				"capture pipeline still stalled after %u automatic recoveries; restart the daemon\n",
+				health->attempts);
+			health->attempts++;
+		}
+		return false;
+	}
+	if (health->last_attempt_ns &&
+	    now_ns - health->last_attempt_ns < GC570D_HEALTH_RETRY_NS)
+		return false;
+
+	dev_warn(&gc->pdev->dev,
+		 "capture pipeline stalled on HDMI IN %s%s for %llus (irq_dma0=%llu irq_dma1=%llu audio_cursor=%u/%u); re-initializing\n",
+		 hdmi1_stalled ? "1" : "",
+		 hdmi2_stalled ? (hdmi1_stalled ? "+2" : "2") : "",
+		 (unsigned long long)((now_ns -
+			(hdmi1_stalled ? health->hdmi1.stall_since_ns
+				       : health->hdmi2.stall_since_ns)) /
+			NSEC_PER_SEC),
+		 (unsigned long long)dma0, (unsigned long long)dma1,
+		 READ_ONCE(gc->audio0_pcm_cursor),
+		 READ_ONCE(gc->audio_pcm_cursor));
+
+	health->hdmi1.stall_since_ns = 0;
+	health->hdmi2.stall_since_ns = 0;
+	health->last_attempt_ns = now_ns;
+	health->attempts++;
+	return true;
 }
 
 static void on_signal(int sig)
@@ -2861,6 +3159,11 @@ int main(int argc, char **argv)
 	clock_gettime(CLOCK_MONOTONIC, &ts_mono_prev);
 	clock_gettime(CLOCK_BOOTTIME, &ts_boot_prev);
 	uint64_t last_watchdog_ns = (uint64_t)ts_mono_prev.tv_sec * 1000000000ULL + ts_mono_prev.tv_nsec;
+	struct gc570d_health health = { 0 };
+
+	gc570d_health_arm(g_gc, &health,
+			  (u64)ts_mono_prev.tv_sec * NSEC_PER_SEC +
+			  (u64)ts_mono_prev.tv_nsec);
 
 	while (!atomic_load(&g_daemon_quit) &&
 	       !gc570d_everlive_quit_requested()) {
@@ -2909,6 +3212,13 @@ int main(int argc, char **argv)
 					g_reinit_requested = true;
 				}
 			}
+
+			/* A stalled DMA/IRQ path can leave the registers above
+			 * looking sane, so also watch the per-input heartbeats.
+			 */
+			if (!g_reinit_requested &&
+			    gc570d_health_tick(g_gc, &health, mono_now_ns))
+				g_reinit_requested = true;
 		}
 
 		if (g_reinit_requested && !atomic_load(&g_daemon_quit)) {
@@ -2929,6 +3239,9 @@ int main(int argc, char **argv)
 				clock_gettime(CLOCK_MONOTONIC, &ts_mono_prev);
 				clock_gettime(CLOCK_BOOTTIME, &ts_boot_prev);
 				last_watchdog_ns = (uint64_t)ts_mono_prev.tv_sec * 1000000000ULL + ts_mono_prev.tv_nsec;
+				gc570d_health_arm(g_gc, &health,
+						  (u64)ts_mono_prev.tv_sec * NSEC_PER_SEC +
+						  (u64)ts_mono_prev.tv_nsec);
 			} else {
 				fprintf(stderr, "[gc570d ERR ] Hardware re-initialization failed; shutting down\n");
 				break;
