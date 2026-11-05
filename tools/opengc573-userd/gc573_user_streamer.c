@@ -35,6 +35,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/capability.h>
 #include <math.h>
 #include <linux/videodev2.h>
 #include <signal.h>
@@ -42,6 +43,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -800,10 +802,33 @@ static void raise_memlock_limit(void)
 			(unsigned long long)rl.rlim_max / 1024U);
 }
 
+/*
+ * VFIO type1 skips RLIMIT_MEMLOCK accounting entirely when the mapping task
+ * has CAP_IPC_LOCK (dma->lock_cap), so a file capability set by install.sh
+ * must lift our own budget check as well.  Query the effective set with the
+ * raw capget syscall to avoid a libcap dependency.
+ */
+static bool has_cap_ipc_lock(void)
+{
+	struct __user_cap_header_struct hdr = {
+		.version = _LINUX_CAPABILITY_VERSION_3,
+		.pid = 0,
+	};
+	struct __user_cap_data_struct data[_LINUX_CAPABILITY_U32S_3] = { 0 };
+
+	if (syscall(SYS_capget, &hdr, data) < 0)
+		return false;
+
+	return (data[CAP_TO_INDEX(CAP_IPC_LOCK)].effective &
+		CAP_TO_MASK(CAP_IPC_LOCK)) != 0;
+}
+
 static size_t memlock_budget_bytes(void)
 {
 	struct rlimit rl;
 
+	if (has_cap_ipc_lock())
+		return SIZE_MAX;
 	if (getrlimit(RLIMIT_MEMLOCK, &rl) < 0)
 		return 0;
 	if (rl.rlim_cur == RLIM_INFINITY)
