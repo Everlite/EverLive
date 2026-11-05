@@ -65,7 +65,7 @@ SCALE_OPTIONS = [
 SCALE_MODES = {key for _, key in SCALE_OPTIONS}
 
 DEFAULT_SETTINGS = {
-    "v4l2_loopback": True,
+    "v4l2_loopback": False,
     "aspect_ratio": "auto",
     "osd_enabled": True,
     "osd_position": "tr",
@@ -93,7 +93,7 @@ def load_settings() -> dict:
     settings = dict(DEFAULT_SETTINGS)
     settings.update(data)
     if not isinstance(settings.get("v4l2_loopback"), bool):
-        settings["v4l2_loopback"] = True
+        settings["v4l2_loopback"] = False
     if not isinstance(settings.get("minimize_to_tray"), bool):
         settings["minimize_to_tray"] = True
     if settings.get("aspect_ratio") not in ASPECT_KEYS:
@@ -2604,7 +2604,7 @@ if HAS_QT:
                 self.combo_duo_input.setCurrentIndex(1 if saved_input == 1 else 0)
                 self.combo_duo_input.setToolTip(
                     "Select which Live Gamer DUO HDMI input is shown in the "
-                    "gaming window and published to /dev/video10.")
+                    "gaming window and primary capture stream.")
                 self.combo_duo_input.currentIndexChanged.connect(
                     self.on_duo_input_changed)
                 h_telemetry.addWidget(self.combo_duo_input, 0, Qt.AlignVCenter)
@@ -2627,8 +2627,8 @@ if HAS_QT:
             self.btn_studio.setCursor(Qt.PointingHandCursor)
             self.btn_studio.setMinimumHeight(38)
             self.btn_studio.setToolTip(
-                "Runs the userspace engine headless and publishes native YUYV "
-                f"frames to {V4L2_DEFAULT_DEVICE} for OBS, Discord or ffmpeg.")
+                "Runs the userspace engine headless and publishes native video & audio "
+                "to PipeWire, Userspace SHM (libgc570d-v4l2.so), and optional V4L2 for OBS/Discord.")
             self.btn_studio.clicked.connect(self.toggle_studio)
             if not self.vfio_mode:
                 self.btn_studio.setEnabled(False)
@@ -2962,14 +2962,20 @@ if HAS_QT:
 
             grid_out.addWidget(_field("OBS Routing"), 0, 0)
 
+            has_loopback_node = os.path.exists(V4L2_DEFAULT_DEVICE)
             self.chk_v4l2 = QCheckBox(
-                f"Virtual Camera ({V4L2_DEFAULT_DEVICE})")
-            self.chk_v4l2.setChecked(bool(self.saved_cfg.get("v4l2_loopback", True)))
+                f"Legacy Loopback ({V4L2_DEFAULT_DEVICE})")
+            self.chk_v4l2.setChecked(bool(self.saved_cfg.get("v4l2_loopback", False) and has_loopback_node))
             self.chk_v4l2.toggled.connect(self.on_v4l2_toggled)
             if self.vfio_mode:
-                self.chk_v4l2.setToolTip(
-                    "Publishes native YUYV frames to the v4l2loopback node while "
-                    "the Gaming Screen runs. OBS sees it as 'EverLive Capture'.")
+                tip = (
+                    "Optional fallback: publishes native frames to a v4l2loopback kernel node. "
+                    "Modern OBS and Discord can connect directly via PipeWire (gc570d_hdmi1_video) "
+                    "or libgc570d-v4l2.so without any kernel modules."
+                )
+                if not has_loopback_node:
+                    tip += f"\n(Note: {V4L2_DEFAULT_DEVICE} is not loaded; module-free capture is active)"
+                self.chk_v4l2.setToolTip(tip)
             else:
                 self.chk_v4l2.setChecked(False)
                 self.chk_v4l2.setEnabled(False)
@@ -3114,8 +3120,8 @@ if HAS_QT:
                 self._launch_mode = None
 
             studio_idle_tip = (
-                "Runs the userspace engine headless and publishes native YUYV "
-                f"frames to {V4L2_DEFAULT_DEVICE} for OBS, Discord or ffmpeg."
+                "Runs the userspace engine headless and publishes native video & audio "
+                "to PipeWire, Userspace SHM (libgc570d-v4l2.so), and optional V4L2 for OBS/Discord."
                 if self.vfio_mode else
                 "Studio / headless mode requires the userspace VFIO engine.")
 
@@ -3127,7 +3133,7 @@ if HAS_QT:
                 self.btn_launch.setEnabled(True)
                 self.btn_launch.setToolTip(
                     "Seamlessly open the interactive SDL2 gaming window "
-                    "(V4L2 loopback feed to OBS remains uninterrupted).")
+                    "(background capture to OBS remains uninterrupted).")
                 self.btn_studio.setText("Stop Studio")
                 self.btn_studio.setObjectName("btnStudioStop")
                 self.btn_studio.setEnabled(True)
@@ -3602,12 +3608,12 @@ if HAS_QT:
                 vol = self.slider_vol.value() / 100.0
 
                 if v4l2_device and not os.path.exists(v4l2_device):
+                    v4l2_device = None
                     self._set_vfio_notice(
-                        "Virtual Camera Missing",
-                        f"{v4l2_device} not found — load v4l2loopback or "
-                        "uncheck Virtual Camera",
-                        seconds=10.0)
-                    return
+                        "Module-Free Mode",
+                        f"{V4L2_DEFAULT_DEVICE} absent — running pure userspace "
+                        "(SDL2 + PipeWire / Userspace SHM)",
+                        seconds=4.0)
 
                 save_settings({
                     "fullscreen": want_fullscreen,
@@ -3680,15 +3686,13 @@ if HAS_QT:
                 return
 
             want_v4l2 = self.chk_v4l2.isChecked()
-            if want_v4l2 and not os.path.exists(V4L2_DEFAULT_DEVICE):
-                self._set_vfio_notice(
-                    "Virtual Camera Missing",
-                    f"{V4L2_DEFAULT_DEVICE} not found — uncheck Virtual Camera "
-                    "for HDMI passthrough, or load v4l2loopback",
-                    seconds=10.0)
-                return
-
             v4l2_device = V4L2_DEFAULT_DEVICE if (want_v4l2 and os.path.exists(V4L2_DEFAULT_DEVICE)) else None
+            if want_v4l2 and not v4l2_device:
+                self._set_vfio_notice(
+                    "Module-Free Studio",
+                    f"{V4L2_DEFAULT_DEVICE} absent — publishing to PipeWire & Userspace SHM",
+                    seconds=4.0)
+
             aspect = self.combo_aspect.currentData() or "auto"
             if aspect not in ASPECT_KEYS:
                 aspect = "auto"
@@ -3736,7 +3740,7 @@ if HAS_QT:
                 else:
                     self._set_vfio_notice(
                         "Headless Active",
-                        "HDMI Passthrough & Audio running in background",
+                        "Pure Userspace: PipeWire & SHM active in background",
                         seconds=6.0)
                 self._check_audio_sink()
             else:
@@ -3852,9 +3856,14 @@ if HAS_QT:
 
             if enabled and not os.path.exists(V4L2_DEFAULT_DEVICE):
                 self._set_vfio_notice(
-                    "Virtual Camera Missing",
-                    f"{V4L2_DEFAULT_DEVICE} not found - load v4l2loopback first",
-                    seconds=8.0)
+                    "Loopback Node Absent",
+                    f"{V4L2_DEFAULT_DEVICE} not found. PipeWire and Userspace SHM (libgc570d-v4l2.so) are already active module-free.",
+                    seconds=6.0)
+                self.chk_v4l2.blockSignals(True)
+                self.chk_v4l2.setChecked(False)
+                self.chk_v4l2.blockSignals(False)
+                save_settings({"v4l2_loopback": False})
+                self.saved_cfg["v4l2_loopback"] = False
                 return
 
             if self._ipc.set_v4l2(bool(enabled), V4L2_DEFAULT_DEVICE):
@@ -3914,8 +3923,11 @@ if HAS_QT:
                 return
             pci = self.streamer.hw_info.get("pci") or "auto"
             if self.duo_mode:
-                out = (f"{self.streamer.v4l2_device or V4L2_DEFAULT_DEVICE}"
-                       f" + {self.streamer.v4l2_device_2 or V4L2_DUO_SECOND_DEVICE}")
+                if self.streamer.v4l2_device:
+                    out = (f"{self.streamer.v4l2_device}"
+                           f" + {self.streamer.v4l2_device_2 or V4L2_DUO_SECOND_DEVICE}")
+                else:
+                    out = "PipeWire & SHM (Module-free)"
                 edid = ("internal bridge"
                         if load_settings().get("duo_edid_bridge", True)
                         else "downstream copy")
@@ -3924,7 +3936,7 @@ if HAS_QT:
                     f"(Userspace) • Out: {out}")
                 return
             loop = (f" • Out: {self.streamer.v4l2_device}"
-                    if getattr(self.streamer, "v4l2_device", None) else "")
+                    if getattr(self.streamer, "v4l2_device", None) else " • Out: Pure Userspace")
             self.lbl_vdev.setText(
                 f"VFIO: {pci} • EDID: {self._edid_profile_label()} • "
                 f"Audio: SDL2 (Userspace){loop}")
@@ -4393,8 +4405,12 @@ def main():
                         help="Set GC573 LED to multi-zone rainbow wave")
     parser.add_argument("--rainbow", action="store_true",
                         help="Set GC573 LED to whole-card spectrum cycle")
+    parser.add_argument("--no-loopback", "--skip-loopback", dest="no_loopback", action="store_true",
+                        help="Run strictly module-free without v4l2loopback")
     args = parser.parse_args()
 
+    if args.no_loopback:
+        save_settings({"v4l2_loopback": False})
     if args.port in (1, 2):
         save_settings({"duo_input": args.port - 1})
     if args.copy_edid:

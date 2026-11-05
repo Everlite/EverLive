@@ -73,6 +73,7 @@ struct gc570d_v4l2_handle {
 struct gc570d_dir_track {
 	DIR *dirp;
 	int step;
+	bool is_sysfs;
 };
 
 #include <stdatomic.h>
@@ -430,16 +431,109 @@ static struct gc570d_dir_track *find_dir_track(DIR *dirp)
 	return NULL;
 }
 
+static int match_virtual_sysfs_stat(const char *path, struct stat *st)
+{
+	if (!path)
+		return -1;
+	while (*path == '.' && *(path + 1) == '/')
+		path += 2;
+	if (strcmp(path, "/sys/class/video4linux") == 0 ||
+	    strcmp(path, "/sys/class/video4linux/") == 0 ||
+	    strcmp(path, "/sys/subsystem/video4linux/devices") == 0 ||
+	    strcmp(path, "/sys/subsystem/video4linux/devices/") == 0) {
+		if (st) {
+			memset(st, 0, sizeof(*st));
+			st->st_mode = S_IFDIR | 0755;
+			st->st_nlink = 4;
+		}
+		return 0;
+	}
+	if (strcmp(path, "/sys/class/video4linux/video60") == 0 ||
+	    strcmp(path, "/sys/class/video4linux/video60/") == 0 ||
+	    strcmp(path, "/sys/class/video4linux/video61") == 0 ||
+	    strcmp(path, "/sys/class/video4linux/video61/") == 0) {
+		if (st) {
+			memset(st, 0, sizeof(*st));
+			st->st_mode = S_IFDIR | 0755;
+			st->st_nlink = 2;
+		}
+		return 0;
+	}
+	if (strncmp(path, "/sys/class/video4linux/video60/", 31) == 0 ||
+	    strncmp(path, "/sys/class/video4linux/video61/", 31) == 0) {
+		if (st) {
+			memset(st, 0, sizeof(*st));
+			st->st_mode = S_IFREG | 0444;
+			st->st_nlink = 1;
+			st->st_size = 64;
+		}
+		return 0;
+	}
+	return -1;
+}
+
+static int open_virtual_sysfs(const char *path)
+{
+	int port = -1;
+	const char *attr = NULL;
+	if (strncmp(path, "/sys/class/video4linux/video60/", 31) == 0) {
+		port = 0;
+		attr = path + 31;
+	} else if (strncmp(path, "/sys/class/video4linux/video61/", 31) == 0) {
+		port = 1;
+		attr = path + 31;
+	}
+	if (port < 0 || !attr)
+		return -1;
+
+	char content[256] = { 0 };
+	if (strcmp(attr, "uevent") == 0) {
+		snprintf(content, sizeof(content),
+			 "MAJOR=81\nMINOR=%d\nDEVNAME=video%d\nSUBSYSTEM=video4linux\n",
+			 60 + port, 60 + port);
+	} else if (strcmp(attr, "name") == 0) {
+		snprintf(content, sizeof(content),
+			 "%s\n", port == 0 ? "GC570D HDMI 1 (Passthrough)" : "GC570D HDMI 2 (Capture)");
+	} else if (strcmp(attr, "dev") == 0) {
+		snprintf(content, sizeof(content), "81:%d\n", 60 + port);
+	} else if (strcmp(attr, "index") == 0) {
+		snprintf(content, sizeof(content), "%d\n", port);
+	} else {
+		return -1;
+	}
+
+	int fd = memfd_create("gc570d_sysfs", MFD_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	size_t len = strlen(content);
+	if (write(fd, content, len) != (ssize_t)len) {
+		close(fd);
+		return -1;
+	}
+	lseek(fd, 0, SEEK_SET);
+	return fd;
+}
+
 DIR *opendir(const char *name)
 {
 	init_real_funcs();
+	bool is_sysfs = (strcmp(name, "/sys/class/video4linux") == 0 ||
+	                 strcmp(name, "/sys/class/video4linux/") == 0 ||
+	                 strcmp(name, "/sys/subsystem/video4linux/devices") == 0 ||
+	                 strcmp(name, "/sys/subsystem/video4linux/devices/") == 0);
+	bool is_dev = (strcmp(name, "/dev") == 0 || strcmp(name, "/dev/") == 0);
+
 	DIR *d = real_opendir(name);
-	if (d && (strcmp(name, "/dev") == 0 || strcmp(name, "/dev/") == 0)) {
+	if (!d && is_sysfs)
+		d = real_opendir("/tmp");
+
+	if (d && (is_dev || is_sysfs)) {
 		pthread_mutex_lock(&g_v4l2_lock);
 		for (int i = 0; i < GC570D_V4L2_MAX_DIRS; i++) {
 			if (!g_dev_dirs[i].dirp) {
 				g_dev_dirs[i].dirp = d;
 				g_dev_dirs[i].step = 0;
+				g_dev_dirs[i].is_sysfs = is_sysfs;
 				break;
 			}
 		}
@@ -456,16 +550,36 @@ struct dirent *readdir(DIR *dirp)
 		return ent;
 	pthread_mutex_lock(&g_v4l2_lock);
 	struct gc570d_dir_track *tr = find_dir_track(dirp);
+	if (!tr) {
+		pthread_mutex_unlock(&g_v4l2_lock);
+		return ent;
+	}
+
+	if (tr->is_sysfs) {
+		if (tr->step < 2) {
+			int idx = tr->step++;
+			pthread_mutex_unlock(&g_v4l2_lock);
+			memset(&tls_fake_dirent, 0, sizeof(tls_fake_dirent));
+			tls_fake_dirent.d_ino = 7000 + idx;
+			tls_fake_dirent.d_type = DT_DIR;
+			snprintf(tls_fake_dirent.d_name, sizeof(tls_fake_dirent.d_name),
+				 "video%d", 60 + idx);
+			return &tls_fake_dirent;
+		}
+		pthread_mutex_unlock(&g_v4l2_lock);
+		return NULL;
+	}
+
 	if (ent) {
-		if (tr && (strcmp(ent->d_name, "video60") == 0 ||
-			   strcmp(ent->d_name, "video61") == 0)) {
+		if (strcmp(ent->d_name, "video60") == 0 ||
+		    strcmp(ent->d_name, "video61") == 0) {
 			pthread_mutex_unlock(&g_v4l2_lock);
 			return readdir(dirp);
 		}
 		pthread_mutex_unlock(&g_v4l2_lock);
 		return ent;
 	}
-	if (tr && tr->step < 2) {
+	if (tr->step < 2) {
 		int idx = tr->step++;
 		pthread_mutex_unlock(&g_v4l2_lock);
 		memset(&tls_fake_dirent, 0, sizeof(tls_fake_dirent));
@@ -488,6 +602,7 @@ int closedir(DIR *dirp)
 		if (tr) {
 			tr->dirp = NULL;
 			tr->step = 0;
+			tr->is_sysfs = false;
 		}
 		pthread_mutex_unlock(&g_v4l2_lock);
 	}
@@ -513,6 +628,8 @@ int stat(const char *path, struct stat *buf)
 	int port = match_virtual_video_path(path);
 	if (port >= 0)
 		return fill_fake_video_stat(port, buf);
+	if (match_virtual_sysfs_stat(path, buf) == 0)
+		return 0;
 	return real_stat(path, buf);
 }
 
@@ -522,6 +639,8 @@ int lstat(const char *path, struct stat *buf)
 	int port = match_virtual_video_path(path);
 	if (port >= 0)
 		return fill_fake_video_stat(port, buf);
+	if (match_virtual_sysfs_stat(path, buf) == 0)
+		return 0;
 	return real_lstat(path, buf);
 }
 
@@ -547,6 +666,8 @@ int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags)
 	int port = match_virtual_video_path(pathname);
 	if (port >= 0)
 		return fill_fake_video_stat(port, buf);
+	if (match_virtual_sysfs_stat(pathname, buf) == 0)
+		return 0;
 	return real_fstatat(dirfd, pathname, buf, flags);
 }
 
@@ -554,6 +675,8 @@ int access(const char *pathname, int mode)
 {
 	init_real_funcs();
 	if (match_virtual_video_path(pathname) >= 0)
+		return 0;
+	if (match_virtual_sysfs_stat(pathname, NULL) == 0)
 		return 0;
 	return real_access(pathname, mode);
 }
@@ -600,6 +723,9 @@ int open(const char *pathname, int flags, ...)
 	int port = match_virtual_video_path(pathname);
 	if (port >= 0)
 		return open_virtual_video(port, flags);
+	int sfd = open_virtual_sysfs(pathname);
+	if (sfd >= 0)
+		return sfd;
 	mode_t mode = 0;
 	if (flags & O_CREAT) {
 		va_list ap;
@@ -616,6 +742,9 @@ int open64(const char *pathname, int flags, ...)
 	int port = match_virtual_video_path(pathname);
 	if (port >= 0)
 		return open_virtual_video(port, flags);
+	int sfd = open_virtual_sysfs(pathname);
+	if (sfd >= 0)
+		return sfd;
 	mode_t mode = 0;
 	if (flags & O_CREAT) {
 		va_list ap;
@@ -632,6 +761,9 @@ int openat(int dirfd, const char *pathname, int flags, ...)
 	int port = match_virtual_video_path(pathname);
 	if (port >= 0)
 		return open_virtual_video(port, flags);
+	int sfd = open_virtual_sysfs(pathname);
+	if (sfd >= 0)
+		return sfd;
 	mode_t mode = 0;
 	if (flags & O_CREAT) {
 		va_list ap;
@@ -648,6 +780,9 @@ int openat64(int dirfd, const char *pathname, int flags, ...)
 	int port = match_virtual_video_path(pathname);
 	if (port >= 0)
 		return open_virtual_video(port, flags);
+	int sfd = open_virtual_sysfs(pathname);
+	if (sfd >= 0)
+		return sfd;
 	mode_t mode = 0;
 	if (flags & O_CREAT) {
 		va_list ap;

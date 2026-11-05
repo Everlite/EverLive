@@ -21,6 +21,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 USERD_DIR="${SCRIPT_DIR}/tools/opengc573-userd"
+GC570D_DIR="${SCRIPT_DIR}/tools/opengc570d-userd"
 VIEWER_DIR="${SCRIPT_DIR}/tools/everlive"
 
 GREEN='\033[0;32m'
@@ -145,11 +146,20 @@ fi
 #    generation on top, so both can use the hardware (never at the same time).
 echo -e "\n${BLUE}[1/3] Building the userspace VFIO engine...${NC}"
 make -C "${USERD_DIR}" -j"$(nproc)"
+if [ -d "${GC570D_DIR}" ]; then
+    echo -e "${BLUE}[*] Building the GC570D userspace engine...${NC}"
+    make -C "${GC570D_DIR}" -j"$(nproc)"
+    chmod 0755 "${GC570D_DIR}/opengc570d-userd" "${GC570D_DIR}/gc570d-ctl" 2>/dev/null || true
+    chmod 0644 "${GC570D_DIR}/libgc570d-v4l2.so" 2>/dev/null || true
+fi
 chmod +x "${SCRIPT_DIR}/play.sh" 2>/dev/null || true
 
 if [ "${EUID}" -eq 0 ]; then
     # Only meaningful when run as root; the stable install already set this.
     setcap cap_ipc_lock=+ep "${USERD_DIR}/gc573_user_streamer" 2>/dev/null || true
+    if [ -d "${GC570D_DIR}" ]; then
+        setcap cap_ipc_lock=+ep "${GC570D_DIR}/opengc570d-userd" 2>/dev/null || true
+    fi
 fi
 echo -e "${GREEN}[+] Engine built.${NC}"
 
