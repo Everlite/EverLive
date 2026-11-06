@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.4.0] - 2026-11-04
+## [1.4.0] - 2026-11-06
 
 ### Added
+- **2x Motion-Interpolation Frame Generation (Beta · GC573):**
+  - Integrated 2x motion-interpolation frame generation powered by the Vulkan `lsfg-vk` layer (Lossless Scaling Frame Generation 2x on Linux).
+  - Dedicated modes: `30 → 60 FPS` for 30 FPS console titles with real-time phase-locked cadence deduplication, and `60 → 120 FPS` for 60 FPS feeds on high-refresh displays.
+  - Custom low-latency Vulkan swapchain presentation pipeline with optional `Low-Latency Swapchain` mode (`LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT=1`).
+  - Automatic Steam library discovery across all multi-disk Steam library paths (`libraryfolders.vdf`).
+  - Graceful fallback: 100% standalone and optional; falls back to native ultra-low-latency presentation if components are absent.
 - **AVerMedia Live Gamer DUO (`GC570D`) Userspace VFIO Engine (`tools/opengc570d-userd`):**
   - Added full blob-free userspace `vfio-pci` capture support for the **AVerMedia Live Gamer DUO (`GC570D`, PCI `1461:0054`, subsystem `1461:5700`)**, ported from [`neoyagami/OpenGC570D`](https://github.com/neoyagami/OpenGC570D) (commit `4673bb9`, GPL-2.0-only).
   - Automatic PCI subsystem disambiguation (`0x5730` Live Gamer 4K `GC573` vs. `0x5700` Live Gamer DUO `GC570D`) in `play.sh` and `tools/everlive/everlive_viewer.py`.
@@ -26,8 +32,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Updated `build.sh`, `install.sh`, `uninstall.sh`, and `.github/workflows/ci.yml` to build, configure, and verify both `opengc573-userd` and `opengc570d-userd`.
 
 ### Fixed
+- **Instant 4K Capture via CAP_IPC_LOCK (PR #53 by Lou Perret):**
+  - Implemented raw `capget` syscall query in `gc573_user_streamer.c` to detect active `CAP_IPC_LOCK`. When present, EverLive bypasses `RLIMIT_MEMLOCK` accounting immediately after installation without requiring a session logout/relogin.
+- **Direct Headless / Studio Mode Launch:**
+  - Resolved unassigned volume variable in Console Hub GUI (`start_studio()`) that prevented launching directly into Headless/OBS mode.
+- **PipeWire Virtual Audio Tap Isolation:**
+  - Added `PW_STREAM_FLAG_DONT_RECONNECT` and `"node.dont-reconnect" = "true"` to prevent tap fallback to default playback devices.
+  - Added persistent null sink provisioning via `pactl load-module module-null-sink` fallback.
 - **GC570D VFIO interrupt allocation:** Restored MSI-first ordering in `pci_alloc_irq_vectors()`. The INTx-first sequence introduced during the 1.4.0 hardening work could stall the bridge I2C engine, causing the HDMI IN 2 receiver probe to time out at register `0x0f` (`-110`) and aborting probe on real GC570D hardware. INTx remains the fallback, and the 2 ms MMIO status poll covers INTx and eventfd-less setups.
 - **GC570D hardware validation:** VFIO probe, MSI interrupt delivery, IT68051/IT6802 initialization and IRQ handling verified on a physical Live Gamer DUO.
+
+---
+
+## [1.3.2] - 2026-11-03
+
+### Fixed
+- **Direct Headless / Studio Mode Launch:**
+  - Resolved an unassigned volume variable in Console Hub GUI (`start_studio()`) that prevented launching directly into Headless/OBS mode without starting the Gaming Screen first.
+- **PipeWire Virtual Audio Tap Isolation:**
+  - Added `PW_STREAM_FLAG_DONT_RECONNECT` and `"node.dont-reconnect" = "true"` to the in-process audio tap stream, preventing WirePlumber from falling back to default playback devices (speakers/headphones).
+  - Hardened runtime sink provisioning via `pactl load-module module-null-sink` fallback so the virtual capture sink remains persistent across client lifecycles, eliminating duplicate audio playback when Virtual Audio Track is enabled.
 
 ---
 

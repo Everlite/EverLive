@@ -67,8 +67,8 @@ SCALE_MODES = {key for _, key in SCALE_OPTIONS}
 # Experimental lsfg-vk frame generation (gc573_user_streamer --framegen).
 FRAMEGEN_OPTIONS = [
     ("Off — Native Ultra-Low Latency", "off"),
-    ("60 → 120 FPS (LSFG 2x · 60 FPS Games)", "60to120"),
-    ("30 → 60 FPS (LSFG 2x · PS5 30 FPS Games)", "30to60"),
+    ("60 → 120 FPS (Beta · LSFG 2x · 60 FPS Games)", "60to120"),
+    ("30 → 60 FPS (Beta · LSFG 2x · PS5 30 FPS Games)", "30to60"),
 ]
 FRAMEGEN_KEYS = {key for _, key in FRAMEGEN_OPTIONS}
 
@@ -3112,7 +3112,7 @@ if HAS_QT:
 
             # --- Section: frame generation --------------------
             card_fg, grid_fg = _section(
-                "EXPERIMENTAL · LSFG-VK FRAME GENERATION")
+                "FRAME GENERATION (BETA · LSFG-VK)")
             grid_fg.setVerticalSpacing(8)
             grid_fg.setColumnMinimumWidth(0, 148)
             grid_fg.setColumnStretch(1, 1)
@@ -3145,8 +3145,8 @@ if HAS_QT:
             self._refresh_fg_readiness()
 
             grid_fg.addWidget(_field(
-                "Frame Generation",
-                "lsfg-vk 2x. The 30→60 mode drops the repeated HDMI frame a "
+                "Frame Generation (Beta)",
+                "lsfg-vk 2x (Beta). The 30→60 mode drops the repeated HDMI frame a "
                 "PS5 sends for a 30 FPS game before the layer interpolates."),
                 1, 0)
 
@@ -4428,8 +4428,8 @@ if HAS_QT:
                     "lsfg-vk unavailable - presenting without 2x "
                     "(check the readiness line above).")
                 return
-            label = ("30→60 FPS (PS5 30 FPS dedup)" if mode == "30to60"
-                     else "60→120 FPS")
+            label = ("30→60 FPS (Beta · PS5 30 FPS dedup)" if mode == "30to60"
+                     else "60→120 FPS (Beta)")
             text = (f"Standby: {label} · "
                     f"Flow {int(round(cfg['fg_flow_scale'] * 100))}%")
             if cfg.get("fg_perf_mode"):
@@ -4460,8 +4460,8 @@ if HAS_QT:
                     "(check the readiness line above).")
                 return
 
-            label = ("30→60 FPS (PS5 30 FPS dedup)" if mode == "30to60"
-                     else "60→120 FPS")
+            label = ("30→60 FPS (Beta · PS5 30 FPS dedup)" if mode == "30to60"
+                     else "60→120 FPS (Beta)")
 
             # Studio mode has no window, so no swapchain presents exist yet.
             # The mode is armed and activates on the next Gaming switch.

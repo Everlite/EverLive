@@ -57,18 +57,18 @@ build, CLI and hotkey details.
 
 ---
 
-## 2x Frame Generation (Experimental · LSFG-VK)
+## 2x Frame Generation (Beta · LSFG-VK)
 
 > [!IMPORTANT]
-> **Optional: LSFG-VK Frame Generation (Vulkan)**
-> EverLive features experimental 2x AI frame generation (30 → 60 FPS for 30 FPS console titles, 60 → 120 FPS for 60 FPS titles) powered by Vulkan and LSFG-VK with a custom low-latency presentation swapchain and cadence deduplication engine.
+> **Optional: LSFG-VK Frame Generation (Vulkan · Beta)**
+> EverLive features 2x AI frame generation (30 → 60 FPS for 30 FPS console titles, 60 → 120 FPS for 60 FPS titles) powered by Vulkan and LSFG-VK with a custom low-latency presentation swapchain and cadence deduplication engine.
 >
 > * **Standard / Non-LSFG Users:** If you do not have Lossless Scaling installed, EverLive runs in native zero-latency mode as usual. If frame generation is selected without the required components, EverLive gracefully falls back to native presentation without interrupting gameplay or dropping frames.
 > * **Requirements for Frame Generation:**
 >   1. Install the Vulkan layer package: `yay -S lsfg-vk` (or `paru -S lsfg-vk` / your distro's package manager).
 >   2. Own **Lossless Scaling** on Steam and switch to the beta:  
 >      `Steam Library -> Right Click "Lossless Scaling" -> Properties -> Betas -> select "lsfg-vk"`.
->   3. EverLive automatically discovers the Steam directory and Vulkan layer.
+>   3. EverLive automatically discovers the Steam directory and Vulkan layer across all configured Steam library folders.
 
 ---
 
