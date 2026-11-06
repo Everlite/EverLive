@@ -22,15 +22,24 @@ except ImportError:  # imported as a module from another working directory
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from everlive_client import EverLiveIpcClient, probe as ipc_probe
 
-__version__ = "1.3.2"
+__version__ = "1.4.0"
 
 CONFIG_DIR = os.path.expanduser("~/.config/everlive")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
 
 GC573_VENDOR_ID = "0x1461"
 GC573_DEVICE_IDS = {"0x0054", "0x0055"}
+GC570D_SUBSYSTEM_ID = "0x5700"
+GC573_SUBSYSTEM_ID = "0x5730"
+MODEL_GC573 = "gc573"
+MODEL_GC570D = "gc570d"
+MODEL_NAMES = {
+    MODEL_GC573: "GC573 · LIVE GAMER 4K",
+    MODEL_GC570D: "GC570D · LIVE GAMER DUO",
+}
 ENGINE_VFIO_TEXT = "● Userspace VFIO"
 V4L2_DEFAULT_DEVICE = "/dev/video10"
+V4L2_DUO_SECOND_DEVICE = "/dev/video11"
 AUDIO_TAP_NODE = "everlive-capture-audio"
 
 ASPECT_OPTIONS = [
@@ -55,8 +64,32 @@ SCALE_OPTIONS = [
 ]
 SCALE_MODES = {key for _, key in SCALE_OPTIONS}
 
+# Experimental lsfg-vk frame generation (gc573_user_streamer --framegen).
+FRAMEGEN_OPTIONS = [
+    ("Off — Native Ultra-Low Latency", "off"),
+    ("60 → 120 FPS (Beta · LSFG 2x · 60 FPS Games)", "60to120"),
+    ("30 → 60 FPS (Beta · LSFG 2x · PS5 30 FPS Games)", "30to60"),
+]
+FRAMEGEN_KEYS = {key for _, key in FRAMEGEN_OPTIONS}
+
+# Older settings files / scripts used the shader-pipeline names.  Map them onto
+# the two real lsfg-vk modes instead of silently resetting to off.
+FRAMEGEN_ALIASES = {
+    "2x": "60to120",
+    "interp": "60to120",
+    "interpolation": "60to120",
+    "60": "60to120",
+    "adaptive": "30to60",
+    "max": "30to60",
+    "maxhz": "30to60",
+    "30": "30to60",
+    "ps5": "30to60",
+    "none": "off",
+    "native": "off",
+}
+
 DEFAULT_SETTINGS = {
-    "v4l2_loopback": True,
+    "v4l2_loopback": False,
     "aspect_ratio": "auto",
     "osd_enabled": True,
     "osd_position": "tr",
@@ -64,7 +97,13 @@ DEFAULT_SETTINGS = {
     "hdr_tonemap": True,
     "hdr_exposure": 0.0,
     "scale_mode": "fit",
+    "framegen_mode": "off",
+    "fg_flow_scale": 1.0,
+    "fg_perf_mode": False,
+    "fg_low_latency": True,
     "minimize_to_tray": True,
+    "duo_input": 0,
+    "duo_edid_bridge": True,
 }
 
 
@@ -82,7 +121,7 @@ def load_settings() -> dict:
     settings = dict(DEFAULT_SETTINGS)
     settings.update(data)
     if not isinstance(settings.get("v4l2_loopback"), bool):
-        settings["v4l2_loopback"] = True
+        settings["v4l2_loopback"] = False
     if not isinstance(settings.get("minimize_to_tray"), bool):
         settings["minimize_to_tray"] = True
     if settings.get("aspect_ratio") not in ASPECT_KEYS:
@@ -100,6 +139,28 @@ def load_settings() -> dict:
     settings["hdr_exposure"] = max(-2.0, min(2.0, float(settings["hdr_exposure"])))
     if settings.get("scale_mode") not in SCALE_MODES:
         settings["scale_mode"] = "fit"
+    # Experimental lsfg-vk frame generation.  Migrate the old shader-era keys.
+    fg_mode = str(settings.get("framegen_mode", "off")).lower()
+    fg_mode = FRAMEGEN_ALIASES.get(fg_mode, fg_mode)
+    if fg_mode not in FRAMEGEN_KEYS:
+        fg_mode = "off"
+    settings["framegen_mode"] = fg_mode
+    try:
+        settings["fg_flow_scale"] = max(
+            0.5, min(1.0, float(settings.get("fg_flow_scale", 1.0))))
+    except (TypeError, ValueError):
+        settings["fg_flow_scale"] = 1.0
+    if not isinstance(settings.get("fg_perf_mode"), bool):
+        settings["fg_perf_mode"] = False
+    if not isinstance(settings.get("fg_low_latency"), bool):
+        settings["fg_low_latency"] = True
+    # The OpenGL shader pipeline (HUD protection, CAS) no longer exists.
+    for stale in ("framegen_hud_protect", "cas_enabled", "cas_strength"):
+        settings.pop(stale, None)
+    if settings.get("duo_input") not in (0, 1):
+        settings["duo_input"] = 0
+    if not isinstance(settings.get("duo_edid_bridge"), bool):
+        settings["duo_edid_bridge"] = True
     # "bitstream" used to be a separate EDID profile.  Every built-in profile
     # now advertises AC-3/DTS, so old settings migrate to the unified default.
     if settings.get("edid_profile") == "bitstream":
@@ -118,6 +179,161 @@ def save_settings(data: dict):
         pass
 
 
+def _resolve_lsfg_dll(candidate: str) -> str:
+    """Resolve a candidate shader DLL path for lsfg-vk 2.x.
+
+    If a stale config or env var points at Windows ``Lossless.dll``, prefer a
+    sibling ``lsfg-vk.dll`` (from Steam's ``lsfg-vk`` beta branch) and reject
+    bare ``Lossless.dll`` which lacks the precompiled Vulkan SPIR-V shaders.
+    """
+    if not candidate:
+        return ""
+    if os.path.basename(candidate).lower() == "lossless.dll":
+        sibling = os.path.join(os.path.dirname(candidate), "lsfg-vk.dll")
+        if os.path.isfile(sibling) and os.access(sibling, os.R_OK):
+            return sibling
+        return ""
+    if os.path.isfile(candidate) and os.access(candidate, os.R_OK):
+        return candidate
+    return ""
+
+
+def _lsfg_dll_from_conf(path: str) -> str:
+    """Return the ``dll = "..."`` value from lsfg-vk's conf.toml, if usable."""
+    try:
+        with open(path, "r", errors="ignore") as f:
+            for raw in f:
+                line = raw.lstrip()
+                if not line.lower().startswith("dll"):
+                    continue
+                first = line.find('"')
+                if first < 0:
+                    continue
+                last = line.find('"', first + 1)
+                if last < 0:
+                    continue
+                resolved = _resolve_lsfg_dll(line[first + 1:last])
+                if resolved:
+                    return resolved
+    except OSError:
+        pass
+    return ""
+
+
+def _lsfg_dll_from_libraryfolders(path: str) -> Tuple[str, bool]:
+    """Scan a Steam libraryfolders.vdf for a Lossless Scaling install across all library paths.
+
+    Returns ``(lsfg_vk_dll_path, legacy_lossless_dll_found)``.
+    """
+    try:
+        with open(path, "r", errors="ignore") as f:
+            body = f.read()
+    except OSError:
+        return "", False
+
+    legacy_found = False
+    lowered = body.lower()
+    pos = 0
+    found_candidate = ""
+    while True:
+        pos = lowered.find('"path"', pos)
+        if pos < 0:
+            break
+        pos += len('"path"')
+        first = body.find('"', pos)
+        if first < 0:
+            break
+        last = body.find('"', first + 1)
+        if last < 0:
+            break
+        library = body[first + 1:last].replace("\\", "/")
+        game_dir = os.path.join(
+            library, "steamapps", "common", "Lossless Scaling")
+        candidate = os.path.join(game_dir, "lsfg-vk.dll")
+        if os.path.isfile(candidate) and os.access(candidate, os.R_OK):
+            return candidate, True
+        legacy = os.path.join(game_dir, "Lossless.dll")
+        if os.path.isfile(legacy) and os.access(legacy, os.R_OK):
+            legacy_found = True
+        pos = last + 1
+
+    return found_candidate, legacy_found
+
+
+def probe_lsfg_vk() -> Dict[str, object]:
+    """Locate the lsfg-vk Vulkan layer and lsfg-vk.dll without running tools.
+
+    Mirrors ``gc573_fg_probe_system()`` in ``gc573_user_framegen.c`` so the Hub
+    can show readiness before a stream is even started, and after the user
+    installs the layer or enables the Steam beta while the Hub stays open.
+    """
+    layer_dir = ""
+    home = os.path.expanduser("~")
+    xdg_data = os.environ.get("XDG_DATA_HOME") or os.path.join(
+        home, ".local", "share")
+    search = [
+        "/usr/share/vulkan/implicit_layer.d",
+        "/etc/vulkan/implicit_layer.d",
+        os.path.join(xdg_data, "vulkan", "implicit_layer.d"),
+    ]
+    for directory in search:
+        try:
+            for name in os.listdir(directory):
+                lower = name.lower()
+                if not lower.endswith(".json"):
+                    continue
+                hit = "lsfg" in lower
+                if not hit:
+                    try:
+                        with open(os.path.join(directory, name), "r",
+                                  errors="ignore") as f:
+                            body = f.read().lower()
+                        hit = "lsfg" in body or "lossless" in body
+                    except OSError:
+                        pass
+                if hit:
+                    layer_dir = directory
+                    break
+        except OSError:
+            continue
+        if layer_dir:
+            break
+
+    dll_path = _resolve_lsfg_dll(os.environ.get("LSFGVK_DLL_PATH") or "")
+    legacy_dll_found = False
+    if not dll_path:
+        xdg_cfg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+            home, ".config")
+        dll_path = _lsfg_dll_from_conf(
+            os.path.join(xdg_cfg, "lsfg-vk", "conf.toml"))
+    if not dll_path:
+        for root in ("~/.local/share/Steam", "~/.steam/steam"):
+            base = os.path.expanduser(root)
+            game_dir = os.path.join(
+                base, "steamapps", "common", "Lossless Scaling")
+            candidate = os.path.join(game_dir, "lsfg-vk.dll")
+            if os.path.isfile(candidate) and os.access(candidate, os.R_OK):
+                dll_path = candidate
+                break
+            legacy = os.path.join(game_dir, "Lossless.dll")
+            if os.path.isfile(legacy) and os.access(legacy, os.R_OK):
+                legacy_dll_found = True
+            dll_path, vdf_legacy = _lsfg_dll_from_libraryfolders(
+                os.path.join(base, "steamapps", "libraryfolders.vdf"))
+            if vdf_legacy:
+                legacy_dll_found = True
+            if dll_path:
+                break
+
+    return {
+        "layer_found": bool(layer_dir),
+        "dll_found": bool(dll_path),
+        "legacy_dll_found": legacy_dll_found,
+        "layer_dir": layer_dir,
+        "dll_path": dll_path,
+    }
+
+
 def _read_sysfs(path: str) -> str:
     try:
         with open(path, "r") as f:
@@ -127,10 +343,13 @@ def _read_sysfs(path: str) -> str:
 
 
 def detect_gc573_driver() -> Dict[str, Optional[str]]:
-    """Return the GC573 PCI binding: vfio, kernel, or unknown.
+    """Return the capture card binding and model: vfio, kernel, or unknown.
 
-    In VFIO mode there is intentionally no /dev/video* node and no ALSA card;
-    the userspace engine owns the device instead.
+    GC573 (Live Gamer 4K) and GC570D (Live Gamer DUO) both use PCI device
+    1461:0054.  Only ``subsystem_device`` separates them: 0x5730 is the GC573
+    and 0x5700 is the GC570D.  The BOLT (1461:0055) is always a GC573-class
+    device.  In VFIO mode there is intentionally no /dev/video* node and no
+    ALSA card; the userspace engine owns the device instead.
     """
     import glob
 
@@ -138,6 +357,8 @@ def detect_gc573_driver() -> Dict[str, Optional[str]]:
         "mode": "unknown",
         "driver": None,
         "pci": None,
+        "subsystem": None,
+        "model": MODEL_GC573,
     }
 
     for dev in sorted(glob.glob("/sys/bus/pci/devices/*")):
@@ -146,7 +367,14 @@ def detect_gc573_driver() -> Dict[str, Optional[str]]:
         if vendor != GC573_VENDOR_ID or device not in GC573_DEVICE_IDS:
             continue
 
+        subsystem = _read_sysfs(os.path.join(dev, "subsystem_device")).lower()
         result["pci"] = os.path.basename(dev)
+        result["subsystem"] = subsystem or None
+        if device == "0x0054" and subsystem == GC570D_SUBSYSTEM_ID:
+            result["model"] = MODEL_GC570D
+        else:
+            result["model"] = MODEL_GC573
+
         driver_link = os.path.join(dev, "driver")
         try:
             if os.path.islink(driver_link):
@@ -154,7 +382,7 @@ def detect_gc573_driver() -> Dict[str, Optional[str]]:
                 result["driver"] = driver
                 if driver == "vfio-pci":
                     result["mode"] = "vfio"
-                elif driver == "open_gc573":
+                elif driver in ("open_gc573", "gc570d"):
                     result["mode"] = "kernel"
         except OSError:
             pass
@@ -182,20 +410,22 @@ def _proc_running(name_prefix: str) -> bool:
     return False
 
 
-def userd_dir() -> str:
+def userd_dir(model: str = MODEL_GC573) -> str:
+    folder = "opengc570d-userd" if model == MODEL_GC570D else "opengc573-userd"
     return os.path.normpath(
         os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                     "..", "opengc573-userd"))
+                     "..", folder))
 
 
-def userd_bin(name: str) -> str:
-    return os.path.join(userd_dir(), name)
+def userd_bin(name: str, model: str = MODEL_GC573) -> str:
+    return os.path.join(userd_dir(model), name)
 
 
 def _stop_vfio_daemon(wait_s: float = 0.8):
     """Release BAR0/VFIO before the userspace streamer starts."""
     for cmd in (["systemctl", "--user", "stop", "everlive-userd"],
-                ["pkill", "-x", "everlive_userd"]):
+                ["pkill", "-x", "everlive_userd"],
+                ["pkill", "-x", "opengc570d-userd"]):
         try:
             subprocess.run(cmd, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL)
@@ -203,15 +433,17 @@ def _stop_vfio_daemon(wait_s: float = 0.8):
             pass
     deadline = time.time() + wait_s
     while time.time() < deadline:
-        if not _proc_running("everlive_userd"):
+        if not (_proc_running("everlive_userd") or
+                _proc_running("opengc570d-user")):
             return
         time.sleep(0.05)
 
 
 def _vfio_streamer_running() -> bool:
-    # The binary name is longer than 15 chars, so /proc/<pid>/comm is
-    # truncated to "gc573_user_stre".
-    return _proc_running("gc573_user_stre")
+    # Both binaries are longer than 15 chars, so /proc/<pid>/comm is
+    # truncated to "gc573_user_stre" or "opengc570d-user".
+    return (_proc_running("gc573_user_stre") or
+            _proc_running("opengc570d-user"))
 
 
 def _raise_memlock_limit():
@@ -478,6 +710,35 @@ def led_hex_for_mode(mode: int) -> str:
     return f"#{red:02x}{green:02x}{blue:02x}"
 
 
+def send_gc570d_ctl(*args: str) -> Optional[str]:
+    """Send one command to a running GC570D daemon."""
+    ctl = userd_bin("gc570d-ctl", MODEL_GC570D)
+    if not os.access(ctl, os.X_OK):
+        return None
+    try:
+        return subprocess.check_output(
+            [ctl, *args], text=True, stderr=subprocess.DEVNULL, timeout=2.0)
+    except Exception:
+        return None
+
+
+def set_gc570d_led(mode: int) -> bool:
+    """Apply a GC570D LED effect through gc570d-ctl."""
+    mode = int(mode)
+    if mode == 0:
+        effect = "off"
+    elif mode == 8:
+        effect = "colorful"
+    elif mode == 9:
+        effect = "breathing"
+    else:
+        effect = "static"
+    if send_gc570d_ctl("led", effect) is None:
+        return False
+    save_settings({"led_mode": mode})
+    return True
+
+
 def set_vfio_led(mode: int) -> bool:
     """Apply an LED colour through everlive_userd (VFIO mode).
 
@@ -656,7 +917,8 @@ def _is_everlive_audio_line(line: str) -> bool:
     process binary instead.
     """
     low = line.lower()
-    if "gc573_user_streamer" in low or "sdl application" in low:
+    if ("gc573_user_streamer" in low or "opengc570d-user" in low or
+            "sdl application" in low):
         return True
     if "avermedia live gamer 4k pro" in low and "pro 1" not in low:
         return True
@@ -715,6 +977,29 @@ def _pactl_everlive_sink_ids() -> list:
             matches = True
     flush()
     return ids
+
+
+def set_audio_stream_unity():
+    """Sets the userspace SDL2 sink-input in PipeWire to 100% (unity gain).
+
+    Userspace VFIO engines (gc573_user_streamer and gc570d-user) perform
+    software volume scaling internally with a clickless ramp and hotkey
+    controls. The host PipeWire stream must remain at unity (100%) so that
+    volume is not double-attenuated.
+    """
+    try:
+        for target in _wpctl_everlive_stream_ids():
+            subprocess.run(["wpctl", "set-volume", target, "1.00"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+    try:
+        for target in _pactl_everlive_sink_ids():
+            subprocess.run(["pactl", "set-sink-input-volume", target, "100%"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 
 def set_audio_volume(vol_pct: int):
@@ -795,6 +1080,9 @@ class GameStreamer:
     def __init__(self, vdev: Optional[str] = None, adev: Optional[str] = None, force_mpv: bool = False):
         self.hw_info = detect_gc573_driver()
         self.mode = self.hw_info.get("mode", "unknown")
+        self.model = self.hw_info.get("model", MODEL_GC573)
+        self.duo_mode = self.model == MODEL_GC570D
+        self.model_label = MODEL_NAMES.get(self.model, MODEL_NAMES[MODEL_GC573])
         self.vfio_mode = self.mode == "vfio"
         self.kernel_mode = self.mode == "kernel"
 
@@ -818,21 +1106,29 @@ class GameStreamer:
         # Userspace VFIO engine status cache.  The streamer writes a
         # line-buffered log which is parsed below; the last signal is also
         # persisted so standby can show it without touching the hardware.
-        self.streamer_bin = userd_bin("gc573_user_streamer")
-        self.userd_bin = userd_bin("everlive_userd")
-        # Available for manual hardware diagnostics; standby status deliberately
-        # uses the cached streamer log instead of resetting BAR0 via the probe.
-        self.probe_bin = userd_bin("gc573_user_probe")
+        if self.duo_mode:
+            self.streamer_bin = userd_bin("opengc570d-userd", self.model)
+            self.userd_bin = self.streamer_bin
+            self.probe_bin = ""
+            self.ctl_bin = userd_bin("gc570d-ctl", self.model)
+        else:
+            self.streamer_bin = userd_bin("gc573_user_streamer", self.model)
+            self.userd_bin = userd_bin("everlive_userd", self.model)
+            self.probe_bin = userd_bin("gc573_user_probe", self.model)
+            self.ctl_bin = ""
         self._vfio_log_path = os.path.join(CONFIG_DIR, "streamer.log")
         self._vfio_log_pos = 0
         self._vfio_live = False
         self._vfio_saw_output = False
+        self._duo_no_signal = False
         # Last audio state parsed from the streamer log; shown in the capsule.
         self._vfio_audio = {"state": "unknown", "detail": "", "kind": ""}
         saved_aspect = load_settings().get("aspect_ratio", "auto")
         self.aspect = saved_aspect if saved_aspect in ASPECT_KEYS else "auto"
         self.headless = False
         self.v4l2_device: Optional[str] = None
+        self.v4l2_device_2: Optional[str] = None
+        self.duo_input = 0
         saved_signal = load_settings().get("last_signal")
         self._vfio_signal = saved_signal if isinstance(saved_signal, dict) else None
 
@@ -853,7 +1149,7 @@ class GameStreamer:
             "hdr": previous.get("hdr", ""),
         }
         self._vfio_signal = info
-        self._vfio_live = True
+        self._vfio_live = not getattr(self, "_duo_no_signal", False)
 
         if (previous.get("resolution") != resolution or
                 previous.get("framerate") != framerate or
@@ -894,8 +1190,11 @@ class GameStreamer:
         # [STREAM] 2560x1440p @ 120.00 Hz -> 2560x1440 | FPS: 120.0 | Frames: ...
         m = re.search(
             r"\[STREAM\] (\d+)x(\d+)([ip]) @ (\d+)\.(\d+) Hz -> "
-            r"(\d+)x(\d+) \| FPS:", line)
+            r"(\d+)x(\d+) \| FPS: ([0-9.]+)", line)
         if m:
+            fps = float(m.group(8))
+            if fps > 0.5:
+                self._duo_no_signal = False
             self._update_vfio_signal(
                 int(m.group(1)), int(m.group(2)), m.group(3),
                 int(m.group(4)), int(m.group(5)))
@@ -962,6 +1261,10 @@ class GameStreamer:
         if ("HDMI signal lost" in line or
                 "Signal vanished" in line or
                 "Waiting for HDMI signal" in line):
+            self._vfio_live = False
+            return
+        if "EVERLIVE DUO" in line and "no signal" in line.lower():
+            self._duo_no_signal = True
             self._vfio_live = False
 
     def _read_vfio_log(self):
@@ -1223,6 +1526,188 @@ class GameStreamer:
         except Exception:
             return False
 
+    def ctl(self, *args: str) -> Optional[str]:
+        """Run gc570d-ctl and return its output (None when unavailable)."""
+        if not self.ctl_bin or not os.access(self.ctl_bin, os.X_OK):
+            return None
+        try:
+            return subprocess.check_output(
+                [self.ctl_bin, *args], text=True,
+                stderr=subprocess.DEVNULL, timeout=2.0)
+        except Exception:
+            return None
+
+    def set_duo_input(self, port: int) -> bool:
+        """Select HDMI 1 (0) or HDMI 2 (1) on the Live Gamer DUO."""
+        port = 1 if int(port) else 0
+        self.duo_input = port
+        save_settings({"duo_input": port})
+        if not self.duo_mode:
+            return False
+        if not self.is_running:
+            return True
+        return self.ctl("input", str(port + 1)) is not None
+
+    def apply_duo_led(self, mode: int) -> bool:
+        """Map an EverLive LED mode to the GC570D effect interface."""
+        mode = int(mode)
+        if mode == 0:
+            effect = "off"
+        elif mode == 8:
+            effect = "colorful"
+        elif mode == 9:
+            effect = "breathing"
+        else:
+            effect = "static"
+        return self.ctl("led", effect) is not None
+
+    def duo_hotplug(self, port: int = 0) -> bool:
+        """Pulse HPD on IT68051 (HDMI 1) or IT6802 (HDMI 2)."""
+        node = "it68051_hpd" if int(port) == 0 else "it6802_hpd"
+        return self.ctl("action", node, "1") is not None
+
+    def duo_edid_policy(self, bridge: bool) -> bool:
+        """Select internal bridge EDID (True) or downstream copy (False)."""
+        node = ("splitter_windows_bridge_edid" if bridge
+                else "splitter_windows_edid_copy")
+        return self.ctl("action", node, "1") is not None
+
+    def _start_vfio_duo(self, fullscreen: bool, vsync: bool,
+                        streamer_mode: bool, v4l2_device: Optional[str],
+                        headless: bool, aspect: Optional[str], osd: bool,
+                        osd_pos: str, scale: str,
+                        volume: float) -> bool:
+        """Launch the GC570D (Live Gamer DUO) userspace engine."""
+        if _vfio_streamer_running():
+            print("[!] A userspace streamer is already running; refusing to start a second instance.")
+            return False
+
+        if not (os.path.isfile(self.streamer_bin) and
+                os.access(self.streamer_bin, os.X_OK)):
+            print(f"[!] Userspace streamer not found: {self.streamer_bin}")
+            print("    Build it with: make -C tools/opengc570d-userd")
+            return False
+
+        _stop_vfio_daemon()
+        _raise_memlock_limit()
+
+        cmd = [self.streamer_bin]
+        if self.hw_info.get("pci"):
+            cmd.append(self.hw_info["pci"])
+
+        # Experimental lsfg-vk frame generation.  This is deliberately passed
+        # in headless mode too: the engine keeps LSFG idle while the window is
+        # closed and activates Vulkan + LSFG as soon as mode.set("gaming")
+        # opens it, so a Studio -> Gaming switch needs no restart.  The V4L2
+        # loopback keeps receiving the raw capture path independently.
+        if framegen not in FRAMEGEN_KEYS:
+            framegen = FRAMEGEN_ALIASES.get(str(framegen).lower(), "off")
+        if framegen in FRAMEGEN_KEYS and framegen != "off":
+            cmd.extend(["--framegen", framegen])
+        # Flow/perf/latency are passed even in mode OFF so a later live toggle
+        # (hotkey or IPC) starts from the Hub's saved values, not defaults.
+        cmd.extend(["--fg-flow-scale",
+                    f"{max(0.5, min(1.0, float(fg_flow_scale))):.2f}"])
+        cmd.append("--fg-perf" if fg_perf_mode else "--no-fg-perf")
+        cmd.append("--fg-low-latency" if fg_low_latency else "--no-fg-low-latency")
+
+        if headless:
+            cmd.append("--headless")
+            # Studio/streamer mode publishes a clean OBS feed without OSD.
+            cmd.append("--no-osd" if streamer_mode or not osd else "--osd")
+        else:
+            cmd.append("--sdl")
+            if fullscreen:
+                cmd.append("--fullscreen")
+            cmd.append("--vsync" if vsync else "--no-vsync")
+            if streamer_mode:
+                cmd.append("--streamer-mode")
+            else:
+                cmd.append("--osd" if osd else "--no-osd")
+        if osd_pos not in ("tr", "br", "bl", "tl"):
+            osd_pos = "tr"
+        cmd.extend(["--osd-pos", osd_pos])
+
+        if aspect is None:
+            aspect = getattr(self, "aspect", "auto")
+        if aspect not in ASPECT_KEYS:
+            aspect = "auto"
+        self.aspect = aspect
+        if aspect != "auto":
+            cmd.extend(["--aspect", aspect])
+
+        if scale not in SCALE_MODES:
+            scale = "fit"
+        cmd.extend(["--scale", scale])
+        cmd.extend(["--volume", f"{volume:.2f}"])
+
+        duo_input = load_settings().get("duo_input", 0)
+        self.duo_input = 1 if duo_input == 1 else 0
+        cmd.extend(["--port", str(self.duo_input + 1)])
+
+        if not load_settings().get("duo_edid_bridge", True):
+            cmd.append("--copy-edid")
+
+        self.v4l2_device = v4l2_device
+        self.v4l2_device_2 = None
+        if v4l2_device:
+            cmd.extend(["--v4l2", v4l2_device])
+            if os.path.exists(V4L2_DUO_SECOND_DEVICE):
+                self.v4l2_device_2 = V4L2_DUO_SECOND_DEVICE
+                cmd.extend(["--v4l2-2", V4L2_DUO_SECOND_DEVICE])
+
+        self.headless = bool(headless)
+        try:
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            log = open(self._vfio_log_path, "wb")
+        except OSError:
+            log = subprocess.DEVNULL
+
+        stdbuf = shutil.which("stdbuf")
+        if stdbuf:
+            cmd = [stdbuf, "-oL", "-eL"] + cmd
+
+        try:
+            self.mpv_proc = subprocess.Popen(
+                cmd, stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True)
+        except Exception as e:
+            print(f"[!] Failed to launch userspace streamer: {e}")
+            self.headless = False
+            self.v4l2_device = None
+            self.v4l2_device_2 = None
+            if log is not subprocess.DEVNULL:
+                log.close()
+            return False
+        finally:
+            if log is not subprocess.DEVNULL and not log.closed:
+                log.close()
+
+        self._vfio_log_pos = 0
+        self._vfio_live = False
+        self._vfio_saw_output = False
+        self._duo_no_signal = False
+        self._vfio_audio = {"state": "unknown", "detail": "", "kind": ""}
+        self.is_running = True
+        print(f"[*] Starting Userspace VFIO engine (DUO): {' '.join(cmd)}")
+
+        time.sleep(0.25)
+        if self.mpv_proc.poll() is not None:
+            self._read_vfio_log()
+            self.is_running = False
+            self.mpv_proc = None
+            self.headless = False
+            self.v4l2_device = None
+            self.v4l2_device_2 = None
+            print(f"[!] Userspace streamer exited at startup; see {self._vfio_log_path}")
+            return False
+
+        # Apply the saved LED effect once the daemon owns BAR0.
+        mode = load_settings().get("led_mode", 4)
+        if isinstance(mode, int):
+            self.apply_duo_led(mode)
+        return True
+
     def _start_vfio(self, fullscreen: bool = False, vsync: bool = False,
                     streamer_mode: bool = False,
                     v4l2_device: Optional[str] = None,
@@ -1234,8 +1719,20 @@ class GameStreamer:
                     hdr: bool = True,
                     hdr_exposure: float = 0.0,
                     scale: str = "fit",
-                    volume: float = 1.0) -> bool:
+                    volume: float = 1.0,
+                    framegen: str = "off",
+                    fg_flow_scale: float = 1.0,
+                    fg_perf_mode: bool = False,
+                    fg_low_latency: bool = True) -> bool:
         """Launch the blob-free userspace VFIO streamer directly."""
+        if self.duo_mode:
+            return self._start_vfio_duo(
+                fullscreen=fullscreen, vsync=vsync,
+                streamer_mode=streamer_mode,
+                v4l2_device=v4l2_device, headless=headless,
+                aspect=aspect, osd=osd, osd_pos=osd_pos,
+                scale=scale, volume=volume)
+
         if _vfio_streamer_running():
             print("[!] A userspace streamer is already running; refusing to start a second instance.")
             return False
@@ -1319,6 +1816,7 @@ class GameStreamer:
 
         self.headless = bool(headless)
         self.v4l2_device = v4l2_device
+        self.v4l2_device_2 = None
 
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -1350,6 +1848,7 @@ class GameStreamer:
         self._vfio_log_pos = 0
         self._vfio_live = False
         self._vfio_saw_output = False
+        self._duo_no_signal = False
         self._vfio_audio = {"state": "unknown", "detail": "", "kind": ""}
         self.is_running = True
         print(f"[*] Starting Userspace VFIO engine: {' '.join(cmd)}")
@@ -1366,7 +1865,7 @@ class GameStreamer:
             return False
         return True
 
-    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None, osd: bool = True, osd_pos: str = "tr", audio_tap: Optional[str] = None, hdr: bool = True, hdr_exposure: float = 0.0, scale: str = "fit") -> bool:
+    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None, osd: bool = True, osd_pos: str = "tr", audio_tap: Optional[str] = None, hdr: bool = True, hdr_exposure: float = 0.0, scale: str = "fit", framegen: str = "off", fg_flow_scale: float = 1.0, fg_perf_mode: bool = False, fg_low_latency: bool = True) -> bool:
         if self.is_running:
             return True
 
@@ -1385,7 +1884,11 @@ class GameStreamer:
                                     hdr=hdr,
                                     hdr_exposure=hdr_exposure,
                                     scale=scale,
-                                    volume=volume)
+                                    volume=volume,
+                                    framegen=framegen,
+                                    fg_flow_scale=fg_flow_scale,
+                                    fg_perf_mode=fg_perf_mode,
+                                    fg_low_latency=fg_low_latency)
 
         if headless:
             print("[!] Headless/Studio mode requires the userspace VFIO engine.")
@@ -1551,6 +2054,7 @@ class GameStreamer:
         if self.vfio_mode:
             self._read_vfio_log()
             self._vfio_live = False
+            self._duo_no_signal = False
         if self.mpv_proc:
             try:
                 pgid = os.getpgid(self.mpv_proc.pid)
@@ -1621,6 +2125,7 @@ class GameStreamer:
 
         self.headless = False
         self.v4l2_device = None
+        self.v4l2_device_2 = None
 
     def poll(self) -> bool:
         """Returns True while the stream process is still alive."""
@@ -1643,6 +2148,8 @@ if HAS_QT:
             super().__init__()
             self.streamer = streamer
             self.vfio_mode = streamer.vfio_mode
+            self.duo_mode = getattr(streamer, "duo_mode", False)
+            self.model = getattr(streamer, "model", MODEL_GC573)
             self.enable_vsync = vsync
             self.muted = False
             self.saved_cfg = load_settings()
@@ -1704,9 +2211,8 @@ if HAS_QT:
 
         def init_ui(self):
             self.setWindowTitle("EverLive - Console Hub")
-            # Compact console-hub layout: the cards below are sized so the
-            # window never needs more than ~1080p of vertical space.
-            self.setFixedSize(920, 800)
+            # Compact console-hub layout: sized so cards never squash
+            self.setFixedWidth(920)
 
             # Application & Window Icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "everlive.png")
@@ -1770,10 +2276,14 @@ if HAS_QT:
                     color: #ffffff;
                     font-size: 18px;
                     font-weight: 700;
+                    padding-bottom: 3px;
+                    min-height: 26px;
                 }
                 QLabel#heroMeta {
                     color: #94a3b8;
                     font-size: 12px;
+                    padding-bottom: 2px;
+                    min-height: 18px;
                 }
                 QLabel#engineBadge {
                     background-color: #0d2318;
@@ -1799,6 +2309,22 @@ if HAS_QT:
                 QComboBox::drop-down {
                     border: none;
                     width: 20px;
+                }
+                QDoubleSpinBox {
+                    background-color: #171b26;
+                    color: #f1f5f9;
+                    border: 1px solid #2b3348;
+                    border-radius: 6px;
+                    padding: 6px 10px;
+                    font-size: 12px;
+                    min-height: 22px;
+                }
+                QDoubleSpinBox QLineEdit {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    background: transparent;
+                    color: #f1f5f9;
+                    border: none;
                 }
                 QCheckBox {
                     color: #94a3b8;
@@ -2011,8 +2537,15 @@ if HAS_QT:
                     color: #f2f4f8;
                     font-size: 20px;
                     font-weight: 600;
+                    padding-bottom: 4px;
+                    min-height: 28px;
                 }
-                QLabel#heroMeta { color: #8b93a7; font-size: 12px; }
+                QLabel#heroMeta {
+                    color: #8b93a7;
+                    font-size: 12px;
+                    padding-bottom: 2px;
+                    min-height: 18px;
+                }
                 QLabel#engineBadge {
                     background-color: #12261f;
                     color: #8fd6b4;
@@ -2039,13 +2572,20 @@ if HAS_QT:
                     font-size: 12px;
                 }
                 QDoubleSpinBox {
-                    min-height: 0px;
+                    min-height: 24px;
                     padding: 4px 10px;
                     font-size: 12px;
                     background-color: #171d29;
                     color: #e6e9ef;
                     border: 1px solid #2a3242;
                     border-radius: 6px;
+                }
+                QDoubleSpinBox QLineEdit {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    background: transparent;
+                    color: #e6e9ef;
+                    border: none;
                 }
                 QDoubleSpinBox:hover { border-color: #3a465e; }
                 QDoubleSpinBox:focus { border-color: #4b6ea8; }
@@ -2211,7 +2751,10 @@ if HAS_QT:
             lbl_logo.setObjectName("logoTitle")
             top_bar.addWidget(lbl_logo, 0, Qt.AlignVCenter)
 
-            lbl_badge = QLabel("GC573 · LIVE GAMER 4K" if self.vfio_mode else "GC573")
+            model_label = MODEL_NAMES.get(
+                self.model, MODEL_NAMES[MODEL_GC573])
+            lbl_badge = QLabel(model_label if self.vfio_mode
+                               else model_label.split(" · ", 1)[0])
             lbl_badge.setObjectName("badgeModel")
             lbl_badge.setFixedHeight(24)
             lbl_badge.setAlignment(Qt.AlignCenter)
@@ -2256,14 +2799,16 @@ if HAS_QT:
             h_sig_info = QHBoxLayout()
             h_sig_info.setSpacing(12)
             v_sig_text = QVBoxLayout()
-            v_sig_text.setSpacing(4)
+            v_sig_text.setSpacing(6)
 
             self.lbl_hero_signal = QLabel("Waiting for HDMI signal...")
             self.lbl_hero_signal.setObjectName("heroSignal")
+            self.lbl_hero_signal.setMinimumHeight(28)
             v_sig_text.addWidget(self.lbl_hero_signal)
 
             self.lbl_hero_meta = QLabel("Checking input source (Console / PC)...")
             self.lbl_hero_meta.setObjectName("heroMeta")
+            self.lbl_hero_meta.setMinimumHeight(18)
             v_sig_text.addWidget(self.lbl_hero_meta)
 
             h_sig_info.addLayout(v_sig_text, 1)
@@ -2294,6 +2839,23 @@ if HAS_QT:
                 "IT6805 / SDL2 stream log.")
             h_telemetry.addWidget(self.lbl_audio_fmt, 0, Qt.AlignVCenter)
             h_telemetry.addStretch(1)
+
+            if self.duo_mode:
+                lbl_duo = QLabel("DUO Input")
+                lbl_duo.setObjectName("heroMeta")
+                h_telemetry.addWidget(lbl_duo, 0, Qt.AlignVCenter)
+                self.combo_duo_input = QComboBox()
+                self.combo_duo_input.addItem("HDMI 1", 0)
+                self.combo_duo_input.addItem("HDMI 2", 1)
+                saved_input = load_settings().get("duo_input", 0)
+                self.combo_duo_input.setCurrentIndex(1 if saved_input == 1 else 0)
+                self.combo_duo_input.setToolTip(
+                    "Select which Live Gamer DUO HDMI input is shown in the "
+                    "gaming window and primary capture stream.")
+                self.combo_duo_input.currentIndexChanged.connect(
+                    self.on_duo_input_changed)
+                h_telemetry.addWidget(self.combo_duo_input, 0, Qt.AlignVCenter)
+
             v_hero.addLayout(h_telemetry)
 
             # Runtime actions in one row: start/stop, studio, re-sync.
@@ -2312,8 +2874,8 @@ if HAS_QT:
             self.btn_studio.setCursor(Qt.PointingHandCursor)
             self.btn_studio.setMinimumHeight(38)
             self.btn_studio.setToolTip(
-                "Runs the userspace engine headless and publishes native YUYV "
-                f"frames to {V4L2_DEFAULT_DEVICE} for OBS, Discord or ffmpeg.")
+                "Runs the userspace engine headless and publishes native video & audio "
+                "to PipeWire, Userspace SHM (libgc570d-v4l2.so), and optional V4L2 for OBS/Discord.")
             self.btn_studio.clicked.connect(self.toggle_studio)
             if not self.vfio_mode:
                 self.btn_studio.setEnabled(False)
@@ -2335,6 +2897,41 @@ if HAS_QT:
             h_actions.addWidget(self.btn_resync, 0)
 
             v_hero.addLayout(h_actions)
+
+            if self.duo_mode:
+                v_hero.addSpacing(2)
+                h_duo = QHBoxLayout()
+                h_duo.setSpacing(8)
+                btn_bridge = QPushButton("EDID: Internal Bridge")
+                btn_bridge.setObjectName("btnGhost")
+                btn_bridge.setCursor(Qt.PointingHandCursor)
+                btn_bridge.setMinimumHeight(32)
+                btn_bridge.setToolTip(
+                    "Advertise the internal 4K60 bridge EDID to HDMI IN 1. "
+                    "Required for standalone capture without a downstream TV.")
+                btn_bridge.clicked.connect(
+                    lambda: self._duo_edid_action(True))
+                h_duo.addWidget(btn_bridge)
+                btn_copy = QPushButton("EDID: Downstream Copy")
+                btn_copy.setObjectName("btnGhost")
+                btn_copy.setCursor(Qt.PointingHandCursor)
+                btn_copy.setMinimumHeight(32)
+                btn_copy.setToolTip(
+                    "Copy the EDID of the display/AVR connected to HDMI OUT.")
+                btn_copy.clicked.connect(
+                    lambda: self._duo_edid_action(False))
+                h_duo.addWidget(btn_copy)
+                btn_hpd = QPushButton("Pulse HPD")
+                btn_hpd.setObjectName("btnGhost")
+                btn_hpd.setCursor(Qt.PointingHandCursor)
+                btn_hpd.setMinimumHeight(32)
+                btn_hpd.setToolTip(
+                    "Re-trigger the HDMI hot-plug handshake on the selected input.")
+                btn_hpd.clicked.connect(self._duo_hpd_action)
+                h_duo.addWidget(btn_hpd)
+                h_duo.addStretch(1)
+                v_hero.addLayout(h_duo)
+
             root_layout.addWidget(card_hero)
 
             # -------------------------------------------------------------
@@ -2377,7 +2974,6 @@ if HAS_QT:
             if self.vfio_mode:
                 for text, key in EDID_PROFILES:
                     self.combo_presets.addItem(text, key)
-
                 saved_profile = self.saved_cfg.get("edid_profile", "default")
                 custom_path = self.saved_cfg.get("edid_custom_path", "")
                 if saved_profile == "custom":
@@ -2403,6 +2999,11 @@ if HAS_QT:
             # activated (not currentIndexChanged) so re-picking the custom
             # entry opens the file dialog again.
             self.combo_presets.activated.connect(self.on_preset_changed)
+            if self.duo_mode:
+                self.combo_presets.setEnabled(False)
+                self.combo_presets.setToolTip(
+                    "The Live Gamer DUO selects the EDID policy with the "
+                    "Internal Bridge / Downstream Copy buttons above.")
             grid_video.addWidget(self.combo_presets, 0, 1)
 
             grid_video.addWidget(_field(
@@ -2452,6 +3053,8 @@ if HAS_QT:
             self.spin_hdr_exposure.setSuffix(" EV")
             self.spin_hdr_exposure.setValue(
                 float(self.saved_cfg.get("hdr_exposure", 0.0)))
+            self.spin_hdr_exposure.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            self.spin_hdr_exposure.lineEdit().setTextMargins(10, 0, 10, 0)
             self.spin_hdr_exposure.setToolTip(
                 "Linear exposure bias for the tonemapper (-2.0 .. +2.0 EV).")
             self.spin_hdr_exposure.setEnabled(self.chk_hdr.isChecked())
@@ -2506,6 +3109,118 @@ if HAS_QT:
             grid_video.addWidget(self.combo_scale, 2, 1)
 
             root_layout.addWidget(card_video)
+
+            # --- Section: frame generation --------------------
+            card_fg, grid_fg = _section(
+                "FRAME GENERATION (BETA · LSFG-VK)")
+            grid_fg.setVerticalSpacing(8)
+            grid_fg.setColumnMinimumWidth(0, 148)
+            grid_fg.setColumnStretch(1, 1)
+            grid_fg.setColumnMinimumWidth(2, 140)
+            grid_fg.setColumnStretch(3, 1)
+
+            self._fg_ready_ok = False
+            grid_fg.addWidget(_field(
+                "Installation",
+                "Lossless Scaling Frame Generation 3.x through the native "
+                "lsfg-vk 2.0 Vulkan layer (Steam Beta branch 'lsfg-vk')."),
+                0, 0)
+
+            self.lbl_fg_ready = QLabel("Checking lsfg-vk…")
+            self.lbl_fg_ready.setObjectName("fieldLabel")
+            self.lbl_fg_ready.setWordWrap(True)
+            grid_fg.addWidget(self.lbl_fg_ready, 0, 1, 1, 2, Qt.AlignVCenter)
+
+            self.btn_fg_recheck = QPushButton("Re-check")
+            self.btn_fg_recheck.setObjectName("btnGhost")
+            self.btn_fg_recheck.setFixedSize(96, 26)
+            self.btn_fg_recheck.setStyleSheet("padding: 0px 12px;")
+            self.btn_fg_recheck.setCursor(Qt.PointingHandCursor)
+            self.btn_fg_recheck.setToolTip(
+                "Re-scan for the lsfg-vk layer and lsfg-vk.dll without "
+                "restarting the Hub.")
+            self.btn_fg_recheck.clicked.connect(self.on_fg_recheck)
+            grid_fg.addWidget(
+                self.btn_fg_recheck, 0, 3, Qt.AlignRight | Qt.AlignVCenter)
+            self._refresh_fg_readiness()
+
+            grid_fg.addWidget(_field(
+                "Frame Generation (Beta)",
+                "lsfg-vk 2x (Beta). The 30→60 mode drops the repeated HDMI frame a "
+                "PS5 sends for a 30 FPS game before the layer interpolates."),
+                1, 0)
+
+            self.combo_framegen = QComboBox()
+            for text, key in FRAMEGEN_OPTIONS:
+                self.combo_framegen.addItem(text, key)
+            fg_idx = self.combo_framegen.findData(
+                self.saved_cfg.get("framegen_mode", "off"))
+            if fg_idx >= 0:
+                self.combo_framegen.setCurrentIndex(fg_idx)
+            self.combo_framegen.setToolTip(
+                "Forwarded as --framegen. Applies live over IPC while the "
+                "engine runs (hotkey 'g' cycles it in the game window).")
+            self.combo_framegen.currentIndexChanged.connect(
+                self.on_framegen_changed)
+            grid_fg.addWidget(self.combo_framegen, 1, 1, 1, 3)
+
+            grid_fg.addWidget(_field(
+                "Flow Scale",
+                "Optical-flow resolution used by LSFG. 100% is full quality; "
+                "lower values cost less GPU time on 1440p/4K captures."),
+                2, 0)
+
+            h_flow = QHBoxLayout()
+            h_flow.setContentsMargins(0, 0, 0, 0)
+            h_flow.setSpacing(8)
+            self.slider_flow = QSlider(Qt.Horizontal)
+            self.slider_flow.setMinimumHeight(24)
+            self.slider_flow.setRange(50, 100)
+            self.slider_flow.setValue(int(round(
+                float(self.saved_cfg.get("fg_flow_scale", 1.0)) * 100)))
+            self.slider_flow.setToolTip("LSFGVK_FLOW_SCALE: 50% to 100%.")
+            self.slider_flow.valueChanged.connect(self.on_flow_scale_changed)
+            self.slider_flow.sliderReleased.connect(
+                lambda: save_settings(self._framegen_config()))
+            h_flow.addWidget(self.slider_flow, 1)
+
+            self.lbl_flow = QLabel(f"{self.slider_flow.value()}%")
+            self.lbl_flow.setObjectName("fieldLabel")
+            self.lbl_flow.setFixedWidth(38)
+            h_flow.addWidget(self.lbl_flow, 0, Qt.AlignVCenter)
+            grid_fg.addLayout(h_flow, 2, 1)
+
+            self.chk_fg_perf = QCheckBox("Performance Mode")
+            self.chk_fg_perf.setMinimumHeight(24)
+            self.chk_fg_perf.setChecked(
+                bool(self.saved_cfg.get("fg_perf_mode", False)))
+            self.chk_fg_perf.setToolTip(
+                "LSFGVK_PERFORMANCE_MODE: lower latency and less GPU load, "
+                "at the cost of some interpolation quality.")
+            self.chk_fg_perf.toggled.connect(self.on_fg_perf_toggled)
+            grid_fg.addWidget(self.chk_fg_perf, 2, 2, Qt.AlignVCenter)
+
+            self.chk_fg_ll = QCheckBox("Low-Latency Swapchain")
+            self.chk_fg_ll.setMinimumHeight(24)
+            self.chk_fg_ll.setChecked(
+                bool(self.saved_cfg.get("fg_low_latency", True)))
+            self.chk_fg_ll.setToolTip(
+                "Sets LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT=1 so lsfg-vk keeps "
+                "the minimum Vulkan swapchain queue depth (saves 8-17 ms at "
+                "120 Hz). Uncheck if frame pacing ever stutters.")
+            self.chk_fg_ll.toggled.connect(self.on_fg_low_latency_toggled)
+            grid_fg.addWidget(self.chk_fg_ll, 2, 3, Qt.AlignVCenter)
+
+            self.lbl_fg_status = QLabel(
+                "Frame generation is off (native zero-latency path).")
+            self.lbl_fg_status.setObjectName("fieldLabel")
+            grid_fg.addWidget(self.lbl_fg_status, 3, 0, 1, 4)
+            self._refresh_idle_fg_status()
+
+            if self.duo_mode:
+                card_fg.setVisible(False)
+
+            root_layout.addWidget(card_fg)
 
             # --- Section B: audio & hardware ----------------------------
             card_audio, grid_audio = _section("AUDIO & HARDWARE")
@@ -2571,7 +3286,14 @@ if HAS_QT:
                     self.combo_led.setCurrentIndex(idx)
                 will_autostart = self._headless_start or self.saved_cfg.get("autostart", False) or getattr(self.streamer, "_cli_autostart", False)
                 if isinstance(saved_led, int) and 0 <= saved_led <= 9 and not will_autostart:
-                    set_vfio_led(saved_led)
+                    if self.duo_mode:
+                        # The DUO has no standby LED daemon; only talk to a
+                        # running engine, otherwise the mode is applied by the
+                        # next launch.
+                        if _vfio_streamer_running():
+                            set_gc570d_led(saved_led)
+                    else:
+                        set_vfio_led(saved_led)
             else:
                 if saved_led is not None and isinstance(saved_led, int) and 0 <= saved_led <= 7:
                     write_led_mode(saved_led)
@@ -2599,14 +3321,20 @@ if HAS_QT:
 
             grid_out.addWidget(_field("OBS Routing"), 0, 0)
 
+            has_loopback_node = os.path.exists(V4L2_DEFAULT_DEVICE)
             self.chk_v4l2 = QCheckBox(
-                f"Virtual Camera ({V4L2_DEFAULT_DEVICE})")
-            self.chk_v4l2.setChecked(bool(self.saved_cfg.get("v4l2_loopback", True)))
+                f"Legacy Loopback ({V4L2_DEFAULT_DEVICE})")
+            self.chk_v4l2.setChecked(bool(self.saved_cfg.get("v4l2_loopback", False) and has_loopback_node))
             self.chk_v4l2.toggled.connect(self.on_v4l2_toggled)
             if self.vfio_mode:
-                self.chk_v4l2.setToolTip(
-                    "Publishes native YUYV frames to the v4l2loopback node while "
-                    "the Gaming Screen runs. OBS sees it as 'EverLive Capture'.")
+                tip = (
+                    "Optional fallback: publishes native frames to a v4l2loopback kernel node. "
+                    "Modern OBS and Discord can connect directly via PipeWire (gc570d_hdmi1_video) "
+                    "or libgc570d-v4l2.so without any kernel modules."
+                )
+                if not has_loopback_node:
+                    tip += f"\n(Note: {V4L2_DEFAULT_DEVICE} is not loaded; module-free capture is active)"
+                self.chk_v4l2.setToolTip(tip)
             else:
                 self.chk_v4l2.setChecked(False)
                 self.chk_v4l2.setEnabled(False)
@@ -2751,8 +3479,8 @@ if HAS_QT:
                 self._launch_mode = None
 
             studio_idle_tip = (
-                "Runs the userspace engine headless and publishes native YUYV "
-                f"frames to {V4L2_DEFAULT_DEVICE} for OBS, Discord or ffmpeg."
+                "Runs the userspace engine headless and publishes native video & audio "
+                "to PipeWire, Userspace SHM (libgc570d-v4l2.so), and optional V4L2 for OBS/Discord."
                 if self.vfio_mode else
                 "Studio / headless mode requires the userspace VFIO engine.")
 
@@ -2764,7 +3492,7 @@ if HAS_QT:
                 self.btn_launch.setEnabled(True)
                 self.btn_launch.setToolTip(
                     "Seamlessly open the interactive SDL2 gaming window "
-                    "(V4L2 loopback feed to OBS remains uninterrupted).")
+                    "(background capture to OBS remains uninterrupted).")
                 self.btn_studio.setText("Stop Studio")
                 self.btn_studio.setObjectName("btnStudioStop")
                 self.btn_studio.setEnabled(True)
@@ -2833,9 +3561,11 @@ if HAS_QT:
                 return False
             if not (os.path.isfile(self.streamer.streamer_bin) and
                     os.access(self.streamer.streamer_bin, os.X_OK)):
+                folder = ("opengc570d-userd" if self.duo_mode
+                          else "opengc573-userd")
                 self._set_vfio_notice(
                     "Userspace Engine Missing",
-                    "Build it with: make -C tools/opengc573-userd")
+                    f"Build it with: make -C tools/{folder}")
                 return False
             if self._remote or ipc_probe() is not None:
                 self._set_vfio_notice(
@@ -2845,9 +3575,11 @@ if HAS_QT:
                     seconds=8.0)
                 return False
             if _vfio_streamer_running():
+                engine = ("opengc570d-userd" if self.duo_mode
+                          else "gc573_user_streamer")
                 self._set_vfio_notice(
                     "Userspace Engine Active",
-                    "An external gc573_user_streamer instance already owns the device")
+                    f"An external {engine} instance already owns the device")
                 return False
             return True
 
@@ -2856,7 +3588,7 @@ if HAS_QT:
         # -----------------------------------------------------------------
         def _ipc_try_attach(self):
             """Attach to a running streamer (local or external)."""
-            if self._ipc is None or self._ipc_shutdown:
+            if self.duo_mode or self._ipc is None or self._ipc_shutdown:
                 return
             if self._ipc.connected:
                 return
@@ -2926,6 +3658,8 @@ if HAS_QT:
         def _on_remote_status(self, status: Dict):
             """Render a snapshot published by the remote streamer."""
             self._remote_status = status
+            self._update_framegen_status(status.get("framegen") or {},
+                                         bool(status.get("headless")))
             signal_info = status.get("signal") or {}
             video = status.get("video") or {}
             audio = status.get("audio") or {}
@@ -3012,9 +3746,53 @@ if HAS_QT:
                     self.combo_osd_pos.setCurrentIndex(idx)
                     self.combo_osd_pos.blockSignals(False)
 
+            # Experimental lsfg-vk: mirror the engine's live state.
+            fg = status.get("framegen") or {}
+            headless = bool(status.get("headless"))
+            if hasattr(self, "combo_framegen"):
+                mode = FRAMEGEN_ALIASES.get(str(fg.get("mode", "")).lower(),
+                                            fg.get("mode"))
+                # A headless engine can legitimately report "off" (old build or
+                # started without --framegen).  Never let that silently
+                # downgrade the user's saved selection in the Hub.
+                if mode in FRAMEGEN_KEYS and not (headless and mode == "off"):
+                    idx = self.combo_framegen.findData(mode)
+                    if idx >= 0 and idx != self.combo_framegen.currentIndex():
+                        self.combo_framegen.blockSignals(True)
+                        self.combo_framegen.setCurrentIndex(idx)
+                        self.combo_framegen.blockSignals(False)
+
+                if hasattr(self, "chk_fg_perf"):
+                    value = fg.get("perf_mode")
+                    if isinstance(value, bool) and value != self.chk_fg_perf.isChecked():
+                        self.chk_fg_perf.blockSignals(True)
+                        self.chk_fg_perf.setChecked(value)
+                        self.chk_fg_perf.blockSignals(False)
+
+                if hasattr(self, "chk_fg_ll"):
+                    value = fg.get("low_latency")
+                    if isinstance(value, bool) and value != self.chk_fg_ll.isChecked():
+                        self.chk_fg_ll.blockSignals(True)
+                        self.chk_fg_ll.setChecked(value)
+                        self.chk_fg_ll.blockSignals(False)
+
+                if hasattr(self, "slider_flow") and not self.slider_flow.isSliderDown():
+                    flow = fg.get("flow_scale")
+                    if isinstance(flow, (int, float)):
+                        flow_pct = max(50, min(100, int(round(float(flow) * 100))))
+                        if flow_pct != self.slider_flow.value():
+                            self.slider_flow.blockSignals(True)
+                            self.slider_flow.setValue(flow_pct)
+                            self.slider_flow.blockSignals(False)
+                            self.lbl_flow.setText(f"{flow_pct}%")
+
         def _restore_led_after_stream(self):
             """The streamer hands off; restore the hub's saved colour."""
             if not self.vfio_mode:
+                return
+            if self.duo_mode:
+                # The DUO engine keeps the last LED effect in hardware; there
+                # is no separate standby daemon to hand the colour back to.
                 return
             mode = load_settings().get("led_mode",
                                        self.saved_cfg.get("led_mode"))
@@ -3035,6 +3813,11 @@ if HAS_QT:
             if self._ipc is not None and self._ipc.connected:
                 return self._send_ipc_led(mode)
             if self.vfio_mode:
+                if self.duo_mode:
+                    if self.streamer.is_running:
+                        return self.streamer.apply_duo_led(mode)
+                    print("[*] LED mode saved; it is applied when the DUO engine starts.")
+                    return True
                 ok = set_vfio_led(mode)
                 if self.streamer.is_running:
                     print("[*] LED colour saved; the active userspace stream keeps cyan until it exits.")
@@ -3223,14 +4006,16 @@ if HAS_QT:
                 scale_mode = self.combo_scale.currentData() or "fit"
                 if scale_mode not in SCALE_MODES:
                     scale_mode = "fit"
+                vol = self.slider_vol.value() / 100.0
+                fg_cfg = self._framegen_config()
 
                 if v4l2_device and not os.path.exists(v4l2_device):
+                    v4l2_device = None
                     self._set_vfio_notice(
-                        "Virtual Camera Missing",
-                        f"{v4l2_device} not found — load v4l2loopback or "
-                        "uncheck Virtual Camera",
-                        seconds=10.0)
-                    return
+                        "Module-Free Mode",
+                        f"{V4L2_DEFAULT_DEVICE} absent — running pure userspace "
+                        "(SDL2 + PipeWire / Userspace SHM)",
+                        seconds=4.0)
 
                 save_settings({
                     "fullscreen": want_fullscreen,
@@ -3244,6 +4029,7 @@ if HAS_QT:
                     "hdr_tonemap": want_hdr,
                     "hdr_exposure": hdr_exposure,
                     "scale_mode": scale_mode,
+                    **fg_cfg,
                 })
                 self.streamer.aspect = aspect
                 success = self.streamer.start(
@@ -3258,7 +4044,12 @@ if HAS_QT:
                     audio_tap=audio_tap,
                     hdr=want_hdr,
                     hdr_exposure=hdr_exposure,
-                    scale=scale_mode)
+                    scale=scale_mode,
+                    volume=vol,
+                    framegen=fg_cfg["framegen_mode"],
+                    fg_flow_scale=fg_cfg["fg_flow_scale"],
+                    fg_perf_mode=fg_cfg["fg_perf_mode"],
+                    fg_low_latency=fg_cfg["fg_low_latency"])
                 if success:
                     self._set_launch_running(True, "gaming")
                     self._vfio_notice_until = 0.0
@@ -3302,15 +4093,13 @@ if HAS_QT:
                 return
 
             want_v4l2 = self.chk_v4l2.isChecked()
-            if want_v4l2 and not os.path.exists(V4L2_DEFAULT_DEVICE):
-                self._set_vfio_notice(
-                    "Virtual Camera Missing",
-                    f"{V4L2_DEFAULT_DEVICE} not found — uncheck Virtual Camera "
-                    "for HDMI passthrough, or load v4l2loopback",
-                    seconds=10.0)
-                return
-
             v4l2_device = V4L2_DEFAULT_DEVICE if (want_v4l2 and os.path.exists(V4L2_DEFAULT_DEVICE)) else None
+            if want_v4l2 and not v4l2_device:
+                self._set_vfio_notice(
+                    "Module-Free Studio",
+                    f"{V4L2_DEFAULT_DEVICE} absent — publishing to PipeWire & Userspace SHM",
+                    seconds=4.0)
+
             aspect = self.combo_aspect.currentData() or "auto"
             if aspect not in ASPECT_KEYS:
                 aspect = "auto"
@@ -3322,6 +4111,7 @@ if HAS_QT:
             if scale_mode not in SCALE_MODES:
                 scale_mode = "fit"
             vol = self.slider_vol.value() / 100.0
+            fg_cfg = self._framegen_config()
             self.streamer.aspect = aspect
             save_settings({
                 "v4l2_loopback": want_v4l2,
@@ -3330,6 +4120,7 @@ if HAS_QT:
                 "hdr_tonemap": want_hdr,
                 "hdr_exposure": hdr_exposure,
                 "scale_mode": scale_mode,
+                **fg_cfg,
             })
             success = self.streamer.start(
                 fullscreen=False,
@@ -3342,7 +4133,11 @@ if HAS_QT:
                 hdr=want_hdr,
                 hdr_exposure=hdr_exposure,
                 scale=scale_mode,
-                volume=vol)
+                volume=vol,
+                framegen=fg_cfg["framegen_mode"],
+                fg_flow_scale=fg_cfg["fg_flow_scale"],
+                fg_perf_mode=fg_cfg["fg_perf_mode"],
+                fg_low_latency=fg_cfg["fg_low_latency"])
             if success:
                 self._set_launch_running(True, "studio")
                 self._vfio_notice_until = 0.0
@@ -3358,7 +4153,7 @@ if HAS_QT:
                 else:
                     self._set_vfio_notice(
                         "Headless Active",
-                        "HDMI Passthrough & Audio running in background",
+                        "Pure Userspace: PipeWire & SHM active in background",
                         seconds=6.0)
                 self._check_audio_sink()
             else:
@@ -3366,6 +4161,51 @@ if HAS_QT:
                     "Studio Engine Failed",
                     "See ~/.config/everlive/streamer.log for the hardware error")
                 QTimer.singleShot(300, self._restore_led_after_stream)
+
+        def _duo_edid_action(self, bridge: bool):
+            if not self.duo_mode:
+                return
+            save_settings({"duo_edid_bridge": bool(bridge)})
+            self._update_vdev_label()
+            if not self.streamer.is_running:
+                self._set_vfio_notice(
+                    "EDID Policy Saved",
+                    "Start the engine to apply it", seconds=4.0)
+                return
+            ok = self.streamer.duo_edid_policy(bridge)
+            self._set_vfio_notice(
+                "EDID Policy Applied" if ok else "EDID Policy Failed",
+                "Internal bridge" if bridge else "Downstream copy",
+                seconds=5.0)
+
+        def _duo_hpd_action(self):
+            if not self.duo_mode or not self.streamer.is_running:
+                self._set_vfio_notice(
+                    "HPD Unavailable",
+                    "Start the engine before pulsing hot-plug", seconds=4.0)
+                return
+            port = 0
+            if hasattr(self, "combo_duo_input"):
+                port = 1 if self.combo_duo_input.currentData() == 1 else 0
+            ok = self.streamer.duo_hotplug(port)
+            self._set_vfio_notice(
+                "HPD Pulse Sent" if ok else "HPD Pulse Failed",
+                "HDMI 1" if port == 0 else "HDMI 2", seconds=4.0)
+
+        def on_duo_input_changed(self, index: int):
+            if not self.duo_mode:
+                return
+            port = 1 if self.combo_duo_input.itemData(index) == 1 else 0
+            self.streamer.set_duo_input(port)
+            label = "HDMI 1" if port == 0 else "HDMI 2"
+            if self.streamer.is_running:
+                self._set_vfio_notice(
+                    f"DUO Input: {label}",
+                    "Switch applied to the running engine", seconds=4.0)
+            else:
+                self._set_vfio_notice(
+                    f"DUO Input: {label}",
+                    "The next launch will use this input", seconds=4.0)
 
         def on_aspect_changed(self, *_):
             aspect = self.combo_aspect.currentData() or "auto"
@@ -3376,6 +4216,8 @@ if HAS_QT:
             save_settings({"aspect_ratio": aspect})
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_aspect(aspect)
+            elif self.duo_mode and self.streamer.is_running:
+                self.streamer.ctl("aspect", aspect)
             elif self.streamer.is_running:
                 print("[*] Aspect ratio saved; restart the stream to apply it.")
 
@@ -3388,6 +4230,8 @@ if HAS_QT:
             save_settings({"scale_mode": mode})
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_scale(mode)
+            elif self.duo_mode and self.streamer.is_running:
+                self.streamer.ctl("scale", mode)
             elif self.streamer.is_running:
                 print("[*] Scaling mode saved; restart the stream to apply it.")
 
@@ -3398,6 +4242,8 @@ if HAS_QT:
                 self.combo_osd_pos.setEnabled(bool(enabled))
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_osd(bool(enabled))
+            elif self.duo_mode and self.streamer.is_running:
+                self.streamer.ctl("osd", "1" if enabled else "0")
             elif self.streamer.is_running:
                 print("[*] OSD setting saved; use Tab/o in the gaming window "
                       "to toggle the running overlay.")
@@ -3410,6 +4256,8 @@ if HAS_QT:
             save_settings({"osd_position": pos})
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_osd_position(pos)
+            elif self.duo_mode and self.streamer.is_running:
+                self.streamer.ctl("osd_pos", pos)
 
         def on_v4l2_toggled(self, enabled: bool):
             """Persist the preference and apply it live when an engine runs."""
@@ -3421,9 +4269,14 @@ if HAS_QT:
 
             if enabled and not os.path.exists(V4L2_DEFAULT_DEVICE):
                 self._set_vfio_notice(
-                    "Virtual Camera Missing",
-                    f"{V4L2_DEFAULT_DEVICE} not found - load v4l2loopback first",
-                    seconds=8.0)
+                    "Loopback Node Absent",
+                    f"{V4L2_DEFAULT_DEVICE} not found. PipeWire and Userspace SHM (libgc570d-v4l2.so) are already active module-free.",
+                    seconds=6.0)
+                self.chk_v4l2.blockSignals(True)
+                self.chk_v4l2.setChecked(False)
+                self.chk_v4l2.blockSignals(False)
+                save_settings({"v4l2_loopback": False})
+                self.saved_cfg["v4l2_loopback"] = False
                 return
 
             if self._ipc.set_v4l2(bool(enabled), V4L2_DEFAULT_DEVICE):
@@ -3461,6 +4314,178 @@ if HAS_QT:
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_hdr(self.chk_hdr.isChecked(), float(value))
 
+        # -----------------------------------------------------------------
+        # Experimental frame generation & CAS
+        # -----------------------------------------------------------------
+        def _framegen_config(self) -> Dict:
+            mode = self.combo_framegen.currentData() or "off"
+            if mode not in FRAMEGEN_KEYS:
+                mode = "off"
+            return {
+                "framegen_mode": mode,
+                "fg_flow_scale": max(0.5, min(1.0,
+                                             self.slider_flow.value() / 100.0)),
+                "fg_perf_mode": self.chk_fg_perf.isChecked(),
+                "fg_low_latency": self.chk_fg_ll.isChecked(),
+            }
+
+        def _apply_framegen(self, persist: bool = True):
+            if not hasattr(self, "combo_framegen"):
+                return
+            cfg = self._framegen_config()
+            self.saved_cfg.update(cfg)
+            if persist:
+                save_settings(cfg)
+            if self._ipc is not None and self._ipc.connected:
+                self._ipc.set_framegen(
+                    cfg["framegen_mode"], cfg["fg_flow_scale"],
+                    cfg["fg_perf_mode"], cfg["fg_low_latency"])
+            else:
+                self._refresh_idle_fg_status()
+                if self.streamer.is_running:
+                    print("[*] Frame generation saved; applies on the next start.")
+
+        def on_framegen_changed(self, *_):
+            self._apply_framegen()
+
+        def on_fg_perf_toggled(self, _enabled: bool):
+            self._apply_framegen()
+
+        def on_fg_low_latency_toggled(self, _enabled: bool):
+            self._apply_framegen()
+
+        def on_flow_scale_changed(self, value: int):
+            self.lbl_flow.setText(f"{value}%")
+            # Live while dragging, persisted once the handle is released.
+            self._apply_framegen(persist=not self.slider_flow.isSliderDown())
+
+        def _set_fg_readiness(self, layer_found: bool, dll_found: bool,
+                              dll_path: str = "",
+                              legacy_dll_found: Optional[bool] = None):
+            """Colour the readiness line green/amber with the exact fix."""
+            self._fg_ready_ok = bool(layer_found and dll_found)
+            if not hasattr(self, "lbl_fg_ready"):
+                return
+            if layer_found and dll_found:
+                name = os.path.basename(dll_path) if dll_path else "lsfg-vk.dll"
+                self.lbl_fg_ready.setText(
+                    f"✓ LSFG-VK Ready · {name} found")
+                self.lbl_fg_ready.setStyleSheet("color: #5fd38d;")
+                self.lbl_fg_ready.setToolTip(dll_path)
+                return
+
+            if not layer_found:
+                message = ("Missing lsfg-vk package "
+                           "(sudo pacman -S lsfg-vk)")
+            else:
+                if legacy_dll_found is None:
+                    try:
+                        legacy_dll_found = bool(
+                            probe_lsfg_vk().get("legacy_dll_found"))
+                    except Exception:
+                        legacy_dll_found = False
+                if legacy_dll_found:
+                    message = ("Select 'lsfg-vk' Beta in Steam "
+                               "(Lossless Scaling -> Properties -> Betas)")
+                else:
+                    message = ("Missing Lossless Scaling in Steam "
+                               "(enable 'lsfg-vk' Beta)")
+            self.lbl_fg_ready.setText(f"⚠ {message}")
+            self.lbl_fg_ready.setStyleSheet("color: #e0a33a;")
+            self.lbl_fg_ready.setToolTip(
+                "Install the lsfg-vk Vulkan layer and opt Lossless Scaling "
+                "into the 'lsfg-vk' Beta in Steam, then press Re-check.")
+
+        def _refresh_fg_readiness(self):
+            """Offline probe so readiness is visible before any stream starts."""
+            try:
+                probe = probe_lsfg_vk()
+            except Exception:
+                probe = {"layer_found": False, "dll_found": False,
+                         "legacy_dll_found": False, "dll_path": ""}
+            self._set_fg_readiness(
+                bool(probe.get("layer_found")), bool(probe.get("dll_found")),
+                str(probe.get("dll_path") or ""),
+                bool(probe.get("legacy_dll_found")))
+
+        def on_fg_recheck(self):
+            self._refresh_fg_readiness()
+            if not (self._ipc is not None and self._ipc.connected):
+                self._refresh_idle_fg_status()
+
+        def _refresh_idle_fg_status(self):
+            """Reflect the selected Frame Generation preset while idle."""
+            if not hasattr(self, "lbl_fg_status"):
+                return
+            cfg = self._framegen_config()
+            mode = cfg["framegen_mode"]
+            if mode == "off":
+                self.lbl_fg_status.setText(
+                    "Frame generation is off (native zero-latency path).")
+                return
+            if not getattr(self, "_fg_ready_ok", False):
+                self.lbl_fg_status.setText(
+                    "lsfg-vk unavailable - presenting without 2x "
+                    "(check the readiness line above).")
+                return
+            label = ("30→60 FPS (Beta · PS5 30 FPS dedup)" if mode == "30to60"
+                     else "60→120 FPS (Beta)")
+            text = (f"Standby: {label} · "
+                    f"Flow {int(round(cfg['fg_flow_scale'] * 100))}%")
+            if cfg.get("fg_perf_mode"):
+                text += " · Performance"
+            if cfg.get("fg_low_latency"):
+                text += " · Low-Latency"
+            text += " · activates on Start Gaming Screen"
+            self.lbl_fg_status.setText(text)
+
+        def _update_framegen_status(self, fg: Dict, headless: bool = False):
+            """Render the engine's live cadence in the lab card."""
+            if not hasattr(self, "lbl_fg_status") or not isinstance(fg, dict):
+                return
+            mode = FRAMEGEN_ALIASES.get(str(fg.get("mode", "off")).lower(),
+                                        fg.get("mode", "off"))
+            present = float(fg.get("present_fps") or 0.0)
+            output = float(fg.get("output_fps") or 0.0)
+            unique = float(fg.get("unique_fps") or 0.0)
+
+            if mode == "off":
+                self.lbl_fg_status.setText(
+                    "Frame generation is off (native zero-latency path).")
+                return
+
+            if not (fg.get("layer_found") and fg.get("dll_found")):
+                self.lbl_fg_status.setText(
+                    "lsfg-vk unavailable - presenting without 2x "
+                    "(check the readiness line above).")
+                return
+
+            label = ("30→60 FPS (Beta · PS5 30 FPS dedup)" if mode == "30to60"
+                     else "60→120 FPS (Beta)")
+
+            # Studio mode has no window, so no swapchain presents exist yet.
+            # The mode is armed and activates on the next Gaming switch.
+            if headless:
+                self.lbl_fg_status.setText(
+                    f"Armed: {label} · activates when the Gaming Screen opens")
+                return
+
+            if fg.get("vulkan_active") is False:
+                self.lbl_fg_status.setText(
+                    "Vulkan renderer unavailable - presenting through "
+                    "OpenGL without frame generation.")
+                return
+
+            text = f"Live: {label} · {present:.1f} → {output:.1f} FPS"
+            if unique > 0.0:
+                text += f" · source {unique:.1f} FPS"
+            flow = fg.get("flow_scale")
+            if isinstance(flow, (int, float)):
+                text += f" · Flow {int(round(float(flow) * 100))}%"
+            if fg.get("perf_mode"):
+                text += " · Performance"
+            self.lbl_fg_status.setText(text)
+
         def on_preset_changed(self, *_):
             if self.vfio_mode:
                 self._on_edid_profile_changed()
@@ -3482,8 +4507,21 @@ if HAS_QT:
             if not self.vfio_mode or not hasattr(self, "lbl_vdev"):
                 return
             pci = self.streamer.hw_info.get("pci") or "auto"
+            if self.duo_mode:
+                if self.streamer.v4l2_device:
+                    out = (f"{self.streamer.v4l2_device}"
+                           f" + {self.streamer.v4l2_device_2 or V4L2_DUO_SECOND_DEVICE}")
+                else:
+                    out = "PipeWire & SHM (Module-free)"
+                edid = ("internal bridge"
+                        if load_settings().get("duo_edid_bridge", True)
+                        else "downstream copy")
+                self.lbl_vdev.setText(
+                    f"VFIO: {pci} • EDID: {edid} • Audio: SDL2/PipeWire "
+                    f"(Userspace) • Out: {out}")
+                return
             loop = (f" • Out: {self.streamer.v4l2_device}"
-                    if getattr(self.streamer, "v4l2_device", None) else "")
+                    if getattr(self.streamer, "v4l2_device", None) else " • Out: Pure Userspace")
             self.lbl_vdev.setText(
                 f"VFIO: {pci} • EDID: {self._edid_profile_label()} • "
                 f"Audio: SDL2 (Userspace){loop}")
@@ -3555,6 +4593,8 @@ if HAS_QT:
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_mute(self.muted)
                 return
+            if self.duo_mode and self.streamer.is_running:
+                self.streamer.ctl("mute", "1" if self.muted else "0")
             set_audio_mute(self.muted)
             if self.vfio_mode:
                 # Re-arm the retry window if the sink-input is not there yet.
@@ -3577,6 +4617,8 @@ if HAS_QT:
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_volume(val / 100.0)
                 return
+            if self.duo_mode and self.streamer.is_running:
+                self.streamer.ctl("volume", str(val))
             set_audio_volume(val)
             if self.vfio_mode:
                 self._vfio_volume_applies = 0
@@ -3714,7 +4756,10 @@ if HAS_QT:
                     # Re-apply a few times: the SDL sink-input appears only after
                     # the first audio period, and the status poll is cheap.
                     if self._vfio_volume_applies < 4:
-                        set_audio_volume(self.slider_vol.value())
+                        if self.vfio_mode:
+                            set_audio_stream_unity()
+                        else:
+                            set_audio_volume(self.slider_vol.value())
                         set_audio_mute(self.muted)
                         self._vfio_volume_applies += 1
                     self._show_live(info)
@@ -3928,15 +4973,38 @@ def main():
                         const=V4L2_DEFAULT_DEVICE, default=None,
                         help="Publish native YUYV frames to a v4l2loopback device "
                              f"(default: {V4L2_DEFAULT_DEVICE})")
-    parser.add_argument("--headless", action="store_true",
+    parser.add_argument("--headless", "--studio", dest="headless", action="store_true",
                         help="Capture and publish/play without an SDL window")
+    parser.add_argument("--sdl", action="store_true",
+                        help="Open the interactive SDL2 gaming window")
+    parser.add_argument("--port", type=int, choices=[1, 2], default=None,
+                        help="Select initial HDMI input on Live Gamer DUO (1 or 2)")
+    parser.add_argument("--pip", action="store_true",
+                        help="Enable picture-in-picture on Live Gamer DUO")
+    parser.add_argument("--v4l2-2", "--loopback-2", dest="v4l2_2", default=None,
+                        help="Secondary v4l2loopback device for Live Gamer DUO HDMI 2")
+    parser.add_argument("--copy-edid", action="store_true",
+                        help="Copy downstream EDID on Live Gamer DUO")
+    parser.add_argument("--scale", choices=["fit", "integer"], default=None,
+                        help="Scaling mode override (fit or integer)")
     parser.add_argument("--tray", "--minimized", dest="tray", action="store_true",
                         help="Launch Console Hub directly hidden into the system tray")
     parser.add_argument("--wave", action="store_true",
                         help="Set GC573 LED to multi-zone rainbow wave")
     parser.add_argument("--rainbow", action="store_true",
                         help="Set GC573 LED to whole-card spectrum cycle")
+    parser.add_argument("--no-loopback", "--skip-loopback", dest="no_loopback", action="store_true",
+                        help="Run strictly module-free without v4l2loopback")
     args = parser.parse_args()
+
+    if args.no_loopback:
+        save_settings({"v4l2_loopback": False})
+    if args.port in (1, 2):
+        save_settings({"duo_input": args.port - 1})
+    if args.copy_edid:
+        save_settings({"duo_edid_bridge": False})
+    if args.scale in SCALE_MODES:
+        save_settings({"scale_mode": args.scale})
 
     if args.wave:
         args.led = "wave"
@@ -3957,6 +5025,8 @@ def main():
                 pass
         if val is not None and 0 <= val <= 9:
             hw = detect_gc573_driver()
+            model = hw.get("model", MODEL_GC573)
+            model_name = "GC570D" if model == MODEL_GC570D else "GC573"
             if hw.get("mode") == "vfio":
                 save_settings({"led_mode": val})
                 is_launching = args.cli or args.tray or any(
@@ -3966,7 +5036,15 @@ def main():
                         "--streamer-mode", "-s"
                     ]
                 )
-                if _vfio_streamer_running():
+                if model == MODEL_GC570D:
+                    if _vfio_streamer_running():
+                        if set_gc570d_led(val):
+                            print(f"[+] {model_name} LED effect set to mode {val}.")
+                        else:
+                            print(f"[*] {model_name} streamer is running; LED mode {val} saved for the next session.")
+                    else:
+                        print(f"[*] {model_name} LED mode {val} saved; it is applied by the engine.")
+                elif _vfio_streamer_running():
                     print(f"[*] Userspace streamer is running; LED mode {val} saved for the next session.")
                 elif not is_launching:
                     if set_vfio_led(val):
@@ -3977,9 +5055,9 @@ def main():
                     print(f"[+] GC573 LED lighting set to mode {val} for stream.")
             else:
                 if write_led_mode(val):
-                    print(f"[+] GC573 LED lighting set to mode {val}.")
+                    print(f"[+] {model_name} LED lighting set to mode {val}.")
                 else:
-                    print(f"[!] Failed to set GC573 LED to mode {val}.")
+                    print(f"[!] Failed to set {model_name} LED to mode {val}.")
         else:
             print(f"[!] Invalid LED mode '{args.led}'. Valid: {list(LED_NAME_MAP.keys())}")
         if not args.cli and not args.tray and not any(arg in sys.argv for arg in ["-f", "--fullscreen", "-p", "--preset", "--headless", "--v4l2", "--loopback"]):
@@ -3991,12 +5069,14 @@ def main():
         streamer._cli_autostart = True
 
     if streamer.vfio_mode:
-        print(f"[*] GC573: Userspace VFIO engine (PCI {streamer.hw_info.get('pci') or 'auto'}), "
+        print(f"[*] {streamer.model_label}: Userspace VFIO engine "
+              f"(PCI {streamer.hw_info.get('pci') or 'auto'}), "
               "no V4L2/ALSA device required.")
         if args.device or args.audio or args.mpv:
             print("[*] Note: --device/--audio/--mpv apply only to the kernel V4L2 path.")
     else:
-        print(f"[*] GC573 Hardware: Video={streamer.vdev}, Audio={streamer.adev} "
+        print(f"[*] {streamer.model_label} Hardware: Video={streamer.vdev}, "
+              f"Audio={streamer.adev} "
               f"(driver={streamer.hw_info.get('driver') or 'unknown'})")
 
     # Graceful shutdown on Ctrl+C
@@ -4009,25 +5089,30 @@ def main():
     if args.cli or not HAS_QT:
         print("[*] Launching Gaming Screen in low-latency mode...")
         if streamer.vfio_mode:
-            print("[*] Userspace VFIO engine: video and HDMI audio run inside gc573_user_streamer.")
+            engine = ("opengc570d-userd" if streamer.duo_mode
+                      else "gc573_user_streamer")
+            print(f"[*] Userspace VFIO engine: video and HDMI audio run inside {engine}.")
         else:
             info = streamer.get_signal_info()
             chroma_disp = f" [{info['chroma']}]" if info.get('chroma') else ""
             print(f"[*] Signal: {info['resolution']} {info['framerate']}{chroma_disp}".strip())
             if not info["locked"]:
-                print("[!] Warning: No active HDMI signal detected on GC573.")
+                print(f"[!] Warning: No active HDMI signal detected on {streamer.model_label}.")
                 print("    Please check if the video source is powered on and sending video.")
-        if not streamer.start(preset_name=args.preset, fullscreen=args.fullscreen, volume=args.volume, vsync=args.vsync, streamer_mode=args.streamer_mode, v4l2_device=args.v4l2, headless=args.headless, aspect=args.aspect):
+        cli_settings = load_settings()
+        if not streamer.start(preset_name=args.preset, fullscreen=args.fullscreen, volume=args.volume, vsync=args.vsync, streamer_mode=args.streamer_mode, v4l2_device=args.v4l2, headless=args.headless, aspect=args.aspect, framegen=cli_settings.get("framegen_mode", "off"), fg_flow_scale=cli_settings.get("fg_flow_scale", 1.0), fg_perf_mode=cli_settings.get("fg_perf_mode", False), fg_low_latency=cli_settings.get("fg_low_latency", True)):
             sys.exit(1)
-        if streamer.vfio_mode and args.volume != 1.0:
+        if streamer.vfio_mode:
             # The SDL2 sink-input only exists once audio starts flowing.
+            # Ensure host PipeWire stream is at 100% unity gain so --volume
+            # applies cleanly without double-scaling.
             time.sleep(1.5)
-            set_audio_volume(int(args.volume * 100))
+            set_audio_stream_unity()
         print("[+] Window opened. Press 'q' in window or Ctrl+C to exit.")
         while streamer.poll():
             time.sleep(0.5)
         streamer.stop()
-        if streamer.vfio_mode:
+        if streamer.vfio_mode and not streamer.duo_mode:
             saved_led = load_settings().get("led_mode")
             mode = saved_led if isinstance(saved_led, int) and 0 <= saved_led <= 9 else 4
             if not (_proc_running("everlive_userd") and mode == 4):

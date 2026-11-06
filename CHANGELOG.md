@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.4.0] - 2026-11-06
+
+### Added
+- **2x Motion-Interpolation Frame Generation (Beta · GC573):**
+  - Integrated 2x motion-interpolation frame generation powered by the Vulkan `lsfg-vk` layer (Lossless Scaling Frame Generation 2x on Linux).
+  - Dedicated modes: `30 → 60 FPS` for 30 FPS console titles with real-time phase-locked cadence deduplication, and `60 → 120 FPS` for 60 FPS feeds on high-refresh displays.
+  - Custom low-latency Vulkan swapchain presentation pipeline with optional `Low-Latency Swapchain` mode (`LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT=1`).
+  - Automatic Steam library discovery across all multi-disk Steam library paths (`libraryfolders.vdf`).
+  - Graceful fallback: 100% standalone and optional; falls back to native ultra-low-latency presentation if components are absent.
+- **AVerMedia Live Gamer DUO (`GC570D`) Userspace VFIO Engine (`tools/opengc570d-userd`):**
+  - Added full blob-free userspace `vfio-pci` capture support for the **AVerMedia Live Gamer DUO (`GC570D`, PCI `1461:0054`, subsystem `1461:5700`)**, ported from [`neoyagami/OpenGC570D`](https://github.com/neoyagami/OpenGC570D) (commit `4673bb9`, GPL-2.0-only).
+  - Automatic PCI subsystem disambiguation (`0x5730` Live Gamer 4K `GC573` vs. `0x5700` Live Gamer DUO `GC570D`) in `play.sh` and `tools/everlive/everlive_viewer.py`.
+  - Simultaneous dual-HDMI capture pipeline:
+    - **HDMI IN 1 (Passthrough + Capture):** ITE IT68051 receiver + `VideoSplitter` microcontroller + Xilinx 3000-nit BT.2020 HDR-to-SDR 3D LUT preprocessor + VIP0 hardware scaler (`4K60 HDR -> 1080p60 YUYV`, plus native `1080p`, `720p`, `1024x768`, `576p`, `480p`, and `640x480`).
+    - **HDMI IN 2 (Secondary Capture):** ITE IT6802 receiver + VIP1 hardware scaler (`1080p60 YUYV`) for facecam or secondary console capture.
+  - Hardware-validated `HDMI IN 1` 2.0 Stereo and 5.1/7.1 Multichannel L-PCM passthrough (`PR #6` / `484aa8d`) and active non-blocking audio recovery (`4673bb9`) across live `2.0 <-> 5.1` format switches without disturbing HDMI OUT video passthrough.
+- **EverLive SDL2 Gaming Preview, Picture-in-Picture & Dual Virtual Cameras for DUO:**
+  - Integrated `gc570d_everlive.[ch]` frontend directly into `opengc570d-userd` reading lock-free seqlock frames from `/dev/shm/gc570d_v4l2_shm`.
+  - Interactive SDL2 gaming window (`--sdl`) with live `1`/`2` input switching, Picture-in-Picture (`--pip` / `P`), aspect ratio overrides (`--aspect` / `A`), integer scaling (`--scale` / `L`), live stats OSD (`Tab`/`O`, corner cycle `C`), and low-latency SDL2 desktop audio monitoring (`M` mute, `↑`/`↓` volume).
+  - Dual `v4l2loopback` virtual camera outputs: `/dev/video10` (`"EverLive Capture"`, following the selected DUO input) and `/dev/video11` (`"EverLive Capture HDMI 2"`, dedicated to HDMI IN 2), plus module-free PipeWire camera/audio source nodes and `libgc570d-v4l2.so` (`LD_PRELOAD`) virtual V4L2 fallback (`/dev/video60` and `/dev/video61`).
+- **Console Hub DUO Controls & Runtime CLI (`gc570d-ctl`):**
+  - Added Live Gamer DUO controls to `everlive_viewer.py`: **DUO Input** selector (`HDMI 1` / `HDMI 2`), **EDID: Internal Bridge** vs. **EDID: Downstream Copy** policy buttons, **Pulse HPD** hot-plug button, and DUO RGB LED effect mapping (`colorful`, `breathing`, `static`, `off`) over `$XDG_RUNTIME_DIR/gc570d/control.sock`.
+  - Updated `build.sh`, `install.sh`, `uninstall.sh`, and `.github/workflows/ci.yml` to build, configure, and verify both `opengc573-userd` and `opengc570d-userd`.
+
+### Fixed
+- **Instant 4K Capture via CAP_IPC_LOCK (PR #53 by Lou Perret):**
+  - Implemented raw `capget` syscall query in `gc573_user_streamer.c` to detect active `CAP_IPC_LOCK`. When present, EverLive bypasses `RLIMIT_MEMLOCK` accounting immediately after installation without requiring a session logout/relogin.
+- **Direct Headless / Studio Mode Launch:**
+  - Resolved unassigned volume variable in Console Hub GUI (`start_studio()`) that prevented launching directly into Headless/OBS mode.
+- **PipeWire Virtual Audio Tap Isolation:**
+  - Added `PW_STREAM_FLAG_DONT_RECONNECT` and `"node.dont-reconnect" = "true"` to prevent tap fallback to default playback devices.
+  - Added persistent null sink provisioning via `pactl load-module module-null-sink` fallback.
+- **GC570D VFIO interrupt allocation:** Restored MSI-first ordering in `pci_alloc_irq_vectors()`. The INTx-first sequence introduced during the 1.4.0 hardening work could stall the bridge I2C engine, causing the HDMI IN 2 receiver probe to time out at register `0x0f` (`-110`) and aborting probe on real GC570D hardware. INTx remains the fallback, and the 2 ms MMIO status poll covers INTx and eventfd-less setups.
+- **GC570D hardware validation:** VFIO probe, MSI interrupt delivery, IT68051/IT6802 initialization and IRQ handling verified on a physical Live Gamer DUO.
+
+---
+
 ## [1.3.2] - 2026-11-03
 
 ### Fixed

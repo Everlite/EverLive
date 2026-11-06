@@ -25,7 +25,11 @@
 #include <sys/un.h>
 #include <time.h>
 
-#define IPC_DEFAULT_NAME	"everlive.sock"
+/*
+ * Experimental socket name: the stable EverLive hub keeps everlive.sock, so a
+ * system-tray hub from release 1.3 can never collide with this engine.
+ */
+#define IPC_DEFAULT_NAME	"everlive-experimental.sock"
 #define IPC_PATH_LIMIT		100U	/* stay clear of sun_path[108] */
 #define IPC_REPLY_MAX		3072U
 #define IPC_METHOD_MAX		48U
@@ -445,6 +449,7 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 	char label_esc[64];
 	char pos_esc[24];
 	char aspect_esc[24];
+	char dll_esc[192];
 	char scale_esc[24];
 	uint64_t age_ms;
 	int n;
@@ -456,6 +461,7 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 	json_escape_into(label_esc, sizeof(label_esc), st.audio_label);
 	json_escape_into(pos_esc, sizeof(pos_esc), st.osd_position);
 	json_escape_into(aspect_esc, sizeof(aspect_esc), st.aspect);
+	json_escape_into(dll_esc, sizeof(dll_esc), st.framegen_dll_path);
 	json_escape_into(scale_esc, sizeof(scale_esc), st.scale);
 
 	n = snprintf(result, sizeof(result),
@@ -476,6 +482,13 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 		     "\"osd\":{\"enabled\":%s,\"position\":\"%s\"},"
 		     "\"aspect\":\"%s\",\"scale\":\"%s\","
 		     "\"vsync\":%s,\"fullscreen\":%s,"
+		     "\"framegen\":{\"mode\":\"%s\",\"present_fps\":%.2f,"
+		     "\"output_fps\":%.2f,\"unique_fps\":%.2f,"
+		     "\"raw_fps\":%.2f,\"flow_scale\":%.2f,"
+		     "\"perf_mode\":%s,\"low_latency\":%s,"
+		     "\"layer_found\":%s,"
+		     "\"dll_found\":%s,\"dll_path\":\"%s\","
+		     "\"vulkan_active\":%s,\"deduplicator_active\":%s},"
 		     "\"led\":{\"r\":%u,\"g\":%u,\"b\":%u},"
 		     "\"clients\":%u,\"age_ms\":%llu}",
 		     GC573_IPC_PROTO_VERSION, s->version, (long)getpid(),
@@ -499,6 +512,15 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 		     st.osd_enabled ? "true" : "false", pos_esc,
 		     aspect_esc, scale_esc, st.vsync ? "true" : "false",
 		     st.fullscreen ? "true" : "false",
+		     st.framegen_mode, st.framegen_present_fps,
+		     st.framegen_output_fps, st.framegen_unique_fps,
+		     st.framegen_raw_fps, (double)st.framegen_flow_scale,
+		     st.framegen_perf_mode ? "true" : "false",
+		     st.framegen_low_latency ? "true" : "false",
+		     st.framegen_layer_found ? "true" : "false",
+		     st.framegen_dll_found ? "true" : "false", dll_esc,
+		     st.framegen_vulkan_active ? "true" : "false",
+		     st.framegen_dedup_active ? "true" : "false",
 		     st.led_r, st.led_g, st.led_b,
 		     (unsigned int)gc573_ipc_has_clients(),
 		     (unsigned long long)age_ms);
@@ -524,7 +546,7 @@ static void ipc_send_hello(struct ipc_server *s, struct ipc_client *c,
 		     "\"led.set\",\"led.mode.set\",\"audio.volume.set\","
 		     "\"audio.mute.set\",\"osd.set\",\"osd.position.set\","
 		     "\"aspect.set\",\"mode.set\",\"v4l2.set\","
-		     "\"hdr.set\",\"scale.set\"]}",
+		     "\"hdr.set\",\"scale.set\",\"framegen.set\"]}",
 		     GC573_IPC_PROTO_VERSION, s->version, (long)getpid(),
 		     path_esc);
 	if (n > 0 && (size_t)n < sizeof(result))
@@ -777,6 +799,58 @@ static void ipc_handle_hdr(struct ipc_client *c, const char *id,
 	ipc_push_and_reply(c, id, &cmd);
 }
 
+static void ipc_handle_framegen(struct ipc_client *c, const char *id,
+				const char *line)
+{
+	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_FRAMEGEN };
+	char mode[16];
+	bool flag;
+	double scale;
+
+	/* -1 / negative means "leave unchanged". */
+	cmd.a = -1;
+	cmd.b = -1;
+	cmd.c = -1;
+	cmd.f = -1.0f;
+
+	if (json_get_string(line, "mode", mode, sizeof(mode))) {
+		if (!strcasecmp(mode, "off") || !strcasecmp(mode, "none"))
+			cmd.a = GC573_IPC_FG_OFF;
+		else if (!strcasecmp(mode, "60to120") ||
+			 !strcasecmp(mode, "2x") ||
+			 !strcasecmp(mode, "60"))
+			cmd.a = GC573_IPC_FG_60_TO_120;
+		else if (!strcasecmp(mode, "30to60") ||
+			 !strcasecmp(mode, "30"))
+			cmd.a = GC573_IPC_FG_30_TO_60;
+		else {
+			ipc_error(c, id, -32602,
+				  "unknown mode: off|60to120|30to60");
+			return;
+		}
+	}
+
+	if (json_get_double(line, "flow_scale", &scale)) {
+		if (scale < 0.5)
+			scale = 0.5;
+		if (scale > 1.0)
+			scale = 1.0;
+		cmd.f = (float)scale;
+	}
+	if (json_get_bool(line, "perf_mode", &flag))
+		cmd.b = flag ? 1 : 0;
+	if (json_get_bool(line, "low_latency", &flag))
+		cmd.c = flag ? 1 : 0;
+
+	if (cmd.a < 0 && cmd.b < 0 && cmd.c < 0 && cmd.f < 0.0f) {
+		ipc_error(c, id, -32602,
+			  "invalid params: mode, flow_scale, perf_mode or low_latency required");
+		return;
+	}
+
+	ipc_push_and_reply(c, id, &cmd);
+}
+
 static void ipc_handle_mode(struct ipc_client *c, const char *id,
 			    const char *line)
 {
@@ -872,6 +946,8 @@ static void ipc_handle_line(struct ipc_server *s, struct ipc_client *c,
 		ipc_handle_hdr(c, has_id ? id : NULL, line);
 	} else if (strcmp(method, "scale.set") == 0) {
 		ipc_handle_scale(c, has_id ? id : NULL, line);
+	} else if (strcmp(method, "framegen.set") == 0) {
+		ipc_handle_framegen(c, has_id ? id : NULL, line);
 	} else {
 		ipc_error(c, has_id ? id : NULL, -32601, "method not found");
 	}

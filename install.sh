@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive v1.3.2 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573)
+# EverLive v1.4.0 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573) & Live Gamer DUO (GC570D)
 # ==============================================================================
 # Installiert den 100% blob-freien Userspace VFIO-Treiber, udev-Hardware-Rechte,
 # Speicher-Locking-Limits und die EverLive Desktop-App für HDMI Console Gaming.
@@ -13,6 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 USERD_DIR="${SCRIPT_DIR}/tools/opengc573-userd"
+GC570D_DIR="${SCRIPT_DIR}/tools/opengc570d-userd"
 VIEWER_DIR="${SCRIPT_DIR}/tools/everlive"
 
 # ANSI Farben
@@ -23,11 +24,14 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}===================================================================${NC}"
-echo -e "${BLUE}     EverLive v1.3.2 - GC573 Userspace Gaming Suite Installer     ${NC}"
+echo -e "${BLUE}   EverLive Experimental (1.4 Lab) - GC573 Gaming Suite Installer   ${NC}"
 echo -e "${BLUE}===================================================================${NC}"
 
 # Optionale Virtual Camera: standardmäßig ja, per --no-loopback abschaltbar.
 WANT_LOOPBACK=1
+# Optionale 2x Frame Generation (lsfg-vk 2.0): standardmäßig interaktiv [y/N],
+# in nicht-interaktiven Läufen aus (oder explizit per --with-framegen).
+WANT_FRAMEGEN="ask"
 
 usage() {
     cat <<EOF
@@ -37,6 +41,13 @@ Usage: sudo ./install.sh [OPTIONS]
       Do not install or configure v4l2loopback. The optional Virtual Camera
       (/dev/video10 for OBS) stays disabled and the system remains free of
       DKMS modules and kernel headers.
+
+  --with-framegen
+      Install the optional lsfg-vk 2.0 Vulkan layer for 2x Console Frame
+      Generation (60->120 / 30->60 FPS) without prompting.
+
+  --no-framegen, --skip-framegen
+      Skip installing the optional lsfg-vk 2.0 Vulkan layer without prompting.
 
   -h, --help
       Show this help and exit.
@@ -48,6 +59,12 @@ parse_args() {
         case "$arg" in
             --no-loopback|--skip-loopback)
                 WANT_LOOPBACK=0
+                ;;
+            --with-framegen)
+                WANT_FRAMEGEN=1
+                ;;
+            --no-framegen|--skip-framegen)
+                WANT_FRAMEGEN=0
                 ;;
             -h|--help)
                 usage
@@ -76,6 +93,25 @@ ask_virtual_camera() {
     esac
 }
 
+ask_framegen() {
+    if [ "$WANT_FRAMEGEN" != "ask" ]; then
+        return 0
+    fi
+    if [ ! -t 0 ]; then
+        WANT_FRAMEGEN=0
+        return 0
+    fi
+
+    local answer=""
+
+    echo ""
+    read -r -p "Install optional 2x Frame Generation layer (lsfg-vk 2.0 for 60->120 / 30->60 FPS)? [y/N] " answer || true
+    case "${answer:-n}" in
+        [yY]|[jJ]*) WANT_FRAMEGEN=1 ;;
+        *)          WANT_FRAMEGEN=0 ;;
+    esac
+}
+
 # Vor der Root-Prüfung parsen, damit --help kein sudo benötigt. Der
 # sudo-Neustart übergibt "$@", wodurch das Kind erneut parst.
 parse_args "$@"
@@ -99,6 +135,11 @@ echo -e "[*] Architektur  : ${GREEN}100% Userspace VFIO (Blob-Free Ring 3)${NC}"
 ask_virtual_camera
 if [ "$WANT_LOOPBACK" -eq 0 ]; then
     echo -e "${GREEN}[*] Virtual Camera installation skipped. EverLive remains 100% module-free.${NC}"
+fi
+
+ask_framegen
+if [ "$WANT_FRAMEGEN" -eq 0 ]; then
+    echo -e "${GREEN}[*] Optional lsfg-vk Frame Generation download skipped (can be installed anytime later).${NC}"
 fi
 
 # 2. Paketmanager & Abhängigkeiten erkennen
@@ -152,6 +193,138 @@ ensure_v4l2loopback() {
     echo -e "${YELLOW}    Debian/Ubuntu: sudo apt install v4l2loopback-dkms v4l2loopback-utils linux-headers-\$(uname -r)${NC}"
     echo -e "${YELLOW}    Fedora:        sudo dnf install akmod-v4l2loopback   (RPM Fusion)${NC}"
     echo -e "${YELLOW}    Arch:          yay -S v4l2loopback-dkms${NC}"
+    return 0
+}
+
+# Prüft, ob das lsfg-vk 2.0 Implicit-Layer-Manifest bereits vorhanden ist.
+has_lsfg_vk_layer() {
+    [ -f "/usr/share/vulkan/implicit_layer.d/VkLayer_LSFGVK_frame_generation.json" ] ||
+    [ -f "/etc/vulkan/implicit_layer.d/VkLayer_LSFGVK_frame_generation.json" ] ||
+    [ -f "${TARGET_HOME}/.local/share/vulkan/implicit_layer.d/VkLayer_LSFGVK_frame_generation.json" ]
+}
+
+# Prüft den Steam-Status von Lossless Scaling (lsfg-vk.dll vs. Windows Lossless.dll)
+# für eine präzise Rückmeldung am Ende der Installation.
+check_steam_lsfg_dll() {
+    LSFG_STEAM_STATUS="missing"
+    LSFG_STEAM_DLL_PATH=""
+
+    local -a roots=(
+        "${TARGET_HOME}/.local/share/Steam"
+        "${TARGET_HOME}/.steam/steam"
+    )
+    local -a libs=()
+    local root vdf line lib game_dir
+
+    for root in "${roots[@]}"; do
+        [ -d "${root}" ] && libs+=("${root}")
+        vdf="${root}/steamapps/libraryfolders.vdf"
+        if [ -r "${vdf}" ]; then
+            while IFS= read -r line; do
+                lib="$(printf '%s\n' "${line}" | sed -n 's/.*"path"[[:space:]]*"\([^"]*\)".*/\1/p' | sed 's/\\\\/\//g')"
+                [ -n "${lib}" ] && libs+=("${lib}")
+            done < "${vdf}"
+        fi
+    done
+
+    for lib in "${libs[@]}"; do
+        game_dir="${lib}/steamapps/common/Lossless Scaling"
+        if [ -r "${game_dir}/lsfg-vk.dll" ]; then
+            LSFG_STEAM_STATUS="ready"
+            LSFG_STEAM_DLL_PATH="${game_dir}/lsfg-vk.dll"
+            return 0
+        fi
+        if [ -r "${game_dir}/Lossless.dll" ]; then
+            LSFG_STEAM_STATUS="wrong_branch"
+        fi
+    done
+    return 0
+}
+
+# Optionaler 2x Frame-Generation-Layer (lsfg-vk 2.0). Darf den Installer niemals
+# abbrechen: bei Fehlern bleibt EverLive im nativen Modus voll funktionsfähig.
+ensure_lsfg_vk() {
+    echo -e "\n${BLUE}[*] Prüfe optionalen Frame-Generation-Layer (lsfg-vk 2.0)...${NC}"
+
+    if has_lsfg_vk_layer; then
+        echo -e "${GREEN}[+] lsfg-vk 2.0 Vulkan-Layer ist bereits installiert.${NC}"
+    else
+        # 1. Vulkan-Loader + Download/Entpack-Werkzeuge sicherstellen
+        if command -v pacman >/dev/null 2>&1; then
+            pacman -S --needed --noconfirm vulkan-icd-loader curl xz >/dev/null 2>&1 || true
+        elif command -v apt-get >/dev/null 2>&1; then
+            apt-get install -y libvulkan1 curl xz-utils >/dev/null 2>&1 || true
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y vulkan-loader curl xz >/dev/null 2>&1 || true
+        fi
+
+        # 2. Distributions-Paket bevorzugen (z. B. CachyOS Repo oder AUR auf Arch)
+        if command -v pacman >/dev/null 2>&1; then
+            if pacman -Si lsfg-vk >/dev/null 2>&1; then
+                echo -e "[*] Installiere lsfg-vk direkt aus dem Paket-Repository..."
+                pacman -S --needed --noconfirm lsfg-vk || true
+            elif [ "${TARGET_USER}" != "root" ] && command -v yay >/dev/null 2>&1; then
+                echo -e "[*] Installiere lsfg-vk über yay (AUR)..."
+                sudo -u "${TARGET_USER}" yay -S --needed --noconfirm lsfg-vk-bin ||
+                sudo -u "${TARGET_USER}" yay -S --needed --noconfirm lsfg-vk || true
+            elif [ "${TARGET_USER}" != "root" ] && command -v paru >/dev/null 2>&1; then
+                echo -e "[*] Installiere lsfg-vk über paru (AUR)..."
+                sudo -u "${TARGET_USER}" paru -S --needed --noconfirm lsfg-vk-bin ||
+                sudo -u "${TARGET_USER}" paru -S --needed --noconfirm lsfg-vk || true
+            fi
+        fi
+
+        # 3. Universeller Fallback (Ubuntu/Debian/Fedora/Arch ohne AUR-Helper):
+        #    Offizielles lsfg-vk 2.0 Release-Archiv von builds.lsfg-vk.dev nach ~/.local
+        if ! has_lsfg_vk_layer && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+            local archive_rel=""
+            local archive_url=""
+            local tmp_tar=""
+
+            archive_rel="$(curl -fsSL --max-time 10 https://builds.lsfg-vk.dev/ 2>/dev/null | \
+                sed -n 's/.*href="\([^"]*\.tar\.xz\)">&gt;&gt; Latest release.*/\1/p' | head -n 1 || true)"
+            [ -z "${archive_rel}" ] && archive_rel="lsfg-vk-2.0.0.tar.xz"
+            archive_url="https://builds.lsfg-vk.dev/${archive_rel}"
+
+            echo -e "[*] Lade offizielles lsfg-vk 2.0 Paket (${archive_rel})..."
+            tmp_tar="$(mktemp /tmp/everlive-lsfg-vk.XXXXXX.tar.xz)"
+            if curl -fL --max-time 60 "${archive_url}" -o "${tmp_tar}" &&
+               tar -tJf "${tmp_tar}" >/dev/null 2>&1; then
+                chmod 644 "${tmp_tar}"
+                if [ "${TARGET_USER}" != "root" ]; then
+                    sudo -u "${TARGET_USER}" mkdir -p "${TARGET_HOME}/.local"
+                    sudo -u "${TARGET_USER}" tar -xJf "${tmp_tar}" -C "${TARGET_HOME}/.local" || true
+                else
+                    mkdir -p "${TARGET_HOME}/.local"
+                    tar -xJf "${tmp_tar}" -C "${TARGET_HOME}/.local" || true
+                fi
+            fi
+            rm -f "${tmp_tar}"
+        fi
+
+        if has_lsfg_vk_layer; then
+            echo -e "${GREEN}[+] lsfg-vk 2.0 Vulkan-Layer erfolgreich eingerichtet!${NC}"
+        else
+            echo -e "${YELLOW}[!] lsfg-vk 2.0 konnte nicht automatisch geladen werden.${NC}"
+            echo -e "${YELLOW}    Manuelle Anleitung: https://lsfg-vk.dev/docs/installation/${NC}"
+            return 0
+        fi
+    fi
+
+    check_steam_lsfg_dll
+    case "${LSFG_STEAM_STATUS}" in
+        ready)
+            echo -e "${GREEN}[+] Steam-Shader gefunden: ${LSFG_STEAM_DLL_PATH}${NC}"
+            ;;
+        wrong_branch)
+            echo -e "${YELLOW}[!] Lossless Scaling in Steam gefunden, aber 'lsfg-vk.dll' fehlt noch:${NC}"
+            echo -e "${YELLOW}    Steam -> Rechtsklick auf 'Lossless Scaling' -> Eigenschaften -> Betas -> 'lsfg-vk' auswählen.${NC}"
+            ;;
+        *)
+            echo -e "${YELLOW}[*] Hinweis für Frame Generation: 'Lossless Scaling' in Steam installieren und${NC}"
+            echo -e "${YELLOW}    unter Eigenschaften -> Betas den Branch 'lsfg-vk' aktivieren (danach im Hub 'Re-check' klicken).${NC}"
+            ;;
+    esac
     return 0
 }
 
@@ -212,6 +385,10 @@ detect_and_install_deps() {
     if [ "$WANT_LOOPBACK" -eq 1 ]; then
         ensure_v4l2loopback
     fi
+
+    if [ "$WANT_FRAMEGEN" -eq 1 ]; then
+        ensure_lsfg_vk
+    fi
 }
 
 detect_and_install_deps
@@ -220,9 +397,19 @@ detect_and_install_deps
 echo -e "\n${BLUE}[2/5] Kompiliere EverLive Userspace VFIO Engine...${NC}"
 make -C "${USERD_DIR}" clean >/dev/null 2>&1 || true
 make -C "${USERD_DIR}" -j"$(nproc)"
-chmod +x "${USERD_DIR}/gc573_user_streamer" "${USERD_DIR}/everlive_userd" "${USERD_DIR}/gc573_user_probe" "${SCRIPT_DIR}/play.sh"
+echo -e "${BLUE}[*] Kompiliere GC570D (Live Gamer DUO) Userspace Engine...${NC}"
+make -C "${GC570D_DIR}" clean >/dev/null 2>&1 || true
+make -C "${GC570D_DIR}" -j"$(nproc)"
+# Never leave build artifacts world-writable, and keep the binary setcap-safe.
+chmod 0755 "${USERD_DIR}/gc573_user_streamer" "${USERD_DIR}/everlive_userd" "${USERD_DIR}/gc573_user_probe" \
+    "${GC570D_DIR}/opengc570d-userd" "${GC570D_DIR}/gc570d-ctl" "${SCRIPT_DIR}/play.sh"
+chmod 0644 "${GC570D_DIR}/libgc570d-v4l2.so" 2>/dev/null || true
+# Install the GC570D helpers (udev rule, memlock, systemd unit, sleep hook)
+# through the engine's own Makefile so both installers stay in sync.
+make -C "${GC570D_DIR}" install
 setcap cap_ipc_lock=+ep "${USERD_DIR}/gc573_user_streamer" 2>/dev/null || true
-echo -e "${GREEN}[+] Userspace VFIO Engine erfolgreich gebaut & berechtigt!${NC}"
+setcap cap_ipc_lock=+ep "${GC570D_DIR}/opengc570d-userd" 2>/dev/null || true
+echo -e "${GREEN}[+] Userspace VFIO Engines erfolgreich gebaut & berechtigt!${NC}"
 
 # Python GUI-Umgebung (PySide6) für Benutzer prüfen und bei Bedarf einrichten
 echo -e "\n[*] Prüfe Python-Umgebung für EverLive Studio..."
@@ -262,23 +449,27 @@ elif modinfo v4l2loopback >/dev/null 2>&1; then
     mkdir -p /etc/modules-load.d /etc/modprobe.d
     echo "v4l2loopback" > /etc/modules-load.d/everlive-v4l2loopback.conf
     cat > /etc/modprobe.d/everlive-v4l2loopback.conf <<EOF
-# Managed by EverLive: virtual camera node for OBS / Discord / FFmpeg.
-# exclusive_caps=0 keeps VIDEO_CAPTURE advertised while no writer is active,
-# so OBS never drops the device from its list.
-options v4l2loopback video_nr=10 card_label="EverLive Capture" exclusive_caps=0
+# Managed by EverLive: virtual camera nodes for OBS / Discord / FFmpeg.
+# /dev/video10 carries HDMI 1 (GC570D) or the GC573 feed; /dev/video11 is
+# HDMI 2 on the Live Gamer DUO.  exclusive_caps=0 keeps VIDEO_CAPTURE
+# advertised while no writer is active, so OBS never drops the devices.
+options v4l2loopback video_nr=10,11 card_label="EverLive Capture,EverLive Capture HDMI 2" exclusive_caps=0
 EOF
     if ! lsmod | grep -q '^v4l2loopback'; then
         modprobe v4l2loopback 2>/dev/null || true
     fi
-    if [ -e /dev/video10 ]; then
+    if [ -e /dev/video10 ] && [ -e /dev/video11 ]; then
         if [ "$(cat /sys/module/v4l2loopback/parameters/exclusive_caps 2>/dev/null || echo 0)" = "1" ]; then
-            echo -e "${YELLOW}[!] /dev/video10 existiert, aber die laufende Instanz nutzt noch exclusive_caps=1.${NC}"
-            echo -e "${YELLOW}    Nach einem Neustart (oder 'sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback') gilt exclusive_caps=0.${NC}"
+            echo -e "${YELLOW}[!] /dev/video10 and /dev/video11 exist, but the running instance still uses exclusive_caps=1.${NC}"
+            echo -e "${YELLOW}    After a reboot (or 'sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback') exclusive_caps=0 applies.${NC}"
         else
-            echo -e "${GREEN}[+] /dev/video10 'EverLive Capture' bereit (exclusive_caps=0).${NC}"
+            echo -e "${GREEN}[+] /dev/video10 'EverLive Capture' and /dev/video11 'EverLive Capture HDMI 2' ready (exclusive_caps=0).${NC}"
         fi
+    elif [ -e /dev/video10 ]; then
+        echo -e "${YELLOW}[!] /dev/video10 exists, but /dev/video11 (DUO HDMI 2) is missing.${NC}"
+        echo -e "${YELLOW}    Reload: sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback video_nr=10,11 card_label=\"EverLive Capture,EverLive Capture HDMI 2\" exclusive_caps=0${NC}"
     else
-        echo -e "${YELLOW}[!] v4l2loopback konfiguriert, aber /dev/video10 fehlt noch (Neustart nötig).${NC}"
+        echo -e "${YELLOW}[!] v4l2loopback configured, but /dev/video10 and /dev/video11 are still missing (reboot required).${NC}"
     fi
 else
     echo -e "${YELLOW}[!] v4l2loopback nicht verfügbar; Virtual Camera bleibt bis zur Installation aus.${NC}"
@@ -333,16 +524,17 @@ vfio_iommu_type1
 EOF
 
 cat > /etc/modprobe.d/everlive-vfio.conf <<EOF
-# EverLive: Auto-bind AVerMedia Live Gamer 4K (GC573) and Live Gamer BOLT (GC555) to vfio-pci at boot
+# EverLive: Auto-bind AVerMedia Live Gamer 4K (GC573), Live Gamer BOLT (GC555)
+# and Live Gamer DUO (GC570D, same 1461:0054 device ID) to vfio-pci at boot
 options vfio-pci ids=1461:0054,1461:0055
 EOF
 
-# Memlock Limits für native 4K DMA Mappings
+# Memlock Limits für native 4K DMA Mappings (nur Mitglieder der video-Gruppe)
 mkdir -p /etc/security/limits.d
 cat > /etc/security/limits.d/99-everlive-memlock.conf <<EOF
-# EverLive GC573 VFIO DMA memory pinning
-*       soft    memlock   unlimited
-*       hard    memlock   unlimited
+# EverLive VFIO DMA memory pinning (video group only)
+@video  soft    memlock   unlimited
+@video  hard    memlock   unlimited
 EOF
 
 # Udev-Regel: Bindet AVerMedia GC573 (1461:0054 / 1461:5550) an vfio-pci
@@ -363,9 +555,20 @@ udevadm trigger 2>/dev/null || true
 usermod -aG video,audio "${TARGET_USER}" 2>/dev/null || true
 
 # 6. Desktop-Verknüpfung & Application-Icon (Startmenü)
-echo -e "\n${BLUE}[5/5] Installiere EverLive Desktop-Starter & Anwendungs-Icon ins System...${NC}"
+#
+# Side-by-side: this branch installs everlive-experimental.desktop.  A stable
+# EverLive installed from another directory keeps its own everlive.desktop,
+# config directory and control socket and is never overwritten here.
+echo -e "\n${BLUE}[5/5] Installiere EverLive Experimental Desktop-Starter & Anwendungs-Icon ins System...${NC}"
 APPS_DIR="${TARGET_HOME}/.local/share/applications"
 mkdir -p "${APPS_DIR}"
+
+# The repository path is normally space-free; quote it only when needed so the
+# Exec= line stays exactly "<abs path>/play.sh" otherwise.
+case "${SCRIPT_DIR}" in
+    *" "*) DESKTOP_EXEC="\"${SCRIPT_DIR}/play.sh\"" ;;
+    *)     DESKTOP_EXEC="${SCRIPT_DIR}/play.sh" ;;
+esac
 
 ICONS_BASE="${TARGET_HOME}/.local/share/icons/hicolor"
 for sz in 16 32 48 64 128 256 512; do
@@ -384,29 +587,50 @@ if [ -f "${VIEWER_DIR}/icons/scalable/apps/everlive.png" ]; then
     cp -f "${VIEWER_DIR}/everlive.bmp" "/usr/share/pixmaps/everlive.bmp" 2>/dev/null || true
 fi
 
-cat > "${APPS_DIR}/everlive.desktop" <<EOF
+cat > "${APPS_DIR}/everlive-experimental.desktop" <<EOF
 [Desktop Entry]
-Name=EverLive
-GenericName=Console Gaming Screen
-Comment=Ultra-Low-Latency HDMI Gaming Screen für PS5 & Konsolen (AVerMedia GC573 - 100% Userspace VFIO)
-Exec=${SCRIPT_DIR}/play.sh
+Name=EverLive Experimental
+GenericName=Console Gaming Screen (Experimental FrameGen)
+Comment=EverLive 1.4 Lab - Lossless Scaling 2x Console Frame Generation
+Exec=${DESKTOP_EXEC}
 Icon=everlive
 Terminal=false
 Type=Application
 Categories=Game;AudioVideo;Video;
-Keywords=EverLive;PS5;Capture;AVerMedia;GC573;HDMI;Gaming;Console;VFIO;
-StartupWMClass=EverLive
+Keywords=EverLive;Experimental;FrameGen;LSFG;Vulkan;PS5;Capture;AVerMedia;GC573;HDMI;Gaming;Console;VFIO;
+StartupWMClass=EverLiveExperimental
 EOF
-chmod +x "${APPS_DIR}/everlive.desktop"
-chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive.desktop" 2>/dev/null || true
+chmod +x "${APPS_DIR}/everlive-experimental.desktop"
+chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive-experimental.desktop" 2>/dev/null || true
 
-# Entferne ggf. veraltete Test-Starter
+# Entferne ggf. veraltete Test-Starter dieses Branches.  everlive.desktop der
+# stabilen Installation bleibt unangetastet.
 rm -f "${APPS_DIR}/everlive-intern.desktop" 2>/dev/null || true
 
+# Experimental-Konfiguration vorbereiten (nur Benutzerverzeichnis).  Beim
+# ersten Start seedet die GUI ihre Defaults aus der stabilen
+# ~/.config/everlive/settings.json (read-only).
+EXP_CONFIG_DIR="${TARGET_HOME}/.config/everlive-experimental"
+mkdir -p "${EXP_CONFIG_DIR}"
+chown -R "${TARGET_USER}:${TARGET_USER}" "${EXP_CONFIG_DIR}" 2>/dev/null || true
+
 echo -e "\n${GREEN}===================================================================${NC}"
-echo -e "${GREEN}      EverLive v1.3.2 erfolgreich installiert & einsatzbereit!      ${NC}"
+echo -e "${GREEN}   EverLive Experimental (1.4 Lab) erfolgreich installiert!        ${NC}"
 echo -e "${GREEN}===================================================================${NC}"
-echo -e "Du kannst EverLive ab sofort direkt über dein Startmenü starten,"
-echo -e "oder im Terminal mit: ${BLUE}./play.sh${NC}"
+echo -e "Du kannst EverLive Experimental ab sofort direkt über dein Startmenü"
+echo -e "starten (Eintrag \"EverLive Experimental\"), oder im Terminal mit:"
+echo -e "  ${BLUE}./play.sh${NC}"
 echo -e ""
-echo -e "Viel Spaß beim Zocken mit 1440p120, nativem 4K und Null Kernel-Gefrickel!"
+echo -e "Stabile EverLive-Installation bleibt unberührt:"
+echo -e "  Launcher : ~/.local/share/applications/everlive.desktop"
+echo -e "  Config   : ~/.config/everlive/"
+echo -e "  Socket   : \$XDG_RUNTIME_DIR/everlive.sock"
+echo -e ""
+echo -e "Experimental nutzt eigene Pfade:"
+echo -e "  Launcher : ~/.local/share/applications/everlive-experimental.desktop"
+echo -e "  Config   : ~/.config/everlive-experimental/"
+echo -e "  Socket   : \$XDG_RUNTIME_DIR/everlive-experimental.sock"
+echo -e ""
+echo -e "Frame Generation im Spielfenster: 'g' = Off -> 60->120 -> 30->60."
+echo -e "Voraussetzung: lsfg-vk 2.0 + Lossless Scaling in Steam (Beta-Branch 'lsfg-vk')."
+echo -e "Viel Spaß beim Zocken mit 60->120 / 30->60 FPS!"

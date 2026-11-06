@@ -1,6 +1,6 @@
-# EverLive - AVerMedia GC573 Linux Gaming Suite & Userspace Driver
+# EverLive - AVerMedia GC573 & GC570D Linux Gaming Suite & Userspace Driver
 
-[![Version](https://img.shields.io/badge/version-v1.3.2-blue.svg)](https://github.com/Everlite/EverLive/releases)
+[![Version](https://img.shields.io/badge/version-v1.4.0-blue.svg)](https://github.com/Everlite/EverLive/releases)
 [![Status](https://img.shields.io/badge/status-1440p120%20%2B%204K60%20%2B%20V4L2%20%2B%20Audio%20(Hardware%20Verified)-brightgreen.svg)](#hardware-verified-capabilities)
 [![Driver](https://img.shields.io/badge/driver-Userspace%20VFIO%20(Blob--Free)-2e7d32.svg)](#architecture--design)
 [![Kernel Modules](https://img.shields.io/badge/DKMS-None%20Required-success.svg)](#architecture--design)
@@ -9,9 +9,11 @@
 [![License](https://img.shields.io/badge/license-GPL--2.0--only-blue.svg)](#legal-and-licensing)
 [![AI Assisted](https://img.shields.io/badge/transparency-heavily%20AI%20assisted-ff69b4.svg)](#-transparency--ai-assistance)
 
-**EverLive** is a Linux console gaming suite and open-source userspace driver for the **AVerMedia Live Gamer 4K (GC573)** (`PCI 1461:0054`, Subsystem `1461:5730`).
+**EverLive** is a Linux console gaming suite and open-source userspace driver for the **AVerMedia Live Gamer 4K (GC573)** (`PCI 1461:0054`, Subsystem `1461:5730`) and the **Live Gamer DUO (GC570D)** (`PCI 1461:0054`, Subsystem `1461:5700`). The installed card is detected through `subsystem_device` and routed to the matching engine; both cards never share a device node.
 
 It is designed to let you play console games (PlayStation 5, Xbox Series X, Nintendo Switch, retro scalers, or secondary PCs) directly on your Linux desktop (Wayland & X11) with low presentation overhead, real-time **HDR10 / HLG to SDR filmic tonemapping**, synchronized audio (**Linear PCM** as well as **Dolby Digital / DTS 5.1** decoded to stereo), a native **V4L2 virtual camera** and **PipeWire virtual audio track** for OBS/Discord, zero-interruption live runtime controls over IPC, **pixel-perfect integer scaling** for retro and 720p/1080p consoles, on-the-fly hardware EDID switching, and custom hardware RGB LED control.
+
+The **Live Gamer DUO** additionally exposes both HDMI inputs simultaneously: HDMI 1 supports the full 3000-nit BT.2020 HDR LUT path and native lower resolutions, HDMI 2 is published as a second OBS camera, and validated 2.0/5.1 LPCM passthrough is available from both inputs.
 
 ---
 
@@ -27,6 +29,46 @@ Starting with version 1.0.0, EverLive transitions from an out-of-tree kernel mod
 * **System Requirements:** Requires IOMMU hardware support (`Intel VT-d` or `AMD-Vi / IOMMU`) enabled in your motherboard's UEFI/BIOS. (See [IOMMU & PCIe Groups](#-iommu--pcie-group-requirements)).
 
 > *Note: The legacy kernel module is archived in [`legacy/open_gc573-kernel/`](legacy/open_gc573-kernel/) for historical reference.*
+
+---
+
+## Live Gamer DUO (GC570D)
+
+`tools/opengc570d-userd/` is a separate userspace engine for the dual-input
+Live Gamer DUO. The launcher reads `subsystem_device` and automatically uses
+this engine for `0x5700`; all other `1461:0054` cards keep the GC573 engine.
+
+* **Dual HDMI capture:** HDMI 1 and HDMI 2 have independent receivers, DMA
+  rings and audio rings. `/dev/video10` publishes the selected gaming input and
+  `/dev/video11` publishes HDMI 2 for a second OBS source.
+* **HDMI 1 HDR path:** the validated 3000-nit BT.2020 HDR-to-SDR lookup table
+  and downscaler run in the FPGA preprocessor. Native 640×480, 720×480,
+  720×576, 1024×768, 1280×720 and 1920×1080 modes are selectable.
+* **Audio:** validated stereo and 5.1 LPCM passthrough from both inputs, based
+  on upstream commit `4673bb9` and splitter PR #6 (`484aa8d`).
+* **Console Hub controls:** HDMI 1 / HDMI 2 input selection, Studio/headless
+  mode, internal-bridge vs downstream EDID policy, HPD pulses, and RGB effects
+  (`colorful`, `breathing`, `static`, `off`) through `gc570d-ctl`.
+* **Module-free fallback:** the same process writes raw YUYV frames to
+  v4l2loopback; no GC570D kernel module is required.
+
+See [`tools/opengc570d-userd/README.md`](tools/opengc570d-userd/README.md) for
+build, CLI and hotkey details.
+
+---
+
+## 2x Frame Generation (Beta · LSFG-VK)
+
+> [!IMPORTANT]
+> **Optional: LSFG-VK Frame Generation (Vulkan · Beta)**
+> EverLive features 2x AI frame generation (30 → 60 FPS for 30 FPS console titles, 60 → 120 FPS for 60 FPS titles) powered by Vulkan and LSFG-VK with a custom low-latency presentation swapchain and cadence deduplication engine.
+>
+> * **Standard / Non-LSFG Users:** If you do not have Lossless Scaling installed, EverLive runs in native zero-latency mode as usual. If frame generation is selected without the required components, EverLive gracefully falls back to native presentation without interrupting gameplay or dropping frames.
+> * **Requirements for Frame Generation:**
+>   1. Install the Vulkan layer package: `yay -S lsfg-vk` (or `paru -S lsfg-vk` / your distro's package manager).
+>   2. Own **Lossless Scaling** on Steam and switch to the beta:  
+>      `Steam Library -> Right Click "Lossless Scaling" -> Properties -> Betas -> select "lsfg-vk"`.
+>   3. EverLive automatically discovers the Steam directory and Vulkan layer across all configured Steam library folders.
 
 ---
 
@@ -200,7 +242,7 @@ sudo ./install.sh --no-loopback
 ### What the installer does:
 1. Installs the build/runtime dependencies: SDL2, FFmpeg development libraries (`libavcodec`/`libswresample`/`libavutil`), `libcap` (`setcap`), WirePlumber (`wpctl`), `xcb-util-cursor`, PySide6, standard build tools, and `v4l2loopback` where the distribution packages it (skip with `--no-loopback`).
 2. Configures udev rules (`/etc/udev/rules.d/70-everlive.rules`) granting your local user read/write access to the card's VFIO group and binding `vfio-pci`.
-3. Sets `/etc/security/limits.d/99-everlive-memlock.conf` and adds `cap_ipc_lock` capabilities so unprivileged users can pin DMA buffers required for native 4K capture.
+3. Sets `/etc/security/limits.d/99-everlive-memlock.conf` and adds `cap_ipc_lock` capabilities so unprivileged users can pin DMA buffers required for native 4K and dual-HDMI capture.
 4. Blacklists the legacy out-of-tree `open_gc573` module (`/etc/modprobe.d/blacklist-everlive-legacy.conf`) so it cannot race with `vfio-pci` at boot.
 5. Compiles the userspace binaries (`gc573_user_streamer`, `everlive_userd`, `gc573_user_probe`).
 6. Installs the desktop application launcher and icon.
@@ -220,7 +262,7 @@ Or start **EverLive** directly from your desktop application launcher.
 git pull
 ./play.sh
 ```
-*EverLive's launcher (`play.sh`) automatically detects modified source files and incrementally recompiles the userspace binaries on startup.*
+*EverLive's launcher (`play.sh`) automatically detects modified source files and incrementally recompiles the userspace binaries on startup. Rebuilding replaces the binaries and clears their `cap_ipc_lock` file capability; the launcher re-applies it automatically when needed (one authorization prompt).*
 
 ---
 
@@ -303,18 +345,20 @@ Writing clean-room Linux drivers for proprietary capture hardware requires havin
 | Component | Path | License | Notes |
 |:---|:---|:---:|:---|
 | **Userspace Driver & Streamer** | `tools/opengc573-userd/` | **GPL-2.0-only** | Userspace VFIO implementation. Copyright © 2026 Everlite. |
+| **Live Gamer DUO Engine** | `tools/opengc570d-userd/` | **GPL-2.0-only** | Derived from [`neoyagami/OpenGC570D`](https://github.com/neoyagami/OpenGC570D) and its userspace VFIO-PCI port. Upstream base `4673bb9`, splitter PR #6 `484aa8d`, userspace import `afbb06e`. Upstream copyright remains with the OpenGC570D contributors; EverLive additions © 2026 Everlite. |
 | **EverLive Console Hub** | `tools/everlive/`, `play.sh`, `install.sh` | **GPL-2.0-only** | Python/Qt hub and launcher scripts. Copyright © 2026 Everlite. |
 | **Legacy Kernel Module** | `legacy/open_gc573-kernel/` | **GPL-2.0-only** | Historical kernel module based on work by ostrich, extended by Everlite. |
 
 ### Disclaimers & Trademark Notice
-* AVerMedia, Live Gamer 4K (GC573) and Live Gamer BOLT (GC555) are trademarks or registered trademarks of AVerMedia Technologies, Inc. PlayStation, PS4, and PS5 are registered trademarks of Sony Interactive Entertainment Inc. All trademarks belong to their respective owners and are used strictly for compatibility identification. This independent open-source project is not affiliated with, authorized, maintained, sponsored, or endorsed by AVerMedia Technologies, Inc., Sony, or any of their affiliates.
+* AVerMedia, Live Gamer 4K (GC573), Live Gamer DUO (GC570D) and Live Gamer BOLT (GC555) are trademarks or registered trademarks of AVerMedia Technologies, Inc. PlayStation, PS4, and PS5 are registered trademarks of Sony Interactive Entertainment Inc. All trademarks belong to their respective owners and are used strictly for compatibility identification. This independent open-source project is not affiliated with, authorized, maintained, sponsored, or endorsed by AVerMedia Technologies, Inc., Sony, or any of their affiliates.
 * This software is provided "AS IS", without warranty of any kind. Register configuration and EDID operations are performed at your own risk.
 
 ---
 
 ## Acknowledgements
 
-- **[@PolygonPrincess](https://github.com/PolygonPrincess)**: For pioneering userspace VFIO control of AVerMedia capture hardware in [OpenGC570D](https://github.com/PolygonPrincess/OpenGC570D), which inspired the architecture of the EverLive v1.0.0 userspace driver.
+- **[@PolygonPrincess](https://github.com/PolygonPrincess)**: For pioneering userspace VFIO control of AVerMedia capture hardware, which inspired the architecture of the EverLive v1.0.0 userspace driver.
+- **[@neoyagami](https://github.com/neoyagami)**: For the maintained [OpenGC570D](https://github.com/neoyagami/OpenGC570D) reverse-engineering project, including the validated dual-input GC570D audio and splitter work that EverLive's Live Gamer DUO engine builds on.
 - **[@haxman](https://github.com/haxman)**: For extensive modeline analysis, RetroTINK 4K Pro hardware testing, and verifying high-refresh and retro video timings.
 - **[@ostrich](https://github.com/ostrich)**: Author of the [gc555](https://github.com/ostrich/gc555) driver; his reverse-engineering of the Artix-7 register space laid the foundation for early GC573 open-source development.
 - **[@lou-perret](https://github.com/lou-perret)**: Author of the historic breakthroughs in PRs [#7](https://github.com/Everlite/Avermedia-GC573-Linux/pull/7) and [#8](https://github.com/Everlite/Avermedia-GC573-Linux/pull/8) (continuous capture pipeline, DMA sync, and audio constraints) that turned static DMA filler into the very first live, watchable video picture from the GC573 on Linux.

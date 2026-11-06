@@ -10,8 +10,9 @@ through its Unix socket and mirrors the engine's own view of the hardware.
 
 Phase 1 is read-only (``hello`` / ``ping`` / ``status.get``); Phase 2 adds the
 live mutations (LED, audio gain/mute, OSD, aspect), which the streamer applies
-from a lock-free command ring on its render thread.  Two entry points are
-provided:
+from the lock-free command ring on its render thread.  EverLive Experimental adds
+``framegen.set`` for lsfg-vk frame generation (Lossless Scaling 2x).  Two entry
+points are provided:
 
 ``probe()``
     A blocking, Qt-free liveness check.  Use it where no event loop is running
@@ -31,9 +32,26 @@ import os
 import socket
 import time
 
-SOCKET_NAME = "everlive.sock"
+SOCKET_NAME = "everlive-experimental.sock"
 PROTO_VERSION = 1
 MAX_FRAME = 65536
+
+FRAMEGEN_MODES = ("off", "60to120", "30to60")
+
+# Legacy/alias spellings accepted from older settings files or scripts.
+FRAMEGEN_ALIASES = {
+    "2x": "60to120",
+    "interp": "60to120",
+    "interpolation": "60to120",
+    "60": "60to120",
+    "adaptive": "30to60",
+    "max": "30to60",
+    "maxhz": "30to60",
+    "30": "30to60",
+    "ps5": "30to60",
+    "none": "off",
+    "native": "off",
+}
 
 try:  # The hub always has Qt; keep probe() usable without it.
     from PySide6.QtCore import QObject, QSocketNotifier, Signal
@@ -306,6 +324,29 @@ if QSocketNotifier is not None:
             Integer scaling picks the largest whole multiple of the source.
             """
             return self.request("scale.set", {"mode": str(mode)})
+
+        def set_framegen(self, mode: str = "off", flow_scale: float = 1.0,
+                         perf_mode: bool = False,
+                         low_latency: bool = True) -> bool:
+            """Toggle lsfg-vk frame generation on a running engine.
+
+            ``mode`` is ``off`` | ``60to120`` | ``30to60`` (``2x`` is accepted
+            as an alias for ``60to120``).  ``flow_scale`` is 0.5 .. 1.0,
+            ``perf_mode`` selects LSFG's performance profile, and
+            ``low_latency`` keeps the minimal Vulkan swapchain image count
+            (``LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT=1``).  The change is
+            queued lock-free to the render thread and applies mid-game without
+            restarting the stream.
+            """
+            mode = FRAMEGEN_ALIASES.get(str(mode), str(mode))
+            if mode not in FRAMEGEN_MODES:
+                mode = "off"
+            return self.request("framegen.set", {
+                "mode": mode,
+                "flow_scale": max(0.5, min(1.0, float(flow_scale))),
+                "perf_mode": bool(perf_mode),
+                "low_latency": bool(low_latency),
+            })
 
         # -- wire ------------------------------------------------------
 
