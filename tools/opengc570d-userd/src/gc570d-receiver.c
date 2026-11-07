@@ -1578,174 +1578,252 @@ int gc570d_it68051_select_page(struct gc570d_dev *gc, u8 page)
 				       0x0f, 0x07, page);
 }
 
-int gc570d_it68051_program_edid(struct gc570d_dev *gc)
-{
-	const struct gc570d_i2c_bus *bus = &gc570d_receiver_buses[0];
-	const u8 vsdb_address = 0xa9;
-	u8 block0_checksum = 0;
-	u8 block1_checksum = 0;
-	u8 port1_checksum;
-	size_t bad_byte = 0;
-	size_t block;
-	size_t i;
-	int restore_ret;
-	int ret = 0;
+/*
+ * IT68051 EDID Programming Constants & Registers
+ */
+#define IT68051_REG_CHIP_REV            0x00
+#define IT68051_REG_SYS_RESET           0x4b
+#define IT68051_REG_PORT0_RESET         0x6b
+#define IT68051_REG_OUTPUT_WIDTH_LATCH  0xc0
+#define IT68051_REG_OUTPUT_CLK_CTRL     0xc1
+#define IT68051_REG_EDID_LATCH_CTRL     0xc5
+#define IT68051_REG_VSDB_ADDR           0xc6
+#define IT68051_REG_PHYS_ADDR_AB        0xc7
+#define IT68051_REG_PHYS_ADDR_CD        0xc8
+#define IT68051_REG_BLOCK0_CHECKSUM     0xc9
+#define IT68051_REG_BLOCK1_CHECKSUM     0xca
 
-	/* The official driver writes 127 payload bytes; IT68051 holds checksums in c9/ca. */
-	for (i = 0; i < 127; i++) {
-		block0_checksum -= gc570d_it68051_edid[i];
-		block1_checksum -= gc570d_it68051_edid[128 + i];
+#define EDID_BLOCK_SIZE                 128U
+#define EDID_BLOCK_PAYLOAD_SIZE         127U
+#define IT68051_VSDB_DEFAULT_ADDR       0xa9
+#define IT68051_EDID_RAM_ENABLE         0xa9
+
+static int gc570d_it68051_calculate_edid_checksums(u8 *out_blk0, u8 *out_blk1)
+{
+	u8 blk0 = 0;
+	u8 blk1 = 0;
+	size_t i;
+
+	for (i = 0; i < EDID_BLOCK_PAYLOAD_SIZE; i++) {
+		blk0 -= gc570d_it68051_edid[i];
+		blk1 -= gc570d_it68051_edid[EDID_BLOCK_SIZE + i];
 	}
-	if (block0_checksum != gc570d_it68051_edid[127] ||
-	    block1_checksum != gc570d_it68051_edid[255])
+	if (blk0 != gc570d_it68051_edid[EDID_BLOCK_PAYLOAD_SIZE] ||
+	    blk1 != gc570d_it68051_edid[EDID_BLOCK_SIZE + EDID_BLOCK_PAYLOAD_SIZE])
 		return -EILSEQ;
 
-	/* The official driver enables the internal EDID RAM at write address 0xa8. */
-	ret = gc570d_it68051_select_page(gc, 0);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_update8(gc, bus, 0x00, 0x88, 0x00);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0x4b, 0xa9);
-	if (ret)
-		goto out_restore_page;
+	if (out_blk0)
+		*out_blk0 = blk0;
+	if (out_blk1)
+		*out_blk1 = blk1;
+	return 0;
+}
+
+static int gc570d_it68051_write_edid_blocks(struct gc570d_dev *gc,
+					    const struct gc570d_i2c_bus *bus)
+{
+	size_t block;
+	size_t i;
+	int ret;
 
 	for (block = 0; block < 2; block++) {
-		for (i = 0; i < 127; i++) {
-			size_t address = block * 128 + i;
-
+		for (i = 0; i < EDID_BLOCK_PAYLOAD_SIZE; i++) {
+			size_t address = block * EDID_BLOCK_SIZE + i;
 			ret = gc570d_i2c_write8(gc, bus, GC570D_I2C_EDID_ADDR8,
 						address,
 						gc570d_it68051_edid[address]);
 			if (ret) {
 				dev_err(&gc->pdev->dev,
-					"IT68051 EDID write failed at byte %zu: %d\n",
-					address, ret);
-				goto out_restore_page;
+					"IT68051 EDID write failed at addr 0x%02x byte %zu (val 0x%02x): %d\n",
+					GC570D_I2C_EDID_ADDR8, address,
+					gc570d_it68051_edid[address], ret);
+				return ret;
 			}
 		}
 	}
+	return 0;
+}
 
+static int gc570d_it68051_program_port_registers(struct gc570d_dev *gc,
+						 const struct gc570d_i2c_bus *bus,
+						 u8 block0_checksum,
+						 u8 block1_checksum,
+						 u8 port1_checksum)
+{
+	int ret;
+
+	/* Program Port 0 (Page 0) Checksums and VSDB Physical Address (1.0.0.0) */
 	ret = gc570d_it68051_select_page(gc, 0);
 	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xc9, block0_checksum);
+		return ret;
+	ret = gc570d_receiver_write8(gc, bus, IT68051_REG_BLOCK0_CHECKSUM, block0_checksum);
 	if (ret)
-		goto out_restore_page;
+		return ret;
+	ret = gc570d_receiver_write8(gc, bus, IT68051_REG_VSDB_ADDR, IT68051_VSDB_DEFAULT_ADDR);
+	if (ret)
+		return ret;
+	ret = gc570d_receiver_write8(gc, bus, IT68051_REG_PHYS_ADDR_AB, 0x10);
+	if (ret)
+		return ret;
+	ret = gc570d_receiver_write8(gc, bus, IT68051_REG_PHYS_ADDR_CD, 0x00);
+	if (ret)
+		return ret;
+	ret = gc570d_receiver_write8(gc, bus, IT68051_REG_BLOCK1_CHECKSUM, block1_checksum);
+	if (ret)
+		return ret;
+
+	/* Program Port 1 (Page 4) Checksums and VSDB Physical Address (2.0.0.0) */
+	ret = gc570d_it68051_select_page(gc, 4);
+	if (ret)
+		return ret;
+	ret = gc570d_receiver_write8(gc, bus, IT68051_REG_BLOCK0_CHECKSUM, block0_checksum);
+	if (ret)
+		return ret;
+	ret = gc570d_receiver_write8(gc, bus, IT68051_REG_PHYS_ADDR_AB, 0x20);
+	if (ret)
+		return ret;
+	ret = gc570d_receiver_write8(gc, bus, IT68051_REG_PHYS_ADDR_CD, 0x00);
+	if (ret)
+		return ret;
+	ret = gc570d_receiver_write8(gc, bus, IT68051_REG_BLOCK1_CHECKSUM, port1_checksum);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
+static int gc570d_it68051_latch_edid(struct gc570d_dev *gc,
+				     const struct gc570d_i2c_bus *bus)
+{
+	int ret;
+
+	/* Latch updated shared EDID on port 0 and port 1 */
+	ret = gc570d_it68051_select_page(gc, 0);
+	if (ret)
+		return ret;
+	ret = gc570d_receiver_update8(gc, bus, IT68051_REG_EDID_LATCH_CTRL, 0x01, 0x00);
+	if (ret)
+		return ret;
 
 	ret = gc570d_it68051_select_page(gc, 4);
 	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xc9, block0_checksum);
+		return ret;
+	ret = gc570d_receiver_update8(gc, bus, IT68051_REG_EDID_LATCH_CTRL, 0x01, 0x00);
 	if (ret)
-		goto out_restore_page;
+		return ret;
 
-	/* Shared CTA block: port 0 is 1.0.0.0 and port 1 is 2.0.0.0. */
+	/* HPD pulse toggles to trigger source re-read on both ports */
 	ret = gc570d_it68051_select_page(gc, 0);
 	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xc6, vsdb_address);
+		return ret;
+	ret = gc570d_receiver_update8(gc, bus, IT68051_REG_EDID_LATCH_CTRL, 0x10, 0x10);
 	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xc7, 0x10);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xc8, 0x00);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xca, block1_checksum);
-	if (ret)
-		goto out_restore_page;
-
-	port1_checksum = block1_checksum - 0x10;
-	ret = gc570d_it68051_select_page(gc, 4);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xc7, 0x20);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xc8, 0x00);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xca, port1_checksum);
-	if (ret)
-		goto out_restore_page;
-
-	ret = gc570d_it68051_edid_verify(gc, &bad_byte);
-	if (ret)
-		dev_err(&gc->pdev->dev,
-			"IT68051 EDID verification failed at byte %zu: %d\n",
-			bad_byte, ret);
-	if (ret)
-		goto out_restore_page;
-
-	/* The official driver latches the updated shared EDID independently on both ports. */
-	ret = gc570d_it68051_select_page(gc, 0);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_update8(gc, bus, 0xc5, 0x01, 0x00);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_it68051_select_page(gc, 4);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_update8(gc, bus, 0xc5, 0x01, 0x00);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_it68051_select_page(gc, 0);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_update8(gc, bus, 0xc5, 0x10, 0x10);
-	if (ret)
-		goto out_restore_page;
+		return ret;
 	msleep(1);
-	ret = gc570d_receiver_update8(gc, bus, 0xc5, 0x10, 0x00);
+	ret = gc570d_receiver_update8(gc, bus, IT68051_REG_EDID_LATCH_CTRL, 0x10, 0x00);
 	if (ret)
-		goto out_restore_page;
+		return ret;
+
 	ret = gc570d_it68051_select_page(gc, 4);
 	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_update8(gc, bus, 0xc5, 0x10, 0x10);
+		return ret;
+	ret = gc570d_receiver_update8(gc, bus, IT68051_REG_EDID_LATCH_CTRL, 0x10, 0x10);
 	if (ret)
-		goto out_restore_page;
+		return ret;
 	msleep(1);
-	ret = gc570d_receiver_update8(gc, bus, 0xc5, 0x10, 0x00);
+	ret = gc570d_receiver_update8(gc, bus, IT68051_REG_EDID_LATCH_CTRL, 0x10, 0x00);
 	if (ret)
-		goto out_restore_page;
+		return ret;
 
-	/* The official driver with the defaults selected by the official driver. */
+	/* Configure official driver defaults on page 1 */
 	ret = gc570d_it68051_select_page(gc, 1);
 	if (ret)
-		goto out_restore_page;
-	/* The official driver clears the output-width latch before selecting it. */
-	ret = gc570d_receiver_update8(gc, bus, 0xc0, 0x01, 0x00);
+		return ret;
+	ret = gc570d_receiver_update8(gc, bus, IT68051_REG_OUTPUT_WIDTH_LATCH, 0x01, 0x00);
 	if (ret)
-		goto out_restore_page;
+		return ret;
+	ret = gc570d_receiver_update8(gc, bus, IT68051_REG_OUTPUT_WIDTH_LATCH, 0x06, 0x02);
+	if (ret)
+		return ret;
+	ret = gc570d_receiver_update8(gc, bus, IT68051_REG_OUTPUT_CLK_CTRL, 0x02, 0x00);
+	if (ret)
+		return ret;
+	ret = gc570d_receiver_update8(gc, bus, IT68051_REG_OUTPUT_CLK_CTRL, 0x20, 0x00);
+	if (ret)
+		return ret;
 
-	/* The official driver: dual-clock mode; initialization output is YUV444. */
-	ret = gc570d_receiver_update8(gc, bus, 0xc0, 0x06, 0x02);
+	ret = gc570d_it68051_select_page(gc, 0);
 	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_update8(gc, bus, 0xc1, 0x02, 0x00);
+		return ret;
+	ret = gc570d_receiver_update8(gc, bus, IT68051_REG_PORT0_RESET, 0x0c, 0x08);
+	return ret;
+}
+
+int gc570d_it68051_program_edid(struct gc570d_dev *gc)
+{
+	const struct gc570d_i2c_bus *bus = &gc570d_receiver_buses[0];
+	u8 block0_checksum = 0;
+	u8 block1_checksum = 0;
+	u8 port1_checksum;
+	size_t bad_byte = 0;
+	int restore_ret;
+	int ret = 0;
+
+	ret = gc570d_it68051_calculate_edid_checksums(&block0_checksum, &block1_checksum);
 	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_update8(gc, bus, 0xc1, 0x20, 0x00);
-	if (ret)
-		goto out_restore_page;
+		return ret;
+	port1_checksum = block1_checksum - 0x10;
+
+	/* The official driver enables the internal EDID RAM at write address 0xa8. */
 	ret = gc570d_it68051_select_page(gc, 0);
 	if (ret)
 		goto out_restore_page;
-	ret = gc570d_receiver_update8(gc, bus, 0x6b, 0x0c, 0x08);
+	ret = gc570d_receiver_update8(gc, bus, IT68051_REG_CHIP_REV, 0x88, 0x00);
+	if (ret)
+		goto out_restore_page;
+	ret = gc570d_receiver_write8(gc, bus, IT68051_REG_SYS_RESET, IT68051_EDID_RAM_ENABLE);
+	if (ret)
+		goto out_restore_page;
+
+	for (int attempt = 1; attempt <= 3; attempt++) {
+		ret = gc570d_it68051_write_edid_blocks(gc, bus);
+		if (ret)
+			goto out_restore_page;
+
+		ret = gc570d_it68051_program_port_registers(gc, bus, block0_checksum,
+							    block1_checksum, port1_checksum);
+		if (ret)
+			goto out_restore_page;
+
+		ret = gc570d_it68051_edid_verify(gc, &bad_byte);
+		if (!ret)
+			break;
+
+		dev_warn(&gc->pdev->dev,
+			 "IT68051 EDID verification failed at byte %zu: %d (attempt %d/3); retrying write...\n",
+			 bad_byte, ret, attempt);
+		if (attempt == 3) {
+			dev_err(&gc->pdev->dev,
+				"IT68051 EDID verification failed after 3 attempts at byte %zu: %d\n",
+				bad_byte, ret);
+			goto out_restore_page;
+		}
+		msleep(5);
+	}
+
+	ret = gc570d_it68051_latch_edid(gc, bus);
 
 out_restore_page:
 	restore_ret = gc570d_it68051_select_page(gc, 0);
-	if (!ret)
+	if (restore_ret && !ret)
 		ret = restore_ret;
 	if (!ret)
 		dev_info(&gc->pdev->dev,
 			 "IT68051 4K EDID programmed and verified, checksums=0x%02x/0x%02x port1=0x%02x\n",
 			 block0_checksum, block1_checksum, port1_checksum);
+	else
+		dev_err(&gc->pdev->dev,
+			"IT68051 EDID programming failed or restored with error: %d\n", ret);
 	return ret;
 }
 

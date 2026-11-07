@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Bind AVerMedia GC570D (1461:0054) to signed stock vfio-pci and grant seat/video access
 ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1461", ATTR{device}=="0x0054", RUN+="/usr/local/libexec/gc570d-vfio-bind.sh"
+# /dev/vfio/vfio is the shared control node; scope only the group nodes to
+# AVerMedia PCI IDs so other VFIO assignments keep their own policy.
 SUBSYSTEM=="vfio", KERNEL=="vfio", GROUP="video", MODE="0660", TAG+="uaccess"
-SUBSYSTEM=="vfio", KERNEL=="[0-9]*", GROUP="video", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="vfio", KERNEL=="[0-9]*", ATTRS{vendor}=="0x1461", ATTRS{device}=="0x0054", GROUP="video", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="vfio", KERNEL=="[0-9]*", ATTRS{vendor}=="0x1461", ATTRS{device}=="0x0055", GROUP="video", MODE="0660", TAG+="uaccess"
