@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# EverLive Universal Userspace Capture Service
+#
+# Powers up the capture hardware, holds the VFIO context open, enables monitor
+# passthrough, and dispatches virtual cameras and PipeWire audio streams at login.
+#
+# Install with:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now everlive.service
+
+[Unit]
+Description=EverLive Universal Userspace Capture Service
+After=pipewire.service wireplumber.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/everlive-service
+Restart=on-failure
+RestartSec=2
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=default.target
