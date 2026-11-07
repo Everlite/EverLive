@@ -14,15 +14,11 @@
  * snapshot once per second through a seqlock, so the control thread never
  * blocks the DMA or render path and never touches a shared mutex.
  *
- * The socket lives at $XDG_RUNTIME_DIR/everlive-experimental.sock (fallback
+ * The socket lives at $XDG_RUNTIME_DIR/everlive.sock (fallback
  * /run/user/<uid>, then /tmp/everlive-<uid>) and is protected by a lock file.
  * The lock file — not the socket — is the authoritative "is a streamer
  * running?" signal: a crashed process leaves a stale socket behind, and only
  * flock() reliably distinguishes that from a live owner.
- *
- * The experimental name is deliberate: the stable EverLive hub keeps its own
- * everlive.sock, so both engines can be installed side by side and never
- * collide.
  */
 
 #ifndef GC573_USER_IPC_H
@@ -160,7 +156,7 @@ struct gc573_stats {
 	uint8_t led_g;
 	uint8_t led_b;
 
-	/* Experimental lsfg-vk frame generation */
+	/* lsfg-vk frame generation */
 	char framegen_mode[12];	/* "off" | "60to120" | "30to60" */
 	double framegen_present_fps;	/* real SDL_RenderPresent rate */
 	double framegen_output_fps;	/* present_fps * 2 with lsfg-vk */

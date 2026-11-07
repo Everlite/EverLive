@@ -2,14 +2,14 @@
 /*
  * gc573_user_framegen.h — lsfg-vk frame generation + PS5 phase-locked dedup
  *
- * EverLive Experimental no longer ships a custom optical-flow shader.  Frame
+ * EverLive no longer ships a custom optical-flow shader.  Frame
  * generation is delegated to the system's native lsfg-vk implicit Vulkan layer
  * (Lossless Scaling Frame Generation 2x on Linux), which the SDL2 "vulkan"
  * renderer feeds directly.  This module is the glue:
  *
  *   gc573_fg_probe_system()   locate the layer + lsfg-vk.dll, build the env
  *   gc573_fg_apply_env()      export LSFGVK_* before the Vulkan instance exists
- *   gc573_fg_write_toml()     write ~/.config/everlive-experimental/lsfg.toml
+ *   gc573_fg_write_toml()     write ~/.config/everlive/lsfg.toml
  *   gc573_fg_cadence_*        PS5 30-in-60 phase-locked 2:1 deduplicator
  *   gc573_framegen_*          capture-side ring + present-side take/release
  *
@@ -168,7 +168,7 @@ bool gc573_fg_apply_env(const struct gc573_fg_config *cfg,
  * gc573_fg_write_toml - Write the diagnostic lsfg.toml profile
  *
  * Mirrors the exported environment into
- * ~/.config/everlive-experimental/lsfg.toml (version 2, [global] allow_fp16,
+ * ~/.config/everlive/lsfg.toml (version 2, [global] allow_fp16,
  * dll path when known, [[profile]] name = "everlive").
  */
 void gc573_fg_write_toml(const struct gc573_fg_config *cfg,

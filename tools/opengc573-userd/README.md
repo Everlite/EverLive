@@ -40,6 +40,7 @@ As of **EverLive v1.0.0**, this userspace engine is the default, primary driver 
 | **`gc573_user_probe`** | Diagnostic tool for testing MMIO, I2C discovery, and DMA mappings. |
 | **`gc573_user_edid.[ch]`** | Hardware EDID profile generator (4K60, 1440p60/120 SDR & HDR, 1080p240) and I2C programmer. |
 | **`gc573_user_hdr.[ch]`** | Real-time HDR10 (PQ) & HLG to SDR Hable filmic tonemapper and BT.2020-to-BT.709 chroma matrix. |
+| **`gc573_user_framegen.[ch]`** | Vulkan LSFG-VK 2x frame generation integration, phase-locked 2:1 cadence deduplication, and low-latency swapchain. |
 | **`gc573_user_ipc.[ch]`** | Lock-free JSON-RPC 2.0 Unix control socket (`everlive.sock`) for zero-interrupt runtime mutations. |
 | **`gc573_user_audio_tap.[ch]`** | In-process PipeWire virtual audio tap (`EverLive Capture Audio`) for isolated OBS recording. |
 | **`gc573_user_audio.[ch]`** | PCIe DMA audio ring buffer, IEC 61937 scan/mute guard, audio worker thread and SDL2 playback. |
@@ -66,12 +67,21 @@ make -C tools/opengc573-userd -j"$(nproc)"
 gc573_user_streamer [PCI_ADDRESS] [OPTIONS]
 
   --led COLOR          off|blue|green|red|cyan|magenta|yellow|white|#RRGGBB
+  --wave               Multi-zone animated RGB wave
+  --rainbow            Full-spectrum animated RGB cycle
   --edid VALUE         default|1440p120|1080p240|/path/to/custom.edid
   --raw-edid           Load custom EDID files bit-exact (no AC-3/DTS injection)
                        alias: --no-unify-edid
   -f, --fullscreen     Start the SDL2 window in borderless fullscreen
   --vsync/--no-vsync   Pace presentation to the display refresh (default: off)
   --aspect MODE        auto|16:9|4:3|stretch
+  --scale MODE         fit|integer (pixel-perfect integer scaling; alias: --integer-scale)
+  --volume, -v 0..100  Initial playback volume percentage
+  --mute               Start with audio muted
+  --framegen MODE      off|60to120|30to60 (LSFG-VK 2x frame generation)
+  --fg-flow-scale S    Optical flow scale: 0.5|0.75|1.0 (default: 1.0)
+  --fg-perf            Enable LSFGVK performance mode
+  --fg-low-latency     Preserve Vulkan swapchain image count for lower latency
   --osd / --no-osd     Stats overlay on/off (--streamer-mode = hidden overlay + cursor)
   --osd-pos POS        tr|br|bl|tl (default: tr)
   --v4l2 DEVICE        Write native YUYV frames to a v4l2loopback device
@@ -87,9 +97,9 @@ gc573_user_streamer [PCI_ADDRESS] [OPTIONS]
 ```
 
 Game-window hotkeys: <kbd>f</kbd>/<kbd>F11</kbd> fullscreen, <kbd>1</kbd>/<kbd>l</kbd> scaling (fit/integer),
-<kbd>h</kbd> HDR tonemapper, <kbd>a</kbd> aspect ratio, <kbd>↑</kbd>/<kbd>↓</kbd> (or <kbd>+</kbd>/<kbd>-</kbd>) volume, <kbd>m</kbd> mute,
-<kbd>F1</kbd>/<kbd>?</kbd> help overlay, <kbd>p</kbd> OSD position, <kbd>o</kbd>/<kbd>i</kbd>/<kbd>Tab</kbd> stats overlay,
-<kbd>s</kbd>/<kbd>F10</kbd> overlay + cursor, <kbd>Esc</kbd>/<kbd>q</kbd> quit.
+<kbd>g</kbd> frame generation mode, <kbd>h</kbd> HDR tonemapper, <kbd>a</kbd> aspect ratio,
+<kbd>↑</kbd>/<kbd>↓</kbd> (or <kbd>+</kbd>/<kbd>-</kbd>) volume, <kbd>m</kbd> mute, <kbd>F1</kbd>/<kbd>?</kbd> help overlay,
+<kbd>p</kbd> OSD position, <kbd>o</kbd>/<kbd>i</kbd>/<kbd>Tab</kbd> stats overlay, <kbd>s</kbd>/<kbd>F10</kbd> overlay + cursor, <kbd>Esc</kbd>/<kbd>q</kbd> quit.
 
 ## Remote Control Socket
 
@@ -107,7 +117,7 @@ socket and the Control Hub attaches to it as a read-only **Remote Session**.
 
 Methods: `hello`, `ping`, `status.get`, and the write path
 `led.set`, `led.mode.set`, `audio.volume.set`, `audio.mute.set`, `osd.set`,
-`osd.position.set`, `aspect.set`, `mode.set`, `v4l2.set`, `hdr.set`.
+`osd.position.set`, `aspect.set`, `scale.set`, `framegen.set`, `mode.set`, `v4l2.set`, `hdr.set`.
 Mutations are queued into a lock-free ring and applied by the render thread, so
 they never touch the DMA path; the audio gain uses a 20 ms linear ramp instead
 of pausing the device. The snapshot is published once per second from the

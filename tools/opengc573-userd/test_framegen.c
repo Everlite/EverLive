@@ -131,7 +131,7 @@ int main(void)
 		return 1;
 	}
 
-	printf("EverLive Experimental — phase-locked 2:1 deduplicator self-test\n\n");
+	printf("EverLive — phase-locked 2:1 deduplicator self-test\n\n");
 
 	/* ---------------------------------------------------------------- */
 	printf("1) Clean 30-in-60 HDMI container (A, A, B, B, ...)\n");
@@ -400,7 +400,7 @@ int main(void)
 
 			setenv("HOME", home, 1);
 			snprintf(path, sizeof(path),
-				 "%s/.config/everlive-experimental/lsfg.toml", home);
+				 "%s/.config/everlive/lsfg.toml", home);
 
 			cfg.mode = GC573_FG_60_TO_120;
 			cfg.low_latency = true;

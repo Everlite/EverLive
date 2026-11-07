@@ -10,7 +10,7 @@ through its Unix socket and mirrors the engine's own view of the hardware.
 
 Phase 1 is read-only (``hello`` / ``ping`` / ``status.get``); Phase 2 adds the
 live mutations (LED, audio gain/mute, OSD, aspect), which the streamer applies
-from the lock-free command ring on its render thread.  EverLive Experimental adds
+from the lock-free command ring on its render thread.  EverLive adds
 ``framegen.set`` for lsfg-vk frame generation (Lossless Scaling 2x).  Two entry
 points are provided:
 
@@ -32,7 +32,7 @@ import os
 import socket
 import time
 
-SOCKET_NAME = "everlive-experimental.sock"
+SOCKET_NAME = "everlive.sock"
 PROTO_VERSION = 1
 MAX_FRAME = 65536
 

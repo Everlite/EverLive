@@ -546,7 +546,7 @@ void gc573_fg_write_toml(const struct gc573_fg_config *cfg,
 		return;
 
 	fg_home_dir(home, sizeof(home));
-	fg_path(dir, sizeof(dir), home, "/.config/everlive-experimental", NULL);
+	fg_path(dir, sizeof(dir), home, "/.config/everlive", NULL);
 	fg_mkdir_p(dir);
 	fg_path(path, sizeof(path), dir, "/lsfg.toml", NULL);
 
@@ -556,7 +556,7 @@ void gc573_fg_write_toml(const struct gc573_fg_config *cfg,
 
 	gc573_fg_format_scale(cfg->flow_scale, scale, sizeof(scale));
 
-	fprintf(f, "# Managed by EverLive Experimental - reference profile.\n");
+	fprintf(f, "# Managed by EverLive - reference profile.\n");
 	fprintf(f, "# The engine drives lsfg-vk through LSFGVK_* environment\n");
 	fprintf(f, "# variables; this file documents and mirrors that setup.\n");
 	fprintf(f, "version = 2\n\n");

@@ -26,10 +26,9 @@
 #include <time.h>
 
 /*
- * Experimental socket name: the stable EverLive hub keeps everlive.sock, so a
- * system-tray hub from release 1.3 can never collide with this engine.
+ * Control socket name shared by the engine and the Console Hub.
  */
-#define IPC_DEFAULT_NAME	"everlive-experimental.sock"
+#define IPC_DEFAULT_NAME	"everlive.sock"
 #define IPC_PATH_LIMIT		100U	/* stay clear of sun_path[108] */
 #define IPC_REPLY_MAX		3072U
 #define IPC_METHOD_MAX		48U

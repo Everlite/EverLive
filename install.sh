@@ -24,7 +24,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}===================================================================${NC}"
-echo -e "${BLUE}   EverLive Experimental (1.4 Lab) - GC573 Gaming Suite Installer   ${NC}"
+echo -e "${BLUE}   EverLive (1.4.0) - GC573 & GC570D Gaming Suite Installer   ${NC}"
 echo -e "${BLUE}===================================================================${NC}"
 
 # Optionale Virtual Camera: standardmäßig ja, per --no-loopback abschaltbar.
@@ -555,11 +555,7 @@ udevadm trigger 2>/dev/null || true
 usermod -aG video,audio "${TARGET_USER}" 2>/dev/null || true
 
 # 6. Desktop-Verknüpfung & Application-Icon (Startmenü)
-#
-# Side-by-side: this branch installs everlive-experimental.desktop.  A stable
-# EverLive installed from another directory keeps its own everlive.desktop,
-# config directory and control socket and is never overwritten here.
-echo -e "\n${BLUE}[5/5] Installiere EverLive Experimental Desktop-Starter & Anwendungs-Icon ins System...${NC}"
+echo -e "\n${BLUE}[5/5] Installiere EverLive Desktop-Starter & Anwendungs-Icon ins System...${NC}"
 APPS_DIR="${TARGET_HOME}/.local/share/applications"
 mkdir -p "${APPS_DIR}"
 
@@ -587,49 +583,38 @@ if [ -f "${VIEWER_DIR}/icons/scalable/apps/everlive.png" ]; then
     cp -f "${VIEWER_DIR}/everlive.bmp" "/usr/share/pixmaps/everlive.bmp" 2>/dev/null || true
 fi
 
-cat > "${APPS_DIR}/everlive-experimental.desktop" <<EOF
+cat > "${APPS_DIR}/everlive.desktop" <<EOF
 [Desktop Entry]
-Name=EverLive Experimental
-GenericName=Console Gaming Screen (Experimental FrameGen)
-Comment=EverLive 1.4 Lab - Lossless Scaling 2x Console Frame Generation
+Name=EverLive
+GenericName=Console Gaming Screen
+Comment=Console gaming suite with userspace VFIO capture and optional 2x frame generation
 Exec=${DESKTOP_EXEC}
 Icon=everlive
 Terminal=false
 Type=Application
 Categories=Game;AudioVideo;Video;
-Keywords=EverLive;Experimental;FrameGen;LSFG;Vulkan;PS5;Capture;AVerMedia;GC573;HDMI;Gaming;Console;VFIO;
-StartupWMClass=EverLiveExperimental
+Keywords=EverLive;FrameGen;LSFG;Vulkan;PS5;Capture;AVerMedia;GC573;GC570D;HDMI;Gaming;Console;VFIO;
+StartupWMClass=EverLive
 EOF
-chmod +x "${APPS_DIR}/everlive-experimental.desktop"
-chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive-experimental.desktop" 2>/dev/null || true
+chmod +x "${APPS_DIR}/everlive.desktop"
+chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive.desktop" 2>/dev/null || true
 
-# Entferne ggf. veraltete Test-Starter dieses Branches.  everlive.desktop der
-# stabilen Installation bleibt unangetastet.
+# Entferne Starter aus der früheren "Experimental"-Phase dieses Projekts, damit
+# im Startmenü keine verwaisten Doppel-Einträge zurückbleiben.
+rm -f "${APPS_DIR}/everlive-experimental.desktop" 2>/dev/null || true
 rm -f "${APPS_DIR}/everlive-intern.desktop" 2>/dev/null || true
-
-# Experimental-Konfiguration vorbereiten (nur Benutzerverzeichnis).  Beim
-# ersten Start seedet die GUI ihre Defaults aus der stabilen
-# ~/.config/everlive/settings.json (read-only).
-EXP_CONFIG_DIR="${TARGET_HOME}/.config/everlive-experimental"
-mkdir -p "${EXP_CONFIG_DIR}"
-chown -R "${TARGET_USER}:${TARGET_USER}" "${EXP_CONFIG_DIR}" 2>/dev/null || true
+rmdir "${TARGET_HOME}/.config/everlive-experimental" 2>/dev/null || true
 
 echo -e "\n${GREEN}===================================================================${NC}"
-echo -e "${GREEN}   EverLive Experimental (1.4 Lab) erfolgreich installiert!        ${NC}"
+echo -e "${GREEN}   EverLive v1.4.0 erfolgreich installiert!                        ${NC}"
 echo -e "${GREEN}===================================================================${NC}"
-echo -e "Du kannst EverLive Experimental ab sofort direkt über dein Startmenü"
-echo -e "starten (Eintrag \"EverLive Experimental\"), oder im Terminal mit:"
+echo -e "Du kannst EverLive ab sofort direkt über dein Startmenü"
+echo -e "starten (Eintrag \"EverLive\"), oder im Terminal mit:"
 echo -e "  ${BLUE}./play.sh${NC}"
 echo -e ""
-echo -e "Stabile EverLive-Installation bleibt unberührt:"
-echo -e "  Launcher : ~/.local/share/applications/everlive.desktop"
-echo -e "  Config   : ~/.config/everlive/"
-echo -e "  Socket   : \$XDG_RUNTIME_DIR/everlive.sock"
-echo -e ""
-echo -e "Experimental nutzt eigene Pfade:"
-echo -e "  Launcher : ~/.local/share/applications/everlive-experimental.desktop"
-echo -e "  Config   : ~/.config/everlive-experimental/"
-echo -e "  Socket   : \$XDG_RUNTIME_DIR/everlive-experimental.sock"
+echo -e "Launcher : ~/.local/share/applications/everlive.desktop"
+echo -e "Config   : ~/.config/everlive/"
+echo -e "Socket   : \$XDG_RUNTIME_DIR/everlive.sock"
 echo -e ""
 echo -e "Frame Generation im Spielfenster: 'g' = Off -> 60->120 -> 30->60."
 echo -e "Voraussetzung: lsfg-vk 2.0 + Lossless Scaling in Steam (Beta-Branch 'lsfg-vk')."

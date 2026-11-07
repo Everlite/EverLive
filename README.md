@@ -11,7 +11,7 @@
 
 **EverLive** is a Linux console gaming suite and open-source userspace driver for the **AVerMedia Live Gamer 4K (GC573)** (`PCI 1461:0054`, Subsystem `1461:5730`) and the **Live Gamer DUO (GC570D)** (`PCI 1461:0054`, Subsystem `1461:5700`). The installed card is detected through `subsystem_device` and routed to the matching engine; both cards never share a device node.
 
-It is designed to let you play console games (PlayStation 5, Xbox Series X, Nintendo Switch, retro scalers, or secondary PCs) directly on your Linux desktop (Wayland & X11) with low presentation overhead, real-time **HDR10 / HLG to SDR filmic tonemapping**, synchronized audio (**Linear PCM** as well as **Dolby Digital / DTS 5.1** decoded to stereo), a native **V4L2 virtual camera** and **PipeWire virtual audio track** for OBS/Discord, zero-interruption live runtime controls over IPC, **pixel-perfect integer scaling** for retro and 720p/1080p consoles, on-the-fly hardware EDID switching, and custom hardware RGB LED control.
+It is designed to let you play console games (PlayStation 5, Xbox Series X, Nintendo Switch, retro scalers, or secondary PCs) directly on your Linux desktop (Wayland & X11) with low presentation overhead, real-time **HDR10 / HLG to SDR filmic tonemapping**, synchronized audio (**Linear PCM** as well as **Dolby Digital / DTS 5.1** decoded to stereo), a native **V4L2 virtual camera** and **PipeWire virtual audio track** for OBS/Discord, zero-interruption live runtime controls over IPC, **pixel-perfect integer scaling** for retro and 720p/1080p consoles, selectable hardware EDID profiles (applied on session restart), and custom hardware RGB LED control.
 
 The **Live Gamer DUO** additionally exposes both HDMI inputs simultaneously: HDMI 1 supports the full 3000-nit BT.2020 HDR LUT path and native lower resolutions, HDMI 2 is published as a second OBS camera, and validated 2.0/5.1 LPCM passthrough is available from both inputs.
 
@@ -24,8 +24,8 @@ Starting with version 1.0.0, EverLive transitions from an out-of-tree kernel mod
 ### Technical Characteristics & Trade-offs
 * **No DKMS or Kernel Header Dependencies:** EverLive's capture engine runs 100% in userspace with zero kernel modules or DKMS rebuilds. The optional Virtual Camera sink uses your distribution's upstream `v4l2loopback` package; you can opt out during installation with `./install.sh --no-loopback` to keep your system entirely module-free.
 * **In-Tree Kernel Module (`vfio-pci`):** Uses the standard, upstream `vfio-pci` module shipped and signed by your distribution. It does not load unsigned out-of-tree `.ko` drivers, avoiding kernel-taint flags and custom Machine Owner Key (MOK) enrollment under UEFI Secure Boot.
-* **Direct Hardware DMA in Userspace:** Video and audio Scatter-Gather DMA descriptors are mapped directly into userspace process memory via VFIO IOMMU containers, then uploaded directly to an SDL2 OpenGL rendering context.
-* **Exclusive Hardware Access & Virtual Camera:** VFIO requires exclusive binding to the PCI device. Starting in v1.2.0, EverLive includes a native virtual camera sink (`/dev/video10` labeled `"EverLive Capture"` via `v4l2loopback`), delivering clean, unscaled raw frames to OBS, Discord, and FFmpeg simultaneously with the gaming screen or in Headless Studio mode.
+* **Direct Hardware DMA in Userspace:** Video and audio Scatter-Gather DMA descriptors are mapped directly into userspace process memory via VFIO IOMMU containers, then uploaded directly to an SDL2 OpenGL or Vulkan (for LSFG-VK Frame Generation) rendering context.
+* **Exclusive Hardware Access & Virtual Camera:** VFIO requires exclusive binding to the PCI device. Starting in v1.2.0, EverLive includes a native virtual camera sink (`/dev/video10` labeled `"EverLive Capture"` via `v4l2loopback`), delivering clean raw frames to OBS, Discord, and FFmpeg (with automatic scaling fallback if OBS requests a different negotiated format) simultaneously with the gaming screen or in Headless Studio mode.
 * **System Requirements:** Requires IOMMU hardware support (`Intel VT-d` or `AMD-Vi / IOMMU`) enabled in your motherboard's UEFI/BIOS. (See [IOMMU & PCIe Groups](#-iommu--pcie-group-requirements)).
 
 > *Note: The legacy kernel module is archived in [`legacy/open_gc573-kernel/`](legacy/open_gc573-kernel/) for historical reference.*
@@ -34,8 +34,8 @@ Starting with version 1.0.0, EverLive transitions from an out-of-tree kernel mod
 
 ## Live Gamer DUO (GC570D)
 
-`tools/opengc570d-userd/` is a separate userspace engine for the dual-input
-Live Gamer DUO. The launcher reads `subsystem_device` and automatically uses
+`tools/opengc570d-userd/` is a dedicated userspace engine for the dual-input
+Live Gamer DUO, ported and contributed to EverLive by **[@PolygonPrincess](https://github.com/PolygonPrincess)** (PR #52). The launcher reads `subsystem_device` and automatically uses
 this engine for `0x5700`; all other `1461:0054` cards keep the GC573 engine.
 
 * **Dual HDMI capture:** HDMI 1 and HDMI 2 have independent receivers, DMA
@@ -102,7 +102,7 @@ The following capabilities have been physically tested and verified on physical 
 * **Retro Scalers & Custom Modelines (RetroTINK 4K Pro):**
   - Verified on physical hardware by contributor [@haxman](https://github.com/haxman): 240p retro modes (`1440x240`, `1920x240` CRT Super-Resolution), 480i / 576i interlaced modes with automatic 4:3 aspect-ratio preservation, PAL 50Hz/100Hz, and Cinema 95.94Hz BFI modes.
 * **Hardware RGB LED Lighting:**
-  - Native 24-bit RGB control via Artix-7 FPGA register writes. 8 predefined color profiles (or completely disabled). Operates without dropped frames or stream interruptions.
+  - Native 24-bit RGB control via Artix-7 FPGA register writes. Nine lighting modes (static colour profiles plus animated Rainbow Wave (`--wave`) and Spectrum Cycle (`--rainbow`)) and a complete off state. Operates without dropped frames or stream interruptions.
 * **Standby Daemon Handoff (`everlive_userd`):**
   - Closing the gaming screen hands off the active file descriptor to a lightweight background daemon without triggering a PCIe Function Level Reset (FLR), preserving the HDMI link state and LED configuration.
 
@@ -147,7 +147,7 @@ EverLive streams raw YUYV capture frames directly to a virtual video device node
 > When your console is powered off or during HDMI handshakes, EverLive automatically pumps a clean 30 FPS "No Signal" standby card to both the game window and `/dev/video10`. This prevents OBS from freezing on a black or corrupted frame during signal loss.
 
 > [!NOTE]
-> **Prerequisite:** `install.sh` installs `v4l2loopback` where your distribution packages it and preconfigures it (`/etc/modprobe.d/everlive-v4l2loopback.conf` + `/etc/modules-load.d/`). If the module is not packaged (e.g. Fedora without RPM Fusion), install your distribution's `v4l2loopback-dkms` once — `play.sh` loads it with `video_nr=10 card_label="EverLive Capture" exclusive_caps=0` when the node is missing.
+> **Prerequisite:** `install.sh` installs `v4l2loopback` where your distribution packages it and preconfigures two nodes (`/etc/modprobe.d/everlive-v4l2loopback.conf` + `/etc/modules-load.d/`): `/dev/video10` (`EverLive Capture`, fed by the GC573 or the DUO's selected input) and `/dev/video11` (`EverLive Capture HDMI 2`, the DUO's second input). If the module is not packaged (e.g. Fedora without RPM Fusion), install your distribution's `v4l2loopback-dkms` once — `play.sh` loads it automatically with `exclusive_caps=0` when nodes are missing.
 
 > [!TIP]
 > **Simultaneous 1440p120 Gaming & 4K OBS Recording:**  
@@ -240,13 +240,16 @@ sudo ./install.sh --no-loopback
 `--skip-loopback` is an alias, and `sudo ./install.sh --help` lists all options. Without `v4l2loopback`, `/dev/video10` is unavailable — capture the game window via PipeWire instead (see [Streaming & Recording with OBS](#-streaming--recording-with-obs)). Re-running the installer without the flag re-enables the Virtual Camera.
 
 ### What the installer does:
-1. Installs the build/runtime dependencies: SDL2, FFmpeg development libraries (`libavcodec`/`libswresample`/`libavutil`), `libcap` (`setcap`), WirePlumber (`wpctl`), `xcb-util-cursor`, PySide6, standard build tools, and `v4l2loopback` where the distribution packages it (skip with `--no-loopback`).
-2. Configures udev rules (`/etc/udev/rules.d/70-everlive.rules`) granting your local user read/write access to the card's VFIO group and binding `vfio-pci`.
+1. Installs the build/runtime dependencies: SDL2, FFmpeg development libraries (`libavcodec`/`libswresample`/`libavutil`), `libcap` (`setcap`), PipeWire/WirePlumber, `xcb-util-cursor`, PySide6, standard build tools, optional `lsfg-vk` frame generation layer (skip with `--no-framegen`), and `v4l2loopback` where packaged (skip with `--no-loopback`).
+2. Configures udev rules (`/etc/udev/rules.d/70-everlive.rules`) and early-boot VFIO autobind (`/etc/modules-load.d/everlive-vfio.conf` + `/etc/modprobe.d/everlive-vfio.conf`) granting your local user read/write access to the card's VFIO group and binding `vfio-pci`.
 3. Sets `/etc/security/limits.d/99-everlive-memlock.conf` and adds `cap_ipc_lock` capabilities so unprivileged users can pin DMA buffers required for native 4K and dual-HDMI capture.
 4. Blacklists the legacy out-of-tree `open_gc573` module (`/etc/modprobe.d/blacklist-everlive-legacy.conf`) so it cannot race with `vfio-pci` at boot.
-5. Compiles the userspace binaries (`gc573_user_streamer`, `everlive_userd`, `gc573_user_probe`).
-6. Installs the desktop application launcher and icon.
-7. Configures the Virtual Camera: `/etc/modprobe.d/everlive-v4l2loopback.conf` (`video_nr=10 card_label="EverLive Capture" exclusive_caps=0`) and loads the module at boot via `/etc/modules-load.d/`.
+5. Compiles userspace engines: `opengc573-userd` (`gc573_user_streamer`, `everlive_userd`, `gc573_user_probe`, `gc573_user_diag`) and `opengc570d-userd` (`opengc570d-userd`, `gc570d-ctl`, `libgc570d-v4l2.so`).
+6. Configures an isolated PipeWire audio sink (`50-everlive-capture.conf`) providing the dedicated `"EverLive Capture Audio"` source for OBS.
+7. Configures the Virtual Camera: `/etc/modprobe.d/everlive-v4l2loopback.conf` (`video_nr=10,11 card_label="EverLive Capture,EverLive Capture HDMI 2" exclusive_caps=0`) and loads the module at boot via `/etc/modules-load.d/`.
+8. Installs the desktop application launcher and icon.
+
+*(To cleanly remove EverLive and revert all system configurations, run `sudo ./uninstall.sh`).*
 
 ### Launching:
 ```bash
@@ -272,6 +275,7 @@ git pull
 |:---|:---|
 | <kbd>f</kbd> or <kbd>F11</kbd> | Toggle borderless fullscreen |
 | <kbd>1</kbd> or <kbd>l</kbd> | Toggle scaling mode (`fit` bilinear $\to$ `integer` nearest-neighbor) |
+| <kbd>g</kbd> | Cycle 2x Frame Generation mode (Off $\to$ `60 → 120 FPS` $\to$ `30 → 60 FPS`) |
 | <kbd>h</kbd> | Toggle real-time HDR10 / HLG $\to$ SDR filmic tonemapping |
 | <kbd>a</kbd> | Cycle Aspect Ratio (`auto` $\to$ `16:9` $\to$ `4:3` $\to$ `stretch`) |
 | <kbd>↑</kbd> / <kbd>↓</kbd> (or <kbd>+</kbd> / <kbd>-</kbd>) | Volume up / down (in 5% steps) |
@@ -298,15 +302,15 @@ flowchart TD
 
   subgraph Kernel["Linux Kernel (Ring 0)"]
     vfio["vfio-pci (Standard Upstream Driver)<br/>IOMMU Container & DMA Remapping"]
-    v4l2dev["v4l2loopback<br/>/dev/video10 'EverLive Capture'"]
+    v4l2dev["v4l2loopback<br/>/dev/video10 & video11 'EverLive Capture'"]
     pcie --> vfio
   end
 
   subgraph Userspace["EverLive Userspace Engine (Ring 3)"]
     direction TB
-    vfio -->|"Userspace DMA Mapping"| streamer["gc573_user_streamer (C Engine)<br/>- Scatter-Gather Video DMA (3-6 buffers)<br/>- L-PCM + AC-3/DTS Decoder (libavcodec)<br/>- IT6805 I2C Matrix & EDID Programmer<br/>- Artix-7 24-bit RGB Control<br/>- OSD, Aspect Ratio & V4L2 Sink"]
+    vfio -->|"Userspace DMA Mapping"| streamer["gc573_user_streamer (C Engine)<br/>- Scatter-Gather Video DMA (3-6 buffers)<br/>- L-PCM + AC-3/DTS Decoder (libavcodec)<br/>- IT6805 I2C Matrix & EDID Programmer<br/>- Artix-7 24-bit RGB Control<br/>- OSD, Aspect Ratio, Framegen & V4L2 Sink"]
     
-    streamer -->|"OpenGL / SDL2 Direct Scanout"| window["Game Window (1440p120 / 4K60)"]
+    streamer -->|"OpenGL / Vulkan Direct Scanout"| window["Game Window (1440p120 / 4K60)"]
     streamer -->|"Native YUYV Frames"| v4l2dev
     streamer -->|"SDL2 Audio / PipeWire"| audio["Headset / Speakers (Stereo Downmix)"]
 
@@ -333,8 +337,8 @@ Writing clean-room Linux drivers for proprietary capture hardware requires havin
 
 #### 🎯 Hardware Acquisition Targets:
 * **AVerMedia Live Gamer 4K 2.1 (GC575):** HDMI 2.1 4K144 / 4K120 PCIe capture card.
-* **AVerMedia Live Gamer DUO (GC570D):** Dual-channel PCIe capture card.
 * **Elgato 4K60 Pro (MK.1 & MK.2) / Cam Link Pro:** Widely used PCIe capture cards currently lacking open-source Linux drivers.
+*(Note: AVerMedia Live Gamer DUO GC570D is fully supported starting in v1.4.0 thanks to @PolygonPrincess).*
 
 👉 **[Sponsor @Everlite on GitHub Sponsors](https://github.com/sponsors/Everlite)**
 
@@ -345,7 +349,7 @@ Writing clean-room Linux drivers for proprietary capture hardware requires havin
 | Component | Path | License | Notes |
 |:---|:---|:---:|:---|
 | **Userspace Driver & Streamer** | `tools/opengc573-userd/` | **GPL-2.0-only** | Userspace VFIO implementation. Copyright © 2026 Everlite. |
-| **Live Gamer DUO Engine** | `tools/opengc570d-userd/` | **GPL-2.0-only** | Derived from [`neoyagami/OpenGC570D`](https://github.com/neoyagami/OpenGC570D) and its userspace VFIO-PCI port. Upstream base `4673bb9`, splitter PR #6 `484aa8d`, userspace import `afbb06e`. Upstream copyright remains with the OpenGC570D contributors; EverLive additions © 2026 Everlite. |
+| **Live Gamer DUO Engine** | `tools/opengc570d-userd/` | **GPL-2.0-only** | Derived from [`neoyagami/OpenGC570D`](https://github.com/neoyagami/OpenGC570D) with userspace VFIO-PCI + PipeWire port by [@PolygonPrincess](https://github.com/PolygonPrincess). Upstream base `4673bb9`, splitter PR #6 `484aa8d`, userspace import `afbb06e`. EverLive integration and frontend © 2026 Everlite & PolygonPrincess. |
 | **EverLive Console Hub** | `tools/everlive/`, `play.sh`, `install.sh` | **GPL-2.0-only** | Python/Qt hub and launcher scripts. Copyright © 2026 Everlite. |
 | **Legacy Kernel Module** | `legacy/open_gc573-kernel/` | **GPL-2.0-only** | Historical kernel module based on work by ostrich, extended by Everlite. |
 
@@ -357,11 +361,11 @@ Writing clean-room Linux drivers for proprietary capture hardware requires havin
 
 ## Acknowledgements
 
-- **[@PolygonPrincess](https://github.com/PolygonPrincess)**: For pioneering userspace VFIO control of AVerMedia capture hardware, which inspired the architecture of the EverLive v1.0.0 userspace driver.
+- **[@PolygonPrincess](https://github.com/PolygonPrincess)**: For authoring the Live Gamer DUO (`GC570D`) userspace VFIO engine and contributing dual-input capture support to EverLive (PR #52), as well as pioneering userspace VFIO control of AVerMedia hardware that inspired EverLive's v1.0.0 architecture.
 - **[@neoyagami](https://github.com/neoyagami)**: For the maintained [OpenGC570D](https://github.com/neoyagami/OpenGC570D) reverse-engineering project, including the validated dual-input GC570D audio and splitter work that EverLive's Live Gamer DUO engine builds on.
 - **[@haxman](https://github.com/haxman)**: For extensive modeline analysis, RetroTINK 4K Pro hardware testing, and verifying high-refresh and retro video timings.
 - **[@ostrich](https://github.com/ostrich)**: Author of the [gc555](https://github.com/ostrich/gc555) driver; his reverse-engineering of the Artix-7 register space laid the foundation for early GC573 open-source development.
-- **[@lou-perret](https://github.com/lou-perret)**: Author of the historic breakthroughs in PRs [#7](https://github.com/Everlite/Avermedia-GC573-Linux/pull/7) and [#8](https://github.com/Everlite/Avermedia-GC573-Linux/pull/8) (continuous capture pipeline, DMA sync, and audio constraints) that turned static DMA filler into the very first live, watchable video picture from the GC573 on Linux.
+- **[@lou-perret](https://github.com/lou-perret)**: Author of the historic breakthroughs in PRs [#7](https://github.com/Everlite/Avermedia-GC573-Linux/pull/7) and [#8](https://github.com/Everlite/Avermedia-GC573-Linux/pull/8) (continuous capture pipeline, DMA sync, and audio constraints) that turned static DMA filler into the very first live picture on Linux, and PR [#53](https://github.com/Everlite/Avermedia-GC573-Linux/pull/53) (`CAP_IPC_LOCK` instant 4K capture).
 - **[@derrod](https://github.com/derrod)**: For early Linux reverse-engineering work and documentation on AVerMedia capture hardware.
 
 ### 🤖 Transparency & AI Assistance

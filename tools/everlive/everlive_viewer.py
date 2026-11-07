@@ -64,7 +64,7 @@ SCALE_OPTIONS = [
 ]
 SCALE_MODES = {key for _, key in SCALE_OPTIONS}
 
-# Experimental lsfg-vk frame generation (gc573_user_streamer --framegen).
+# lsfg-vk frame generation (gc573_user_streamer --framegen).
 FRAMEGEN_OPTIONS = [
     ("Off — Native Ultra-Low Latency", "off"),
     ("60 → 120 FPS (Beta · LSFG 2x · 60 FPS Games)", "60to120"),
@@ -139,7 +139,7 @@ def load_settings() -> dict:
     settings["hdr_exposure"] = max(-2.0, min(2.0, float(settings["hdr_exposure"])))
     if settings.get("scale_mode") not in SCALE_MODES:
         settings["scale_mode"] = "fit"
-    # Experimental lsfg-vk frame generation.  Migrate the old shader-era keys.
+    # lsfg-vk frame generation.  Migrate the old shader-era keys.
     fg_mode = str(settings.get("framegen_mode", "off")).lower()
     fg_mode = FRAMEGEN_ALIASES.get(fg_mode, fg_mode)
     if fg_mode not in FRAMEGEN_KEYS:
@@ -1595,7 +1595,7 @@ class GameStreamer:
         if self.hw_info.get("pci"):
             cmd.append(self.hw_info["pci"])
 
-        # Experimental lsfg-vk frame generation.  This is deliberately passed
+        # lsfg-vk frame generation.  This is deliberately passed
         # in headless mode too: the engine keeps LSFG idle while the window is
         # closed and activates Vulkan + LSFG as soon as mode.set("gaming")
         # opens it, so a Studio -> Gaming switch needs no restart.  The V4L2
@@ -3746,7 +3746,7 @@ if HAS_QT:
                     self.combo_osd_pos.setCurrentIndex(idx)
                     self.combo_osd_pos.blockSignals(False)
 
-            # Experimental lsfg-vk: mirror the engine's live state.
+            # lsfg-vk: mirror the engine's live state.
             fg = status.get("framegen") or {}
             headless = bool(status.get("headless"))
             if hasattr(self, "combo_framegen"):
@@ -4315,7 +4315,7 @@ if HAS_QT:
                 self._ipc.set_hdr(self.chk_hdr.isChecked(), float(value))
 
         # -----------------------------------------------------------------
-        # Experimental frame generation & CAS
+        # Frame generation & CAS
         # -----------------------------------------------------------------
         def _framegen_config(self) -> Dict:
             mode = self.combo_framegen.currentData() or "off"

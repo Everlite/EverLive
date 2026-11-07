@@ -56,10 +56,10 @@
 #define EVERLIVE_VERSION "1.4.0"
 #endif
 
-/* Side-by-side identity: never claim the stable app's WM class or title. */
-#define EVERLIVE_WINDOW_TITLE	"EverLive Experimental"
-#define EVERLIVE_WM_CLASS	"EverLiveExperimental"
-#define EVERLIVE_APP_NAME	"EverLive Experimental"
+/* Desktop identity: window title, Wayland/X11 WM class and PipeWire app name. */
+#define EVERLIVE_WINDOW_TITLE	"EverLive"
+#define EVERLIVE_WM_CLASS	"EverLive"
+#define EVERLIVE_APP_NAME	"EverLive"
 
 /* SDL_HINT_APP_NAME was added after the 2.0.20 headers some distros ship. */
 #ifndef SDL_HINT_APP_NAME
@@ -134,7 +134,7 @@ static bool g_headless;
 static int g_mode_request;
 
 /*
- * Experimental presentation state.  Frame generation is delegated to the
+ * Frame-generation presentation state.  Frame generation is delegated to the
  * system lsfg-vk Vulkan layer, so there is no GL context any more: the window
  * owns either an "opengl" SDL_Renderer (mode OFF) or a "vulkan" one (the two
  * LSFG modes).  g_present_driver records which one is live; g_framegen is the
@@ -517,7 +517,7 @@ static void print_usage(const char *prog)
 	       DEFAULT_V4L2_DEVICE);
 	printf("  --headless        No SDL window/video output; capture, V4L2 and audio only.\n");
 	printf("  --ipc-socket PATH Control socket for the Control Hub remote mode\n");
-	printf("                    (default: $XDG_RUNTIME_DIR/everlive-experimental.sock).\n");
+	printf("                    (default: $XDG_RUNTIME_DIR/everlive.sock).\n");
 	printf("  --no-ipc          Do not open the control socket.\n");
 	printf("  --audio-tap [NAME] Mirror the mixed audio into a PipeWire sink\n");
 	printf("                    (default: %s).\n",
@@ -1544,12 +1544,12 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 
 	if (line3[0])
 		snprintf(text, sizeof(text),
-			 "EVERLIVE EXPERIMENTAL %c %ux%u%s @ %.2f Hz\n%s\n%s",
+			 "EVERLIVE %c %ux%u%s @ %.2f Hz\n%s\n%s",
 			 OSD_BULLET, in_w, in_h, interlaced ? "i" : "p",
 			 (double)rate_x100 / 100.0, line2, line3);
 	else
 		snprintf(text, sizeof(text),
-			 "EVERLIVE EXPERIMENTAL %c %ux%u%s @ %.2f Hz\n%s",
+			 "EVERLIVE %c %ux%u%s @ %.2f Hz\n%s",
 			 OSD_BULLET, in_w, in_h, interlaced ? "i" : "p",
 			 (double)rate_x100 / 100.0, line2);
 
@@ -1594,6 +1594,7 @@ static const char g_help_text[] =
 	"EVERLIVE HOTKEYS\n"
 	"F11 / F    Fullscreen\n"
 	"1 / L      Scaling (Fit / Integer)\n"
+	"G          Frame Generation (Off / 60->120 / 30->60)\n"
 	"A          Aspect Ratio (Auto/16:9/4:3/Stretch)\n"
 	"H          HDR Filmic Tonemap Toggle\n"
 	"Up / Down  Volume Up / Down (5%) [or + / -]\n"
@@ -1839,7 +1840,7 @@ static void *preview_thread(void *arg)
 		}
 
 		/*
-		 * Experimental frame generation: feed the capture ring on EVERY DMA
+		 * Frame generation: feed the capture ring on EVERY DMA
 		 * frame while a frame generation mode is selected.  The ring runs the
 		 * deduplicator internally, so a real 30/60 FPS transition frame can
 		 * never be skipped just because the renderer was busy.
@@ -4474,7 +4475,7 @@ static void apply_app_identity(void)
 	(void)setenv("PIPEWIRE_PROPS",
 		     "{ application.name = \"" EVERLIVE_APP_NAME "\" "
 		     "application.icon-name = \"everlive\" "
-		     "application.id = \"everlive-experimental\" "
+		     "application.id = \"everlive\" "
 		     "media.role = \"game\" }",
 		     0);
 	(void)setenv("PULSE_PROP_application.name", EVERLIVE_APP_NAME, 0);
@@ -4568,7 +4569,7 @@ static void set_window_icon(SDL_Window *window)
 }
 
 /*
- * Experimental presentation layer: the window owns an "opengl" SDL_Renderer
+ * Frame-generation presentation layer: the window owns an "opengl" SDL_Renderer
  * when frame generation is off, and a "vulkan" one when lsfg-vk should
  * synthesize the in-between frames.  Nothing here touches the DMA ring, so a
  * live switch only blinks the window for a frame.
@@ -4981,7 +4982,7 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 	st.led_g = g_led_g;
 	st.led_b = g_led_b;
 
-	/* Experimental lsfg-vk frame generation telemetry. */
+	/* lsfg-vk frame generation telemetry. */
 	memset(&fgst, 0, sizeof(fgst));
 	if (g_framegen)
 		gc573_framegen_get_stats(g_framegen, &fgst);
@@ -5465,7 +5466,7 @@ int main(int argc, char *argv[])
 	}
 
 	printf("==================================================================\n");
-	printf("  EverLive Experimental — Userspace VFIO Streamer [1.4 LAB] (v" EVERLIVE_VERSION ")\n");
+	printf("  EverLive — Userspace VFIO Streamer (v" EVERLIVE_VERSION ")\n");
 	printf("==================================================================\n\n");
 	if (g_trace_mode)
 		printf("[TRACE] Teardown trace enabled: press T while streaming to start the phase test.\n");
@@ -5748,7 +5749,7 @@ int main(int argc, char *argv[])
 	if (v4l2_sink.fd >= 0)
 		printf("[V4L2] Loopback output active on %s\n", v4l2_sink.path);
 	render_standby(window, renderer,
-		       "EverLive Experimental — Waiting for HDMI signal...");
+		       "EverLive — Waiting for HDMI signal...");
 
 	/*
 	 * Open the control socket last: every earlier failure path returns
@@ -5827,7 +5828,7 @@ int main(int argc, char *argv[])
 					printf("[OSD] Aspect: %s\n", aspect_name(g_aspect));
 					fflush(stdout);
 					snprintf(title, sizeof(title),
-						 "EverLive Experimental — Aspect: %s",
+						 "EverLive — Aspect: %s",
 						 aspect_name(g_aspect));
 					SDL_SetWindowTitle(window, title);
 				} else if (event.key.keysym.sym == SDLK_p) {
@@ -5864,7 +5865,7 @@ int main(int argc, char *argv[])
 					       scale_name(g_scale_mode));
 					fflush(stdout);
 					snprintf(title, sizeof(title),
-						 "EverLive Experimental — Scaling: %s",
+						 "EverLive — Scaling: %s",
 						 scale_name(g_scale_mode));
 					SDL_SetWindowTitle(window, title);
 				} else if (event.key.keysym.sym == SDLK_TAB ||
@@ -6039,7 +6040,7 @@ int main(int argc, char *argv[])
 							texture = NULL;
 						}
 						render_standby(window, renderer,
-							       "EverLive Experimental — Signal lost, waiting...");
+							       "EverLive — Signal lost, waiting...");
 					}
 				} else if (!probe.width || !probe.height) {
 					/* Timing register snapshot not ready; retry next poll. */
@@ -6077,7 +6078,7 @@ int main(int argc, char *argv[])
 								texture = NULL;
 							}
 							render_standby(window, renderer,
-								       "EverLive Experimental — Signal lost, waiting...");
+								       "EverLive — Signal lost, waiting...");
 						} else if (have_signal &&
 							   signal_parameters_equal(&fresh,
 									   &current_sig,
@@ -6152,8 +6153,8 @@ int main(int argc, char *argv[])
 								}
 								render_standby(window, renderer,
 									       ret == -ENOMEM ?
-									       "EverLive Experimental — Native mode exceeds RLIMIT_MEMLOCK" :
-									       "EverLive Experimental — Hot switch failed, waiting...");
+									       "EverLive — Native mode exceeds RLIMIT_MEMLOCK" :
+									       "EverLive — Hot switch failed, waiting...");
 							} else {
 								streaming = true;
 								have_signal = true;
@@ -6237,8 +6238,8 @@ int main(int argc, char *argv[])
 								VIDEO_STOP_HOT_MS);
 							render_standby(window, renderer,
 								       ret == -ENOMEM ?
-								       "EverLive Experimental — Native mode exceeds RLIMIT_MEMLOCK" :
-								       "EverLive Experimental — Waiting for HDMI signal...");
+								       "EverLive — Native mode exceeds RLIMIT_MEMLOCK" :
+								       "EverLive — Waiting for HDMI signal...");
 						} else {
 							streaming = true;
 							have_signal = true;
@@ -6301,7 +6302,7 @@ int main(int argc, char *argv[])
 				texture = NULL;
 			}
 			render_standby(window, renderer,
-				       "EverLive Experimental — DMA stall, reconnecting...");
+				       "EverLive — DMA stall, reconnecting...");
 		}
 
 		if (streaming) {
@@ -6668,7 +6669,7 @@ int main(int argc, char *argv[])
 						 " | %s", fg_line);
 
 				snprintf(title, sizeof(title),
-					 "EverLive Experimental — %ux%u%s @ %u.%02u Hz -> %ux%u YUYV @ %.2f FPS | ring %u/%uch | AR %s%s%s%s",
+					 "EverLive — %ux%u%s @ %u.%02u Hz -> %ux%u YUYV @ %.2f FPS | ring %u/%uch | AR %s%s%s%s",
 					 input_width, input_height,
 					 current_sig.interlaced ? "i" : "p",
 					 input_rate_x100 / 100,
@@ -6751,7 +6752,7 @@ int main(int argc, char *argv[])
 				}
 			} else {
 				snprintf(title, sizeof(title),
-					 "EverLive Experimental — Waiting for HDMI signal...");
+					 "EverLive — Waiting for HDMI signal...");
 			}
 			if (g_trace_mode)
 				strncat(title, " | T=teardown trace",

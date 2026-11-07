@@ -66,15 +66,14 @@ udevadm trigger 2>/dev/null || true
 
 # 4. Desktop-Einträge & Icons entfernen
 #
-# Side-by-side safety: this branch installs everlive-experimental.desktop.  The
-# stable everlive.desktop (and its config/socket) must survive an Experimental
-# uninstall, so the icon set is only removed when no launcher is left either.
+# Remove both the current launcher and the leftover entry from the earlier
+# "experimental" naming phase of this project.
+rm -f "${TARGET_HOME}/.local/share/applications/everlive.desktop"
 rm -f "${TARGET_HOME}/.local/share/applications/everlive-experimental.desktop"
 rm -f "${TARGET_HOME}/.local/share/applications/everlive-intern.desktop"
-if [ ! -f "${TARGET_HOME}/.local/share/applications/everlive.desktop" ]; then
-    rm -f "${TARGET_HOME}/.config/autostart/everlive.desktop"
-    rm -f "${TARGET_HOME}/.local/share/icons/hicolor/"*/apps/everlive.png
-fi
+rm -f "${TARGET_HOME}/.config/autostart/everlive.desktop"
+rmdir "${TARGET_HOME}/.config/everlive-experimental" 2>/dev/null || true
+rm -f "${TARGET_HOME}/.local/share/icons/hicolor/"*/apps/everlive.png
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "${TARGET_HOME}/.local/share/applications" 2>/dev/null || true
 fi
