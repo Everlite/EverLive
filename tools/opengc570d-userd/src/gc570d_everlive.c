@@ -76,6 +76,9 @@ struct everlive_v4l2 {
 	uint64_t frames;
 	uint64_t dropped;
 	uint64_t last_try_ns;
+	uint64_t last_reader_check_ns;
+	uint64_t idle_skips;
+	bool reader_active;
 	bool configured;
 };
 
@@ -288,11 +291,17 @@ static bool everlive_snapshot(struct everlive_state *st, int port)
 	unsigned int tries;
 
 	for (tries = 0; tries < 8; tries++) {
+		uint32_t slot;
+
 		seq = __atomic_load_n(&sp->seq, __ATOMIC_ACQUIRE);
-		if (!seq || (seq & 1))
+		if (!seq)
 			continue;
 		if (seq == st->last_seen[port])
 			return false;
+
+		slot = __atomic_load_n(&sp->ready_idx, __ATOMIC_ACQUIRE);
+		if (slot >= GC570D_SHM_SLOTS)
+			continue;
 
 		width = __atomic_load_n(&sp->width, __ATOMIC_ACQUIRE);
 		height = __atomic_load_n(&sp->height, __ATOMIC_ACQUIRE);
@@ -303,7 +312,7 @@ static bool everlive_snapshot(struct everlive_state *st, int port)
 			return false;
 
 		__atomic_thread_fence(__ATOMIC_ACQUIRE);
-		memcpy(frame->pixels, sp->yuy2, bytes);
+		memcpy(frame->pixels, sp->yuy2[slot], bytes);
 		frame->width = width;
 		frame->height = height;
 		frame->no_signal = __atomic_load_n(&sp->no_signal, __ATOMIC_RELAXED);
@@ -313,6 +322,7 @@ static bool everlive_snapshot(struct everlive_state *st, int port)
 
 		__atomic_thread_fence(__ATOMIC_ACQUIRE);
 		if (__atomic_load_n(&sp->seq, __ATOMIC_ACQUIRE) == seq) {
+			__atomic_store_n(&sp->read_idx, slot, __ATOMIC_RELAXED);
 			frame->seq = seq;
 			st->last_seen[port] = seq;
 			st->last_profile[port] = shm_port_profile(st, port);
@@ -378,6 +388,57 @@ static void everlive_v4l2_close(struct everlive_v4l2 *out)
 	out->configured = false;
 }
 
+/*
+ * v4l2loopback reports whether a capture consumer owns the node through
+ * sysfs.  Without a reader, write() only burns a full-frame copy (and the
+ * dual-HDMI path does this twice), so skip it while nobody is listening.
+ */
+static bool everlive_v4l2_reader_active(const char *device)
+{
+	const char *name;
+	char path[160];
+	char buf[64];
+	ssize_t n;
+	int fd;
+
+	if (!device || !*device)
+		return false;
+	name = strrchr(device, '/');
+	name = name ? name + 1 : device;
+	if (!*name)
+		return false;
+
+	if (snprintf(path, sizeof(path), "/sys/class/video4linux/%s/state",
+		     name) < (int)sizeof(path)) {
+		fd = open(path, O_RDONLY | O_CLOEXEC);
+		if (fd >= 0) {
+			const char *p = buf;
+
+			n = read(fd, buf, sizeof(buf) - 1);
+			close(fd);
+			if (n > 0) {
+				buf[n] = '\0';
+				while (*p == ' ' || *p == '\t' || *p == '\n')
+					p++;
+				return strncasecmp(p, "capture", 7) == 0;
+			}
+		}
+	}
+
+	if (snprintf(path, sizeof(path), "/sys/class/video4linux/%s/buffers",
+		     name) >= (int)sizeof(path))
+		return false;
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return false;
+	n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n <= 0)
+		return false;
+	buf[n] = '\0';
+	return strtoul(buf, NULL, 10) > 0;
+}
+
 static void everlive_v4l2_write(struct everlive_v4l2 *out,
 				const struct everlive_frame *frame,
 				uint64_t now)
@@ -403,6 +464,16 @@ static void everlive_v4l2_write(struct everlive_v4l2 *out,
 		everlive_v4l2_close(out);
 		if (everlive_v4l2_open(out, frame->width, frame->height) < 0)
 			return;
+	}
+
+	/* Re-check the sysfs state at most twice per second. */
+	if (now - out->last_reader_check_ns >= 500000000ULL) {
+		out->reader_active = everlive_v4l2_reader_active(out->path);
+		out->last_reader_check_ns = now;
+	}
+	if (!out->reader_active) {
+		out->idle_skips++;
+		return;
 	}
 
 	bytes = (size_t)frame->width * frame->height * 2;
@@ -982,6 +1053,27 @@ static void *everlive_thread(void *arg)
 		if (!sdl_ready)
 			fprintf(stderr,
 				"[gc570d WARN] EverLive SDL window unavailable; continuing without a preview\n");
+	} else if (st->opt.enable_sdl || st->opt.headless) {
+		/* Open low-latency desktop audio playback even in headless/UI-player mode */
+		SDL_SetHint(SDL_HINT_APP_NAME, "EverLive");
+		SDL_SetHint(SDL_HINT_AUDIO_DEVICE_APP_NAME, "EverLive");
+		SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_NAME, "HDMI Game Audio");
+		SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_ROLE, "game");
+		if (SDL_Init(SDL_INIT_AUDIO) == 0) {
+			SDL_AudioSpec want, have;
+			memset(&want, 0, sizeof(want));
+			want.freq = 48000;
+			want.format = AUDIO_S16LSB;
+			want.channels = 2;
+			want.samples = 1024;
+			sdl.audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+			if (sdl.audio_dev > 0) {
+				SDL_PauseAudioDevice(sdl.audio_dev, 0);
+				atomic_store_explicit(&st->audio_dev,
+						      (unsigned int)sdl.audio_dev,
+						      __ATOMIC_RELEASE);
+			}
+		}
 	}
 #endif
 
@@ -1070,7 +1162,7 @@ static void *everlive_thread(void *arg)
 	for (i = 0; i < 2; i++)
 		everlive_v4l2_close(&st->v4l2[i]);
 #ifdef HAVE_SDL2
-	if (sdl_ready)
+	if (sdl_ready || sdl.audio_dev > 0)
 		sdl_destroy(st, &sdl);
 #endif
 	atomic_store_explicit(&st->running, false, __ATOMIC_RELEASE);
@@ -1086,7 +1178,7 @@ int gc570d_everlive_start(struct gc570d_shm_region *shm,
 
 	if (!shm || !options)
 		return -EINVAL;
-	if (!options->enable_sdl && !options->v4l2[0] && !options->v4l2[1])
+	if (!options->enable_sdl && !options->headless && !options->v4l2[0] && !options->v4l2[1])
 		return 0;
 	if (atomic_load_explicit(&g_everlive.running, __ATOMIC_ACQUIRE))
 		return -EBUSY;

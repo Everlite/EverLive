@@ -22,16 +22,18 @@
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/utils/result.h>
+#include <dirent.h>
+#include <signal.h>
 #include <sys/wait.h>
 
-#define TAP_RING_BYTES		65536U	/* power of two, ~340 ms at 48 kHz */
-#define TAP_CHANNELS		2U
+#define TAP_RING_BYTES		262144U	/* power of two, ~340 ms at 48 kHz 8 ch */
 #define TAP_SAMPLE_BYTES	2U
 
 struct gc573_audio_tap {
 	int running;
 	char node_name[64];
 	int rate;
+	int channels;
 	int pending_seq;
 
 	struct pw_thread_loop *loop;
@@ -146,9 +148,14 @@ static void tap_process(void *userdata)
 
 	n = tap_ring_read(data->data, data->maxsize);
 	if (data->chunk) {
+		size_t frame = (size_t)tap->channels * TAP_SAMPLE_BYTES;
+
+		/* Never advertise a partial frame to the graph. */
+		if (frame)
+			n -= n % frame;
 		data->chunk->offset = 0;
 		data->chunk->size = (uint32_t)n;
-		data->chunk->stride = TAP_CHANNELS * TAP_SAMPLE_BYTES;
+		data->chunk->stride = (int32_t)frame;
 	}
 
 	pw_stream_queue_buffer(tap->stream, pwbuf);
@@ -166,8 +173,8 @@ static void tap_stream_state_changed(void *userdata,
 		pr_warn("Audio tap: stream error: %s",
 			error ? error : "unknown");
 	else if (state == PW_STREAM_STATE_STREAMING)
-		pr_info("Audio tap: connected to '%s' at %d Hz S16 stereo",
-			tap->node_name, tap->rate);
+		pr_info("Audio tap: connected to '%s' at %d Hz, %d ch S16",
+			tap->node_name, tap->rate, tap->channels);
 }
 
 static const struct pw_stream_events tap_stream_events = {
@@ -256,6 +263,54 @@ static void tap_teardown_locked(struct gc573_audio_tap *tap)
 }
 
 /*
+ * Close any inherited descriptors above STDERR_FILENO before executing
+ * helper processes (pactl / pw-cli).
+ */
+static void close_extra_fds(void)
+{
+	DIR *dir = opendir("/proc/self/fd");
+	if (dir) {
+		int dir_fd = dirfd(dir);
+		struct dirent *entry;
+
+		while ((entry = readdir(dir))) {
+			char *end;
+			long fd = strtol(entry->d_name, &end, 10);
+			if (*end != '\0' || fd <= 2 || fd == dir_fd)
+				continue;
+			close((int)fd);
+		}
+		closedir(dir);
+	} else {
+		int max_fd = (int)sysconf(_SC_OPEN_MAX);
+		if (max_fd < 0 || max_fd > 4096)
+			max_fd = 4096;
+		for (int fd = 3; fd < max_fd; fd++)
+			close(fd);
+	}
+}
+
+/*
+ * Bounded waitpid helper to ensure a hung pactl/pw-cli never stalls the audio thread.
+ */
+static pid_t timed_waitpid(pid_t pid, int *status, int timeout_ms)
+{
+	int step_ms = 10;
+	int elapsed = 0;
+
+	while (elapsed < timeout_ms) {
+		pid_t res = waitpid(pid, status, WNOHANG);
+		if (res != 0)
+			return res;
+		usleep(step_ms * 1000);
+		elapsed += step_ms;
+	}
+
+	kill(pid, SIGKILL);
+	return waitpid(pid, status, 0);
+}
+
+/*
  * Create the sink in-process when the config drop-in is not installed.
  *
  * We try `pactl load-module module-null-sink` first: modules loaded through
@@ -274,9 +329,10 @@ static void tap_ensure_sink(struct gc573_audio_tap *tap)
 
 	snprintf(sink_arg, sizeof(sink_arg), "sink_name=%s", tap->node_name);
 
-	/* 1. Try pactl */
+	/* 1. Try pactl.  Eight channels keeps 5.1/7.1 intact for OBS. */
 	pid = fork();
 	if (pid == 0) {
+		close_extra_fds();
 		int devnull = open("/dev/null", O_RDWR);
 
 		if (devnull >= 0) {
@@ -287,6 +343,8 @@ static void tap_ensure_sink(struct gc573_audio_tap *tap)
 		}
 		execlp("pactl", "pactl", "load-module",
 		       "module-null-sink", sink_arg,
+		       "channels=8",
+		       "channel_map=front-left,front-right,front-center,lfe,rear-left,rear-right,side-left,side-right",
 		       "sink_properties=device.description=\"EverLive Capture Audio\"",
 		       (char *)NULL);
 		_exit(127);
@@ -295,7 +353,7 @@ static void tap_ensure_sink(struct gc573_audio_tap *tap)
 	if (pid > 0) {
 		int status = 0;
 
-		if (waitpid(pid, &status, 0) > 0 &&
+		if (timed_waitpid(pid, &status, 1500) > 0 &&
 		    WIFEXITED(status) && WEXITSTATUS(status) == 0) {
 			pr_info("Audio tap: created persistent sink '%s' via pactl",
 				tap->node_name);
@@ -309,13 +367,14 @@ static void tap_ensure_sink(struct gc573_audio_tap *tap)
 		 "node.name = %s "
 		 "node.description = \"EverLive Capture Audio\" "
 		 "media.class = Audio/Sink "
-		 "audio.position = [ FL FR ] "
+		 "audio.position = [ FL FR FC LFE RL RR SL SR ] "
 		 "monitor.channel-volumes = true "
 		 "node.virtual = false }",
 		 tap->node_name);
 
 	pid = fork();
 	if (pid == 0) {
+		close_extra_fds();
 		int devnull = open("/dev/null", O_RDWR);
 
 		if (devnull >= 0) {
@@ -332,7 +391,7 @@ static void tap_ensure_sink(struct gc573_audio_tap *tap)
 	if (pid > 0) {
 		int status = 0;
 
-		if (waitpid(pid, &status, 0) > 0 &&
+		if (timed_waitpid(pid, &status, 1500) > 0 &&
 		    WIFEXITED(status) && WEXITSTATUS(status) == 0) {
 			pr_info("Audio tap: created sink '%s' via pw-cli",
 				tap->node_name);
@@ -422,7 +481,42 @@ fail:
 	return ret;
 }
 
-void gc573_audio_tap_set_format(unsigned int rate_hz)
+static void tap_channel_positions(unsigned int channels,
+				  enum spa_audio_channel *pos)
+{
+	static const enum spa_audio_channel layout2[2] = {
+		SPA_AUDIO_CHANNEL_FL, SPA_AUDIO_CHANNEL_FR,
+	};
+	static const enum spa_audio_channel layout6[6] = {
+		SPA_AUDIO_CHANNEL_FL, SPA_AUDIO_CHANNEL_FR,
+		SPA_AUDIO_CHANNEL_FC, SPA_AUDIO_CHANNEL_LFE,
+		SPA_AUDIO_CHANNEL_RL, SPA_AUDIO_CHANNEL_RR,
+	};
+	static const enum spa_audio_channel layout8[8] = {
+		SPA_AUDIO_CHANNEL_FL, SPA_AUDIO_CHANNEL_FR,
+		SPA_AUDIO_CHANNEL_FC, SPA_AUDIO_CHANNEL_LFE,
+		SPA_AUDIO_CHANNEL_RL, SPA_AUDIO_CHANNEL_RR,
+		SPA_AUDIO_CHANNEL_SL, SPA_AUDIO_CHANNEL_SR,
+	};
+	const enum spa_audio_channel *src;
+	unsigned int count;
+
+	if (channels >= 8) {
+		src = layout8;
+		count = 8;
+	} else if (channels == 6) {
+		src = layout6;
+		count = 6;
+	} else {
+		src = layout2;
+		count = 2;
+	}
+
+	for (unsigned int i = 0; i < count; i++)
+		pos[i] = src[i];
+}
+
+void gc573_audio_tap_set_format(unsigned int rate_hz, unsigned int channels)
 {
 	struct gc573_audio_tap *tap = &g_tap;
 	struct spa_audio_info_raw info;
@@ -436,8 +530,11 @@ void gc573_audio_tap_set_format(unsigned int rate_hz)
 		return;
 	if (!rate_hz)
 		rate_hz = 48000;
+	if (channels != 6 && channels != 8)
+		channels = 2;
 
-	if (tap->stream && tap->rate == (int)rate_hz)
+	if (tap->stream && tap->rate == (int)rate_hz &&
+	    tap->channels == (int)channels)
 		return;
 
 	pw_thread_loop_lock(tap->loop);
@@ -449,6 +546,7 @@ void gc573_audio_tap_set_format(unsigned int rate_hz)
 	}
 
 	tap->rate = (int)rate_hz;
+	tap->channels = (int)channels;
 
 	props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio",
 				  PW_KEY_MEDIA_CATEGORY, "Capture",
@@ -479,7 +577,8 @@ void gc573_audio_tap_set_format(unsigned int rate_hz)
 	spa_zero(info);
 	info.format = SPA_AUDIO_FORMAT_S16_LE;
 	info.rate = rate_hz;
-	info.channels = TAP_CHANNELS;
+	info.channels = channels;
+	tap_channel_positions(channels, info.position);
 
 	spa_pod_builder_init(&builder, buffer, sizeof(buffer));
 	params[0] = spa_format_audio_raw_build(&builder, SPA_PARAM_EnumFormat,
@@ -497,43 +596,69 @@ void gc573_audio_tap_set_format(unsigned int rate_hz)
 	if (res < 0)
 		pr_warn("Audio tap: connect failed (%s)", spa_strerror(res));
 	else
-		pr_info("Audio tap: publishing %u Hz S16 stereo to '%s'",
-			rate_hz, tap->node_name);
+		pr_info("Audio tap: publishing %u Hz %u ch S16 to '%s'",
+			rate_hz, channels, tap->node_name);
 }
 
 void gc573_audio_tap_write(const void *data, size_t bytes,
-			   unsigned int sample_bits)
+			   unsigned int sample_bytes,
+			   unsigned int source_channels,
+			   unsigned int output_channels)
 {
 	const uint8_t *src = data;
+	unsigned int frame_in;
+	size_t frames;
 
 	if (!__atomic_load_n(&g_tap.running, __ATOMIC_RELAXED) ||
 	    !data || !bytes)
 		return;
 
-	if (sample_bits > 16) {
-		/*
-		 * The streamer hands us left-aligned S32LSB (S24_3LE was widened
-		 * for SDL), so the top 16 bits are exactly the S16 sample.
-		 */
-		size_t samples = bytes / 4U;
-		size_t i;
+	if ((output_channels != 2 && output_channels != 6 &&
+	     output_channels != 8) ||
+	    (sample_bytes != 2 && sample_bytes != 3 && sample_bytes != 4) ||
+	    source_channels < output_channels || source_channels > 8)
+		return;
 
-		if (samples * 2U > sizeof(g_convert))
-			samples = sizeof(g_convert) / 2U;
+	frame_in = source_channels * sample_bytes;
+	frames = bytes / frame_in;
+	if (!frames)
+		return;
 
-		for (i = 0; i < samples; i++) {
-			int32_t v;
-			uint16_t out;
+	if (sample_bytes == 2 && source_channels == output_channels) {
+		/* Native S16LE: forward complete interleaved frames unchanged. */
+		tap_ring_write(src, frames * frame_in);
+		return;
+	}
 
-			memcpy(&v, src + i * 4U, sizeof(v));
-			out = (uint16_t)((uint32_t)v >> 16);
-			memcpy(g_convert + i * 2U, &out, sizeof(out));
+	/*
+	 * S24_3LE and left-aligned S32LSB both carry the 16 most significant
+	 * bits in the last two bytes of the sample, so no scaling is needed.
+	 * Packing also drops the FPGA padding slots for 5.1 sources.
+	 */
+	{
+		size_t max_frames = (sizeof(g_convert) / 2U) / output_channels;
+		size_t out = 0;
+
+		if (frames > max_frames)
+			frames = max_frames;
+
+		for (size_t frame = 0; frame < frames; frame++) {
+			for (unsigned int ch = 0; ch < output_channels; ch++) {
+				const uint8_t *p = src +
+					(frame * source_channels + ch) *
+					sample_bytes;
+
+				if (sample_bytes == 2) {
+					g_convert[out++] = p[0];
+					g_convert[out++] = p[1];
+				} else {
+					g_convert[out++] = p[sample_bytes - 2U];
+					g_convert[out++] = p[sample_bytes - 1U];
+				}
+			}
 		}
 
-		tap_ring_write(g_convert, samples * 2U);
-	} else {
-		/* Whole stereo frames only: never split a sample pair. */
-		tap_ring_write(src, bytes & ~3U);
+		tap_ring_write(g_convert, out);
 	}
 }
 
@@ -555,6 +680,7 @@ void gc573_audio_tap_stop(void)
 	tap->loop = NULL;
 	tap->node_name[0] = '\0';
 	tap->rate = 0;
+	tap->channels = 0;
 }
 
 bool gc573_audio_tap_active(void)

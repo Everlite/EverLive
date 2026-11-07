@@ -17,12 +17,6 @@
 #define GC573_I2C_ADDR_MCU_LED		0x20	/* RGB LED MCU */
 
 /**
- * gc573_user_i2c_init - Configure I2C bus clock divisors on FPGA
- * @bar0: Pointer to mapped BAR0 memory
- */
-void gc573_user_i2c_init(void *bar0);
-
-/**
  * gc573_user_i2c_read - Read bytes from an I2C slave register
  * @bar0: Pointer to mapped BAR0 memory
  * @bus: I2C bus index (0 = primary, 1 = secondary)

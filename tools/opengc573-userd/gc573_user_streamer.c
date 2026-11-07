@@ -27,9 +27,12 @@
 #include "gc573_user_nosignal.h"
 #include "gc573_user_ipc.h"
 #include "gc573_user_audio_tap.h"
+#include "gc573_user_video_tap.h"
 #include "gc573_user_hdr.h"
 #include "gc573_user_framegen.h"
 #include "gc573_user_font8x8.h"
+#include "gc573_user_led.h"
+#include "gc573_shm.h"
 #include <SDL2/SDL.h>
 #include <libswscale/swscale.h>
 #include <ctype.h>
@@ -40,11 +43,14 @@
 #include <math.h>
 #include <linux/videodev2.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -303,6 +309,7 @@ static enum stream_aspect g_aspect = ASPECT_AUTO;
 
 /* HDR to SDR tonemapping: on by default, exposure added in EV. */
 static bool g_hdr_enabled = true;
+static bool g_hdr_passthrough;
 static float g_hdr_exposure_ev;
 static enum gc573_hdr_type g_hdr_announced = GC573_HDR_SDR;
 
@@ -523,6 +530,10 @@ static void print_usage(const char *prog)
 	printf("                    (default: %s).\n",
 	       GC573_AUDIO_TAP_DEFAULT);
 	printf("                    Add 'Monitor of EverLive Capture Audio' in OBS.\n");
+	printf("  --video-tap [NAME] Mirror captured video into a PipeWire Video/Source\n");
+	printf("                    (default: %s).\n",
+	       GC573_VIDEO_TAP_DEFAULT);
+	printf("                    Consumable directly by OBS, Discord and FFmpeg.\n");
 	printf("  --no-hdr          Disable HDR10/HLG -> SDR tonemapping (bypass).\n");
 	printf("  --hdr-exposure EV Exposure bias for the tonemapper, -2.0 .. +2.0.\n");
 	printf("  --framegen MODE   off|60to120|30to60 (native lsfg-vk 2x).\n");
@@ -559,8 +570,37 @@ static bool parse_unit_float(const char *text, float *out)
 
 static void stop_led_daemon(void)
 {
-	(void)system("systemctl --user stop everlive-userd >/dev/null 2>&1");
-	(void)system("pkill -x everlive_userd >/dev/null 2>&1");
+	DIR *dir = opendir("/proc");
+	if (!dir)
+		return;
+
+	pid_t self_pid = getpid();
+	struct dirent *ent;
+	while ((ent = readdir(dir)) != NULL) {
+		if (ent->d_name[0] < '0' || ent->d_name[0] > '9')
+			continue;
+		pid_t pid = (pid_t)atoi(ent->d_name);
+		if (pid <= 1 || pid == self_pid)
+			continue;
+
+		char comm_path[64];
+		snprintf(comm_path, sizeof(comm_path), "/proc/%d/comm", (int)pid);
+		int fd = open(comm_path, O_RDONLY | O_CLOEXEC);
+		if (fd >= 0) {
+			char comm[64] = { 0 };
+			ssize_t n = read(fd, comm, sizeof(comm) - 1);
+			close(fd);
+			if (n > 0) {
+				while (n > 0 && (comm[n - 1] == '\n' || comm[n - 1] == ' ' || comm[n - 1] == '\r'))
+					comm[--n] = '\0';
+				if (strcmp(comm, "everlive_userd") == 0 ||
+				    strcmp(comm, "everlive-userd") == 0) {
+					kill(pid, SIGTERM);
+				}
+			}
+		}
+	}
+	closedir(dir);
 }
 
 /*
@@ -638,13 +678,31 @@ static bool start_led_daemon(struct gc573_vfio_ctx *ctx, bool handoff)
 	snprintf(led_g, sizeof(led_g), "%u", g_led_g);
 	snprintf(led_b, sizeof(led_b), "%u", g_led_b);
 
+	int err_pipe[2];
+	if (pipe2(err_pipe, O_CLOEXEC) < 0) {
+		err_pipe[0] = -1;
+		err_pipe[1] = -1;
+	}
+
 	pid = fork();
-	if (pid < 0)
+	if (pid < 0) {
+		if (err_pipe[0] >= 0) {
+			close(err_pipe[0]);
+			close(err_pipe[1]);
+		}
 		return false;
+	}
 	if (pid == 0) {
+		if (err_pipe[0] >= 0)
+			close(err_pipe[0]);
 		setsid();
 		mark_extra_fds_close_on_exec(ctx->container_fd, ctx->group_fd,
 					     ctx->device_fd);
+		if (err_pipe[1] >= 0) {
+			int flags = fcntl(err_pipe[1], F_GETFD);
+			if (flags >= 0)
+				fcntl(err_pipe[1], F_SETFD, flags | FD_CLOEXEC);
+		}
 		if (g_led_mode == STREAM_LED_WAVE) {
 			execl(exe, "everlive_userd", "--inherit",
 			      container_fd, group_fd, device_fd,
@@ -659,7 +717,28 @@ static bool start_led_daemon(struct gc573_vfio_ctx *ctx, bool handoff)
 			      bar_offset, bar_size, "--color",
 			      led_r, led_g, led_b, (char *)NULL);
 		}
+		int err = errno;
+		if (err_pipe[1] >= 0) {
+			ssize_t written = write(err_pipe[1], &err, sizeof(err));
+			(void)written;
+			close(err_pipe[1]);
+		}
 		_exit(127);
+	}
+
+	if (err_pipe[1] >= 0)
+		close(err_pipe[1]);
+
+	if (err_pipe[0] >= 0) {
+		int exec_err = 0;
+		ssize_t n = read(err_pipe[0], &exec_err, sizeof(exec_err));
+		close(err_pipe[0]);
+		if (n > 0) {
+			pr_err("Failed to exec standby daemon %s: %s (errno %d)",
+			       exe, strerror(exec_err), exec_err);
+			waitpid(pid, NULL, 0);
+			return false;
+		}
 	}
 
 	if (handoff) {
@@ -675,72 +754,22 @@ static bool start_led_daemon(struct gc573_vfio_ctx *ctx, bool handoff)
 
 static uint64_t now_us(void)
 {
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+	return gc573_now_us();
 }
 
 static uint64_t now_ms(void)
 {
-	return now_us() / 1000;
+	return gc573_now_ms();
 }
 
-#define RAINBOW_SATURATION	150U
-#define RAINBOW_VALUE_MIN	150U
-#define RAINBOW_VALUE_MAX	205U
-
-static void hsv_to_rgb(uint32_t hue, uint8_t sat, uint8_t val,
-		       uint8_t *r, uint8_t *g, uint8_t *b)
+static uint64_t timespec_to_ns(const struct timespec *ts)
 {
-	uint32_t region = (hue >> 8) % 6U;
-	uint32_t rem = hue & 0xffU;
-	uint8_t p = (uint8_t)((val * (255U - sat)) / 255U);
-	uint8_t q = (uint8_t)((val * (255U - (sat * rem) / 255U)) / 255U);
-	uint8_t t = (uint8_t)((val *
-			      (255U - (sat * (255U - rem)) / 255U)) / 255U);
-
-	switch (region) {
-	case 0: *r = val; *g = t;   *b = p;   break;
-	case 1: *r = q;   *g = val; *b = p;   break;
-	case 2: *r = p;   *g = val; *b = t;   break;
-	case 3: *r = p;   *g = q;   *b = val; break;
-	case 4: *r = t;   *g = p;   *b = val; break;
-	default:*r = val; *g = p;   *b = q;   break;
-	}
-}
-
-static void rainbow_tick(uint64_t elapsed_ms, uint32_t cycle_ms,
-			 uint8_t *r, uint8_t *g, uint8_t *b)
-{
-	uint32_t pos = cycle_ms ? (uint32_t)(elapsed_ms % cycle_ms) : 0U;
-	uint32_t hue = (uint32_t)(((uint64_t)pos * 1536U) / cycle_ms);
-	uint32_t half = cycle_ms / 2U;
-	uint32_t level, breath, val;
-
-	if (!half)
-		half = 1U;
-
-	level = (uint32_t)(((uint64_t)(pos % half) * 255U) / half);
-	breath = (level <= 127U) ? level * 2U : (255U - level) * 2U;
-	val = RAINBOW_VALUE_MIN +
-	      ((RAINBOW_VALUE_MAX - RAINBOW_VALUE_MIN) * breath) / 255U;
-
-	hsv_to_rgb(hue, RAINBOW_SATURATION, (uint8_t)val, r, g, b);
-}
-
-static void wave_tick(uint64_t elapsed_ms, uint32_t cycle_ms, uint32_t colors[5])
-{
-	for (int i = 0; i < 5; i++) {
-		uint64_t zone_elapsed = elapsed_ms + ((uint64_t)i * cycle_ms) / 5U;
-		uint8_t r, g, b;
-		rainbow_tick(zone_elapsed, cycle_ms, &r, &g, &b);
-		colors[i] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
-	}
+	return (uint64_t)ts->tv_sec * 1000000000ULL + (uint64_t)ts->tv_nsec;
 }
 
 static pthread_t g_led_thread;
 static bool g_led_thread_running;
+static volatile sig_atomic_t g_led_thread_stop;
 
 static void *led_worker(void *arg)
 {
@@ -749,7 +778,8 @@ static void *led_worker(void *arg)
 	uint32_t last_static = 0xFFFFFFFFu;
 	int last_mode = -1;
 
-	while (__atomic_load_n(&g_running, __ATOMIC_RELAXED)) {
+	while (!__atomic_load_n(&g_led_thread_stop, __ATOMIC_RELAXED) &&
+	       __atomic_load_n(&g_running, __ATOMIC_RELAXED)) {
 		int mode = __atomic_load_n(&g_led_mode_raw, __ATOMIC_RELAXED);
 
 		if (mode == STREAM_LED_WAVE) {
@@ -779,6 +809,30 @@ static void *led_worker(void *arg)
 		usleep(50000);
 	}
 	return NULL;
+}
+
+static int led_worker_start(struct gc573_vfio_ctx *ctx)
+{
+	if (g_led_thread_running)
+		return 0;
+	if (!ctx || !ctx->bar0)
+		return -EINVAL;
+
+	__atomic_store_n(&g_led_thread_stop, 0, __ATOMIC_RELAXED);
+	if (pthread_create(&g_led_thread, NULL, led_worker, ctx) != 0)
+		return -1;
+	g_led_thread_running = true;
+	return 0;
+}
+
+static void led_worker_stop(void)
+{
+	if (!g_led_thread_running)
+		return;
+
+	__atomic_store_n(&g_led_thread_stop, 1, __ATOMIC_RELAXED);
+	pthread_join(g_led_thread, NULL);
+	g_led_thread_running = false;
 }
 
 static const char *colorspace_name(uint8_t colorspace)
@@ -1311,6 +1365,43 @@ static void help_destroy(void)
 	g_help_overlay = false;
 }
 
+struct toast_overlay {
+	SDL_Texture *texture;
+	int width;
+	int height;
+	int scale;
+	char text[128];
+	uint64_t start_ms;
+	uint32_t duration_ms;
+	bool active;
+};
+
+static struct toast_overlay g_toast;
+static char g_toast_pending_text[128];
+static pthread_mutex_t g_toast_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void toast_trigger(const char *msg)
+{
+	if (!msg || !*msg)
+		return;
+	pthread_mutex_lock(&g_toast_lock);
+	snprintf(g_toast_pending_text, sizeof(g_toast_pending_text), "%s", msg);
+	pthread_mutex_unlock(&g_toast_lock);
+}
+
+static void toast_destroy(void)
+{
+	if (g_toast.texture) {
+		SDL_DestroyTexture(g_toast.texture);
+		g_toast.texture = NULL;
+	}
+	g_toast.width = 0;
+	g_toast.height = 0;
+	g_toast.scale = 0;
+	g_toast.text[0] = '\0';
+	g_toast.active = false;
+}
+
 static int osd_pad_for_scale(int scale)
 {
 	return 10 + (scale - 1) * 4;
@@ -1636,6 +1727,120 @@ static void help_render(SDL_Renderer *renderer, SDL_Window *window)
 	SDL_RenderCopy(renderer, g_help.texture, NULL, &dst);
 }
 
+static void toast_update(SDL_Renderer *renderer, int win_h)
+{
+	char pending[128] = { 0 };
+	int scale;
+	SDL_Surface *surface;
+	SDL_Texture *texture;
+	Uint32 bg, border_color;
+	SDL_Rect edge;
+	int pad, line_height, border;
+	size_t len;
+	int width, height;
+
+	pthread_mutex_lock(&g_toast_lock);
+	if (g_toast_pending_text[0]) {
+		memcpy(pending, g_toast_pending_text, sizeof(pending));
+		g_toast_pending_text[0] = '\0';
+	}
+	pthread_mutex_unlock(&g_toast_lock);
+
+	if (!pending[0])
+		return;
+
+	scale = osd_scale_for_height(win_h);
+	pad = scale >= 3 ? 18 : (scale == 2 ? 14 : 10);
+	line_height = 8 * scale;
+	border = scale >= 3 ? 2 : 1;
+
+	len = strlen(pending);
+	width = pad * 2 + (int)len * 8 * scale;
+	height = pad * 2 + line_height;
+
+	surface = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32,
+						 SDL_PIXELFORMAT_RGBA32);
+	if (!surface)
+		return;
+
+	bg = SDL_MapRGBA(surface->format, 16, 22, 32, 230);
+	SDL_FillRect(surface, NULL, bg);
+
+	border_color = SDL_MapRGBA(surface->format, 64, 160, 255, 200);
+	edge.x = 0; edge.y = 0; edge.w = width; edge.h = border;
+	SDL_FillRect(surface, &edge, border_color);
+	edge.y = height - border;
+	SDL_FillRect(surface, &edge, border_color);
+	edge.y = 0; edge.w = border; edge.h = height;
+	SDL_FillRect(surface, &edge, border_color);
+	edge.x = width - border;
+	SDL_FillRect(surface, &edge, border_color);
+
+	osd_draw_text(surface, pending, scale);
+
+	texture = SDL_CreateTextureFromSurface(renderer, surface);
+	SDL_FreeSurface(surface);
+	if (!texture)
+		return;
+
+	SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+	if (g_toast.texture)
+		SDL_DestroyTexture(g_toast.texture);
+	g_toast.texture = texture;
+	g_toast.width = width;
+	g_toast.height = height;
+	g_toast.scale = scale;
+	snprintf(g_toast.text, sizeof(g_toast.text), "%s", pending);
+	g_toast.start_ms = now_ms();
+	g_toast.duration_ms = 3000;
+	g_toast.active = true;
+}
+
+static void toast_render(SDL_Renderer *renderer, SDL_Window *window)
+{
+	int win_w = 0, win_h = 0;
+	uint64_t elapsed;
+	Uint8 alpha;
+	SDL_Rect dst;
+
+	if (!window)
+		return;
+
+	SDL_GetWindowSize(window, &win_w, &win_h);
+	if (win_w <= 0 || win_h <= 0)
+		return;
+
+	toast_update(renderer, win_h);
+
+	if (!g_toast.active || !g_toast.texture)
+		return;
+
+	elapsed = now_ms() - g_toast.start_ms;
+	if (elapsed >= g_toast.duration_ms) {
+		g_toast.active = false;
+		return;
+	}
+
+	if (elapsed < 250) {
+		alpha = (Uint8)((elapsed * 235) / 250);
+	} else if (elapsed > g_toast.duration_ms - 350) {
+		uint64_t rem = g_toast.duration_ms - elapsed;
+		alpha = (Uint8)((rem * 235) / 350);
+	} else {
+		alpha = 235;
+	}
+
+	dst.w = g_toast.width;
+	dst.h = g_toast.height;
+	dst.x = (win_w - dst.w) / 2;
+	if (dst.x < 0) dst.x = 0;
+	dst.y = win_h - dst.h - (g_toast.scale >= 3 ? 48 : (g_toast.scale == 2 ? 32 : 20));
+	if (dst.y < 0) dst.y = 0;
+
+	SDL_SetTextureAlphaMod(g_toast.texture, alpha);
+	SDL_RenderCopy(renderer, g_toast.texture, NULL, &dst);
+}
+
 static void fit_destination(SDL_Rect *dst, int win_w, int win_h,
 			    float src_aspect)
 {
@@ -1751,6 +1956,7 @@ static void render_frame(SDL_Window *window, SDL_Renderer *renderer,
 	SDL_RenderCopy(renderer, texture, NULL, &dst);
 	osd_render(renderer, window);
 	help_render(renderer, window);
+	toast_render(renderer, window);
 	SDL_RenderPresent(renderer);
 }
 
@@ -1776,9 +1982,9 @@ struct frame_preview {
 	pthread_t thread;
 	pthread_mutex_t lock;
 	bool lock_ready;
-	bool started;
-	bool stop;
-	bool stalled;
+	_Atomic bool started;
+	_Atomic bool stop;
+	_Atomic bool stalled;
 	struct gc573_user_video *video;
 	uint8_t *buffers[PREVIEW_MAX_BUFFERS];
 	bool busy[PREVIEW_MAX_BUFFERS];
@@ -1802,18 +2008,33 @@ static struct frame_preview g_preview;
 static void *preview_thread(void *arg)
 {
 	struct frame_preview *preview = arg;
+	int recovery_attempts = 0;
 
 	while (!preview->stop) {
 		int index = gc573_user_video_poll(preview->video, 2);
 		int slot = -1;
 
 		if (index == -2) {
-			__atomic_store_n(&preview->stalled, true,
-					 __ATOMIC_RELAXED);
+			if (recovery_attempts < 3 && !preview->stop) {
+				recovery_attempts++;
+				pr_warn("Video DMA stall watchdog triggered (>2s idle); auto-recovering DMA (attempt %d/3)...",
+					recovery_attempts);
+				gc573_user_video_stop(preview->video);
+				usleep(20000);
+				if (gc573_user_video_start(preview->video) == 0) {
+					pr_info("Video DMA auto-recovery attempt %d succeeded", recovery_attempts);
+					continue;
+				}
+				pr_err("Video DMA auto-recovery restart failed on attempt %d", recovery_attempts);
+			}
+			atomic_store_explicit(&preview->stalled, true,
+					      memory_order_relaxed);
 			break;
 		}
 		if (index < 0)
 			continue;
+
+		recovery_attempts = 0;
 
 		/*
 		 * Diagnostic frame dumps must never run on the hot path: stdout can
@@ -2108,8 +2329,21 @@ static enum v4l2_colorspace v4l2_colorspace_for_signal(
 	return V4L2_COLORSPACE_SRGB;
 }
 
+static bool is_valid_v4l2_device_path(const char *path)
+{
+	if (!path || strncmp(path, "/dev/video", 10) != 0)
+		return false;
+	for (const char *p = path + 10; *p; p++) {
+		if (*p < '0' || *p > '9')
+			return false;
+	}
+	return true;
+}
+
 static int v4l2_sink_open(struct v4l2_sink *sink, const char *path)
 {
+	struct stat st;
+
 	memset(sink, 0, sizeof(*sink));
 	sink->fd = -1;
 	sink->target_colorspace = V4L2_COLORSPACE_SRGB;
@@ -2117,11 +2351,23 @@ static int v4l2_sink_open(struct v4l2_sink *sink, const char *path)
 	if (!path || !*path)
 		return -EINVAL;
 
+	if (!is_valid_v4l2_device_path(path)) {
+		pr_err("V4L2 sink: invalid device path '%s' (must match /dev/video[0-9]+)", path);
+		return -EINVAL;
+	}
+
 	snprintf(sink->path, sizeof(sink->path), "%s", path);
-	sink->fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+	sink->fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
 	if (sink->fd < 0) {
 		pr_err("V4L2 sink: cannot open %s: %s", path, strerror(errno));
 		return -errno;
+	}
+
+	if (fstat(sink->fd, &st) < 0 || !S_ISCHR(st.st_mode)) {
+		pr_err("V4L2 sink: %s is not a character device", path);
+		close(sink->fd);
+		sink->fd = -1;
+		return -ENODEV;
 	}
 
 	pr_info("V4L2 sink: %s opened", path);
@@ -2135,9 +2381,13 @@ static int v4l2_sink_open(struct v4l2_sink *sink, const char *path)
  */
 static int v4l2_sink_reopen(struct v4l2_sink *sink)
 {
+	struct stat st;
 	int fd;
 
 	if (!sink || !sink->path[0])
+		return -EINVAL;
+
+	if (!is_valid_v4l2_device_path(sink->path))
 		return -EINVAL;
 
 	/* A new fd starts without any negotiated format. */
@@ -2148,7 +2398,7 @@ static int v4l2_sink_reopen(struct v4l2_sink *sink)
 		sink->fd = -1;
 	}
 
-	fd = open(sink->path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+	fd = open(sink->path, O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
 	if (fd < 0) {
 		if (!sink->reopen_error_reported) {
 			pr_warn("V4L2 sink: cannot reopen %s: %s",
@@ -2156,6 +2406,11 @@ static int v4l2_sink_reopen(struct v4l2_sink *sink)
 			sink->reopen_error_reported = true;
 		}
 		return -errno;
+	}
+
+	if (fstat(fd, &st) < 0 || !S_ISCHR(st.st_mode)) {
+		close(fd);
+		return -ENODEV;
 	}
 
 	sink->fd = fd;
@@ -2782,10 +3037,89 @@ static int v4l2_sink_configure_guarded(struct v4l2_sink *sink,
 	return ret;
 }
 
+static struct gc573_shm_region *g_gc573_shm = NULL;
+
+static void gc573_shm_init(const char *pci_bdf)
+{
+	int fd = shm_open(GC573_SHM_NAME, O_CREAT | O_RDWR, 0600);
+	if (fd < 0) {
+		pr_warn("Failed to create shared memory %s: %s", GC573_SHM_NAME, strerror(errno));
+		return;
+	}
+	/* The frame store is private to the owning user; never world-writable. */
+	(void)fchmod(fd, 0600);
+	if (ftruncate(fd, sizeof(struct gc573_shm_region)) < 0) {
+		pr_warn("Failed to truncate shared memory %s: %s", GC573_SHM_NAME, strerror(errno));
+		close(fd);
+		return;
+	}
+	void *ptr = mmap(NULL, sizeof(struct gc573_shm_region),
+			 PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	close(fd);
+	if (ptr == MAP_FAILED) {
+		pr_warn("Failed to mmap shared memory %s: %s", GC573_SHM_NAME, strerror(errno));
+		return;
+	}
+	g_gc573_shm = ptr;
+	g_gc573_shm->magic = GC573_SHM_MAGIC;
+	g_gc573_shm->version = 2;
+	g_gc573_shm->publisher_pid = (uint32_t)getpid();
+	g_gc573_shm->heartbeat_ns = now_us() * 1000ULL;
+	if (pci_bdf)
+		snprintf(g_gc573_shm->pci_bdf, sizeof(g_gc573_shm->pci_bdf), "%s", pci_bdf);
+	printf("[SHM] Initialized %s for userspace camera preload\n", GC573_SHM_NAME);
+}
+
+static void gc573_shm_publish(const void *pixels, size_t bytes,
+			      unsigned int width, unsigned int height,
+			      unsigned int fps_num, unsigned int fps_den)
+{
+	if (gc573_video_tap_active() && pixels && width && height) {
+		unsigned int rate_x100 = 6000;
+		if (fps_den > 0 && fps_num > 0)
+			rate_x100 = (unsigned int)((uint64_t)fps_den * 100ULL / fps_num);
+		gc573_video_tap_set_format(width, height, rate_x100);
+		gc573_video_tap_write(pixels, bytes, width, height);
+	}
+
+	if (!g_gc573_shm || !pixels || !width || !height)
+		return;
+
+	if (bytes > sizeof(g_gc573_shm->port.yuy2))
+		bytes = sizeof(g_gc573_shm->port.yuy2);
+
+	uint64_t seq = __atomic_load_n(&g_gc573_shm->port.seq, __ATOMIC_RELAXED) + 1;
+	__atomic_store_n(&g_gc573_shm->port.seq, seq, __ATOMIC_RELEASE);
+
+	g_gc573_shm->port.width = width;
+	g_gc573_shm->port.height = height;
+	g_gc573_shm->port.fps_num = fps_num ? fps_num : 1;
+	g_gc573_shm->port.fps_den = fps_den ? fps_den : 60;
+	g_gc573_shm->port.streaming = 1;
+	g_gc573_shm->port.timestamp_ns = now_us() * 1000ULL;
+	g_gc573_shm->publisher_pid = (uint32_t)getpid();
+	g_gc573_shm->heartbeat_ns = g_gc573_shm->port.timestamp_ns;
+	memcpy(g_gc573_shm->port.yuy2, pixels, bytes);
+
+	__atomic_store_n(&g_gc573_shm->port.seq, seq + 1, __ATOMIC_RELEASE);
+}
+
+static void gc573_shm_cleanup(void)
+{
+	if (g_gc573_shm) {
+		g_gc573_shm->port.streaming = 0;
+		munmap(g_gc573_shm, sizeof(struct gc573_shm_region));
+		g_gc573_shm = NULL;
+	}
+	shm_unlink(GC573_SHM_NAME);
+}
+
 static void v4l2_sink_write_guarded(struct v4l2_sink *sink, const void *data,
 				    size_t bytes, unsigned int width,
 				    unsigned int height)
 {
+	gc573_shm_publish(data, bytes, width, height, 1, 60);
+
 	pthread_mutex_lock(&g_v4l2_lock);
 	if (sink && (sink->fd >= 0 || sink->path[0]))
 		v4l2_sink_write(sink, data, bytes, width, height);
@@ -3042,6 +3376,7 @@ static void standby_present(SDL_Window *window, SDL_Renderer *renderer,
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 	SDL_RenderClear(renderer);
 	SDL_RenderCopy(renderer, g_standby->texture, NULL, &dst);
+	toast_render(renderer, window);
 	SDL_RenderPresent(renderer);
 	g_standby->pushes++;
 }
@@ -3184,7 +3519,6 @@ static int audio_open_device(struct audio_playback *playback,
 	playback->bits = (int)sample_bits;
 	playback->bytes_per_frame = (sample_bits / 8U) * 2U;
 	playback->primed = false;
-	gc573_audio_tap_set_format((unsigned int)playback->rate);
 	/* Stay paused until audio_queue_pcm_bytes() has built the cushion. */
 	SDL_PauseAudioDevice(playback->dev, 1);
 	pr_info("SDL audio: opened %u Hz, 2 ch, %u-bit via %s (cushion %u ms)",
@@ -3439,6 +3773,13 @@ static void audio_hotkey_report(SDL_Window *window)
 	printf("[AUDIO] Volume: %d%% %s\n", percent, muted ? "(Muted)" : "");
 	fflush(stdout);
 
+	{
+		char toast_buf[64];
+		snprintf(toast_buf, sizeof(toast_buf), "Volume: %d%%%s", percent,
+			 muted ? " (Muted)" : "");
+		toast_trigger(toast_buf);
+	}
+
 	if (window) {
 		char title[128];
 
@@ -3592,12 +3933,6 @@ static void audio_queue_pcm_bytes(struct audio_stream *as, const void *data,
 
 	data = audio_apply_gain(as, data, bytes);
 
-	/*
-	 * Mirror exactly what SDL is about to play.  The tap normalises to S16
-	 * and never feeds back into the playback path.
-	 */
-	gc573_audio_tap_write(data, bytes, (unsigned int)playback->bits);
-
 	if (SDL_QueueAudio(playback->dev, data, (Uint32)bytes) < 0) {
 		if (!playback->queue_error_reported) {
 			pr_warn("SDL audio: SDL_QueueAudio failed: %s",
@@ -3668,6 +4003,8 @@ static bool audio_bitstream_prepare(struct audio_stream *as)
 	    audio_open_device(&as->playback, 48000, 16) < 0)
 		return false;
 
+	/* Decoded output is stereo even when the carrier is 5.1/7.1. */
+	gc573_audio_tap_set_format(48000, 2);
 	return true;
 }
 
@@ -3687,6 +4024,9 @@ static void audio_bitstream_decode(struct audio_stream *as,
 		return;
 	if (!out_bytes)
 		return;
+
+	/* Decoded AC-3/DTS output is always stereo S16. */
+	gc573_audio_tap_write(as->playback.scratch, out_bytes, 2, 2, 2);
 
 	as->bt_playing = true;
 	audio_queue_pcm_bytes(as, as->playback.scratch, out_bytes);
@@ -3821,6 +4161,18 @@ static void audio_queue_block(struct audio_stream *as, const void *data,
 	/* Ambiguous carriers stay silent until the LPCM window confirmed. */
 	if (!as->lpcm_verified)
 		return;
+
+	/*
+	 * Feed the capture tap from the raw DMA block, before gain/mute and
+	 * before the stereo fold-down, so a 5.1/7.1 source keeps its full
+	 * layout.  A 6-channel source still arrives in the FPGA's 8-slot
+	 * layout, which the tap compacts down to 6 published channels.
+	 */
+	if (as->format_channels && as->dma.dma_channels &&
+	    as->dma.sample_bytes)
+		gc573_audio_tap_write(data, bytes, as->dma.sample_bytes,
+				      as->dma.dma_channels,
+				      as->format_channels);
 
 	if (!playback->dev)
 		return;
@@ -4003,6 +4355,13 @@ static void audio_handle_format(struct audio_stream *as,
 		as->retry_after = now + AUDIO_RETRY_MS;
 		return;
 	}
+
+	/*
+	 * The capture tap mirrors the source layout.  Compressed carriers are
+	 * decoded to stereo, so their tap stays 2 ch at the decoder rate.
+	 */
+	gc573_audio_tap_set_format(bitstream ? 48000 : format->rate_hz,
+				   bitstream ? 2 : format->channels);
 
 	if (as->lock_ready)
 		pthread_mutex_lock(&as->lock);
@@ -4441,6 +4800,7 @@ static void run_teardown_trace(struct gc573_vfio_ctx *ctx,
 		SDL_DestroyTexture(texture);
 	osd_destroy();
 	help_destroy();
+	toast_destroy();
 	if (renderer)
 		SDL_DestroyRenderer(renderer);
 	if (window)
@@ -4899,7 +5259,7 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 			      uint32_t out_w, uint32_t out_h,
 			      double fps, uint64_t frames,
 			      const struct gc573_user_video *video,
-			      const struct audio_stream *audio,
+			      struct audio_stream *audio,
 			      const struct v4l2_sink *sink)
 {
 	struct gc573_stats st;
@@ -4921,6 +5281,9 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 	st.frames = frames;
 	st.ring_buffers = video->num_buffers;
 	st.ring_channels = video->num_channels;
+
+	if (audio->lock_ready)
+		pthread_mutex_lock(&audio->lock);
 
 	if (audio->streaming) {
 		if (audio->bt_playing) {
@@ -4950,6 +5313,9 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 		snprintf(st.audio_label, sizeof(st.audio_label),
 			 "No HDMI audio");
 	}
+
+	if (audio->lock_ready)
+		pthread_mutex_unlock(&audio->lock);
 
 	st.audio_gain = float_from_bits(
 		__atomic_load_n(&g_audio_gain_bits, __ATOMIC_RELAXED));
@@ -5026,6 +5392,7 @@ static void hdr_apply(const struct gc573_user_video_signal *sig,
 			type = GC573_HDR_HLG;
 	}
 
+	gc573_hdr_set_passthrough(g_hdr_passthrough);
 	gc573_hdr_set_mode(type, powf(2.0f, g_hdr_exposure_ev));
 
 	if (type != g_hdr_announced) {
@@ -5046,6 +5413,7 @@ static void hdr_apply(const struct gc573_user_video_signal *sig,
 static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 			      SDL_Window *window,
 			      struct v4l2_sink *sink,
+			      struct gc573_vfio_ctx *ctx,
 			      uint32_t out_w, uint32_t out_h,
 			      const struct gc573_user_video_signal *sig,
 			      bool have_signal)
@@ -5120,9 +5488,16 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 	case GC573_IPC_CMD_HDR:
 		g_hdr_enabled = cmd->a != 0;
 		g_hdr_exposure_ev = cmd->f;
+		g_hdr_passthrough = cmd->b != 0;
+		gc573_hdr_set_passthrough(g_hdr_passthrough);
 		hdr_apply(sig, have_signal);
-		printf("[IPC] HDR: %s, exposure %+.1f EV\n",
+		if (g_hdr_passthrough)
+			toast_trigger("HDR: Passthrough (BT.2020)");
+		else
+			toast_trigger(g_hdr_enabled ? "HDR: Enabled (ACES)" : "HDR: Disabled");
+		printf("[IPC] HDR: %s, passthrough: %s, exposure %+.1f EV\n",
 		       g_hdr_enabled ? "auto" : "bypass",
+		       g_hdr_passthrough ? "on" : "off",
 		       (double)g_hdr_exposure_ev);
 		break;
 	case GC573_IPC_CMD_SCALE:
@@ -5169,6 +5544,12 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		pthread_mutex_unlock(&g_framegen_lock);
 
 		framegen_apply_config();
+		{
+			char fg_msg[64];
+			snprintf(fg_msg, sizeof(fg_msg), "FrameGen: %s",
+				 framegen_mode_name(mode));
+			toast_trigger(fg_msg);
+		}
 		printf("[IPC] Frame generation: %s (flow %d%%, perf %s, low-latency %s)\n",
 		       framegen_mode_name(mode),
 		       (int)(flow * 100.0f + 0.5f),
@@ -5213,10 +5594,198 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		}
 		break;
 	}
+	case GC573_IPC_CMD_TOAST:
+		toast_trigger(cmd->path);
+		printf("[IPC] Toast: %s\n", cmd->path);
+		break;
+	case GC573_IPC_CMD_EDID:
+		if (!ctx || !ctx->bar0) {
+			pr_warn("IPC EDID change ignored: hardware not initialized");
+			break;
+		}
+		if (gc573_user_edid_select(cmd->path, NULL) < 0) {
+			pr_warn("IPC EDID profile rejected: %s", cmd->path);
+			toast_trigger("EDID: Unknown Profile");
+			break;
+		}
+		g_bitstream_enabled = gc573_user_edid_advertises_bitstream();
+		if (gc573_user_program_edid_by_name(ctx->bar0,
+						    gc573_user_edid_active_name(),
+						    NULL) < 0) {
+			pr_warn("IPC EDID programming failed");
+			toast_trigger("EDID: Programming Failed");
+			break;
+		}
+		/*
+		 * Reprogramming the receiver is not visible to the source until
+		 * HPD is pulsed; enable_source() replays the upstream EDID and
+		 * toggles RX HPD, which is exactly the hotplug handshake.
+		 */
+		if (gc573_user_it6664_enable_source(ctx->bar0) < 0)
+			pr_warn("IPC EDID hotplug pulse failed");
+		printf("[IPC] EDID profile: %s\n",
+		       gc573_user_edid_active_name());
+		toast_trigger("EDID Updated");
+		break;
+	case GC573_IPC_CMD_HOTPLUG:
+		if (!ctx || !ctx->bar0) {
+			pr_warn("IPC hotplug ignored: hardware not initialized");
+			break;
+		}
+		if (!cmd->a) {
+			printf("[IPC] Hotplug pulse disabled\n");
+			break;
+		}
+		if (gc573_user_it6664_enable_source(ctx->bar0) < 0) {
+			pr_warn("IPC hotplug pulse failed");
+			toast_trigger("Hotplug Failed");
+			break;
+		}
+		printf("[IPC] HDMI hotplug pulse sent\n");
+		toast_trigger("HDMI Hotplug");
+		break;
+	case GC573_IPC_CMD_HDR_EV:
+		g_hdr_exposure_ev = cmd->f;
+		hdr_apply(sig, have_signal);
+		printf("[IPC] HDR exposure %+.1f EV\n",
+		       (double)g_hdr_exposure_ev);
+		toast_trigger("HDR Exposure Changed");
+		break;
 	default:
 		break;
 	}
 	fflush(stdout);
+}
+
+/*
+ * Re-acquire the GC573 after a system sleep/resume.
+ *
+ * A resume powers the PCIe function down and back up, which invalidates the
+ * VFIO group state, the BAR0 mapping and every DMA mapping.  The old stream
+ * cannot simply be poked back to life, so quiesce it, drop the VFIO context,
+ * and run the same bring-up sequence as the initial start.  The caller keeps
+ * the UI in standby and lets the normal signal probe restart capture.
+ *
+ * Returns 0 on success.  On failure the partially initialized context is
+ * cleaned up and a negative errno is returned so the caller can retry.
+ */
+static int gc573_resume_reinit(struct gc573_vfio_ctx *ctx,
+			       struct gc573_user_video *video,
+			       bool *video_ready,
+			       struct audio_stream *audio,
+			       const char *pci_addr,
+			       bool *it6805_irq_active,
+			       unsigned int *poll_stream_ms)
+{
+	int ret;
+
+	/*
+	 * Stop the LED worker first: it writes BAR0 from another thread and the
+	 * mapping is about to disappear.  It is restarted only after a complete
+	 * successful bring-up.
+	 */
+	led_worker_stop();
+
+	if (ctx->bar0) {
+		if (*it6805_irq_active) {
+			(void)gc573_user_it6805_enable_interrupts(ctx->bar0, false);
+			*it6805_irq_active = false;
+		}
+		(void)gc573_user_it6805_audio_disable(ctx->bar0);
+	}
+
+	/* The audio worker polls DMA state, so join it before unmapping. */
+	audio_worker_stop(audio);
+	audio_stop_capture(audio);
+	if (audio->dma_ready) {
+		gc573_user_audio_cleanup(&audio->dma);
+		audio->dma_ready = false;
+	}
+
+	if (*video_ready && ctx->bar0)
+		gc573_user_video_stop_timeout(video, VIDEO_STOP_HOT_MS);
+	if (*video_ready) {
+		gc573_user_video_cleanup(video);
+		*video_ready = false;
+	}
+
+	gc573_vfio_cleanup(ctx);
+
+	/* Re-open the container/group/device and remap BAR0. */
+	ret = gc573_vfio_init(ctx, pci_addr);
+	if (ret < 0)
+		goto fail;
+
+	ret = gc573_user_hw_init(ctx->bar0);
+	if (ret < 0) {
+		pr_err("FPGA/bridge re-init failed after resume: %d", ret);
+		goto fail_vfio;
+	}
+
+	/* Restore the selected LED mode while the receiver comes up. */
+	if (g_led_mode == STREAM_LED_WAVE) {
+		uint32_t default_zones[5] = {
+			0x00ff0000, 0x00ffff00, 0x0000ff00, 0x0000ffff, 0x008000ff,
+		};
+		gc573_user_set_led_zones(ctx->bar0, default_zones);
+	} else {
+		gc573_user_set_led_rgb(ctx->bar0, g_led_r, g_led_g, g_led_b);
+	}
+
+	ret = gc573_user_it6664_init(ctx->bar0);
+	if (ret < 0) {
+		pr_err("IT6664 re-init failed after resume: %d", ret);
+		goto fail_vfio;
+	}
+
+	ret = gc573_user_it6805_init(ctx->bar0);
+	if (ret < 0) {
+		pr_err("IT6805 re-init failed after resume: %d", ret);
+		goto fail_vfio;
+	}
+
+	if (gc573_user_it6805_enable_interrupts(ctx->bar0, true) == 0) {
+		*it6805_irq_active = true;
+		*poll_stream_ms = 200U;
+	} else {
+		*it6805_irq_active = false;
+		*poll_stream_ms = STATUS_POLL_STREAM_MS;
+	}
+
+	ret = gc573_user_program_edid_by_name(ctx->bar0,
+					      gc573_user_edid_active_name(), NULL);
+	if (ret < 0) {
+		pr_err("EDID reprogramming failed after resume: %d", ret);
+		goto fail_vfio;
+	}
+
+	ret = gc573_user_it6664_enable_source(ctx->bar0);
+	if (ret < 0) {
+		pr_err("IT6664 source enable failed after resume: %d", ret);
+		goto fail_vfio;
+	}
+
+	if (gc573_vfio_setup_msi(ctx) < 0)
+		pr_warn("Interrupt setup failed after resume; falling back to IRQ polling");
+
+	if (led_worker_start(ctx) < 0)
+		pr_warn("LED worker restart failed after resume");
+
+	if (gc573_user_audio_init(&audio->dma, ctx, ctx->bar0) == 0) {
+		audio->dma_ready = true;
+		if (audio_worker_start(audio) < 0)
+			pr_warn("Audio worker restart failed after resume");
+	} else {
+		pr_warn("Audio DMA remap failed after resume; continuing video-only");
+	}
+
+	return 0;
+
+fail_vfio:
+	gc573_vfio_cleanup(ctx);
+fail:
+	pr_err("GC573 hardware re-initialization after resume failed: %d", ret);
+	return ret ? ret : -EIO;
 }
 
 int main(int argc, char *argv[])
@@ -5229,6 +5798,7 @@ int main(int argc, char *argv[])
 	const char *v4l2_device = NULL;
 	const char *ipc_socket_override = NULL;
 	const char *audio_tap_node = NULL;
+	const char *video_tap_node = NULL;
 	bool ipc_disabled = false;
 	struct gc573_vfio_ctx ctx;
 	struct gc573_user_video video;
@@ -5242,6 +5812,8 @@ int main(int argc, char *argv[])
 	SDL_Texture *texture = NULL;
 	struct gc573_ipc_cmd ipc_cmd;
 	uint64_t last_status_poll = 0;
+	bool it6805_irq_active = false;
+	unsigned int poll_stream_ms = STATUS_POLL_STREAM_MS;
 	uint64_t last_service = 0;
 	uint64_t last_stats = 0;
 	uint64_t last_stats_us = 0;
@@ -5258,6 +5830,10 @@ int main(int argc, char *argv[])
 	bool have_signal = false;
 	unsigned int signal_lost_hits = 0;
 	bool rate_probe_after_scdt = false;
+	struct timespec resume_mono_prev = { 0 }, resume_boot_prev = { 0 };
+	uint64_t last_resume_check = 0;
+	uint64_t resume_next_try_ms = 0;
+	bool resume_pending = false;
 	int ret;
 
 	signal(SIGINT, sig_handler);
@@ -5361,6 +5937,15 @@ int main(int argc, char *argv[])
 				audio_tap_node = GC573_AUDIO_TAP_DEFAULT;
 		} else if (strncmp(argv[i], "--audio-tap=", 12) == 0) {
 			audio_tap_node = argv[i] + 12;
+		} else if (strcmp(argv[i], "--video-tap") == 0) {
+			if (i + 1 < argc && argv[i + 1][0] != '-')
+				video_tap_node = argv[++i];
+			else
+				video_tap_node = GC573_VIDEO_TAP_DEFAULT;
+		} else if (strncmp(argv[i], "--video-tap=", 12) == 0) {
+			video_tap_node = argv[i] + 12;
+		} else if (strcmp(argv[i], "--no-video-tap") == 0) {
+			video_tap_node = NULL;
 		} else if (strcmp(argv[i], "-f") == 0 ||
 			   strcmp(argv[i], "--fullscreen") == 0) {
 			g_fullscreen = true;
@@ -5501,6 +6086,9 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	/* 1b. Initialize GC573 V4L2 userspace camera shared memory */
+	gc573_shm_init(pci_addr);
+
 	/* 2. Initialize FPGA bridge, rails, HDMI link, and assert HPD. */
 	ret = gc573_user_hw_init(ctx.bar0);
 	if (ret < 0) {
@@ -5534,8 +6122,8 @@ int main(int argc, char *argv[])
 	 * wave and rainbow at runtime, and a static colour change must reach the
 	 * controller without restarting the streamer.
 	 */
-	if (pthread_create(&g_led_thread, NULL, led_worker, &ctx) == 0)
-		g_led_thread_running = true;
+	if (led_worker_start(&ctx) < 0)
+		pr_warn("LED worker thread unavailable; LED stays at the initial colour");
 
 	/*
 	 * 3. Bring up the IT6664 splitter first.  The source only sees the
@@ -5586,6 +6174,17 @@ int main(int argc, char *argv[])
 		}
 		gc573_vfio_cleanup(&ctx);
 		return 1;
+	}
+
+	/* 4a. Enable IT6805 signal change interrupts (R3). */
+	if (gc573_user_it6805_enable_interrupts(ctx.bar0, true) == 0) {
+		it6805_irq_active = true;
+		poll_stream_ms = 200U;
+		printf("[IT6805] Hardware signal interrupts enabled (poll interval relaxed to 200ms)\n");
+	} else {
+		it6805_irq_active = false;
+		poll_stream_ms = STATUS_POLL_STREAM_MS;
+		printf("[IT6805] Hardware signal interrupts unavailable; falling back to 50ms polling\n");
 	}
 
 	/*
@@ -5774,11 +6373,22 @@ int main(int argc, char *argv[])
 				strerror(-tap_ret));
 	}
 
+	if (video_tap_node) {
+		int vtap_ret = gc573_video_tap_start(video_tap_node);
+
+		if (vtap_ret < 0)
+			pr_warn("Video tap unavailable (%s); continuing without it",
+				strerror(-vtap_ret));
+	}
+
 	last_stats = now_ms();
 	last_stats_us = now_us();
 	last_status_poll = 0;
 	last_service = 0;
 	g_loop_start_ms = now_ms();
+	clock_gettime(CLOCK_MONOTONIC, &resume_mono_prev);
+	clock_gettime(CLOCK_BOOTTIME, &resume_boot_prev);
+	last_resume_check = now_ms();
 
 	while (g_running) {
 		SDL_Event event;
@@ -5822,9 +6432,12 @@ int main(int argc, char *argv[])
 					fflush(stdout);
 				} else if (event.key.keysym.sym == SDLK_a) {
 					char title[128];
+					char asp_toast[64];
 
 					g_aspect = (enum stream_aspect)
 						((g_aspect + 1) % ASPECT_COUNT);
+					snprintf(asp_toast, sizeof(asp_toast), "Aspect: %s", aspect_name(g_aspect));
+					toast_trigger(asp_toast);
 					printf("[OSD] Aspect: %s\n", aspect_name(g_aspect));
 					fflush(stdout);
 					snprintf(title, sizeof(title),
@@ -5840,10 +6453,13 @@ int main(int argc, char *argv[])
 				} else if (event.key.keysym.sym == SDLK_h) {
 					g_hdr_enabled = !g_hdr_enabled;
 					hdr_apply(&current_sig, have_signal);
+					toast_trigger(g_hdr_enabled ? "HDR: Enabled (Tonemapped)" : "HDR: Disabled (Bypass)");
 					printf("[HDR] Tonemapping: %s\n",
 					       g_hdr_enabled ? "auto" : "bypass");
 					fflush(stdout);
 				} else if (event.key.keysym.sym == SDLK_g) {
+					char fg_toast[64];
+
 					pthread_mutex_lock(&g_framegen_lock);
 					g_fg_config.mode = (g_fg_config.mode + 1) %
 							   (GC573_FG_30_TO_60 + 1);
@@ -5852,15 +6468,22 @@ int main(int argc, char *argv[])
 					g_fg_fallback = false;
 					g_present_rebuild = true;
 					framegen_apply_config();
+					snprintf(fg_toast, sizeof(fg_toast), "FrameGen: %s",
+						 framegen_mode_name(g_fg_config.mode));
+					toast_trigger(fg_toast);
 					printf("[FRAMEGEN] Mode: %s\n",
 					       framegen_mode_name(g_fg_config.mode));
 					fflush(stdout);
 				} else if (event.key.keysym.sym == SDLK_l ||
 					   event.key.keysym.sym == SDLK_1) {
 					char title[128];
+					char sc_toast[64];
 
 					g_scale_mode = (enum stream_scale)
 						((g_scale_mode + 1) % SCALE_COUNT);
+					snprintf(sc_toast, sizeof(sc_toast), "Scaling: %s",
+						 scale_name(g_scale_mode));
+					toast_trigger(sc_toast);
 					printf("[SCALE] Scaling: %s\n",
 					       scale_name(g_scale_mode));
 					fflush(stdout);
@@ -5907,7 +6530,7 @@ int main(int argc, char *argv[])
 		 * ever appends to the lock-free command ring.
 		 */
 		while (gc573_ipc_poll_cmd(&ipc_cmd))
-			apply_ipc_command(&ipc_cmd, window, &v4l2_sink,
+			apply_ipc_command(&ipc_cmd, window, &v4l2_sink, &ctx,
 					  output_width, output_height,
 					  &current_sig, have_signal);
 
@@ -5941,6 +6564,7 @@ int main(int argc, char *argv[])
 					standby.texture = NULL;
 				}
 				osd_destroy();
+				toast_destroy();
 				presentation_destroy(&window, &renderer, &texture);
 				if (presentation_open(&window, &renderer, &texture,
 						      output_width, output_height) < 0) {
@@ -5963,6 +6587,93 @@ int main(int argc, char *argv[])
 		now = now_ms();
 
 		/*
+		 * Detect system sleep/resume.  CLOCK_MONOTONIC stops during
+		 * suspend while CLOCK_BOOTTIME keeps counting, so a boot delta
+		 * that exceeds the monotonic delta by seconds means the machine
+		 * was asleep.  The PCIe function loses its VFIO state and every
+		 * hardware register across that boundary, so schedule a full
+		 * bring-up instead of trusting the old stream.
+		 */
+		if (now - last_resume_check >= 250) {
+			struct timespec mono_now;
+			struct timespec boot_now;
+			uint64_t mono_delta;
+			uint64_t boot_delta;
+
+			clock_gettime(CLOCK_MONOTONIC, &mono_now);
+			clock_gettime(CLOCK_BOOTTIME, &boot_now);
+			mono_delta = timespec_to_ns(&mono_now) -
+				     timespec_to_ns(&resume_mono_prev);
+			boot_delta = timespec_to_ns(&boot_now) -
+				     timespec_to_ns(&resume_boot_prev);
+			resume_mono_prev = mono_now;
+			resume_boot_prev = boot_now;
+			last_resume_check = now;
+
+			if (boot_delta > mono_delta + 2000000000ULL) {
+				printf("[RESUME] System sleep detected (slept %llu ms); re-initializing GC573\n",
+				       (unsigned long long)
+				       ((boot_delta - mono_delta) / 1000000ULL));
+				fflush(stdout);
+				resume_pending = true;
+				resume_next_try_ms = 0;
+			}
+		}
+
+		if (resume_pending && now >= resume_next_try_ms) {
+			/*
+			 * Return to standby before touching the hardware: if the
+			 * re-init fails the UI must not keep showing a frozen
+			 * pre-suspend frame.
+			 */
+			preview_stop();
+			streaming = false;
+			have_signal = false;
+			signal_lost_hits = 0;
+			rate_probe_after_scdt = false;
+			last_status_poll = 0;
+			last_service = 0;
+			last_stats = now_ms();
+			last_stats_us = now_us();
+			input_width = 0;
+			input_height = 0;
+			input_rate_x100 = 0;
+			output_width = 0;
+			output_height = 0;
+			memset(&current_sig, 0, sizeof(current_sig));
+			memset(&watch, 0, sizeof(watch));
+			if (texture) {
+				SDL_DestroyTexture(texture);
+				texture = NULL;
+			}
+			render_standby(window, renderer,
+				       "EverLive Experimental — Resuming from sleep...");
+
+			if (gc573_resume_reinit(&ctx, &video, &video_ready,
+						&audio, pci_addr,
+						&it6805_irq_active,
+						&poll_stream_ms) == 0) {
+				printf("[RESUME] GC573 re-initialized; waiting for HDMI\n");
+				fflush(stdout);
+				resume_pending = false;
+				toast_trigger("System Resume — Reinitialized");
+			} else {
+				resume_pending = true;
+				resume_next_try_ms = now_ms() + 5000U;
+				render_standby(window, renderer,
+					       "EverLive Experimental — Hardware unavailable after resume, retrying...");
+			}
+		}
+
+		if (streaming && it6805_irq_active) {
+			bool scdt_chg = false, avi_chg = false;
+			if (gc573_user_it6805_check_interrupts(ctx.bar0, &scdt_chg, &avi_chg) == 0) {
+				if (scdt_chg || avi_chg)
+					last_status_poll = 0;
+			}
+		}
+
+		/*
 		 * Cheap signal probe: reads status, the latched timing registers and
 		 * the AVI InfoFrame.  The pixel-clock sample is only taken when a
 		 * candidate change is already pending or SCDT just re-locked.  A
@@ -5970,7 +6681,7 @@ int main(int argc, char *argv[])
 		 * visible as a single hitch every 10 seconds on 59.72/59.93 Hz inputs.
 		 */
 		if (now - last_status_poll >=
-		    (streaming ? STATUS_POLL_STREAM_MS : STATUS_POLL_WAIT_MS)) {
+		    (streaming ? poll_stream_ms : STATUS_POLL_WAIT_MS)) {
 			last_status_poll = now;
 
 			/* Keep the splitter RX-lock and AVMute release serviced. */
@@ -6041,6 +6752,7 @@ int main(int argc, char *argv[])
 						}
 						render_standby(window, renderer,
 							       "EverLive — Signal lost, waiting...");
+						toast_trigger("HDMI Signal Lost");
 					}
 				} else if (!probe.width || !probe.height) {
 					/* Timing register snapshot not ready; retry next poll. */
@@ -6079,6 +6791,7 @@ int main(int argc, char *argv[])
 							}
 							render_standby(window, renderer,
 								       "EverLive — Signal lost, waiting...");
+							toast_trigger("HDMI Signal Lost");
 						} else if (have_signal &&
 							   signal_parameters_equal(&fresh,
 									   &current_sig,
@@ -6156,6 +6869,10 @@ int main(int argc, char *argv[])
 									       "EverLive — Native mode exceeds RLIMIT_MEMLOCK" :
 									       "EverLive — Hot switch failed, waiting...");
 							} else {
+								char sig_toast[64];
+								snprintf(sig_toast, sizeof(sig_toast), "Signal: %ux%u @ %.1f Hz",
+									 fresh.width, fresh.height, (double)fresh.frame_rate_x100 / 100.0);
+								toast_trigger(sig_toast);
 								streaming = true;
 								have_signal = true;
 								g_ever_streamed = true;
@@ -6169,6 +6886,9 @@ int main(int argc, char *argv[])
 								input_height = fresh.height;
 								input_rate_x100 =
 									fresh.frame_rate_x100;
+								if (gc573_video_tap_active())
+									gc573_video_tap_set_format(new_out_w, new_out_h,
+												   fresh.frame_rate_x100 ? fresh.frame_rate_x100 : 6000);
 								if (g_framegen)
 									gc573_framegen_set_source_hz(
 										g_framegen,
@@ -6241,6 +6961,10 @@ int main(int argc, char *argv[])
 								       "EverLive — Native mode exceeds RLIMIT_MEMLOCK" :
 								       "EverLive — Waiting for HDMI signal...");
 						} else {
+							char sig_toast[64];
+							snprintf(sig_toast, sizeof(sig_toast), "Signal: %ux%u @ %.1f Hz",
+								 sig.width, sig.height, (double)sig.frame_rate_x100 / 100.0);
+							toast_trigger(sig_toast);
 							streaming = true;
 							have_signal = true;
 							g_ever_streamed = true;
@@ -6255,6 +6979,9 @@ int main(int argc, char *argv[])
 							input_height = sig.height;
 							input_rate_x100 =
 								sig.frame_rate_x100;
+							if (gc573_video_tap_active())
+								gc573_video_tap_set_format(new_out_w, new_out_h,
+											   sig.frame_rate_x100 ? sig.frame_rate_x100 : 6000);
 							if (g_framegen)
 								gc573_framegen_set_source_hz(
 									g_framegen, input_rate_x100);
@@ -6275,7 +7002,7 @@ int main(int argc, char *argv[])
 			}
 		}
 
-		if (streaming && __atomic_load_n(&g_preview.stalled, __ATOMIC_RELAXED)) {
+		if (streaming && atomic_load_explicit(&g_preview.stalled, memory_order_relaxed)) {
 			u8 *b = (u8 *)ctx.bar0;
 
 			pr_err("Video DMA stalled; stopping capture. Diagnostic dump:\n"
@@ -6512,6 +7239,10 @@ int main(int argc, char *argv[])
 							&v4l2_sink, pixels,
 							g_preview.bytes, output_width,
 							output_height);
+					else
+						gc573_shm_publish(pixels, g_preview.bytes,
+								  output_width, output_height,
+								  1, (unsigned int)(displayed_fps > 0 ? displayed_fps : 60));
 					if (texture) {
 						int uret = SDL_UpdateTexture(
 							texture, NULL, pixels,
@@ -6587,6 +7318,10 @@ int main(int argc, char *argv[])
 								g_preview.bytes,
 								output_width,
 								output_height);
+						else
+							gc573_shm_publish(pixels, g_preview.bytes,
+									  output_width, output_height,
+									  1, (unsigned int)(displayed_fps > 0 ? displayed_fps : 60));
 						preview_release(ph);
 					}
 				}
@@ -6769,6 +7504,7 @@ int main(int argc, char *argv[])
 	 * notices within one poll interval that the session ended. */
 	gc573_ipc_stop();
 	gc573_audio_tap_stop();
+	gc573_video_tap_stop();
 
 	if (g_trace_requested) {
 		v4l2_pump_stop();
@@ -6813,6 +7549,7 @@ int main(int argc, char *argv[])
 	gc573_no_signal_destroy(&standby.frame);
 	osd_destroy();
 	help_destroy();
+	toast_destroy();
 	/* preview_stop() has joined the capture thread, so the teardown is safe. */
 	presentation_destroy(&window, &renderer, &texture);
 	SDL_Quit();
@@ -6829,6 +7566,9 @@ int main(int argc, char *argv[])
 	 */
 	if (!daemon_started)
 		start_led_daemon(&ctx, true);
+	if (it6805_irq_active)
+		gc573_user_it6805_enable_interrupts(ctx.bar0, false);
+	gc573_shm_cleanup();
 	gc573_vfio_cleanup(&ctx);
 
 	printf("[✓] EverLive Userspace Streamer closed cleanly.\n");

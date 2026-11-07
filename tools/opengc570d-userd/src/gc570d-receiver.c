@@ -1611,74 +1611,83 @@ int gc570d_it68051_program_edid(struct gc570d_dev *gc)
 	if (ret)
 		goto out_restore_page;
 
-	for (block = 0; block < 2; block++) {
-		for (i = 0; i < 127; i++) {
-			size_t address = block * 128 + i;
+	for (int attempt = 1; attempt <= 3; attempt++) {
+		for (block = 0; block < 2; block++) {
+			for (i = 0; i < 127; i++) {
+				size_t address = block * 128 + i;
 
-			ret = gc570d_i2c_write8(gc, bus, GC570D_I2C_EDID_ADDR8,
-						address,
-						gc570d_it68051_edid[address]);
-			if (ret) {
-				dev_err(&gc->pdev->dev,
-					"IT68051 EDID write failed at byte %zu: %d\n",
-					address, ret);
-				goto out_restore_page;
+				ret = gc570d_i2c_write8(gc, bus, GC570D_I2C_EDID_ADDR8,
+							address,
+							gc570d_it68051_edid[address]);
+				if (ret) {
+					dev_err(&gc->pdev->dev,
+						"IT68051 EDID write failed at byte %zu: %d\n",
+						address, ret);
+					goto out_restore_page;
+				}
 			}
 		}
+
+		ret = gc570d_it68051_select_page(gc, 0);
+		if (ret)
+			goto out_restore_page;
+		ret = gc570d_receiver_write8(gc, bus, 0xc9, block0_checksum);
+		if (ret)
+			goto out_restore_page;
+
+		ret = gc570d_it68051_select_page(gc, 4);
+		if (ret)
+			goto out_restore_page;
+		ret = gc570d_receiver_write8(gc, bus, 0xc9, block0_checksum);
+		if (ret)
+			goto out_restore_page;
+
+		/* Shared CTA block: port 0 is 1.0.0.0 and port 1 is 2.0.0.0. */
+		ret = gc570d_it68051_select_page(gc, 0);
+		if (ret)
+			goto out_restore_page;
+		ret = gc570d_receiver_write8(gc, bus, 0xc6, vsdb_address);
+		if (ret)
+			goto out_restore_page;
+		ret = gc570d_receiver_write8(gc, bus, 0xc7, 0x10);
+		if (ret)
+			goto out_restore_page;
+		ret = gc570d_receiver_write8(gc, bus, 0xc8, 0x00);
+		if (ret)
+			goto out_restore_page;
+		ret = gc570d_receiver_write8(gc, bus, 0xca, block1_checksum);
+		if (ret)
+			goto out_restore_page;
+
+		port1_checksum = block1_checksum - 0x10;
+		ret = gc570d_it68051_select_page(gc, 4);
+		if (ret)
+			goto out_restore_page;
+		ret = gc570d_receiver_write8(gc, bus, 0xc7, 0x20);
+		if (ret)
+			goto out_restore_page;
+		ret = gc570d_receiver_write8(gc, bus, 0xc8, 0x00);
+		if (ret)
+			goto out_restore_page;
+		ret = gc570d_receiver_write8(gc, bus, 0xca, port1_checksum);
+		if (ret)
+			goto out_restore_page;
+
+		ret = gc570d_it68051_edid_verify(gc, &bad_byte);
+		if (!ret)
+			break;
+
+		dev_warn(&gc->pdev->dev,
+			 "IT68051 EDID verification failed at byte %zu: %d (attempt %d/3); retrying write...\n",
+			 bad_byte, ret, attempt);
+		if (attempt == 3) {
+			dev_err(&gc->pdev->dev,
+				"IT68051 EDID verification failed after 3 attempts at byte %zu: %d\n",
+				bad_byte, ret);
+			goto out_restore_page;
+		}
+		msleep(5);
 	}
-
-	ret = gc570d_it68051_select_page(gc, 0);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xc9, block0_checksum);
-	if (ret)
-		goto out_restore_page;
-
-	ret = gc570d_it68051_select_page(gc, 4);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xc9, block0_checksum);
-	if (ret)
-		goto out_restore_page;
-
-	/* Shared CTA block: port 0 is 1.0.0.0 and port 1 is 2.0.0.0. */
-	ret = gc570d_it68051_select_page(gc, 0);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xc6, vsdb_address);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xc7, 0x10);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xc8, 0x00);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xca, block1_checksum);
-	if (ret)
-		goto out_restore_page;
-
-	port1_checksum = block1_checksum - 0x10;
-	ret = gc570d_it68051_select_page(gc, 4);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xc7, 0x20);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xc8, 0x00);
-	if (ret)
-		goto out_restore_page;
-	ret = gc570d_receiver_write8(gc, bus, 0xca, port1_checksum);
-	if (ret)
-		goto out_restore_page;
-
-	ret = gc570d_it68051_edid_verify(gc, &bad_byte);
-	if (ret)
-		dev_err(&gc->pdev->dev,
-			"IT68051 EDID verification failed at byte %zu: %d\n",
-			bad_byte, ret);
-	if (ret)
-		goto out_restore_page;
 
 	/* The official driver latches the updated shared EDID independently on both ports. */
 	ret = gc570d_it68051_select_page(gc, 0);

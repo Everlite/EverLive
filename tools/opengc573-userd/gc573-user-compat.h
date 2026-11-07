@@ -81,6 +81,19 @@ static inline void udelay(unsigned long usecs)
 	usleep(usecs);
 }
 
+/* Monotonic clock helpers */
+static inline uint64_t gc573_now_us(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+static inline uint64_t gc573_now_ms(void)
+{
+	return gc573_now_us() / 1000ULL;
+}
+
 /* Logging macros */
 #define pr_info(fmt, ...)	printf("[GC573-USER] " fmt "\n", ##__VA_ARGS__)
 #define pr_warn(fmt, ...)	printf("[GC573-USER][WARN] " fmt "\n", ##__VA_ARGS__)

@@ -123,6 +123,25 @@ int gc573_user_it6805_poll_signal_ex(void *bar0,
 int gc573_user_it6805_poll_signal(void *bar0, struct gc573_user_video_signal *sig);
 
 /**
+ * gc573_user_it6805_enable_interrupts - Enable IT6805 SCDT and AVI change interrupts
+ * @bar0: Pointer to mapped FPGA BAR0 MMIO
+ * @enable: true to enable interrupt masks, false to disable
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int gc573_user_it6805_enable_interrupts(void *bar0, bool enable);
+
+/**
+ * gc573_user_it6805_check_interrupts - Check and clear latched signal change interrupts
+ * @bar0: Pointer to mapped FPGA BAR0 MMIO
+ * @scdt_change: Set to true if SCDT sync status changed
+ * @avi_change: Set to true if AVI InfoFrame changed
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int gc573_user_it6805_check_interrupts(void *bar0, bool *scdt_change, bool *avi_change);
+
+/**
  * gc573_user_it6805_poll_hdr - Refresh only the DRM InfoFrame status
  * @bar0: Pointer to mapped FPGA BAR0 MMIO
  * @sig: Signal struct whose hdr_present/eotf/max_cll/max_fall are updated

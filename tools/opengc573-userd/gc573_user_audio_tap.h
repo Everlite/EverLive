@@ -6,9 +6,10 @@
  * stereo downmix) into a dedicated PipeWire node so OBS/Discord/FFmpeg can
  * record it as its own track, independent of the desktop mix.
  *
- * The tap always publishes S16_LE stereo.  16-bit carriers are forwarded
- * as-is; 24-bit carriers reach this layer as left-aligned S32LSB (the
- * streamer already widened them for SDL) and are re-quantised to S16.
+ * The tap publishes S16_LE at the HDMI channel count (2, 6 or 8) so OBS and
+ * FFmpeg can record real 5.1/7.1 instead of a stereo fold-down. 16-bit
+ * carriers are forwarded as-is; S24_3LE and left-aligned S32LSB carriers are
+ * re-quantised to S16 without touching the channel order.
  */
 
 #ifndef GC573_USER_AUDIO_TAP_H
@@ -18,6 +19,7 @@
 #include <stddef.h>
 
 #define GC573_AUDIO_TAP_DEFAULT	"everlive-capture-audio"
+#define GC573_AUDIO_TAP_MAX_CHANNELS 8U
 
 /**
  * gc573_audio_tap_start - Create the PipeWire client and locate the sink
@@ -34,23 +36,29 @@
 int gc573_audio_tap_start(const char *node_name);
 
 /**
- * gc573_audio_tap_set_format - (Re)connect the stream for a sample rate
+ * gc573_audio_tap_set_format - (Re)connect the stream for rate + channels
  * @rate_hz: HDMI sample rate (32/44.1/48 kHz)
+ * @channels: 2, 6 or 8 interleaved channels
  *
- * No-op when the tap is disabled or the rate did not change.
+ * No-op when the tap is disabled or the format did not change.
  */
-void gc573_audio_tap_set_format(unsigned int rate_hz);
+void gc573_audio_tap_set_format(unsigned int rate_hz, unsigned int channels);
 
 /**
  * gc573_audio_tap_write - Queue PCM for the tap
- * @data: Stereo PCM block (S16LE or left-aligned S32LSB)
+ * @data: Interleaved PCM block (S16LE, S24_3LE or left-aligned S32LSB)
  * @bytes: Size of the block
- * @sample_bits: 16 or 24, matching the streamer's playback format
+ * @sample_bytes: 2, 3 or 4 bytes per sample
+ * @source_channels: Interleaved stride of the input (for 5.1 this is the
+ *                   FPGA's 8-slot layout while the source carries 6 channels)
+ * @output_channels: 2, 6 or 8 channels to publish
  *
  * Lock-free: called from the audio worker, read from the PipeWire RT thread.
  */
 void gc573_audio_tap_write(const void *data, size_t bytes,
-			   unsigned int sample_bits);
+			   unsigned int sample_bytes,
+			   unsigned int source_channels,
+			   unsigned int output_channels);
 
 /**
  * gc573_audio_tap_stop - Tear the PipeWire client down

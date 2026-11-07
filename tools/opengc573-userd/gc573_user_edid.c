@@ -9,9 +9,13 @@
 #include "gc573_user_it6805.h"
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <sys/stat.h>
 
 #define IT6805_I2C_ADDR			0x48
 #define IT6805_EDID_I2C_ADDR		0x54
@@ -313,24 +317,88 @@ static int edid_build_unified_profile(const u8 *src, u8 *dst)
 	return edid_validate(dst);
 }
 
+static bool is_safe_edid_path(const char *path)
+{
+	char real[PATH_MAX];
+	const char *home;
+	char user_edid_dir[PATH_MAX] = { 0 };
+	char sys_edid_dir[PATH_MAX] = "/usr/share/everlive/edids";
+	char cwd_edid[PATH_MAX] = { 0 };
+
+	if (!path || !*path)
+		return false;
+
+	if (!realpath(path, real))
+		return false;
+
+	home = getenv("HOME");
+	if (home && *home) {
+		snprintf(user_edid_dir, sizeof(user_edid_dir), "%s/.config/everlive", home);
+		if (strncmp(real, user_edid_dir, strlen(user_edid_dir)) == 0)
+			return true;
+	}
+
+	if (strncmp(real, sys_edid_dir, strlen(sys_edid_dir)) == 0)
+		return true;
+
+	if (realpath("edids", cwd_edid) &&
+	    strncmp(real, cwd_edid, strlen(cwd_edid)) == 0)
+		return true;
+
+	if (strncmp(real, "/tmp/everlive", 13) == 0)
+		return true;
+
+	return false;
+}
+
 static int edid_load_file(const char *path)
 {
 	u8 buffer[GC573_EDID_SIZE];
 	u8 unified[GC573_EDID_SIZE];
 	const u8 *selected = buffer;
-	FILE *file;
-	size_t bytes;
+	struct stat st;
+	int fd;
+	ssize_t bytes = 0;
+	size_t total = 0;
 	int ret;
 
-	file = fopen(path, "rb");
-	if (!file) {
-		pr_err("EDID: cannot open '%s': %d", path, errno);
+	if (!path || !*path)
+		return -EINVAL;
+
+	if (!is_safe_edid_path(path)) {
+		pr_err("EDID: rejected unsafe path '%s' (must be under ~/.config/everlive/edids/ or /usr/share/everlive/edids/)", path);
+		return -EACCES;
+	}
+
+	fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+	if (fd < 0) {
+		pr_err("EDID: cannot open '%s': %s", path, strerror(errno));
 		return -errno;
 	}
-	bytes = fread(buffer, 1, sizeof(buffer), file);
-	fclose(file);
-	if (bytes != sizeof(buffer)) {
-		pr_err("EDID: '%s' has %zu bytes, expected %u", path, bytes,
+
+	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode)) {
+		pr_err("EDID: '%s' is not a regular file", path);
+		close(fd);
+		return -EINVAL;
+	}
+
+	while (total < sizeof(buffer)) {
+		bytes = read(fd, buffer + total, sizeof(buffer) - total);
+		if (bytes < 0) {
+			if (errno == EINTR)
+				continue;
+			pr_err("EDID: read error on '%s': %s", path, strerror(errno));
+			close(fd);
+			return -errno;
+		}
+		if (bytes == 0)
+			break;
+		total += (size_t)bytes;
+	}
+	close(fd);
+
+	if (total != sizeof(buffer)) {
+		pr_err("EDID: '%s' has %zu bytes, expected %u", path, total,
 		       GC573_EDID_SIZE);
 		return -EINVAL;
 	}
@@ -448,6 +516,21 @@ int gc573_user_edid_select(const char *profile_name, const char *custom_path)
 					GC573_EDID_PROFILE_DEFAULT);
 	}
 
+	if (!strncasecmp(name, "custom:", 7)) {
+		const char *cname = name + 7;
+		char custom_path_buf[512];
+		const char *home = getenv("HOME");
+		if (!home)
+			home = "/tmp";
+		if (strstr(cname, ".bin") || strstr(cname, ".edid"))
+			snprintf(custom_path_buf, sizeof(custom_path_buf),
+				 "%s/.config/everlive/edids/custom/%s", home, cname);
+		else
+			snprintf(custom_path_buf, sizeof(custom_path_buf),
+				 "%s/.config/everlive/edids/custom/%s.bin", home, cname);
+		return edid_load_file(custom_path_buf);
+	}
+
 	/* Anything that looks like a file is treated as a custom EDID. */
 	if (strchr(name, '/') || strstr(name, ".bin") || strstr(name, ".edid"))
 		return edid_load_file(name);
@@ -558,97 +641,107 @@ int gc573_user_program_edid(void *bar0)
 	if (ret < 0)
 		goto out;
 
-	/* 3. Program Block 0 (bytes 0..126). */
-	sum = 0;
-	for (int i = 0; i < 127; i++) {
-		u8 b = g_active_edid[i];
-
-		ret = it6805_write_edid_byte(bar0, i, b);
-		if (ret < 0)
-			goto out;
-		sum += b;
-	}
-	block_checksum[0] = -sum;
-
-	ret = gc573_user_it6805_set_bank(bar0, IT6805_BANK_0);
-	if (ret < 0)
-		goto out;
-	ret = it6805_write_reg(bar0, 0xc9, block_checksum[0]);
-	if (ret < 0)
-		goto out;
-
-	ret = gc573_user_it6805_set_bank(bar0, IT6805_BANK_CAOF_PORT1_CTRL);
-	if (ret < 0)
-		goto out;
-	ret = it6805_write_reg(bar0, 0xc9, block_checksum[0]);
-	if (ret < 0)
-		goto out;
-
-	/* 4. Program Block 1 (bytes 128..254). */
-	sum = 0;
-	for (int i = 0; i < 127; i++) {
-		u8 b = g_active_edid[128 + i];
-
-		ret = it6805_write_edid_byte(bar0, 128 + i, b);
-		if (ret < 0)
-			goto out;
-		sum += b;
-	}
-	block_checksum[1] = -sum;
-
-	/* 5. Calculate HDMI VSDB physical address and per-port checksums. */
-	offset = it6805_find_hdmi_physical_address(g_active_edid, 256);
-	if (!offset) {
-		pr_err("Failed to locate HDMI physical address in EDID!");
-		ret = -EINVAL;
-		goto out;
-	}
-
-	port_checksum[0] = block_checksum[1] +
-			   g_active_edid[offset] +
-			   g_active_edid[offset + 1] - 0x10;
-	port_checksum[1] = block_checksum[1] +
-			   g_active_edid[offset] +
-			   g_active_edid[offset + 1] - 0x20;
-
-	ret = gc573_user_it6805_set_bank(bar0, IT6805_BANK_0);
-	if (ret < 0)
-		goto out;
-	ret = it6805_write_reg(bar0, 0xc6, offset);
-	if (ret < 0)
-		goto out;
-	ret = it6805_write_reg(bar0, 0xc7, 0x10);
-	if (ret < 0)
-		goto out;
-	ret = it6805_write_reg(bar0, 0xc8, 0x00);
-	if (ret < 0)
-		goto out;
-	ret = it6805_write_reg(bar0, 0xca, port_checksum[0]);
-	if (ret < 0)
-		goto out;
-
-	ret = gc573_user_it6805_set_bank(bar0, IT6805_BANK_CAOF_PORT1_CTRL);
-	if (ret < 0)
-		goto out;
-	ret = it6805_write_reg(bar0, 0xc7, 0x20);
-	if (ret < 0)
-		goto out;
-	ret = it6805_write_reg(bar0, 0xc8, 0x00);
-	if (ret < 0)
-		goto out;
-	ret = it6805_write_reg(bar0, 0xca, port_checksum[1]);
-	if (ret < 0)
-		goto out;
-
-	/* 6. Verify the EDID RAM contents before latching them. */
 	unsigned int mismatches = 0;
 	unsigned int first = 0;
 
-	ret = gc573_user_verify_edid(bar0, &mismatches, &first);
-	if (ret < 0) {
-		pr_err("EDID verification failed: %d mismatches (first at %u)",
-		       mismatches, first);
-		goto out;
+	for (int attempt = 1; attempt <= 3; attempt++) {
+		/* 3. Program Block 0 (bytes 0..126). */
+		sum = 0;
+		for (int i = 0; i < 127; i++) {
+			u8 b = g_active_edid[i];
+
+			ret = it6805_write_edid_byte(bar0, i, b);
+			if (ret < 0)
+				goto out;
+			sum += b;
+		}
+		block_checksum[0] = -sum;
+
+		ret = gc573_user_it6805_set_bank(bar0, IT6805_BANK_0);
+		if (ret < 0)
+			goto out;
+		ret = it6805_write_reg(bar0, 0xc9, block_checksum[0]);
+		if (ret < 0)
+			goto out;
+
+		ret = gc573_user_it6805_set_bank(bar0, IT6805_BANK_CAOF_PORT1_CTRL);
+		if (ret < 0)
+			goto out;
+		ret = it6805_write_reg(bar0, 0xc9, block_checksum[0]);
+		if (ret < 0)
+			goto out;
+
+		/* 4. Program Block 1 (bytes 128..254). */
+		sum = 0;
+		for (int i = 0; i < 127; i++) {
+			u8 b = g_active_edid[128 + i];
+
+			ret = it6805_write_edid_byte(bar0, 128 + i, b);
+			if (ret < 0)
+				goto out;
+			sum += b;
+		}
+		block_checksum[1] = -sum;
+
+		/* 5. Calculate HDMI VSDB physical address and per-port checksums. */
+		offset = it6805_find_hdmi_physical_address(g_active_edid, 256);
+		if (!offset) {
+			pr_err("Failed to locate HDMI physical address in EDID!");
+			ret = -EINVAL;
+			goto out;
+		}
+
+		port_checksum[0] = block_checksum[1] +
+				   g_active_edid[offset] +
+				   g_active_edid[offset + 1] - 0x10;
+		port_checksum[1] = block_checksum[1] +
+				   g_active_edid[offset] +
+				   g_active_edid[offset + 1] - 0x20;
+
+		ret = gc573_user_it6805_set_bank(bar0, IT6805_BANK_0);
+		if (ret < 0)
+			goto out;
+		ret = it6805_write_reg(bar0, 0xc6, offset);
+		if (ret < 0)
+			goto out;
+		ret = it6805_write_reg(bar0, 0xc7, 0x10);
+		if (ret < 0)
+			goto out;
+		ret = it6805_write_reg(bar0, 0xc8, 0x00);
+		if (ret < 0)
+			goto out;
+		ret = it6805_write_reg(bar0, 0xca, port_checksum[0]);
+		if (ret < 0)
+			goto out;
+
+		ret = gc573_user_it6805_set_bank(bar0, IT6805_BANK_CAOF_PORT1_CTRL);
+		if (ret < 0)
+			goto out;
+		ret = it6805_write_reg(bar0, 0xc7, 0x20);
+		if (ret < 0)
+			goto out;
+		ret = it6805_write_reg(bar0, 0xc8, 0x00);
+		if (ret < 0)
+			goto out;
+		ret = it6805_write_reg(bar0, 0xca, port_checksum[1]);
+		if (ret < 0)
+			goto out;
+
+		/* 6. Verify the EDID RAM contents before latching them (R2: verify readback). */
+		mismatches = 0;
+		first = 0;
+		ret = gc573_user_verify_edid(bar0, &mismatches, &first);
+		if (ret == 0)
+			break;
+
+		pr_warn("EDID verification mismatch (attempt %d/3, %u mismatches, first at %u); retrying write...",
+			attempt, mismatches, first);
+		if (attempt == 3) {
+			pr_err("EDID verification failed after 3 attempts: %u mismatches (first at %u)",
+			       mismatches, first);
+			goto out;
+		}
+		usleep(5000);
 	}
 	pr_info("EDID RAM verified: 256 bytes match the built-in table.");
 
@@ -779,7 +872,7 @@ int gc573_user_edid_compare(const u8 *edid, size_t size,
 int gc573_user_verify_edid(void *bar0, unsigned int *mismatches,
 			   unsigned int *first_offset)
 {
-	u8 edid[GC573_EDID_SIZE];
+	u8 edid[GC573_EDID_SIZE] = { 0 };
 	int ret;
 
 	ret = gc573_user_read_edid(bar0, edid);

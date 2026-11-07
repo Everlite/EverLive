@@ -8,6 +8,12 @@
 
 #include "gc573-user-compat.h"
 
+#define PCI_VENDOR_ID_AVERMEDIA		0x1461
+#define PCI_DEVICE_ID_GC573		0x0054
+#define PCI_DEVICE_ID_GC555_BOLT	0x0055
+#define PCI_SUBDEVICE_ID_GC573		0x5730
+#define PCI_SUBDEVICE_ID_GC570D		0x5700
+
 #define GC573_VFIO_MAX_DMA_REGIONS	32
 
 struct gc573_vfio_dma_region {
@@ -34,6 +40,7 @@ struct gc573_vfio_ctx {
 
 	/* Interrupts */
 	int irq_efd;
+	bool is_intx;
 
 	/*
 	 * The DMA interrupt status register is shared by the video completion
@@ -123,5 +130,11 @@ int gc573_vfio_unmap_dma(struct gc573_vfio_ctx *ctx, uint64_t iova, size_t size)
  * Returns 0 on success, negative errno on failure.
  */
 int gc573_vfio_setup_msi(struct gc573_vfio_ctx *ctx);
+
+/**
+ * gc573_vfio_unmask_intx - Unmask INTx interrupt line if configured for level trigger
+ * @ctx: Context structure
+ */
+void gc573_vfio_unmask_intx(struct gc573_vfio_ctx *ctx);
 
 #endif /* GC573_VFIO_H */

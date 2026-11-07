@@ -30,6 +30,21 @@
 #include <stdint.h>
 #include <string.h>
 
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#include <emmintrin.h>
+#if defined(__GNUC__) || defined(__clang__)
+#include <cpuid.h>
+#endif
+#endif
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#if defined(__linux__) && !defined(__aarch64__)
+#include <sys/auxv.h>
+#include <asm/hwcap.h>
+#endif
+#endif
+
 #define HDR_LUT_SIZE		256
 /* Y and Cb/Cr use limited range in the FPGA output. */
 #define HDR_Y_OFFSET		16.0
@@ -57,10 +72,16 @@ static float g_cb_cb;
 static float g_cb_cr;
 static float g_cr_cb;
 static float g_cr_cr;
+static float g_m_cb_cb;
+static float g_m_cb_cr;
+static float g_m_cr_cb;
+static float g_m_cr_cr;
 static int g_active;
+static bool g_passthrough;
 static enum gc573_hdr_type g_type;
 static float g_exposure = 1.0f;
 static int g_init_done;
+static void (*g_tonemap_impl)(void *frame, size_t macropixels) = NULL;
 
 /* ------------------------------------------------------------------ */
 /* Transfer functions                                                  */
@@ -165,6 +186,136 @@ static void hdr_build_lut(enum gc573_hdr_type type, double exposure)
 	}
 }
 
+static inline uint8_t clamp_chroma(float value)
+{
+	int v = (int)(value + 0.5f);
+
+	if (v < HDR_C_MIN)
+		v = HDR_C_MIN;
+	if (v > HDR_C_MAX)
+		v = HDR_C_MAX;
+	return (uint8_t)v;
+}
+
+static void tonemap_yuyv_scalar(void *frame, size_t macropixels)
+{
+	uint8_t *p = frame;
+
+	for (size_t i = 0; i < macropixels; i++, p += 4) {
+		float cb = (float)p[1] - HDR_C_OFFSET;
+		float cr = (float)p[3] - HDR_C_OFFSET;
+
+		p[0] = g_y_lut[p[0]];
+		p[2] = g_y_lut[p[2]];
+		p[1] = clamp_chroma(g_m_cb_cb * cb + g_m_cb_cr * cr + HDR_C_OFFSET);
+		p[3] = clamp_chroma(g_m_cr_cb * cb + g_m_cr_cr * cr + HDR_C_OFFSET);
+	}
+}
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+static void tonemap_yuyv_sse2(void *frame, size_t macropixels)
+{
+	uint8_t *p = frame;
+	size_t pairs = macropixels / 2;
+	const __m128 v_offset_round = _mm_set1_ps(HDR_C_OFFSET + 0.5f);
+	const __m128 v_c_min = _mm_set1_ps((float)HDR_C_MIN);
+	const __m128 v_c_max = _mm_set1_ps((float)HDR_C_MAX);
+	const __m128 v_k_cb = _mm_set_ps(g_m_cr_cb, g_m_cb_cb, g_m_cr_cb, g_m_cb_cb);
+	const __m128 v_k_cr = _mm_set_ps(g_m_cr_cr, g_m_cb_cr, g_m_cr_cr, g_m_cb_cr);
+
+	for (size_t i = 0; i < pairs; i++, p += 8) {
+		p[0] = g_y_lut[p[0]];
+		p[2] = g_y_lut[p[2]];
+		p[4] = g_y_lut[p[4]];
+		p[6] = g_y_lut[p[6]];
+
+		float cb0 = (float)p[1] - HDR_C_OFFSET;
+		float cr0 = (float)p[3] - HDR_C_OFFSET;
+		float cb1 = (float)p[5] - HDR_C_OFFSET;
+		float cr1 = (float)p[7] - HDR_C_OFFSET;
+
+		__m128 v_cb = _mm_set_ps(cb1, cb1, cb0, cb0);
+		__m128 v_cr = _mm_set_ps(cr1, cr1, cr0, cr0);
+
+		__m128 val = _mm_add_ps(_mm_add_ps(_mm_mul_ps(v_cb, v_k_cb), _mm_mul_ps(v_cr, v_k_cr)), v_offset_round);
+		val = _mm_max_ps(val, v_c_min);
+		val = _mm_min_ps(val, v_c_max);
+		__m128i ival = _mm_cvttps_epi32(val);
+
+		__m128i p16 = _mm_packs_epi32(ival, ival);
+		__m128i p8 = _mm_packus_epi16(p16, p16);
+		uint32_t c_packed = (uint32_t)_mm_cvtsi128_si32(p8);
+
+		p[1] = (uint8_t)c_packed;
+		p[3] = (uint8_t)(c_packed >> 8);
+		p[5] = (uint8_t)(c_packed >> 16);
+		p[7] = (uint8_t)(c_packed >> 24);
+	}
+
+	if (macropixels & 1) {
+		float cb = (float)p[1] - HDR_C_OFFSET;
+		float cr = (float)p[3] - HDR_C_OFFSET;
+
+		p[0] = g_y_lut[p[0]];
+		p[2] = g_y_lut[p[2]];
+		p[1] = clamp_chroma(g_m_cb_cb * cb + g_m_cb_cr * cr + HDR_C_OFFSET);
+		p[3] = clamp_chroma(g_m_cr_cb * cb + g_m_cr_cr * cr + HDR_C_OFFSET);
+	}
+}
+#endif
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+static void tonemap_yuyv_neon(void *frame, size_t macropixels)
+{
+	uint8_t *p = frame;
+	size_t pairs = macropixels / 2;
+	float32x4_t v_offset = vdupq_n_f32(HDR_C_OFFSET);
+	float32x4_t v_c_min = vdupq_n_f32((float)HDR_C_MIN);
+	float32x4_t v_c_max = vdupq_n_f32((float)HDR_C_MAX);
+	float32x4_t v_k_cb = { g_m_cb_cb, g_m_cr_cb, g_m_cb_cb, g_m_cr_cb };
+	float32x4_t v_k_cr = { g_m_cb_cr, g_m_cr_cr, g_m_cb_cr, g_m_cr_cr };
+
+	for (size_t i = 0; i < pairs; i++, p += 8) {
+		p[0] = g_y_lut[p[0]];
+		p[2] = g_y_lut[p[2]];
+		p[4] = g_y_lut[p[4]];
+		p[6] = g_y_lut[p[6]];
+
+		float cb0 = (float)p[1] - HDR_C_OFFSET;
+		float cr0 = (float)p[3] - HDR_C_OFFSET;
+		float cb1 = (float)p[5] - HDR_C_OFFSET;
+		float cr1 = (float)p[7] - HDR_C_OFFSET;
+
+		float32x4_t v_cb = { cb0, cb0, cb1, cb1 };
+		float32x4_t v_cr = { cr0, cr0, cr1, cr1 };
+
+		float32x4_t val = vmlaq_f32(vmlaq_f32(v_offset, v_cb, v_k_cb), v_cr, v_k_cr);
+		val = vmaxq_f32(val, v_c_min);
+		val = vminq_f32(val, v_c_max);
+
+		int32x4_t ival = vcvtaq_s32_f32(val);
+		int16x4_t p16 = vmovn_s32(ival);
+		uint8x8_t p8 = vqmovun_s16(vcombine_s16(p16, p16));
+		uint32_t c_packed = vget_lane_u32((uint32x2_t)p8, 0);
+
+		p[1] = (uint8_t)c_packed;
+		p[3] = (uint8_t)(c_packed >> 8);
+		p[5] = (uint8_t)(c_packed >> 16);
+		p[7] = (uint8_t)(c_packed >> 24);
+	}
+
+	if (macropixels & 1) {
+		float cb = (float)p[1] - HDR_C_OFFSET;
+		float cr = (float)p[3] - HDR_C_OFFSET;
+
+		p[0] = g_y_lut[p[0]];
+		p[2] = g_y_lut[p[2]];
+		p[1] = clamp_chroma(g_m_cb_cb * cb + g_m_cb_cr * cr + HDR_C_OFFSET);
+		p[3] = clamp_chroma(g_m_cr_cb * cb + g_m_cr_cr * cr + HDR_C_OFFSET);
+	}
+}
+#endif
+
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
@@ -201,6 +352,28 @@ void gc573_hdr_init(void)
 	g_cr_cb = (float)((-0.1697 * a_r[1] + 1.9404 * a_r[2]) / 1.5748);
 	g_cr_cr = (float)((1.5816 * a_r[0] - 0.6129 * a_r[1]) / 1.5748);
 
+	g_m_cb_cb = g_cb_cb * HDR_SATURATION;
+	g_m_cb_cr = g_cb_cr * HDR_SATURATION;
+	g_m_cr_cb = g_cr_cb * HDR_SATURATION;
+	g_m_cr_cr = g_cr_cr * HDR_SATURATION;
+
+	g_tonemap_impl = tonemap_yuyv_scalar;
+#if defined(__x86_64__) || defined(_M_X64)
+	/* x86_64 baseline always includes SSE2 */
+	g_tonemap_impl = tonemap_yuyv_sse2;
+#elif defined(__i386__) || defined(_M_IX86)
+	if (__builtin_cpu_supports("sse2"))
+		g_tonemap_impl = tonemap_yuyv_sse2;
+#elif defined(__aarch64__)
+	/* AArch64 baseline always includes NEON */
+	g_tonemap_impl = tonemap_yuyv_neon;
+#elif defined(__ARM_NEON)
+	g_tonemap_impl = tonemap_yuyv_neon;
+#elif defined(__linux__) && defined(__arm__)
+	if (getauxval(AT_HWCAP) & HWCAP_NEON)
+		g_tonemap_impl = tonemap_yuyv_neon;
+#endif
+
 	g_init_done = 1;
 }
 
@@ -232,10 +405,31 @@ bool gc573_hdr_active(void)
 	return g_active != 0;
 }
 
+void gc573_hdr_set_passthrough(bool enable)
+{
+	g_passthrough = enable;
+}
+
+bool gc573_hdr_is_passthrough(void)
+{
+	return g_passthrough;
+}
+
 const char *gc573_hdr_label(void)
 {
 	if (!g_active)
 		return "SDR";
+
+	if (g_passthrough) {
+		switch (g_type) {
+		case GC573_HDR_PQ:
+			return "HDR10 Passthrough (BT.2020 PQ)";
+		case GC573_HDR_HLG:
+			return "HLG Passthrough (BT.2100)";
+		default:
+			return "SDR";
+		}
+	}
 
 	switch (g_type) {
 	case GC573_HDR_PQ:
@@ -247,38 +441,22 @@ const char *gc573_hdr_label(void)
 	}
 }
 
-static uint8_t clamp_chroma(float value)
-{
-	int v = (int)(value + 0.5f);
-
-	if (v < HDR_C_MIN)
-		v = HDR_C_MIN;
-	if (v > HDR_C_MAX)
-		v = HDR_C_MAX;
-	return (uint8_t)v;
-}
-
 void gc573_hdr_tonemap_yuyv(void *frame, unsigned int width,
 			    unsigned int height)
 {
-	uint8_t *p = frame;
 	size_t macropixels;
 
-	if (!g_active || !frame || width < 2U || !height)
+	if (!g_active || g_passthrough || !frame || width < 2U || !height)
 		return;
+
+	if (!g_init_done)
+		gc573_hdr_init();
 
 	/* Width is always even for YUYV; a trailing odd pixel is not reachable. */
 	macropixels = (size_t)(width / 2U) * height;
 
-	for (size_t i = 0; i < macropixels; i++, p += 4) {
-		float cb = (float)p[1] - HDR_C_OFFSET;
-		float cr = (float)p[3] - HDR_C_OFFSET;
-
-		p[0] = g_y_lut[p[0]];
-		p[2] = g_y_lut[p[2]];
-		p[1] = clamp_chroma((g_cb_cb * cb + g_cb_cr * cr) *
-				    HDR_SATURATION + HDR_C_OFFSET);
-		p[3] = clamp_chroma((g_cr_cb * cb + g_cr_cr * cr) *
-				    HDR_SATURATION + HDR_C_OFFSET);
-	}
+	if (g_tonemap_impl)
+		g_tonemap_impl(frame, macropixels);
+	else
+		tonemap_yuyv_scalar(frame, macropixels);
 }

@@ -48,6 +48,17 @@ void gc573_hdr_set_mode(enum gc573_hdr_type type, float exposure);
 bool gc573_hdr_active(void);
 
 /**
+ * gc573_hdr_set_passthrough - Enable or disable native BT.2020 HDR passthrough
+ * @enable: true to bypass SDR tonemapping for native HDR display presentation
+ */
+void gc573_hdr_set_passthrough(bool enable);
+
+/**
+ * gc573_hdr_is_passthrough - True when HDR passthrough is active
+ */
+bool gc573_hdr_is_passthrough(void);
+
+/**
  * gc573_hdr_tonemap_yuyv - Tonemap a packed YUYV frame in place
  * @frame: Packed YUYV buffer
  * @width: Frame width (must be even)

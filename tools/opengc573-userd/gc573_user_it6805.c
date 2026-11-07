@@ -2009,6 +2009,82 @@ int gc573_user_it6805_poll_status(void *bar0, struct gc573_user_video_signal *si
 	return 0;
 }
 
+int gc573_user_it6805_enable_interrupts(void *bar0, bool enable)
+{
+	int ret;
+	u8 mask16 = enable ? (BIT(0) | BIT(2)) : 0x00; /* 5V (bit 0) and SCDT (bit 2) */
+	u8 mask17 = enable ? (BIT(0) | BIT(1)) : 0x00; /* AVI InfoFrame change (bit 0/1) */
+	u8 dummy = 0;
+
+	if (!bar0)
+		return -EINVAL;
+
+	ret = gc573_user_it6805_set_bank(bar0, IT6805_BANK_0);
+	if (ret < 0)
+		return ret;
+
+	ret = it6805_write_reg(bar0, 0x16, mask16);
+	if (ret < 0)
+		return ret;
+
+	ret = it6805_write_reg(bar0, 0x17, mask17);
+	if (ret < 0)
+		return ret;
+
+	/* Clear any pending latched interrupts */
+	(void)it6805_read_reg(bar0, 0x10, &dummy);
+	if (dummy)
+		(void)it6805_write_reg(bar0, 0x10, dummy);
+	(void)it6805_read_reg(bar0, 0x11, &dummy);
+	if (dummy)
+		(void)it6805_write_reg(bar0, 0x11, dummy);
+
+	return 0;
+}
+
+int gc573_user_it6805_check_interrupts(void *bar0, bool *scdt_change, bool *avi_change)
+{
+	int ret;
+	u8 irq10 = 0;
+	u8 irq11 = 0;
+
+	if (scdt_change)
+		*scdt_change = false;
+	if (avi_change)
+		*avi_change = false;
+
+	if (!bar0)
+		return -EINVAL;
+
+	ret = gc573_user_it6805_set_bank(bar0, IT6805_BANK_0);
+	if (ret < 0)
+		return ret;
+
+	ret = it6805_read_reg(bar0, 0x10, &irq10);
+	if (ret < 0)
+		return ret;
+
+	ret = it6805_read_reg(bar0, 0x11, &irq11);
+	if (ret < 0)
+		return ret;
+
+	if (irq10 & (BIT(0) | BIT(2))) {
+		if (scdt_change)
+			*scdt_change = true;
+		/* W1C to acknowledge */
+		(void)it6805_write_reg(bar0, 0x10, irq10 & (BIT(0) | BIT(2)));
+	}
+
+	if (irq11 & (BIT(0) | BIT(1))) {
+		if (avi_change)
+			*avi_change = true;
+		/* W1C to acknowledge */
+		(void)it6805_write_reg(bar0, 0x11, irq11 & (BIT(0) | BIT(1)));
+	}
+
+	return 0;
+}
+
 int gc573_user_it6805_poll_signal_ex(void *bar0,
 				     struct gc573_user_video_signal *sig,
 				     enum gc573_user_signal_probe probe)

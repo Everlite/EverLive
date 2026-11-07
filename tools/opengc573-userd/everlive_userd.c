@@ -25,15 +25,6 @@ static void sig_handler(int sig)
 	g_running = 0;
 }
 
-static uint64_t now_ms(void)
-{
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000U +
-	       (uint64_t)(ts.tv_nsec / 1000000L);
-}
-
 /* ------------------------------------------------------------------ */
 /* Smooth colour cycle ("Soft Dream" / spectrum)                      */
 /* ------------------------------------------------------------------ */
@@ -54,104 +45,7 @@ enum led_mode {
  * Never fully saturated and never at full brightness, so a step every 50 ms
  * reads as a soft glow instead of a blinking alarm light.
  */
-#define RAINBOW_SATURATION	150U	/* 0..255, ~59 % */
-#define RAINBOW_VALUE_MIN	150U	/* 0..255, ~59 % */
-#define RAINBOW_VALUE_MAX	205U	/* 0..255, ~80 % */
-
-/*
- * HSV -> RGB, integer only.
- *
- * @hue is a 0..1535 circle (6 sectors * 256), @sat and @val are 0..255.
- * Every intermediate fits in 32 bits: three multiplies, three divides and a
- * switch.  Cheap enough for a 20 Hz daemon (or a 1 kHz one).
- */
-static void hsv_to_rgb(uint32_t hue, uint8_t sat, uint8_t val,
-		       uint8_t *r, uint8_t *g, uint8_t *b)
-{
-	uint32_t region = (hue >> 8) % 6U;
-	uint32_t rem = hue & 0xffU;
-	uint8_t p = (uint8_t)((val * (255U - sat)) / 255U);
-	uint8_t q = (uint8_t)((val * (255U - (sat * rem) / 255U)) / 255U);
-	uint8_t t = (uint8_t)((val *
-			      (255U - (sat * (255U - rem)) / 255U)) / 255U);
-
-	switch (region) {
-	case 0:
-		*r = val;
-		*g = t;
-		*b = p;
-		break;
-	case 1:
-		*r = q;
-		*g = val;
-		*b = p;
-		break;
-	case 2:
-		*r = p;
-		*g = val;
-		*b = t;
-		break;
-	case 3:
-		*r = p;
-		*g = q;
-		*b = val;
-		break;
-	case 4:
-		*r = t;
-		*g = p;
-		*b = val;
-		break;
-	default:
-		*r = val;
-		*g = p;
-		*b = q;
-		break;
-	}
-}
-
-/*
- * Advance the cycle by @elapsed_ms and return the next RGB triplet.
- *
- * The phase comes from a monotonic clock, so scheduling jitter in the 50 ms
- * loop never accumulates: one revolution always takes @cycle_ms.
- *
- * Brightness follows a slow triangle wave (one gentle breath per half
- * revolution) between RAINBOW_VALUE_MIN and RAINBOW_VALUE_MAX.  No libm, no
- * floating point, no allocation.
- */
-static void rainbow_tick(uint64_t elapsed_ms, uint32_t cycle_ms,
-			 uint8_t *r, uint8_t *g, uint8_t *b)
-{
-	uint32_t pos = cycle_ms ? (uint32_t)(elapsed_ms % cycle_ms) : 0U;
-	uint32_t hue = (uint32_t)(((uint64_t)pos * 1536U) / cycle_ms);
-	uint32_t half = cycle_ms / 2U;
-	uint32_t level, breath, val;
-
-	if (!half)
-		half = 1U;
-
-	/* 0..254 ramp over half a revolution, folded into a 0..255 triangle. */
-	level = (uint32_t)(((uint64_t)(pos % half) * 255U) / half);
-	breath = (level <= 127U) ? level * 2U : (255U - level) * 2U;
-	val = RAINBOW_VALUE_MIN +
-	      ((RAINBOW_VALUE_MAX - RAINBOW_VALUE_MIN) * breath) / 255U;
-
-	hsv_to_rgb(hue, RAINBOW_SATURATION, (uint8_t)val, r, g, b);
-}
-
-/*
- * Calculate 5 phase-shifted RGB colors across the card zones for the multi-zone Wave effect.
- */
-static void wave_tick(uint64_t elapsed_ms, uint32_t cycle_ms, uint32_t colors[5])
-{
-	for (int i = 0; i < 5; i++) {
-		/* Each zone is offset by 1/5th (307 / 1536) of the color wheel */
-		uint64_t zone_elapsed = elapsed_ms + ((uint64_t)i * cycle_ms) / 5U;
-		uint8_t r, g, b;
-		rainbow_tick(zone_elapsed, cycle_ms, &r, &g, &b);
-		colors[i] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
-	}
-}
+#include "gc573_user_led.h"
 
 /*
  * Parse a --cycle argument.  A plain number is always consumed (out-of-range
@@ -327,7 +221,7 @@ int main(int argc, char *argv[])
 	 * if a refresh is delayed.
 	 */
 	{
-		uint64_t start_ms = now_ms();
+		uint64_t start_ms = gc573_now_ms();
 		uint32_t cycle_ms = (uint32_t)(cycle_seconds * 1000.0 + 0.5);
 
 		if (!cycle_ms)
@@ -336,11 +230,11 @@ int main(int argc, char *argv[])
 		while (g_running) {
 			if (mode == LED_MODE_WAVE) {
 				uint32_t zone_colors[5];
-				wave_tick(now_ms() - start_ms, cycle_ms, zone_colors);
+				wave_tick(gc573_now_ms() - start_ms, cycle_ms, zone_colors);
 				gc573_user_set_led_zones(ctx.bar0, zone_colors);
 			} else {
 				if (mode == LED_MODE_RAINBOW)
-					rainbow_tick(now_ms() - start_ms, cycle_ms,
+					rainbow_tick(gc573_now_ms() - start_ms, cycle_ms,
 						     &red, &green, &blue);
 
 				gc573_user_led_refresh(ctx.bar0, red, green, blue);

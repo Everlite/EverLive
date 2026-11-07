@@ -16,9 +16,16 @@ find_gc573() {
         if [ -f "$dev/vendor" ] && [ -f "$dev/device" ]; then
             vendor=$(cat "$dev/vendor")
             device=$(cat "$dev/device")
-            if [ "$vendor" = "0x1461" ] && { [ "$device" = "0x0054" ] || [ "$device" = "0x0055" ]; }; then
-                basename "$dev"
-                return 0
+            subdev=$(cat "$dev/subsystem_device" 2>/dev/null || true)
+            if [ "$vendor" = "0x1461" ]; then
+                # Exclude GC570D (Live Gamer DUO: subsystem 0x5700)
+                if [ "$subdev" = "0x5700" ]; then
+                    continue
+                fi
+                if [ "$device" = "0x0054" ] || [ "$device" = "0x0055" ]; then
+                    basename "$dev"
+                    return 0
+                fi
             fi
         fi
     done
@@ -67,9 +74,14 @@ bind_vfio() {
         cur_drv=$(basename "$(readlink -f "/sys/bus/pci/devices/$PCI_DEV/driver")")
         if [ "$cur_drv" != "vfio-pci" ]; then
             echo -e "  Unbinding from $cur_drv..."
-            echo -n "$PCI_DEV" > "/sys/bus/pci/devices/$PCI_DEV/driver/unbind"
+            echo -n "$PCI_DEV" > "/sys/bus/pci/devices/$PCI_DEV/driver/unbind" 2>/dev/null || {
+                echo -e "${YELLOW}  [!] Note: unbind from $cur_drv reported an error or already unbinding${NC}"
+            }
         fi
     fi
+
+    # Set driver_override to vfio-pci for deterministic driver binding
+    echo "vfio-pci" > "/sys/bus/pci/devices/$PCI_DEV/driver_override" 2>/dev/null || true
 
     # Register vendor/device ID with vfio-pci
     if [ -d /sys/bus/pci/drivers/vfio-pci ]; then
@@ -77,12 +89,14 @@ bind_vfio() {
         echo -n "$PCI_DEV" > /sys/bus/pci/drivers/vfio-pci/bind 2>/dev/null || true
     fi
 
-    # Set accessible permissions for userspace testing
+    # Set secure group permissions (matching 70-everlive.rules / 99-gc570d-vfio.rules)
     if [ -e "/dev/vfio/vfio" ]; then
-        chmod 0666 /dev/vfio/vfio
+        chown root:video /dev/vfio/vfio 2>/dev/null || true
+        chmod 0660 /dev/vfio/vfio 2>/dev/null || true
     fi
     if [ -n "$IOMMU_GROUP" ] && [ -e "/dev/vfio/$IOMMU_GROUP" ]; then
-        chmod 0666 "/dev/vfio/$IOMMU_GROUP"
+        chown root:video "/dev/vfio/$IOMMU_GROUP" 2>/dev/null || true
+        chmod 0660 "/dev/vfio/$IOMMU_GROUP" 2>/dev/null || true
     fi
 
     # Grant memory locking capability for DMA page pinning (needed for >1080p frames)
@@ -90,6 +104,7 @@ bind_vfio() {
     if command -v setcap >/dev/null 2>&1; then
         for bin in "$DIR/gc573_user_streamer" "$DIR/gc573_user_diag" "$DIR/gc573_user_probe" "$DIR/everlive_userd"; do
             if [ -f "$bin" ]; then
+                chmod 0755 "$bin" 2>/dev/null || true
                 setcap cap_ipc_lock=+ep "$bin" 2>/dev/null || true
             fi
         done
@@ -111,8 +126,14 @@ restore_kernel() {
         cur_drv=$(basename "$(readlink -f "/sys/bus/pci/devices/$PCI_DEV/driver")")
         if [ "$cur_drv" = "vfio-pci" ]; then
             echo "  Unbinding from vfio-pci..."
-            echo -n "$PCI_DEV" > "/sys/bus/pci/drivers/vfio-pci/unbind"
+            echo -n "$PCI_DEV" > "/sys/bus/pci/drivers/vfio-pci/unbind" 2>/dev/null || true
         fi
+    fi
+
+    echo "" > "/sys/bus/pci/devices/$PCI_DEV/driver_override" 2>/dev/null || true
+
+    if [ -n "$IOMMU_GROUP" ] && [ -e "/dev/vfio/$IOMMU_GROUP" ]; then
+        chmod 0600 "/dev/vfio/$IOMMU_GROUP" 2>/dev/null || true
     fi
 
     modprobe open_gc573 2>/dev/null || true

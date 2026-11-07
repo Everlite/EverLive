@@ -84,6 +84,67 @@ static pthread_mutex_t g_v4l2_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int g_open_handle_count = 0;
 static struct gc570d_shm_region *g_shm_ptr = NULL;
 
+/*
+ * Optional per-process opt-in.  LD_PRELOAD is inherited by every child of a
+ * launched application, but this shim is only meaningful in the process that
+ * actually opens the virtual camera.  When EVERLIVE_V4L2_TARGET is set to a
+ * comma-separated list of executable basenames (or "*"), stay dormant in
+ * every other child so crash reporters, shells and helpers are untouched.
+ * Unset = legacy behaviour (active everywhere).
+ */
+static int g_target_allowed = -1;
+
+static bool shim_target_allowed(void)
+{
+	int cached = __atomic_load_n(&g_target_allowed, __ATOMIC_RELAXED);
+	if (cached >= 0)
+		return cached != 0;
+
+	const char *list = getenv("EVERLIVE_V4L2_TARGET");
+	if (!list || !*list) {
+		__atomic_store_n(&g_target_allowed, 1, __ATOMIC_RELAXED);
+		return true;
+	}
+
+	const char *prog = program_invocation_short_name;
+	bool match = false;
+	const char *p = list;
+
+	if (!prog)
+		prog = "";
+	while (*p) {
+		const char *start;
+
+		while (*p == ',' || *p == ' ' || *p == '\t')
+			p++;
+		if (!*p)
+			break;
+		start = p;
+		while (*p && *p != ',' && *p != ' ' && *p != '\t')
+			p++;
+		if ((size_t)(p - start) == 1 && start[0] == '*') {
+			match = true;
+			break;
+		}
+		if ((size_t)(p - start) == strlen(prog) &&
+		    strncmp(start, prog, (size_t)(p - start)) == 0) {
+			match = true;
+			break;
+		}
+	}
+
+	__atomic_store_n(&g_target_allowed, match ? 1 : 0, __ATOMIC_RELAXED);
+	return match;
+}
+
+static uint64_t shim_now_ns(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
 
 
 /* Real libc & libv4l2 function pointers */
@@ -201,9 +262,32 @@ static void shm_convert_port(int port, uint8_t *dst, size_t dst_max,
 		return;
 	}
 
+	/*
+	 * If the publisher died (or was SIGKILLed) its last frame would
+	 * otherwise loop forever.  The daemon stamps this ~frame rate; a
+	 * missing beacon older than one second means "no signal", not "freeze".
+	 */
+	{
+		uint64_t heartbeat = __atomic_load_n(&shm->heartbeat_ns,
+						     __ATOMIC_ACQUIRE);
+		if (heartbeat && shim_now_ns() > heartbeat + 1000000000ULL) {
+			convert_yuy2_frame(NULL, 0, 0, dst, dst_max,
+					   dst_w, dst_h, pixfmt);
+			return;
+		}
+	}
+
 	for (tries = 0; tries < 8; tries++) {
+		uint32_t slot;
+
 		seq = __atomic_load_n(&shm->ports[port].seq, __ATOMIC_ACQUIRE);
-		if (!seq || (seq & 1)) {
+		if (!seq) {
+			usleep(100);
+			continue;
+		}
+		slot = __atomic_load_n(&shm->ports[port].ready_idx,
+				       __ATOMIC_ACQUIRE);
+		if (slot >= GC570D_SHM_SLOTS) {
 			usleep(100);
 			continue;
 		}
@@ -214,12 +298,15 @@ static void shm_convert_port(int port, uint8_t *dst, size_t dst_max,
 					__ATOMIC_ACQUIRE);
 		__atomic_thread_fence(__ATOMIC_ACQUIRE);
 
-		convert_yuy2_frame(shm->ports[port].yuy2, src_w, src_h,
+		convert_yuy2_frame(shm->ports[port].yuy2[slot], src_w, src_h,
 				   dst, dst_max, dst_w, dst_h, pixfmt);
 
 		__atomic_thread_fence(__ATOMIC_ACQUIRE);
-		if (__atomic_load_n(&shm->ports[port].seq, __ATOMIC_ACQUIRE) == seq)
+		if (__atomic_load_n(&shm->ports[port].seq, __ATOMIC_ACQUIRE) == seq) {
+			__atomic_store_n(&shm->ports[port].read_idx, slot,
+					 __ATOMIC_RELAXED);
 			return;
+		}
 		usleep(100);
 	}
 
@@ -229,7 +316,7 @@ static void shm_convert_port(int port, uint8_t *dst, size_t dst_max,
 
 static int match_virtual_video_path(const char *path)
 {
-	if (!path)
+	if (!path || !shim_target_allowed())
 		return -1;
 	if (strcmp(path, "/dev/video60") == 0 || strcmp(path, "video60") == 0)
 		return 0;
@@ -433,7 +520,7 @@ static struct gc570d_dir_track *find_dir_track(DIR *dirp)
 
 static int match_virtual_sysfs_stat(const char *path, struct stat *st)
 {
-	if (!path)
+	if (!path || !shim_target_allowed())
 		return -1;
 	while (*path == '.' && *(path + 1) == '/')
 		path += 2;
@@ -476,6 +563,8 @@ static int open_virtual_sysfs(const char *path)
 {
 	int port = -1;
 	const char *attr = NULL;
+	if (!shim_target_allowed())
+		return -1;
 	if (strncmp(path, "/sys/class/video4linux/video60/", 31) == 0) {
 		port = 0;
 		attr = path + 31;

@@ -41,6 +41,20 @@ static int find_gc573_pci_device(char *out_addr, size_t max_len, int *out_group)
 						/* 0x0054 = GC573 / GC555, 0x0055 = GC573 PCIe alternate */
 						if (strncasecmp(dev_id, "0x0054", 6) == 0 ||
 						    strncasecmp(dev_id, "0x0055", 6) == 0) {
+							/* Check subsystem_device to avoid grabbing GC570D (0x5700) */
+							snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/subsystem_device", ent->d_name);
+							FILE *sf = fopen(path, "r");
+							if (sf) {
+								char sub_id[32] = "";
+								if (fgets(sub_id, sizeof(sub_id), sf)) {
+									if (strncasecmp(sub_id, "0x5700", 6) == 0) {
+										fclose(sf);
+										continue;
+									}
+								}
+								fclose(sf);
+							}
+
 							snprintf(out_addr, max_len, "%.32s", ent->d_name);
 
 							/* Find IOMMU group */
@@ -116,7 +130,7 @@ int gc573_vfio_init(struct gc573_vfio_ctx *ctx, const char *pci_addr)
 	pr_info("Found GC573 at %s (IOMMU Group %d)", ctx->pci_addr, ctx->iommu_group);
 
 	/* 1. Open VFIO Container */
-	ctx->container_fd = open("/dev/vfio/vfio", O_RDWR);
+	ctx->container_fd = open("/dev/vfio/vfio", O_RDWR | O_CLOEXEC);
 	if (ctx->container_fd < 0) {
 		pr_err("Cannot open /dev/vfio/vfio: %s (Is vfio module loaded?)", strerror(errno));
 		return -errno;
@@ -137,7 +151,7 @@ int gc573_vfio_init(struct gc573_vfio_ctx *ctx, const char *pci_addr)
 	/* 2. Open IOMMU Group */
 	char group_path[64];
 	snprintf(group_path, sizeof(group_path), "/dev/vfio/%d", ctx->iommu_group);
-	ctx->group_fd = open(group_path, O_RDWR);
+	ctx->group_fd = open(group_path, O_RDWR | O_CLOEXEC);
 	if (ctx->group_fd < 0) {
 		pr_err("Cannot open %s: %s (Has vfio-pci claimed the device? Try running vfio_bind.sh)",
 		       group_path, strerror(errno));
@@ -179,6 +193,7 @@ int gc573_vfio_init(struct gc573_vfio_ctx *ctx, const char *pci_addr)
 		gc573_vfio_cleanup(ctx);
 		return -errno;
 	}
+	fcntl(ctx->device_fd, F_SETFD, FD_CLOEXEC);
 
 	/*
 	 * The kernel driver calls pci_set_master(). Without bus master the
@@ -445,10 +460,28 @@ int gc573_vfio_setup_msi(struct gc573_vfio_ctx *ctx)
 			ctx->irq_efd = -1;
 			return -errno;
 		}
+		ctx->is_intx = true;
+		gc573_vfio_unmask_intx(ctx);
 		pr_info("Registered INTx interrupt handler on eventfd %d", ctx->irq_efd);
 		return 0;
 	}
 
+	ctx->is_intx = false;
 	pr_info("Registered MSI interrupt handler on eventfd %d", ctx->irq_efd);
 	return 0;
+}
+
+void gc573_vfio_unmask_intx(struct gc573_vfio_ctx *ctx)
+{
+	if (!ctx || ctx->device_fd < 0 || !ctx->is_intx)
+		return;
+
+	struct vfio_irq_set unmask = {
+		.argsz = sizeof(unmask),
+		.flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_UNMASK,
+		.index = VFIO_PCI_INTX_IRQ_INDEX,
+		.start = 0,
+		.count = 1,
+	};
+	ioctl(ctx->device_fd, VFIO_DEVICE_SET_IRQS, &unmask);
 }

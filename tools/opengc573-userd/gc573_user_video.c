@@ -23,19 +23,6 @@
 #define GC573_USER_VIDEO_STALL_MS	2000U
 #define GC573_USER_VIDEO_STOP_WAIT_MS	2000U
 
-static uint64_t gc573_now_us(void)
-{
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-}
-
-static uint64_t gc573_now_ms(void)
-{
-	return gc573_now_us() / 1000;
-}
-
 static void gc573_video_irq_ack(void *bar0, uint32_t status)
 {
 	uint32_t ack = status & GC573_DMA_IRQ_VIDEO_ACK_MASK;
@@ -395,6 +382,8 @@ int gc573_user_video_poll(struct gc573_user_video *video, int timeout_ms)
 			    errno != EAGAIN)
 				pr_warn("Video DMA: eventfd read failed: %s",
 					strerror(errno));
+			if (video->vfio->is_intx)
+				gc573_vfio_unmask_intx(video->vfio);
 		}
 	} else if (timeout_ms > 0) {
 		/* No MSI/INTx: fall back to polling the IRQ status register. */
