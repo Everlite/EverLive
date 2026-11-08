@@ -1790,8 +1790,9 @@ class GameStreamer:
         # lsfg-vk frame generation.  Passed in headless mode too: the engine
         # keeps LSFG idle while the window is closed and activates Vulkan +
         # LSFG as soon as mode.set("gaming") opens it, so a Studio -> Gaming
-        # switch needs no restart.  The Live Gamer DUO engine has no LSFG
-        # path; those flags stay on this GC573 command line only.
+        # switch needs no restart.  The V4L2 loopback keeps receiving the 
+        # raw capture path independently.  The GC570D engine has no 
+        # LSFG path; those flags stay on this GC573 command line only.
         if framegen not in FRAMEGEN_KEYS:
             framegen = FRAMEGEN_ALIASES.get(str(framegen).lower(), "off")
         if framegen in FRAMEGEN_KEYS and framegen != "off":
