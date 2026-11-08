@@ -24,14 +24,16 @@
 #include <spa/utils/result.h>
 #include <sys/wait.h>
 
-#define TAP_RING_BYTES		65536U	/* power of two, ~340 ms at 48 kHz */
-#define TAP_CHANNELS		2U
+#define TAP_RING_BYTES		65536U	/* power of two, ~340 ms at 48 kHz stereo */
 #define TAP_SAMPLE_BYTES	2U
+#define TAP_MAX_CHANNELS	8U
 
 struct gc573_audio_tap {
 	int running;
 	char node_name[64];
 	int rate;
+	/* Interleaved S16 channel count the stream is published with. */
+	unsigned int channels;
 	int pending_seq;
 
 	struct pw_thread_loop *loop;
@@ -123,6 +125,8 @@ static void tap_process(void *userdata)
 	struct pw_buffer *pwbuf;
 	struct spa_buffer *buf;
 	struct spa_data *data;
+	unsigned int channels;
+	size_t frame_bytes;
 	size_t n;
 
 	if (!tap->stream)
@@ -144,11 +148,16 @@ static void tap_process(void *userdata)
 		return;
 	}
 
-	n = tap_ring_read(data->data, data->maxsize);
+	channels = tap->channels ? tap->channels : 2U;
+	frame_bytes = (size_t)channels * TAP_SAMPLE_BYTES;
+
+	n = data->maxsize;
+	n -= n % frame_bytes;
+	n = tap_ring_read(data->data, n);
 	if (data->chunk) {
 		data->chunk->offset = 0;
 		data->chunk->size = (uint32_t)n;
-		data->chunk->stride = TAP_CHANNELS * TAP_SAMPLE_BYTES;
+		data->chunk->stride = (int32_t)frame_bytes;
 	}
 
 	pw_stream_queue_buffer(tap->stream, pwbuf);
@@ -166,8 +175,9 @@ static void tap_stream_state_changed(void *userdata,
 		pr_warn("Audio tap: stream error: %s",
 			error ? error : "unknown");
 	else if (state == PW_STREAM_STATE_STREAMING)
-		pr_info("Audio tap: connected to '%s' at %d Hz S16 stereo",
-			tap->node_name, tap->rate);
+		pr_info("Audio tap: connected to '%s' at %d Hz S16 %u ch",
+			tap->node_name, tap->rate,
+			tap->channels ? tap->channels : 2U);
 }
 
 static const struct pw_stream_events tap_stream_events = {
@@ -287,6 +297,8 @@ static void tap_ensure_sink(struct gc573_audio_tap *tap)
 		}
 		execlp("pactl", "pactl", "load-module",
 		       "module-null-sink", sink_arg,
+		       "channels=6",
+		       "channel_map=front-left,front-right,front-center,lfe,rear-left,rear-right",
 		       "sink_properties=device.description=\"EverLive Capture Audio\"",
 		       (char *)NULL);
 		_exit(127);
@@ -309,7 +321,7 @@ static void tap_ensure_sink(struct gc573_audio_tap *tap)
 		 "node.name = %s "
 		 "node.description = \"EverLive Capture Audio\" "
 		 "media.class = Audio/Sink "
-		 "audio.position = [ FL FR ] "
+		 "audio.position = [ FL FR FC LFE RL RR ] "
 		 "monitor.channel-volumes = true "
 		 "node.virtual = false }",
 		 tap->node_name);
@@ -354,6 +366,7 @@ int gc573_audio_tap_start(const char *node_name)
 		return 0;
 
 	memset(tap, 0, sizeof(*tap));
+	tap->channels = 2;
 	snprintf(tap->node_name, sizeof(tap->node_name), "%s",
 		 node_name && *node_name ? node_name : GC573_AUDIO_TAP_DEFAULT);
 
@@ -422,7 +435,34 @@ fail:
 	return ret;
 }
 
-void gc573_audio_tap_set_format(unsigned int rate_hz)
+/*
+ * Speaker positions for the published layout.  5.1 uses the canonical
+ * FL/FR/FC/LFE/RL/RR order, 7.1 adds the side pair in SPA's default order
+ * (FL FR FC LFE RL RR SL SR), which is what the playback buffer carries.
+ */
+static void tap_set_positions(struct spa_audio_info_raw *info,
+			      unsigned int channels)
+{
+	unsigned int i;
+
+	for (i = 0; i < channels && i < SPA_AUDIO_MAX_CHANNELS; i++)
+		info->position[i] = SPA_AUDIO_CHANNEL_UNKNOWN;
+
+	info->position[0] = SPA_AUDIO_CHANNEL_FL;
+	info->position[1] = SPA_AUDIO_CHANNEL_FR;
+	if (channels >= 6) {
+		info->position[2] = SPA_AUDIO_CHANNEL_FC;
+		info->position[3] = SPA_AUDIO_CHANNEL_LFE;
+		info->position[4] = SPA_AUDIO_CHANNEL_RL;
+		info->position[5] = SPA_AUDIO_CHANNEL_RR;
+	}
+	if (channels >= 8) {
+		info->position[6] = SPA_AUDIO_CHANNEL_SL;
+		info->position[7] = SPA_AUDIO_CHANNEL_SR;
+	}
+}
+
+void gc573_audio_tap_set_format(unsigned int rate_hz, unsigned int channels)
 {
 	struct gc573_audio_tap *tap = &g_tap;
 	struct spa_audio_info_raw info;
@@ -436,9 +476,21 @@ void gc573_audio_tap_set_format(unsigned int rate_hz)
 		return;
 	if (!rate_hz)
 		rate_hz = 48000;
+	if (channels != 2 && channels != 6 && channels != 8)
+		channels = 2;
 
-	if (tap->stream && tap->rate == (int)rate_hz)
+	if (tap->stream && tap->rate == (int)rate_hz &&
+	    tap->channels == channels)
 		return;
+
+	/*
+	 * Drop whatever is still queued in the old layout; the new stream uses a
+	 * different frame size and would otherwise play the tail as garbage.
+	 * Safe here: the RT thread is stopped under the thread-loop lock below.
+	 */
+	__atomic_store_n(&g_ring_tail,
+			 __atomic_load_n(&g_ring_head, __ATOMIC_ACQUIRE),
+			 __ATOMIC_RELEASE);
 
 	pw_thread_loop_lock(tap->loop);
 
@@ -449,6 +501,7 @@ void gc573_audio_tap_set_format(unsigned int rate_hz)
 	}
 
 	tap->rate = (int)rate_hz;
+	__atomic_store_n(&tap->channels, channels, __ATOMIC_RELAXED);
 
 	props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio",
 				  PW_KEY_MEDIA_CATEGORY, "Capture",
@@ -479,7 +532,8 @@ void gc573_audio_tap_set_format(unsigned int rate_hz)
 	spa_zero(info);
 	info.format = SPA_AUDIO_FORMAT_S16_LE;
 	info.rate = rate_hz;
-	info.channels = TAP_CHANNELS;
+	info.channels = channels;
+	tap_set_positions(&info, channels);
 
 	spa_pod_builder_init(&builder, buffer, sizeof(buffer));
 	params[0] = spa_format_audio_raw_build(&builder, SPA_PARAM_EnumFormat,
@@ -497,18 +551,25 @@ void gc573_audio_tap_set_format(unsigned int rate_hz)
 	if (res < 0)
 		pr_warn("Audio tap: connect failed (%s)", spa_strerror(res));
 	else
-		pr_info("Audio tap: publishing %u Hz S16 stereo to '%s'",
-			rate_hz, tap->node_name);
+		pr_info("Audio tap: publishing %u Hz S16 %u ch to '%s'",
+			rate_hz, channels, tap->node_name);
 }
 
 void gc573_audio_tap_write(const void *data, size_t bytes,
 			   unsigned int sample_bits)
 {
 	const uint8_t *src = data;
+	unsigned int channels;
+	size_t frame_bytes;
 
 	if (!__atomic_load_n(&g_tap.running, __ATOMIC_RELAXED) ||
 	    !data || !bytes)
 		return;
+
+	channels = __atomic_load_n(&g_tap.channels, __ATOMIC_RELAXED);
+	if (channels < 2 || channels > TAP_MAX_CHANNELS)
+		channels = 2;
+	frame_bytes = (size_t)channels * TAP_SAMPLE_BYTES;
 
 	if (sample_bits > 16) {
 		/*
@@ -518,8 +579,11 @@ void gc573_audio_tap_write(const void *data, size_t bytes,
 		size_t samples = bytes / 4U;
 		size_t i;
 
-		if (samples * 2U > sizeof(g_convert))
+		samples -= samples % channels;
+		if (samples * 2U > sizeof(g_convert)) {
 			samples = sizeof(g_convert) / 2U;
+			samples -= samples % channels;
+		}
 
 		for (i = 0; i < samples; i++) {
 			int32_t v;
@@ -532,8 +596,9 @@ void gc573_audio_tap_write(const void *data, size_t bytes,
 
 		tap_ring_write(g_convert, samples * 2U);
 	} else {
-		/* Whole stereo frames only: never split a sample pair. */
-		tap_ring_write(src, bytes & ~3U);
+		/* Whole frames only: never split a channel group. */
+		bytes -= bytes % frame_bytes;
+		tap_ring_write(src, bytes);
 	}
 }
 
@@ -555,6 +620,7 @@ void gc573_audio_tap_stop(void)
 	tap->loop = NULL;
 	tap->node_name[0] = '\0';
 	tap->rate = 0;
+	tap->channels = 0;
 }
 
 bool gc573_audio_tap_active(void)

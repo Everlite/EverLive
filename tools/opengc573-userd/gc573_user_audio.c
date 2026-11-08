@@ -153,8 +153,9 @@ int gc573_user_audio_start(struct gc573_user_audio *audio,
 		return -EBUSY;
 
 	/*
-	 * 5.1 uses the eight FPGA slots just like the kernel driver.  Only
-	 * the first two slots are played, so the DMA layout stays identical.
+	 * 5.1 uses the eight FPGA slots just like the kernel driver, so the DMA
+	 * layout stays identical for 2.0, 5.1 and 7.1.  Slots 0..5 carry
+	 * FL/FR/FC/LFE/SL/SR; slots 6/7 add the rear pair in 7.1 mode.
 	 */
 	dma_channels = channels == 6 ? 8 : channels;
 	sample_bytes = sample_bits / 8U;

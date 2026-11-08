@@ -1227,7 +1227,7 @@ class GameStreamer:
                                 "detail": f"{m.group(1).strip()} (Muted)",
                                 "kind": "bitstream"}
             return
-        m = re.search(r"SDL audio: opened (\d+) Hz, (\d+) ch, (\d+)-bit", line)
+        m = re.search(r"SDL audio: opened (\d+) Hz, (\d+) ch.*?, (\d+)-bit", line)
         if m:
             self._vfio_audio = {"state": "on",
                                 "detail": f"{m.group(1)} Hz {m.group(2)} ch",

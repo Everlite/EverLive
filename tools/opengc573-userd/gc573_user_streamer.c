@@ -108,7 +108,88 @@
 #define AUDIO_LOST_STOP_MS	1000U
 #define AUDIO_FORMAT_WAIT_MS	3000U
 #define AUDIO_RETRY_MS		2000U
-#define AUDIO_SCRATCH_BYTES	16384U
+#define AUDIO_SCRATCH_BYTES	32768U
+
+/*
+ * Playback channel layout.  AUTO follows the HDMI source, so a 5.1/7.1 LPCM
+ * stream stays discrete.  The explicit modes force a layout and fall back to
+ * the ITU-R BS.775 stereo downmix when SDL cannot open that many channels.
+ */
+enum audio_channel_mode {
+	AUDIO_CHANNELS_AUTO = 0,
+	AUDIO_CHANNELS_STEREO,
+	AUDIO_CHANNELS_5_1,
+	AUDIO_CHANNELS_7_1,
+};
+
+static enum audio_channel_mode g_audio_channel_mode = AUDIO_CHANNELS_AUTO;
+
+static const char *audio_channel_mode_name(enum audio_channel_mode mode)
+{
+	switch (mode) {
+	case AUDIO_CHANNELS_STEREO:
+		return "stereo";
+	case AUDIO_CHANNELS_5_1:
+		return "5.1";
+	case AUDIO_CHANNELS_7_1:
+		return "7.1";
+	default:
+		return "auto";
+	}
+}
+
+static bool audio_channel_mode_parse(const char *value,
+				     enum audio_channel_mode *out)
+{
+	if (!value || !*value)
+		return false;
+	if (!strcasecmp(value, "auto") || !strcasecmp(value, "source")) {
+		*out = AUDIO_CHANNELS_AUTO;
+		return true;
+	}
+	if (!strcasecmp(value, "stereo") || !strcasecmp(value, "2") ||
+	    !strcasecmp(value, "2.0")) {
+		*out = AUDIO_CHANNELS_STEREO;
+		return true;
+	}
+	if (!strcasecmp(value, "5.1") || !strcasecmp(value, "6")) {
+		*out = AUDIO_CHANNELS_5_1;
+		return true;
+	}
+	if (!strcasecmp(value, "7.1") || !strcasecmp(value, "8")) {
+		*out = AUDIO_CHANNELS_7_1;
+		return true;
+	}
+	return false;
+}
+
+/* Channels the playback device should be opened with. */
+static unsigned int audio_output_channels(unsigned int source_channels)
+{
+	switch (g_audio_channel_mode) {
+	case AUDIO_CHANNELS_STEREO:
+		return 2;
+	case AUDIO_CHANNELS_5_1:
+		return 6;
+	case AUDIO_CHANNELS_7_1:
+		return 8;
+	case AUDIO_CHANNELS_AUTO:
+	default:
+		return source_channels >= 6 ? source_channels : 2;
+	}
+}
+
+static const char *audio_channel_layout_name(unsigned int channels)
+{
+	switch (channels) {
+	case 6:
+		return "5.1";
+	case 8:
+		return "7.1";
+	default:
+		return "Stereo";
+	}
+}
 /* Compact 16-bit IEC words extracted from an S16/S24 HDMI carrier. */
 #define AUDIO_BITSTREAM_BYTES	16384U
 /*
@@ -523,6 +604,9 @@ static void print_usage(const char *prog)
 	printf("                    (default: %s).\n",
 	       GC573_AUDIO_TAP_DEFAULT);
 	printf("                    Add 'Monitor of EverLive Capture Audio' in OBS.\n");
+	printf("  --audio-channels MODE  Playback layout: auto|stereo|5.1|7.1\n");
+	printf("                    (default: auto = follow the HDMI source; 5.1/7.1\n");
+	printf("                    falls back to an ITU-R BS.775 stereo downmix).\n");
 	printf("  --no-hdr          Disable HDR10/HLG -> SDR tonemapping (bypass).\n");
 	printf("  --hdr-exposure EV Exposure bias for the tonemapper, -2.0 .. +2.0.\n");
 	printf("  --framegen MODE   off|60to120|30to60 (native lsfg-vk 2x).\n");
@@ -3066,6 +3150,8 @@ struct audio_playback {
 	SDL_AudioDeviceID dev;
 	int rate;
 	int bits;
+	/* Channel count the device was actually opened with (2, 6 or 8). */
+	unsigned int channels;
 	unsigned int bytes_per_frame;
 	uint8_t *scratch;
 	size_t scratch_size;
@@ -3095,6 +3181,8 @@ struct audio_stream {
 	bool bt_ready;
 	bool bt_playing;
 	enum gc573_bitstream_codec bt_codec;
+	/* Output channel count the decoder was opened with. */
+	unsigned int bt_channels;
 	bool bt_error_reported;
 	uint8_t *bitstream_buf;
 	size_t bitstream_buf_size;
@@ -3138,57 +3226,97 @@ static void audio_close_device(struct audio_playback *playback)
 	playback->dev = 0;
 	playback->rate = 0;
 	playback->bits = 0;
+	playback->channels = 0;
 	playback->bytes_per_frame = 0;
 	playback->queue_error_reported = false;
 	playback->primed = false;
 }
 
 static int audio_open_device(struct audio_playback *playback,
-			     unsigned int rate_hz, unsigned int sample_bits)
+			     unsigned int rate_hz, unsigned int sample_bits,
+			     unsigned int channels)
 {
 	SDL_AudioSpec want;
 	SDL_AudioSpec have;
+	unsigned int attempts[2];
+	unsigned int tries;
+	unsigned int i;
+	bool downmix = false;
 
 	if (!playback->scratch || !playback->scratch_size)
 		return -ENOMEM;
+	if (channels < 2)
+		channels = 2;
 	if (playback->dev && playback->rate == (int)rate_hz &&
-	    playback->bits == (int)sample_bits)
+	    playback->bits == (int)sample_bits &&
+	    playback->channels == channels)
 		return 0;
 
 	audio_close_device(playback);
 	memset(&want, 0, sizeof(want));
 	want.freq = (int)rate_hz;
 	want.format = sample_bits == 24 ? AUDIO_S32LSB : AUDIO_S16LSB;
-	want.channels = 2;
 	want.samples = 512;
 	want.callback = NULL;
 
-	playback->dev = SDL_OpenAudioDevice(NULL, 0, &want, &have,
-					    SDL_AUDIO_ALLOW_SAMPLES_CHANGE);
-	if (!playback->dev) {
-		pr_warn("SDL audio: cannot open %u Hz %u-bit stereo: %s",
-			rate_hz, sample_bits, SDL_GetError());
-		return -EIO;
+	/*
+	 * Ask for the requested layout first; a stereo sink, a bare ALSA device
+	 * or an older SDL build may refuse it.  The second attempt is always
+	 * plain stereo, which audio_convert_pcm() then feeds with the ITU-R
+	 * BS.775 downmix instead of dropping everything but FL/FR.
+	 */
+	attempts[0] = channels;
+	attempts[1] = 2;
+	tries = channels > 2 ? 2U : 1U;
+
+	for (i = 0; i < tries; i++) {
+		want.channels = (Uint8)attempts[i];
+		memset(&have, 0, sizeof(have));
+		playback->dev = SDL_OpenAudioDevice(NULL, 0, &want, &have,
+						    SDL_AUDIO_ALLOW_SAMPLES_CHANGE);
+		if (playback->dev && have.freq == want.freq &&
+		    have.channels == want.channels &&
+		    have.format == want.format)
+			break;
+
+		if (playback->dev) {
+			pr_warn("SDL audio: device returned %d Hz, %u ch, format 0x%04x; "
+				"need %d Hz, %u ch, format 0x%04x",
+				have.freq, have.channels, have.format,
+				want.freq, want.channels, want.format);
+			SDL_CloseAudioDevice(playback->dev);
+			playback->dev = 0;
+		} else if (attempts[i] > 2) {
+			pr_info("SDL audio: %u-channel output unavailable (%s); "
+				"using the ITU-R BS.775 stereo downmix",
+				attempts[i], SDL_GetError());
+		}
 	}
-	if (have.freq != want.freq || have.channels != 2 ||
-	    have.format != want.format) {
-		pr_warn("SDL audio: device returned %d Hz, %u ch, format 0x%04x; "
-			"need %d Hz stereo 0x%04x",
-			have.freq, have.channels, have.format,
-			want.freq, want.format);
-		audio_close_device(playback);
+
+	if (!playback->dev) {
+		pr_warn("SDL audio: cannot open %u Hz %u-bit %u ch: %s",
+			rate_hz, sample_bits, channels, SDL_GetError());
 		return -EIO;
 	}
 
+	downmix = have.channels < channels;
 	playback->rate = want.freq;
 	playback->bits = (int)sample_bits;
-	playback->bytes_per_frame = (sample_bits / 8U) * 2U;
+	playback->channels = have.channels;
+	/*
+	 * Match the SDL format, not the source container: 24-bit is widened to
+	 * S32LSB, so a frame is 4 bytes per channel, not 3.
+	 */
+	playback->bytes_per_frame =
+		(sample_bits > 16 ? 4U : 2U) * have.channels;
 	playback->primed = false;
-	gc573_audio_tap_set_format((unsigned int)playback->rate);
+	gc573_audio_tap_set_format((unsigned int)playback->rate,
+				   playback->channels);
 	/* Stay paused until audio_queue_pcm_bytes() has built the cushion. */
 	SDL_PauseAudioDevice(playback->dev, 1);
-	pr_info("SDL audio: opened %u Hz, 2 ch, %u-bit via %s (cushion %u ms)",
-		rate_hz, sample_bits,
+	pr_info("SDL audio: opened %u Hz, %u ch%s, %u-bit via %s (cushion %u ms)",
+		rate_hz, have.channels, downmix ? " (BS.775 downmix)" : "",
+		sample_bits,
 		SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "unknown",
 		AUDIO_CUSHION_MS);
 	if (SDL_GetCurrentAudioDriver() &&
@@ -3199,50 +3327,200 @@ static int audio_open_device(struct audio_playback *playback,
 }
 
 /*
- * The FPGA always stores 16- or 24-bit little-endian samples in the same
- * channel layout the kernel driver exposes.  Playback is stereo, so keep
- * the first two HDMI slots (FL/FR); 5.1/7.1 sources therefore downmix to
- * their front pair instead of failing.
+ * FPGA audio slot order, matching the legacy kernel driver
+ * (gc555_audio_5_1_alsa_from_hdmi / gc555_audio_7_1_alsa_from_hdmi):
+ *
+ *   slot 0 = FL, 1 = FR, 2 = FC, 3 = LFE, 4 = SL, 5 = SR, 6 = RL, 7 = RR
+ *
+ * A 5.1 stream populates slots 0..5 (the surround pair is the only one), a
+ * 7.1 stream populates all eight and adds the rear pair.
+ */
+enum audio_dma_slot {
+	AUDIO_SLOT_FL = 0,
+	AUDIO_SLOT_FR = 1,
+	AUDIO_SLOT_FC = 2,
+	AUDIO_SLOT_LFE = 3,
+	AUDIO_SLOT_SL = 4,
+	AUDIO_SLOT_SR = 5,
+	AUDIO_SLOT_RL = 6,
+	AUDIO_SLOT_RR = 7,
+};
+
+/* Output channel -> DMA slot for a discrete 7.1 (8 channel) layout. */
+static const uint8_t audio_slot_71_to_dma[8] = {
+	AUDIO_SLOT_FL, AUDIO_SLOT_FR, AUDIO_SLOT_FC, AUDIO_SLOT_LFE,
+	AUDIO_SLOT_RL, AUDIO_SLOT_RR, AUDIO_SLOT_SL, AUDIO_SLOT_SR,
+};
+
+/*
+ * ITU-R BS.775 downmix coefficients in Q15.  FL/FR stay at unity so a 2.0
+ * source keeps its level, the centre and the surround pair drop by 3 dB, and
+ * a second (rear) surround pair adds at -6 dB so 7.1 and 5.1 end up equally
+ * loud.  LFE is discarded, as specified for a two-channel downmix.
+ */
+#define AUDIO_DM_UNITY_Q15	32768	/* 1.0    */
+#define AUDIO_DM_MINUS3DB_Q15	23170	/* 0.7071 */
+#define AUDIO_DM_MINUS6DB_Q15	16384	/* 0.5    */
+#define AUDIO_DM_SHIFT		15
+
+static inline int32_t audio_pcm_read(const uint8_t *sample,
+				     unsigned int sample_bytes)
+{
+	if (sample_bytes <= 2)
+		return (int16_t)(uint16_t)(sample[0] | (sample[1] << 8));
+
+	/* S24_3LE, left-aligned in the S32LSB playback sample. */
+	return (int32_t)(((uint32_t)sample[0] << 8) |
+			 ((uint32_t)sample[1] << 16) |
+			 ((uint32_t)sample[2] << 24));
+}
+
+static inline void audio_pcm_write(uint8_t *sample, unsigned int sample_bytes,
+				   int32_t value)
+{
+	if (sample_bytes <= 2) {
+		sample[0] = (uint8_t)((uint32_t)value & 0xffU);
+		sample[1] = (uint8_t)(((uint32_t)value >> 8) & 0xffU);
+	} else {
+		sample[0] = (uint8_t)((uint32_t)value & 0xffU);
+		sample[1] = (uint8_t)(((uint32_t)value >> 8) & 0xffU);
+		sample[2] = (uint8_t)(((uint32_t)value >> 16) & 0xffU);
+		sample[3] = (uint8_t)(((uint32_t)value >> 24) & 0xffU);
+	}
+}
+
+static inline int32_t audio_pcm_saturate(int64_t value, unsigned int sample_bytes)
+{
+	if (sample_bytes <= 2) {
+		if (value > 32767)
+			return 32767;
+		if (value < -32768)
+			return -32768;
+	} else {
+		if (value > 2147483647LL)
+			return 2147483647;
+		if (value < -2147483648LL)
+			return (int32_t)(-2147483647LL - 1);
+	}
+	return (int32_t)value;
+}
+
+/*
+ * Convert one DMA period into the playback layout.
+ *
+ * @out_channels is what the SDL device accepted: 2 uses the BS.775 downmix for
+ * a 5.1/7.1 source, 6 and 8 keep the discrete channels (with the rear pair
+ * remapped for 7.1).  Missing source channels are silenced, which makes an
+ * explicit 5.1/7.1 request work even for a stereo source.  Uses integer math
+ * only and never allocates, so it is safe on the audio worker thread.
  */
 static size_t audio_convert_pcm(const struct gc573_user_audio *dma,
+				unsigned int out_channels,
 				const void *src, size_t bytes,
 				uint8_t *dst, size_t dst_size)
 {
 	const uint8_t *in = src;
+	unsigned int in_ch = dma->channels;
 	unsigned int in_frame;
 	unsigned int out_sample_bytes;
 	unsigned int out_frame;
 	unsigned int frames;
+	unsigned int max_frames;
 	size_t out_bytes;
 
-	if (!dma->dma_channels || !dma->sample_bytes)
+	if (!dma->dma_channels || !dma->sample_bytes || !in_ch)
 		return 0;
+	if (out_channels != 2 && out_channels != 6 && out_channels != 8)
+		return 0;
+	if (in_ch > dma->dma_channels)
+		in_ch = dma->dma_channels;
 
 	in_frame = dma->dma_channels * dma->sample_bytes;
-	out_sample_bytes = dma->sample_bits / 8U;
-	out_frame = out_sample_bytes * 2U;
+	/* S24_3LE is widened to the 4-byte S32LSB the SDL device expects. */
+	out_sample_bytes = dma->sample_bits > 16 ? 4U : 2U;
+	out_frame = out_sample_bytes * out_channels;
 	frames = (unsigned int)(bytes / in_frame);
+	if (!frames || !out_frame)
+		return 0;
+
+	/* Never read past the caller's buffer, even for an upmix request. */
+	max_frames = (unsigned int)(dst_size / out_frame);
+	if (frames > max_frames)
+		frames = max_frames;
 	out_bytes = (size_t)frames * out_frame;
-	if (!out_bytes || out_bytes > dst_size)
+	if (!out_bytes)
 		return 0;
 
 	for (unsigned int frame = 0; frame < frames; frame++) {
-		for (unsigned int channel = 0; channel < 2; channel++) {
-			const uint8_t *p = in + (size_t)frame * in_frame +
-					   (size_t)channel * dma->sample_bytes;
-			uint8_t *o = dst + (size_t)frame * out_frame +
-				     (size_t)channel * out_sample_bytes;
+		const uint8_t *in_frame_ptr = in + (size_t)frame * in_frame;
+		uint8_t *out = dst + (size_t)frame * out_frame;
 
-			if (out_sample_bytes == 2) {
-				o[0] = p[0];
-				o[1] = p[1];
-			} else {
-				/* S24_3LE -> S32LSB. */
-				o[0] = 0;
-				o[1] = p[0];
-				o[2] = p[1];
-				o[3] = p[2];
+		if (out_channels == 2 && in_ch > 2) {
+			/* ITU-R BS.775: L/R + 0.7071 FC + 0.7071 surround. */
+			int64_t left = (int64_t)audio_pcm_read(
+				in_frame_ptr + (size_t)AUDIO_SLOT_FL *
+					dma->sample_bytes, dma->sample_bytes) *
+				AUDIO_DM_UNITY_Q15;
+			int64_t right = (int64_t)audio_pcm_read(
+				in_frame_ptr + (size_t)AUDIO_SLOT_FR *
+					dma->sample_bytes, dma->sample_bytes) *
+				AUDIO_DM_UNITY_Q15;
+			int64_t center = audio_pcm_read(
+				in_frame_ptr + (size_t)AUDIO_SLOT_FC *
+					dma->sample_bytes, dma->sample_bytes);
+			int64_t side_left = audio_pcm_read(
+				in_frame_ptr + (size_t)AUDIO_SLOT_SL *
+					dma->sample_bytes, dma->sample_bytes);
+			int64_t side_right = audio_pcm_read(
+				in_frame_ptr + (size_t)AUDIO_SLOT_SR *
+					dma->sample_bytes, dma->sample_bytes);
+
+			left += center * AUDIO_DM_MINUS3DB_Q15;
+			right += center * AUDIO_DM_MINUS3DB_Q15;
+			left += side_left * AUDIO_DM_MINUS3DB_Q15;
+			right += side_right * AUDIO_DM_MINUS3DB_Q15;
+
+			if (in_ch >= 8) {
+				left += (int64_t)audio_pcm_read(
+					in_frame_ptr + (size_t)AUDIO_SLOT_RL *
+						dma->sample_bytes,
+					dma->sample_bytes) * AUDIO_DM_MINUS6DB_Q15;
+				right += (int64_t)audio_pcm_read(
+					in_frame_ptr + (size_t)AUDIO_SLOT_RR *
+						dma->sample_bytes,
+					dma->sample_bytes) * AUDIO_DM_MINUS6DB_Q15;
 			}
+
+			audio_pcm_write(out, out_sample_bytes,
+				audio_pcm_saturate(left >> AUDIO_DM_SHIFT,
+						    out_sample_bytes));
+			audio_pcm_write(out + out_sample_bytes, out_sample_bytes,
+				audio_pcm_saturate(right >> AUDIO_DM_SHIFT,
+						    out_sample_bytes));
+			continue;
+		}
+
+		/*
+		 * Discrete layout (or plain stereo passthrough): map each output
+		 * channel onto its source slot and silence the ones the source
+		 * does not carry.  7.1 sources use the SMPTE order, where the rear
+		 * pair sits in slots 6/7 and the side pair in slots 4/5.
+		 */
+		for (unsigned int out_ch = 0; out_ch < out_channels; out_ch++) {
+			unsigned int slot = out_ch;
+			uint8_t *o = out + (size_t)out_ch * out_sample_bytes;
+
+			if (in_ch >= 8 && out_channels == 8)
+				slot = audio_slot_71_to_dma[out_ch];
+
+			if (slot >= in_ch) {
+				memset(o, 0, out_sample_bytes);
+				continue;
+			}
+			audio_pcm_write(o, out_sample_bytes,
+					audio_pcm_read(in_frame_ptr +
+						       (size_t)slot * dma->sample_bytes,
+					       dma->sample_bytes));
 		}
 	}
 
@@ -3292,8 +3570,10 @@ static const char *audio_osd_text(const struct audio_stream *as, char *buf,
 {
 	if (as->streaming) {
 		if (as->bt_playing) {
-			snprintf(buf, len, "%s 5.1 -> Stereo",
-				 audio_bitstream_osd_name(as->bitstream));
+			snprintf(buf, len, "%s -> %s",
+				 audio_bitstream_osd_name(as->bitstream),
+				 audio_channel_layout_name(as->playback.channels ?
+							   as->playback.channels : 2U));
 		} else if (audio_output_muted(as)) {
 			if (as->non_pcm || as->preamble_muted)
 				snprintf(buf, len, "%s (Muted)",
@@ -3301,8 +3581,10 @@ static const char *audio_osd_text(const struct audio_stream *as, char *buf,
 			else
 				snprintf(buf, len, "Audio (Muted)");
 		} else {
-			snprintf(buf, len, "L-PCM %ukHz",
-				 (as->format_rate + 500U) / 1000U);
+			snprintf(buf, len, "L-PCM %ukHz %s",
+				 (as->format_rate + 500U) / 1000U,
+				 audio_channel_layout_name(as->playback.channels ?
+							   as->playback.channels : 2U));
 		}
 		return buf;
 	}
@@ -3517,8 +3799,10 @@ static const void *audio_apply_gain(struct audio_stream *as, const void *data,
 	memcpy(g_gain_scratch, data, bytes);
 	dst = g_gain_scratch;
 
+	unsigned int channels = as->playback.channels ? as->playback.channels : 2U;
+
 	for (i = 0; i < samples; i++) {
-		if (current != target) {
+		if ((i % channels) == 0 && current != target) {
 			current += delta;
 			if ((delta > 0.0f && current > target) ||
 			    (delta < 0.0f && current < target))
@@ -3635,16 +3919,34 @@ static bool audio_bitstream_prepare(struct audio_stream *as)
 {
 	enum gc573_bitstream_codec codec =
 		audio_bitstream_codec_for_kind(as->bitstream);
+	unsigned int out_channels = audio_output_channels(as->format_channels);
 
 	if (codec == GC573_BITSTREAM_CODEC_NONE)
 		return false;
 
-	if (!as->bt_ready || as->bt_codec != codec) {
+	/*
+	 * Open the device first: it may fall back to stereo, and the decoder has
+	 * to produce exactly the layout the device accepted.  A mismatch would
+	 * hand SDL 6-channel frames with a 2-channel frame size.
+	 */
+	if (as->playback.dev &&
+	    (as->playback.rate != 48000 || as->playback.bits != 16 ||
+	     as->playback.channels != out_channels))
+		audio_close_device(&as->playback);
+	if (!as->playback.dev &&
+	    audio_open_device(&as->playback, 48000, 16, out_channels) < 0)
+		return false;
+	if (as->playback.dev)
+		out_channels = as->playback.channels;
+
+	if (!as->bt_ready || as->bt_codec != codec ||
+	    as->bt_channels != out_channels) {
 		if (as->bt_ready) {
 			gc573_bitstream_decoder_close(&as->bt);
 			as->bt_ready = false;
 		}
-		if (gc573_bitstream_decoder_init(&as->bt, codec, 48000, 2) < 0) {
+		if (gc573_bitstream_decoder_init(&as->bt, codec, 48000,
+						 (int)out_channels) < 0) {
 			if (!as->bt_error_reported) {
 				pr_warn("Bitstream: libavcodec has no usable %s decoder; output stays muted",
 					codec == GC573_BITSTREAM_CODEC_AC3 ?
@@ -3655,18 +3957,12 @@ static bool audio_bitstream_prepare(struct audio_stream *as)
 		}
 		as->bt_ready = true;
 		as->bt_codec = codec;
+		as->bt_channels = out_channels;
 		as->bt_error_reported = false;
-		pr_info("Bitstream: %s decoder ready -> 48000 Hz stereo S16",
-			codec == GC573_BITSTREAM_CODEC_AC3 ? "AC-3" : "DTS");
+		pr_info("Bitstream: %s decoder ready -> 48000 Hz %u ch S16",
+			codec == GC573_BITSTREAM_CODEC_AC3 ? "AC-3" : "DTS",
+			out_channels);
 	}
-
-	/* Decoded audio is always 48 kHz S16 stereo. */
-	if (as->playback.dev &&
-	    (as->playback.rate != 48000 || as->playback.bits != 16))
-		audio_close_device(&as->playback);
-	if (!as->playback.dev &&
-	    audio_open_device(&as->playback, 48000, 16) < 0)
-		return false;
 
 	return true;
 }
@@ -3798,6 +4094,7 @@ static void audio_queue_block(struct audio_stream *as, const void *data,
 				gc573_bitstream_decoder_close(&as->bt);
 				as->bt_ready = false;
 				as->bt_codec = GC573_BITSTREAM_CODEC_NONE;
+				as->bt_channels = 0;
 			}
 			if (was_muted)
 				printf("[AUDIO] LPCM confirmed after %u clean blocks; switching back to PCM\n",
@@ -3825,9 +4122,9 @@ static void audio_queue_block(struct audio_stream *as, const void *data,
 	if (!playback->dev)
 		return;
 
-	out_bytes = audio_convert_pcm(&as->dma, data, bytes,
-					      playback->scratch,
-					      playback->scratch_size);
+	out_bytes = audio_convert_pcm(&as->dma, playback->channels, data, bytes,
+				      playback->scratch,
+				      playback->scratch_size);
 	if (!out_bytes)
 		return;
 
@@ -3877,6 +4174,7 @@ static void audio_stop_capture_locked(struct audio_stream *as)
 		gc573_bitstream_decoder_close(&as->bt);
 		as->bt_ready = false;
 		as->bt_codec = GC573_BITSTREAM_CODEC_NONE;
+		as->bt_channels = 0;
 	}
 	/*
 	 * preamble_muted and the detected codec deliberately survive a format
@@ -3988,7 +4286,8 @@ static void audio_handle_format(struct audio_stream *as,
 	decode_capable = bitstream;
 	if (audio_open_device(&as->playback,
 			      decode_capable ? 48000 : format->rate_hz,
-			      decode_capable ? 16 : format->sample_bits) < 0) {
+			      decode_capable ? 16 : format->sample_bits,
+			      audio_output_channels(format->channels)) < 0) {
 		as->retry_after = now + AUDIO_RETRY_MS;
 		return;
 	}
@@ -4927,8 +5226,10 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 			snprintf(st.audio_state, sizeof(st.audio_state),
 				 "bitstream");
 			snprintf(st.audio_label, sizeof(st.audio_label),
-				 "%.24s 5.1 -> Stereo",
-				 audio_bitstream_osd_name(audio->bitstream));
+				 "%.24s -> %s",
+				 audio_bitstream_osd_name(audio->bitstream),
+				 audio_channel_layout_name(audio->playback.channels ?
+							   audio->playback.channels : 2U));
 		} else if (audio_output_muted(audio)) {
 			snprintf(st.audio_state, sizeof(st.audio_state), "muted");
 			snprintf(st.audio_label, sizeof(st.audio_label),
@@ -4939,8 +5240,10 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 		} else {
 			snprintf(st.audio_state, sizeof(st.audio_state), "lpcm");
 			snprintf(st.audio_label, sizeof(st.audio_label),
-				 "L-PCM %ukHz",
-				 (audio->format_rate + 500U) / 1000U);
+				 "L-PCM %ukHz %s",
+				 (audio->format_rate + 500U) / 1000U,
+				 audio_channel_layout_name(audio->playback.channels ?
+							   audio->playback.channels : 2U));
 		}
 		st.audio_rate = audio->format_rate;
 		st.audio_channels = audio->format_channels;
@@ -5361,6 +5664,19 @@ int main(int argc, char *argv[])
 				audio_tap_node = GC573_AUDIO_TAP_DEFAULT;
 		} else if (strncmp(argv[i], "--audio-tap=", 12) == 0) {
 			audio_tap_node = argv[i] + 12;
+		} else if (strcmp(argv[i], "--audio-channels") == 0 &&
+			   i + 1 < argc) {
+			if (!audio_channel_mode_parse(argv[++i],
+						      &g_audio_channel_mode))
+				fprintf(stderr,
+					"[AUDIO] Unknown channel mode '%s'; using auto\n",
+					argv[i]);
+		} else if (strncmp(argv[i], "--audio-channels=", 17) == 0) {
+			if (!audio_channel_mode_parse(argv[i] + 17,
+						      &g_audio_channel_mode))
+				fprintf(stderr,
+					"[AUDIO] Unknown channel mode '%s'; using auto\n",
+					argv[i] + 17);
 		} else if (strcmp(argv[i], "-f") == 0 ||
 			   strcmp(argv[i], "--fullscreen") == 0) {
 			g_fullscreen = true;
@@ -5726,6 +6042,8 @@ int main(int argc, char *argv[])
 		else
 			pr_info("Audio worker: draining DMA every %u ms",
 				AUDIO_DMA_POLL_MS);
+		pr_info("Audio: playback layout %s (--audio-channels)",
+			audio_channel_mode_name(g_audio_channel_mode));
 	} else {
 		pr_warn("Audio DMA mapping failed; continuing video-only");
 	}
@@ -6710,8 +7028,10 @@ int main(int argc, char *argv[])
 				}
 				pthread_mutex_unlock(&g_v4l2_lock);
 				if (audio.streaming && audio.bt_playing) {
-					printf("[AUDIO] Decoding %s -> Stereo | bursts %lu | frames %lu | errors %lu\n",
+					printf("[AUDIO] Decoding %s -> %s | bursts %lu | frames %lu | errors %lu\n",
 					       audio_bitstream_name(audio.bitstream),
+					       audio_channel_layout_name(audio.playback.channels ?
+									 audio.playback.channels : 2U),
 					       (unsigned long)audio.bt.bursts,
 					       (unsigned long)audio.bt.frames_decoded,
 					       (unsigned long)audio.bt.decode_errors);

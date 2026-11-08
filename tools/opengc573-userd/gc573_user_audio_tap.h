@@ -6,9 +6,10 @@
  * stereo downmix) into a dedicated PipeWire node so OBS/Discord/FFmpeg can
  * record it as its own track, independent of the desktop mix.
  *
- * The tap always publishes S16_LE stereo.  16-bit carriers are forwarded
- * as-is; 24-bit carriers reach this layer as left-aligned S32LSB (the
- * streamer already widened them for SDL) and are re-quantised to S16.
+ * The tap publishes S16_LE in the same channel layout as the playback
+ * device: stereo, 5.1 or 7.1.  16-bit carriers are forwarded as-is; 24-bit
+ * carriers reach this layer as left-aligned S32LSB (the streamer already
+ * widened them for SDL) and are re-quantised to S16.
  */
 
 #ifndef GC573_USER_AUDIO_TAP_H
@@ -34,19 +35,21 @@
 int gc573_audio_tap_start(const char *node_name);
 
 /**
- * gc573_audio_tap_set_format - (Re)connect the stream for a sample rate
+ * gc573_audio_tap_set_format - (Re)connect the stream for rate and layout
  * @rate_hz: HDMI sample rate (32/44.1/48 kHz)
+ * @channels: 2, 6 or 8 interleaved S16 channels
  *
- * No-op when the tap is disabled or the rate did not change.
+ * No-op when the tap is disabled or both rate and channel count are unchanged.
  */
-void gc573_audio_tap_set_format(unsigned int rate_hz);
+void gc573_audio_tap_set_format(unsigned int rate_hz, unsigned int channels);
 
 /**
  * gc573_audio_tap_write - Queue PCM for the tap
- * @data: Stereo PCM block (S16LE or left-aligned S32LSB)
+ * @data: Interleaved PCM block (S16LE or left-aligned S32LSB)
  * @bytes: Size of the block
  * @sample_bits: 16 or 24, matching the streamer's playback format
  *
+ * The block is truncated to whole frames of the active channel count.
  * Lock-free: called from the audio worker, read from the PipeWire RT thread.
  */
 void gc573_audio_tap_write(const void *data, size_t bytes,

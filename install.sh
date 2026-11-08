@@ -497,7 +497,7 @@ context.objects = [
           node.name               = "everlive-capture-audio"
           node.description        = "EverLive Capture Audio"
           media.class             = Audio/Sink
-          audio.position          = [ FL FR ]
+          audio.position          = [ FL FR FC LFE RL RR ]
           monitor.channel-volumes = true
           node.virtual            = false
       }
