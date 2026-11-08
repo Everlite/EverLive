@@ -1887,14 +1887,18 @@ void vb2_buffer_done(struct vb2_buffer *vb, enum vb2_buffer_state state)
 				struct gc570d_shm_port *sp = &g_shm->ports[port];
 
 				if ((size_t)frame_w * frame_h * 2 == vb->payload) {
+					uint32_t slot = __atomic_load_n(
+							&sp->write_idx,
+							__ATOMIC_RELAXED);
 					uint64_t seq = __atomic_load_n(&sp->seq,
 								       __ATOMIC_RELAXED);
 
-					/* Seqlock: odd while the payload is in flux. */
-					__atomic_store_n(&sp->seq, seq + 1,
-							 __ATOMIC_RELAXED);
-					__atomic_thread_fence(__ATOMIC_RELEASE);
-					memcpy(sp->yuy2, vb->vaddr, vb->payload);
+					if (slot >= GC570D_SHM_SLOTS)
+						slot = 0;
+
+					/* Write the back buffer, then swap it in. */
+					memcpy(sp->yuy2[slot], vb->vaddr,
+					       vb->payload);
 					__atomic_store_n(&sp->width, frame_w,
 							 __ATOMIC_RELAXED);
 					__atomic_store_n(&sp->height, frame_h,
@@ -1908,9 +1912,17 @@ void vb2_buffer_done(struct vb2_buffer *vb, enum vb2_buffer_state state)
 					__atomic_store_n(&sp->timestamp_ns,
 							 vb->timestamp,
 							 __ATOMIC_RELAXED);
+					__atomic_store_n(&g_shm->heartbeat_ns,
+							 ktime_get_ns(),
+							 __ATOMIC_RELAXED);
 					__atomic_thread_fence(__ATOMIC_RELEASE);
-					__atomic_store_n(&sp->seq, seq + 2,
+					__atomic_store_n(&sp->ready_idx, slot,
 							 __ATOMIC_RELEASE);
+					__atomic_store_n(&sp->seq, seq + 1,
+							 __ATOMIC_RELEASE);
+					__atomic_store_n(&sp->write_idx,
+							 (slot + 1) % GC570D_SHM_SLOTS,
+							 __ATOMIC_RELAXED);
 				}
 			}
 		}
@@ -3111,6 +3123,7 @@ int main(int argc, char **argv)
 	/* Initialize POSIX shared-memory frame store for libgc570d-v4l2.so */
 	g_shm_fd = shm_open(GC570D_SHM_NAME, O_CREAT | O_RDWR, 0600);
 	if (g_shm_fd >= 0) {
+		/* Frame store is private to the owning user. */
 		fchmod(g_shm_fd, 0600);
 		if (ftruncate(g_shm_fd, sizeof(struct gc570d_shm_region)) == 0) {
 			g_shm = mmap(NULL, sizeof(struct gc570d_shm_region),
@@ -3118,7 +3131,9 @@ int main(int argc, char **argv)
 			if (g_shm != MAP_FAILED) {
 				memset(g_shm, 0, sizeof(struct gc570d_shm_region));
 				g_shm->magic = GC570D_SHM_MAGIC;
-				g_shm->version = 1;
+				g_shm->version = 2;
+				g_shm->publisher_pid = (uint32_t)getpid();
+				g_shm->heartbeat_ns = ktime_get_ns();
 				strscpy(g_shm->pci_bdf, g_pdev.bdf, sizeof(g_shm->pci_bdf));
 				for (int p = 0; p < 2; p++) {
 					g_shm->ports[p].width = p == 0 ?

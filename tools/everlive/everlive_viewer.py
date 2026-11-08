@@ -1595,22 +1595,6 @@ class GameStreamer:
         if self.hw_info.get("pci"):
             cmd.append(self.hw_info["pci"])
 
-        # lsfg-vk frame generation.  This is deliberately passed
-        # in headless mode too: the engine keeps LSFG idle while the window is
-        # closed and activates Vulkan + LSFG as soon as mode.set("gaming")
-        # opens it, so a Studio -> Gaming switch needs no restart.  The V4L2
-        # loopback keeps receiving the raw capture path independently.
-        if framegen not in FRAMEGEN_KEYS:
-            framegen = FRAMEGEN_ALIASES.get(str(framegen).lower(), "off")
-        if framegen in FRAMEGEN_KEYS and framegen != "off":
-            cmd.extend(["--framegen", framegen])
-        # Flow/perf/latency are passed even in mode OFF so a later live toggle
-        # (hotkey or IPC) starts from the Hub's saved values, not defaults.
-        cmd.extend(["--fg-flow-scale",
-                    f"{max(0.5, min(1.0, float(fg_flow_scale))):.2f}"])
-        cmd.append("--fg-perf" if fg_perf_mode else "--no-fg-perf")
-        cmd.append("--fg-low-latency" if fg_low_latency else "--no-fg-low-latency")
-
         if headless:
             cmd.append("--headless")
             # Studio/streamer mode publishes a clean OBS feed without OSD.
@@ -1802,6 +1786,23 @@ class GameStreamer:
             scale = "fit"
         cmd.extend(["--scale", scale])
         cmd.extend(["--volume", f"{volume:.2f}"])
+
+        # lsfg-vk frame generation.  Passed in headless mode too: the engine
+        # keeps LSFG idle while the window is closed and activates Vulkan +
+        # LSFG as soon as mode.set("gaming") opens it, so a Studio -> Gaming
+        # switch needs no restart.  The V4L2 loopback keeps receiving the 
+        # raw capture path independently.  The GC570D engine has no 
+        # LSFG path; those flags stay on this GC573 command line only.
+        if framegen not in FRAMEGEN_KEYS:
+            framegen = FRAMEGEN_ALIASES.get(str(framegen).lower(), "off")
+        if framegen in FRAMEGEN_KEYS and framegen != "off":
+            cmd.extend(["--framegen", framegen])
+        # Flow/perf/latency are passed even in mode OFF so a later live toggle
+        # (hotkey or IPC) starts from the Hub's saved values, not defaults.
+        cmd.extend(["--fg-flow-scale",
+                    f"{max(0.5, min(1.0, float(fg_flow_scale))):.2f}"])
+        cmd.append("--fg-perf" if fg_perf_mode else "--no-fg-perf")
+        cmd.append("--fg-low-latency" if fg_low_latency else "--no-fg-low-latency")
 
         if v4l2_device:
             cmd.extend(["--v4l2", v4l2_device])
