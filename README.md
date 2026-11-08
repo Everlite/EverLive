@@ -11,7 +11,7 @@
 
 **EverLive** is a Linux console gaming suite and open-source userspace driver for the **AVerMedia Live Gamer 4K (GC573)** (`PCI 1461:0054`, Subsystem `1461:5730`) and the **Live Gamer DUO (GC570D)** (`PCI 1461:0054`, Subsystem `1461:5700`). The installed card is detected through `subsystem_device` and routed to the matching engine; both cards never share a device node.
 
-It is designed to let you play console games (PlayStation 5, Xbox Series X, Nintendo Switch, retro scalers, or secondary PCs) directly on your Linux desktop (Wayland & X11) with low presentation overhead, real-time **HDR10 / HLG to SDR filmic tonemapping**, synchronized audio (**Linear PCM** as well as **Dolby Digital / DTS 5.1** decoded to stereo), a native **V4L2 virtual camera** and **PipeWire virtual audio track** for OBS/Discord, zero-interruption live runtime controls over IPC, **pixel-perfect integer scaling** for retro and 720p/1080p consoles, selectable hardware EDID profiles (applied on session restart), and custom hardware RGB LED control.
+It is designed to let you play console games (PlayStation 5, Xbox Series X, Nintendo Switch, retro scalers, or secondary PCs) directly on your Linux desktop (Wayland & X11) with low presentation overhead, real-time **HDR10 / HLG to SDR filmic tonemapping**, synchronized audio (**Linear PCM 2.0 / 5.1 / 7.1** multichannel passthrough as well as **Dolby Digital / DTS 5.1** with standardized **ITU-R BS.775 downmixing** for stereo headsets), a native **V4L2 virtual camera** and **PipeWire virtual audio track** for OBS/Discord, zero-interruption live runtime controls over IPC, **pixel-perfect integer scaling** for retro and 720p/1080p consoles, selectable hardware EDID profiles (applied on session restart), and custom hardware RGB LED control.
 
 The **Live Gamer DUO** additionally exposes both HDMI inputs simultaneously: HDMI 1 supports the full 3000-nit BT.2020 HDR LUT path and native lower resolutions, HDMI 2 is published as a second OBS camera, and validated 2.0/5.1 LPCM passthrough is available from both inputs.
 
@@ -83,7 +83,7 @@ The following capabilities have been physically tested and verified on physical 
   - **2560×1440 @ 60 & 120 FPS (SDR & HDR — v1.3.0):** Verified across PS5 *Test 1440p Output* (`60 Hz SDR/HDR` and `120 Hz SDR/HDR`) and 120 Hz titles (*The Finals*, *Fortnite 120Hz Mode*, PS5 Dashboard). Stable frame pacing matching display refresh intervals.
   - **3840×2160 @ 60 FPS (Native 4K SDR & HDR):** Verified native 4K capture without downscaling stalls.
   - **HDR10 & HLG Filmic Tonemapping (v1.3.0):** Automatic IT6805 DRM InfoFrame detection (`PQ` / `HLG`) with real-time in-place Hable filmic tonemapping (ITU-R BT.2408 203-nit diffuse white + BT.2020 $\to$ BT.709 chroma matrix) for both the SDL2 game window and OBS (`/dev/video10`), with live EV exposure adjustment (`-2.0 .. +2.0 EV`) and zero-copy bypass on SDR signals.
-  - **Audio DMA & Universal Bitstream Decoding:** High-fidelity audio captured over PCIe DMA and played back via SDL2 into PipeWire. Supports both uncompressed **Linear PCM** (up to 8 channels) and compressed **Dolby Digital (AC-3 5.1)** and **DTS (5.1)** bitstreams decoded in real time via `libavcodec` and downmixed to stereo with `libswresample`. Failsafe mute-guard prevents digital noise during mode transitions.
+  - **Audio DMA, 5.1/7.1 Multichannel & Universal Bitstream Decoding:** High-fidelity audio captured over PCIe DMA and played back via SDL2 into PipeWire. Supports uncompressed **Linear PCM (2.0, 5.1, 7.1)** with discrete multichannel passthrough as well as compressed **Dolby Digital (AC-3 5.1)** and **DTS (5.1)** bitstreams decoded via `libavcodec`. For stereo headsets and speakers, EverLive implements a standardized **ITU-R BS.775 matrix downmix** in fixed-point Q15 arithmetic, ensuring crystal-clear center-channel speech and dialogue. The in-process PipeWire audio tap (`EverLive Capture Audio`) dynamically mirrors multichannel 5.1/7.1 into OBS Studio for surround recordings. Failsafe mute-guard prevents digital noise during mode transitions.
   - **Dynamic Hot-Switching & Cold-Start Handshake:** Verified dynamic mode changes (e.g. 4K60 dashboard $\leftrightarrow$ 1440p120 gameplay $\leftrightarrow$ 1080p) without process crashes or window recreation, plus reliable cold-start locking when the console boots after EverLive is already running.
 * **Virtual Camera, Isolated OBS Audio & Live IPC Control (v1.2.0 / v1.3.0):**
   - **Native V4L2 output (`/dev/video10`):** Verified with a PS5 feeding OBS (`"EverLive Capture"`) while the interactive gaming window is open, with dynamic live attach/detach (`v4l2.set`) without restarting the stream.
@@ -312,7 +312,7 @@ flowchart TD
     
     streamer -->|"OpenGL / Vulkan Direct Scanout"| window["Game Window (1440p120 / 4K60)"]
     streamer -->|"Native YUYV Frames"| v4l2dev
-    streamer -->|"SDL2 Audio / PipeWire"| audio["Headset / Speakers (Stereo Downmix)"]
+    streamer -->|"SDL2 Audio / PipeWire"| audio["Headset / Speakers (Discrete 5.1/7.1 or BS.775 Stereo Downmix)"]
 
     gui["EverLive Console Hub (Qt / Python)<br/>Launch Modes, EDID, Aspect, LED, Volume"] -.->|Manages| streamer
     streamer -.->|"FD Handoff"| daemon["everlive_userd (Standby Daemon)<br/>Maintains state & LED without FLR"]

@@ -19,7 +19,7 @@ As of **EverLive v1.0.0**, this userspace engine is the default, primary driver 
 5. **Direct Video Presentation:**  
    Frames are presented directly via an SDL2 OpenGL rendering context.
 6. **HDMI Audio DMA & Decoding:**
-   Linear PCM (up to 8 channels) as well as Dolby Digital (AC-3) and DTS 5.1 carried as IEC 61937 bursts are captured over DMA. Compressed streams are decoded with `libavcodec` and downmixed to 48 kHz stereo via `libswresample`; a content-driven mute guard keeps raw bitstreams away from the speakers.
+   Linear PCM (up to 8 channels) as well as Dolby Digital (AC-3) and DTS 5.1 carried as IEC 61937 bursts are captured over DMA. Supports discrete multichannel 5.1/7.1 passthrough (`--audio-channels auto|stereo|5.1|7.1`) as well as ITU-R BS.775 fixed-point stereo downmixing so center-channel speech remains crystal clear. Compressed streams are decoded with `libavcodec` and resampled via `libswresample`; a content-driven mute guard keeps raw bitstreams away from the speakers.
 7. **Hardware EDID Profile Management:**
    Predefined and custom binary EDIDs can be flashed directly into the IT6805 receiver RAM over I2C. Every built-in profile advertises L-PCM, AC-3 and DTS 5.1.
 8. **Standby Daemon (`everlive_userd`):**
@@ -42,7 +42,7 @@ As of **EverLive v1.0.0**, this userspace engine is the default, primary driver 
 | **`gc573_user_hdr.[ch]`** | Real-time HDR10 (PQ) & HLG to SDR Hable filmic tonemapper and BT.2020-to-BT.709 chroma matrix. |
 | **`gc573_user_framegen.[ch]`** | Vulkan LSFG-VK 2x frame generation integration, phase-locked 2:1 cadence deduplication, and low-latency swapchain. |
 | **`gc573_user_ipc.[ch]`** | Lock-free JSON-RPC 2.0 Unix control socket (`everlive.sock`) for zero-interrupt runtime mutations. |
-| **`gc573_user_audio_tap.[ch]`** | In-process PipeWire virtual audio tap (`EverLive Capture Audio`) for isolated OBS recording. |
+| **`gc573_user_audio_tap.[ch]`** | Dynamic 2/6/8-channel PipeWire virtual audio tap (`EverLive Capture Audio`) for isolated stereo and 5.1 surround OBS recording. |
 | **`gc573_user_audio.[ch]`** | PCIe DMA audio ring buffer, IEC 61937 scan/mute guard, audio worker thread and SDL2 playback. |
 | **`gc573_user_bitstream.[ch]`** | IEC 61937 unpacker plus AC-3/DTS decoder (`libavcodec`) and stereo downmix (`libswresample`). |
 | **`gc573_user_nosignal.[ch]`** | Procedural YUYV standby screen (gradient, grid, icon, bitmap-font text) for the window and the V4L2 sink. |
@@ -92,6 +92,8 @@ gc573_user_streamer [PCI_ADDRESS] [OPTIONS]
   --no-ipc             Do not open the control socket
   --audio-tap [NAME]   Mirror the mixed audio into a PipeWire sink
                        (default: everlive-capture-audio)
+  --audio-channels M   Playback layout: auto|stereo|5.1|7.1 (default: auto;
+                       5.1/7.1 falls back to ITU-R BS.775 stereo downmix)
   --no-hdr             Disable HDR10/HLG -> SDR tonemapping (bypass)
   --hdr-exposure EV    Exposure bias for the tonemapper (-2.0 .. +2.0)
 ```
