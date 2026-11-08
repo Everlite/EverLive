@@ -97,6 +97,7 @@ DEFAULT_SETTINGS = {
     "hdr_tonemap": True,
     "hdr_exposure": 0.0,
     "scale_mode": "fit",
+    "audio_channels": "auto",
     "framegen_mode": "off",
     "fg_flow_scale": 1.0,
     "fg_perf_mode": False,
@@ -139,6 +140,8 @@ def load_settings() -> dict:
     settings["hdr_exposure"] = max(-2.0, min(2.0, float(settings["hdr_exposure"])))
     if settings.get("scale_mode") not in SCALE_MODES:
         settings["scale_mode"] = "fit"
+    if settings.get("audio_channels") not in AUDIO_CHANNEL_KEYS:
+        settings["audio_channels"] = "auto"
     # lsfg-vk frame generation.  Migrate the old shader-era keys.
     fg_mode = str(settings.get("framegen_mode", "off")).lower()
     fg_mode = FRAMEGEN_ALIASES.get(fg_mode, fg_mode)
@@ -674,6 +677,17 @@ EDID_PROFILES = [
     ("Load Custom EDID (.bin)...", "custom"),
 ]
 EDID_PROFILE_KEYS = {key for _, key in EDID_PROFILES if key != "custom"}
+
+# Playback layouts understood by gc573_user_streamer --audio-channels.
+# "auto" follows the HDMI source; "stereo" applies the ITU-R BS.775 downmix
+# for 5.1/7.1 sources instead of dropping everything but FL/FR.
+AUDIO_CHANNEL_MODES = [
+    ("Auto (HDMI Source)", "auto"),
+    ("Stereo (BS.775 Downmix)", "stereo"),
+    ("5.1 Surround", "5.1"),
+    ("7.1 Surround", "7.1"),
+]
+AUDIO_CHANNEL_KEYS = {key for _, key in AUDIO_CHANNEL_MODES}
 
 LED_COLORS = {
     0: "#334155",  # Aus (Dunkel)
@@ -1786,6 +1800,14 @@ class GameStreamer:
             scale = "fit"
         cmd.extend(["--scale", scale])
         cmd.extend(["--volume", f"{volume:.2f}"])
+
+        # Playback channel layout.  "auto" follows the HDMI source; the other
+        # modes force a layout and fall back to the BS.775 stereo downmix when
+        # the sink refuses it.  Live changes go through audio.channels.set.
+        audio_channels = load_settings().get("audio_channels", "auto")
+        if audio_channels not in AUDIO_CHANNEL_KEYS:
+            audio_channels = "auto"
+        cmd.extend(["--audio-channels", audio_channels])
 
         # lsfg-vk frame generation.  Passed in headless mode too: the engine
         # keeps LSFG idle while the window is closed and activates Vulkan +
@@ -3312,6 +3334,26 @@ if HAS_QT:
             self.combo_led.currentIndexChanged.connect(self.on_led_changed)
             grid_audio.addWidget(self.combo_led, 0, 3)
 
+            grid_audio.addWidget(_field(
+                "Audio Layout",
+                "Playback channel layout. Auto follows the HDMI source; "
+                "5.1/7.1 fall back to an ITU-R BS.775 stereo downmix when "
+                "the audio sink cannot open them."), 1, 0)
+
+            self.combo_audio_channels = QComboBox()
+            for label, key in AUDIO_CHANNEL_MODES:
+                self.combo_audio_channels.addItem(label, key)
+            saved_layout = str(self.saved_cfg.get("audio_channels", "auto"))
+            idx = self.combo_audio_channels.findData(saved_layout)
+            self.combo_audio_channels.setCurrentIndex(idx if idx >= 0 else 0)
+            self.combo_audio_channels.currentIndexChanged.connect(
+                self.on_audio_channels_changed)
+            if self.duo_mode:
+                self.combo_audio_channels.setEnabled(False)
+                self.combo_audio_channels.setToolTip(
+                    "The Live Gamer DUO engine publishes stereo only.")
+            grid_audio.addWidget(self.combo_audio_channels, 1, 1, 1, 3)
+
             root_layout.addWidget(card_audio)
 
             # --- Section C: outputs, overlay & app ----------------------
@@ -3731,6 +3773,16 @@ if HAS_QT:
                     self.combo_scale.blockSignals(True)
                     self.combo_scale.setCurrentIndex(idx)
                     self.combo_scale.blockSignals(False)
+
+            layout = (audio or {}).get("layout")
+            if (hasattr(self, "combo_audio_channels") and
+                    layout in AUDIO_CHANNEL_KEYS):
+                idx = self.combo_audio_channels.findData(layout)
+                if (idx >= 0 and
+                        idx != self.combo_audio_channels.currentIndex()):
+                    self.combo_audio_channels.blockSignals(True)
+                    self.combo_audio_channels.setCurrentIndex(idx)
+                    self.combo_audio_channels.blockSignals(False)
 
             osd = status.get("osd") or {}
             if (isinstance(osd.get("enabled"), bool) and
@@ -4235,6 +4287,18 @@ if HAS_QT:
                 self.streamer.ctl("scale", mode)
             elif self.streamer.is_running:
                 print("[*] Scaling mode saved; restart the stream to apply it.")
+
+        def on_audio_channels_changed(self, *_):
+            mode = self.combo_audio_channels.currentData() or "auto"
+            if mode not in AUDIO_CHANNEL_KEYS:
+                mode = "auto"
+            self.saved_cfg["audio_channels"] = mode
+            save_settings({"audio_channels": mode})
+            if self._ipc is not None and self._ipc.connected:
+                if self._ipc.set_audio_channels(mode):
+                    print(f"[*] Audio layout -> {mode}")
+            elif self.streamer.is_running:
+                print("[*] Audio layout saved; restart the stream to apply it.")
 
         def on_osd_changed(self, enabled: bool):
             self.saved_cfg["osd_enabled"] = bool(enabled)

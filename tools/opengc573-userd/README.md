@@ -118,8 +118,8 @@ socket and the Control Hub attaches to it as a read-only **Remote Session**.
 - Transport: newline-delimited JSON-RPC 2.0, max 64 KiB per line.
 
 Methods: `hello`, `ping`, `status.get`, and the write path
-`led.set`, `led.mode.set`, `audio.volume.set`, `audio.mute.set`, `osd.set`,
-`osd.position.set`, `aspect.set`, `scale.set`, `framegen.set`, `mode.set`, `v4l2.set`, `hdr.set`.
+`led.set`, `led.mode.set`, `audio.volume.set`, `audio.mute.set`, `audio.channels.set`,
+`osd.set`, `osd.position.set`, `aspect.set`, `scale.set`, `framegen.set`, `mode.set`, `v4l2.set`, `hdr.set`.
 Mutations are queued into a lock-free ring and applied by the render thread, so
 they never touch the DMA path; the audio gain uses a 20 ms linear ramp instead
 of pausing the device. The snapshot is published once per second from the

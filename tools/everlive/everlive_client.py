@@ -277,6 +277,16 @@ if QSocketNotifier is not None:
         def set_mute(self, muted: bool) -> bool:
             return self.request("audio.mute.set", {"muted": bool(muted)})
 
+        def set_audio_channels(self, mode: str) -> bool:
+            """Set the playback channel layout of a running engine.
+
+            ``mode`` is ``auto`` (follow the HDMI source), ``stereo``,
+            ``5.1`` or ``7.1``.  Only the SDL playback device is re-opened;
+            the DMA ring, the V4L2 feed and the video pipeline keep running.
+            """
+            return self.request("audio.channels.set",
+                                {"mode": str(mode).strip().lower()})
+
         def set_osd(self, enabled: bool) -> bool:
             return self.request("osd.set", {"enabled": bool(enabled)})
 

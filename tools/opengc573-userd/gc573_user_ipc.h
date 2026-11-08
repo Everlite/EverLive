@@ -73,6 +73,7 @@ enum gc573_ipc_mode {
 	GC573_IPC_CMD_HDR,
 	GC573_IPC_CMD_SCALE,
 	GC573_IPC_CMD_FRAMEGEN,
+	GC573_IPC_CMD_AUDIO_CHANNELS,
 };
 
 /*
@@ -98,6 +99,8 @@ struct gc573_ipc_cmd {
 	float f;
 	/* Optional device path for GC573_IPC_CMD_V4L2 (empty = streamer default). */
 	char path[64];
+	/* Playback layout for GC573_IPC_CMD_AUDIO_CHANNELS. */
+	char mode[16];
 };
 
 /*
@@ -130,7 +133,9 @@ struct gc573_stats {
 	char audio_state[16];	/* "lpcm" | "bitstream" | "muted" | "none" */
 	char audio_label[48];	/* e.g. "L-PCM 48kHz", "Dolby Digital 5.1" */
 	uint32_t audio_rate;
-	uint32_t audio_channels;
+	uint32_t audio_channels;	/* channel count reported by the HDMI source */
+	uint32_t audio_out_channels;	/* channel count the sink was opened with */
+	char audio_layout[12];	/* "auto" | "stereo" | "5.1" | "7.1" */
 	uint32_t audio_bits;
 	float audio_gain;
 	bool audio_muted;

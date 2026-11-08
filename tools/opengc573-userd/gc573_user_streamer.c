@@ -123,6 +123,12 @@ enum audio_channel_mode {
 };
 
 static enum audio_channel_mode g_audio_channel_mode = AUDIO_CHANNELS_AUTO;
+/*
+ * Bumped whenever the layout mode changes (CLI setup, IPC).  The audio path
+ * compares it against its own copy and re-opens the playback device in place,
+ * without stopping the DMA ring or the video pipeline.
+ */
+static uint32_t g_audio_layout_seq;
 
 static const char *audio_channel_mode_name(enum audio_channel_mode mode)
 {
@@ -3191,6 +3197,9 @@ struct audio_stream {
 	uint32_t format_rate;
 	unsigned int format_channels;
 	unsigned int format_bits;
+	/* Last layout generation applied to the playback device. */
+	uint32_t layout_seq;
+	uint64_t layout_retry_ms;
 	uint64_t format_lost_since;
 	uint64_t format_wait_since;
 	bool format_wait_reported;
@@ -4206,6 +4215,57 @@ static void audio_stop_capture(struct audio_stream *as)
 		pthread_mutex_unlock(&as->lock);
 }
 
+/*
+ * Apply a playback-layout change at run time (CLI setup or audio.channels.set).
+ *
+ * Only the SDL device is re-opened: the DMA ring, the FPGA audio engine and the
+ * video pipeline are untouched, so the stream does not stall.  The worker
+ * drains DMA under as->lock and audio_handle_format() runs on the render
+ * thread, so holding the lock here guarantees the descriptor cannot be swapped
+ * while audio_queue_block() is inside it.
+ */
+static void audio_switch_layout(struct audio_stream *as,
+				const struct gc573_user_audio_format *format,
+				uint64_t now)
+{
+	unsigned int want = audio_output_channels(format->channels);
+	unsigned int rate;
+	unsigned int bits;
+
+	as->layout_seq = __atomic_load_n(&g_audio_layout_seq, __ATOMIC_ACQUIRE);
+	if (!as->playback.dev || want == as->playback.channels)
+		return;
+	if (as->layout_retry_ms && now < as->layout_retry_ms)
+		return;
+
+	/* Compressed streams always play from the fixed 48 kHz S16 decoder. */
+	rate = as->non_pcm ? 48000 : format->rate_hz;
+	bits = as->non_pcm ? 16 : format->sample_bits;
+
+	if (as->lock_ready)
+		pthread_mutex_lock(&as->lock);
+	audio_close_device(&as->playback);
+	/* The decoder is re-armed for the new layout on its next burst. */
+	as->bt_channels = 0;
+	if (audio_open_device(&as->playback, rate, bits, want) < 0) {
+		if (as->lock_ready)
+			pthread_mutex_unlock(&as->lock);
+		as->layout_retry_ms = now + AUDIO_RETRY_MS;
+		pr_warn("HDMI audio: layout switch to %u ch failed; retrying",
+			want);
+		return;
+	}
+	if (as->lock_ready)
+		pthread_mutex_unlock(&as->lock);
+
+	as->layout_retry_ms = 0;
+	as->peak = 0;
+	pr_info("HDMI audio: live layout switch to %u ch (%s, source %u ch)",
+		as->playback.channels,
+		audio_channel_layout_name(as->playback.channels),
+		format->channels);
+}
+
 static void audio_handle_format(struct audio_stream *as,
 				const struct gc573_user_audio_format *format,
 				uint64_t now)
@@ -4261,6 +4321,15 @@ static void audio_handle_format(struct audio_stream *as,
 		return;
 	}
 	as->unsupported_reported = false;
+
+	/*
+	 * A layout change from audio.channels.set re-opens only the SDL device;
+	 * the DMA ring, the FPGA audio engine and the video path keep running.
+	 */
+	if (as->streaming &&
+	    as->layout_seq !=
+		    __atomic_load_n(&g_audio_layout_seq, __ATOMIC_ACQUIRE))
+		audio_switch_layout(as, format, now);
 
 	if (as->streaming && as->format_rate == format->rate_hz &&
 	    as->format_channels == format->channels &&
@@ -5220,6 +5289,9 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 	st.frames = frames;
 	st.ring_buffers = video->num_buffers;
 	st.ring_channels = video->num_channels;
+	snprintf(st.audio_layout, sizeof(st.audio_layout), "%s",
+		 audio_channel_mode_name(g_audio_channel_mode));
+	st.audio_out_channels = audio->playback.channels;
 
 	if (audio->streaming) {
 		if (audio->bt_playing) {
@@ -5396,6 +5468,17 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		__atomic_store_n(&g_audio_mute_flag, cmd->a ? 1 : 0,
 				 __ATOMIC_RELAXED);
 		printf("[IPC] Audio mute: %s\n", cmd->a ? "on" : "off");
+		break;
+	case GC573_IPC_CMD_AUDIO_CHANNELS:
+		if (!audio_channel_mode_parse(cmd->mode, &g_audio_channel_mode)) {
+			printf("[IPC] Audio layout: unknown mode '%s'\n",
+			       cmd->mode);
+			break;
+		}
+		/* The format poll re-opens the device; DMA and video are untouched. */
+		__atomic_add_fetch(&g_audio_layout_seq, 1, __ATOMIC_RELEASE);
+		printf("[IPC] Audio layout: %s\n",
+		       audio_channel_mode_name(g_audio_channel_mode));
 		break;
 	case GC573_IPC_CMD_OSD_ENABLE:
 		g_osd_enabled = cmd->a != 0;
