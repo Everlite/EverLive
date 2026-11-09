@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **GC573 green/white speckles and audio crackle on HDMI 2.0 sources (4K60, 1440p120):**
+  - The IT6664 input receiver was left at its fixed power-on equaliser (RS `0x1f`, forced), so >340 MHz TMDS links decoded a steady stream of wrong characters. The errors were re-encoded by the IT6664, so they showed up on the HDMI OUT passthrough too and were invisible to the IT6805. Windows was clean on the same hardware and cable.
+  - New `gc573_user_rx_eq.[ch]` drives both receivers (IT6664 input and IT6805 capture share the same ITE receiver core). On HDMI 2.0 lock it measures per-lane TMDS character errors (CED), leaves error-free links alone, and otherwise runs hardware auto-EQ with DFE taps, falling back to a per-lane RS sweep and skew retraining scored by measured errors.
+  - Hardware result (RetroTINK 4K, 4K60 RGB, ~593 MHz): input errors went from ~25,500 per 100 ms to 0 on every lane. Tuning adds ~0.75 s at signal lock.
+
+### Added
+- `[HDMI] TMDS errors B/G/R` line in `streamer.log` with per-lane error counts for the card input and the internal capture hop: every second while errors occur, otherwise every 10 s.
+- `EVERLIVE_NO_AUTO_EQ=1` disables link equalisation; `EVERLIVE_EQ_INPUT_DFE=0` keeps the input on RS-only EQ (for comparison and troubleshooting).
+
 ## [1.4.0] - 2026-11-06
 
 ### Added
