@@ -13,7 +13,7 @@
  *   - per-channel TMDS character-error (CED) counters, blocking and
  *     non-blocking, so link quality can be measured and logged;
  *   - a tuning pass for HDMI 2.0 links: hardware successive-approximation
- *     auto-EQ, optional DFE tap derivation from the auto-EQ amplitude
+ *     auto-EQ, DFE tap derivation from the auto-EQ amplitude
  *     readback, a per-channel RS sweep scored by CED when errors remain,
  *     and a final RS-fixed skew training pass.
  *
@@ -62,7 +62,7 @@
 struct rx_port {
 	const char *name;
 	u8 addr;
-	/* DFE taps are only applied where the register block is confirmed. */
+	/* Apply DFE taps derived from the auto-EQ amplitude readback. */
 	bool dfe;
 	int (*set_bank)(void *bar0, u8 bank);
 };
@@ -80,7 +80,12 @@ static const struct rx_port rx_ports[GC573_RX_PORT_COUNT] = {
 	[GC573_RX_INPUT] = {
 		.name = "input (IT6664)",
 		.addr = 0x38,
-		.dfe = false,
+		/*
+		 * Hardware-verified: without DFE the TMDS G lane still
+		 * misdecoded ~2800 characters/s at 4K60 even at RS 0x00;
+		 * auto-EQ + DFE brought every lane to zero errors.
+		 */
+		.dfe = true,
 		.set_bank = it6664_rx_set_bank,
 	},
 	[GC573_RX_CAPTURE] = {
@@ -460,12 +465,16 @@ static bool env_flag(const char *name)
 }
 
 /*
- * DFE on the IT6664 input is unverified: opt in with EVERLIVE_EQ_INPUT_DFE=1.
+ * EVERLIVE_EQ_INPUT_DFE=0 turns DFE off on the IT6664 input for comparison.
  */
 static bool port_dfe(enum gc573_rx_port port)
 {
-	if (port == GC573_RX_INPUT)
-		return env_flag("EVERLIVE_EQ_INPUT_DFE");
+	if (port == GC573_RX_INPUT) {
+		const char *v = getenv("EVERLIVE_EQ_INPUT_DFE");
+
+		if (v && strcmp(v, "0") == 0)
+			return false;
+	}
 	return rx_ports[port].dfe;
 }
 

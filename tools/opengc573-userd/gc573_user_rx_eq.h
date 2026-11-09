@@ -76,8 +76,8 @@ void gc573_rx_ced_reset(void);
  * gc573_rx_eq_tune - Equalise one receiver on an HDMI 2.0 link
  *
  * Measures CED first and leaves an error-free link untouched.  Otherwise
- * runs the receiver's hardware auto-EQ, applies the result (plus DFE taps
- * where supported) and, if errors remain, sweeps the RS (equaliser
+ * runs the receiver's hardware auto-EQ, applies the result plus DFE taps
+ * and, if errors remain, sweeps the RS (equaliser
  * strength) per TMDS channel and keeps the setting with the fewest errors.
  * No-op on HDMI 1.x links or when EVERLIVE_NO_AUTO_EQ=1 is set.  Blocks for
  * up to roughly 1.5 s; the link may briefly lose SCDT while EQ runs.
