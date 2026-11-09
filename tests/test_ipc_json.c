@@ -27,12 +27,18 @@ static void test_json_get_string(void)
 {
 	char out[64];
 	const char *json = "{\"jsonrpc\":\"2.0\",\"method\":\"led.set\",\"params\":{\"mode\":\"wave\"}}";
+	const char *json_dup_val = "{\"title\":\"mode\",\"mode\":\"wave\"}";
+	const char *json_param_method = "{\"jsonrpc\":\"2.0\",\"params\":{\"text\":\"method\"},\"method\":\"led.set\"}";
 
 	printf("Testing json_get_string...\n");
 	TEST_ASSERT(json_get_string(json, "method", out, sizeof(out)) && strcmp(out, "led.set") == 0,
 		    "Extracts top-level string 'method'");
 	TEST_ASSERT(json_get_string(json, "mode", out, sizeof(out)) && strcmp(out, "wave") == 0,
 		    "Extracts nested string 'mode'");
+	TEST_ASSERT(json_get_string(json_dup_val, "mode", out, sizeof(out)) && strcmp(out, "wave") == 0,
+		    "Distinguishes object key from prior string value matching key name");
+	TEST_ASSERT(json_get_string(json_param_method, "method", out, sizeof(out)) && strcmp(out, "led.set") == 0,
+		    "Extracts top-level method even if params contains identical string value");
 	TEST_ASSERT(!json_get_string(json, "missing", out, sizeof(out)),
 		    "Fails cleanly on missing key");
 }

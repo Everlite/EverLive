@@ -135,35 +135,36 @@ typedef enum {
 	JSON_GET_RAW
 } json_get_type_e;
 
-/* Recursively find a key in the JSON token tree */
-static int json_token_find_recursive(const jsmntok_t *tokens, int tok_count,
-				     int start_idx, const char *key, const char *json)
+/* Find a key in the JSON token tree. Direct children of root are matched first. */
+static int json_token_find_key(const jsmntok_t *tokens, int tok_count,
+			       const char *key, const char *json)
 {
-	for (int i = start_idx; i < tok_count; i++) {
-		if (tokens[i].type != JSMN_STRING)
+	const size_t klen = strlen(key);
+
+	/* Pass 1: check direct keys of the root object (tokens[0]) */
+	for (int i = 1; i < tok_count; i++) {
+		if (tokens[i].type != JSMN_STRING || tokens[i].parent != 0)
 			continue;
-		int klen = tokens[i].end - tokens[i].start;
-		if (klen == (int)strlen(key) &&
-		    strncmp(json + tokens[i].start, key, klen) == 0) {
-			/* Found key - return the value token (next sibling at same parent) */
+		size_t len = (size_t)(tokens[i].end - tokens[i].start);
+		if (len == klen && memcmp(json + tokens[i].start, key, klen) == 0) {
 			if (i + 1 < tok_count)
 				return i + 1;
 		}
-		/* If this is an object or array, search inside its direct children */
-		if (tokens[i].type == JSMN_OBJECT || tokens[i].type == JSMN_ARRAY) {
-			for (int j = i + 1; j < tok_count; j++) {
-				if (tokens[j].parent == i) {
-					/* Direct child - search recursively from this child */
-					int found = json_token_find_recursive(tokens, tok_count, j, key, json);
-					if (found >= 0)
-						return found;
-				} else if (tokens[j].parent < i) {
-					/* We've left this object's subtree */
-					break;
-				}
-			}
+	}
+
+	/* Pass 2: check keys of nested objects (e.g. inside "params") */
+	for (int i = 1; i < tok_count; i++) {
+		if (tokens[i].type != JSMN_STRING)
+			continue;
+		if (tokens[i].parent <= 0 || tokens[tokens[i].parent].type != JSMN_OBJECT)
+			continue;
+		size_t len = (size_t)(tokens[i].end - tokens[i].start);
+		if (len == klen && memcmp(json + tokens[i].start, key, klen) == 0) {
+			if (i + 1 < tok_count)
+				return i + 1;
 		}
 	}
+
 	return -1;
 }
 
@@ -264,8 +265,8 @@ static bool json_parse_request(const char *input, size_t len,
 	if (tok_count < 1 || tokens[0].type != JSMN_OBJECT)
 		return false;
 
-	/* Recursively search for the key anywhere in the JSON */
-	int val_idx = json_token_find_recursive(tokens, tok_count, 1, key, input);
+	/* Search for the key anywhere in the JSON token tree */
+	int val_idx = json_token_find_key(tokens, tok_count, key, input);
 	if (val_idx < 0)
 		return false;
 
@@ -889,6 +890,8 @@ static void ipc_handle_hdr(struct ipc_client *c, const char *id,
 	double exposure = 0.0;
 	bool passthrough = false;
 
+	cmd.f = -999.0f; /* -999 means leave current exposure unchanged */
+
 	if (!json_get_string(line, "mode", mode, sizeof(mode))) {
 		ipc_error(c, id, -32602, "invalid params: mode required");
 		return;
@@ -925,6 +928,8 @@ static void ipc_handle_hdr_passthrough(struct ipc_client *c, const char *id,
 {
 	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_HDR };
 	bool enable = false;
+
+	cmd.f = -999.0f; /* leave exposure unchanged */
 
 	if (!json_get_bool(line, "enabled", &enable) &&
 	    !json_get_bool(line, "passthrough", &enable)) {
