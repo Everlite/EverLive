@@ -64,4 +64,10 @@ int gc573_user_it6664_enable_source(void *bar0);
 int gc573_user_it6664_poll(void *bar0,
 			   struct gc573_user_it6664_status *status);
 
+/**
+ * gc573_user_it6664_pulse_hpd - Pulse upstream HDMI RX HPD to trigger source re-sync
+ * @bar0: Pointer to mapped BAR0 memory
+ */
+int gc573_user_it6664_pulse_hpd(void *bar0);
+
 #endif /* GC573_USER_IT6664_H */

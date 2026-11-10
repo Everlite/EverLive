@@ -17,7 +17,7 @@ PW_LIBS = $(shell pkg-config --libs libpipewire-0.3)
 # Frame generation is delegated to the system lsfg-vk Vulkan implicit layer,
 # which the SDL2 "vulkan" renderer feeds directly.  No GL, no Vulkan headers.
 
-COMMON_OBJS = gc573_vfio.o gc573_user_i2c.o gc573_user_hw.o gc573_user_edid.o gc573_user_it6805.o gc573_user_it6664.o
+COMMON_OBJS = gc573_vfio.o gc573_user_i2c.o gc573_user_hw.o gc573_user_edid.o gc573_user_it6805.o gc573_user_it6664.o third_party/jsmn.o
 STREAM_OBJS = gc573_user_fpga.o gc573_user_video.o gc573_user_audio.o gc573_user_bitstream.o gc573_user_nosignal.o gc573_user_ipc.o gc573_user_audio_tap.o gc573_user_hdr.o gc573_user_framegen.o
 TARGETS = gc573_user_probe gc573_user_streamer everlive_userd gc573_user_diag
 HEADERS = gc573-user-compat.h gc573_vfio.h gc573_user_i2c.h gc573_user_hw.h gc573_user_edid.h gc573_user_it6805.h gc573_user_it6664.h gc573_user_fpga.h gc573_user_video.h gc573_user_audio.h gc573_user_bitstream.h gc573_user_nosignal.h gc573_user_ipc.h gc573_user_audio_tap.h gc573_user_hdr.h gc573_user_framegen.h
@@ -42,6 +42,9 @@ gc573_user_diag: gc573_user_diag.o $(COMMON_OBJS)
 # Pure CPU: the framegen module has no SDL/GL/Vulkan dependency.
 gc573_framegen_selftest: test_framegen.o gc573_user_framegen.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+third_party/jsmn.o: third_party/jsmn.c third_party/jsmn.h
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 selftest: gc573_framegen_selftest
 	./gc573_framegen_selftest

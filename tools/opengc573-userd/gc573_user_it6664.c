@@ -2721,3 +2721,17 @@ int gc573_user_it6664_poll(void *bar0, struct gc573_user_it6664_status *status)
 
 	return 0;
 }
+
+int gc573_user_it6664_pulse_hpd(void *bar0)
+{
+	int ret;
+
+	if (!bar0)
+		return -EINVAL;
+
+	ret = it6664_rx_set_hpd(bar0, false);
+	if (ret < 0)
+		return ret;
+	usleep(150000);
+	return it6664_rx_set_hpd(bar0, true);
+}
