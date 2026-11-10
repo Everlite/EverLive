@@ -30,6 +30,7 @@
 #include "gc573_user_audio_tap.h"
 #include "gc573_user_hdr.h"
 #include "gc573_user_framegen.h"
+#include "gc573_user_log.h"
 #include "gc573_user_font8x8.h"
 #include <SDL2/SDL.h>
 #include <libswscale/swscale.h>
@@ -5952,9 +5953,12 @@ int main(int argc, char *argv[])
 		g_osd_pos = OSD_POS_TR;
 	}
 
+	gc573_user_log_init();
 	printf("==================================================================\n");
 	printf("  EverLive — Userspace VFIO Streamer (v" EVERLIVE_VERSION ")\n");
-	printf("==================================================================\n\n");
+	printf("==================================================================\n");
+	printf("[LOG] Started %s; line prefixes are seconds since start.\n\n",
+	       gc573_user_log_start_time());
 	if (g_trace_mode)
 		printf("[TRACE] Teardown trace enabled: press T while streaming to start the phase test.\n");
 
