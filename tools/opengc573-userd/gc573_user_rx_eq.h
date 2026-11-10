@@ -47,6 +47,8 @@ struct gc573_rx_eq_state {
 struct gc573_rx_eq_result {
 	bool ran;		/* false: not HDMI 2.0, disabled, or clean */
 	bool used_saved;	/* the saved settings were clean; no auto-EQ */
+	bool saved_tried;	/* saved settings were applied and measured */
+	u32 saved_errors;	/* CED with the saved settings */
 	bool ced_valid;		/* CED counters reported valid counts */
 	bool before_valid;	/* baseline window had valid counts */
 	bool auto_eq_done;	/* hardware auto-EQ reported completion */

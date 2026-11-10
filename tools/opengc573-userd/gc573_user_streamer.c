@@ -1248,7 +1248,7 @@ static void tune_link_eq(void *bar0)
 		struct gc573_rx_eq_result eq;
 		const char *name = gc573_rx_port_name(port);
 		int ret = gc573_rx_eq_tune(bar0, port, &g_eq_saved[port], &eq);
-		char before[16], after[16];
+		char before[16], after[16], saved_info[24];
 
 		if (ret < 0) {
 			pr_warn("HDMI 2.0 link EQ (%s) failed: %d", name, ret);
@@ -1268,6 +1268,11 @@ static void tune_link_eq(void *bar0)
 			g_eq_saved[port] = eq.state;
 			save = true;
 		}
+		if (!eq.saved_tried)
+			snprintf(saved_info, sizeof(saved_info), "none");
+		else
+			snprintf(saved_info, sizeof(saved_info), "%u errors",
+				 eq.saved_errors);
 		if (eq.before_valid)
 			snprintf(before, sizeof(before), "%u", eq.errors_before);
 		else
@@ -1276,12 +1281,13 @@ static void tune_link_eq(void *bar0)
 			snprintf(after, sizeof(after), "%u", eq.errors_after);
 		else
 			snprintf(after, sizeof(after), "n/a");
-		printf("[HDMI] Link EQ %s: TMDS errors %s -> %s per 100 ms (B/G/R %u/%u/%u) | RS B/G/R 0x%02x/0x%02x/0x%02x | auto-EQ %s | DFE %s | sweep %s | skew %s | %u ms\n",
+		printf("[HDMI] Link EQ %s: TMDS errors %s -> %s per 100 ms (B/G/R %u/%u/%u) | RS B/G/R 0x%02x/0x%02x/0x%02x | saved EQ %s | auto-EQ %s | DFE %s | sweep %s | skew %s | %u ms\n",
 		       name, before, after,
 		       eq.ch_errors_after[0], eq.ch_errors_after[1],
 		       eq.ch_errors_after[2],
 		       eq.rs[0], eq.rs[1], eq.rs[2],
-		       eq.used_saved ? "skipped (saved EQ clean)" :
+		       saved_info,
+		       eq.used_saved ? "skipped" :
 		       eq.auto_eq_done ? "done" : "failed",
 		       eq.dfe_applied ? "on" : "off",
 		       !eq.swept ? "no" : eq.kept_auto ? "lost to auto-EQ" : "yes",

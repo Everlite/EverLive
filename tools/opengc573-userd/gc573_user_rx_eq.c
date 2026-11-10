@@ -586,6 +586,8 @@ int gc573_rx_eq_tune(void *bar0, enum gc573_rx_port port,
 	if (saved && saved->valid && (!saved->dfe || p->dfe)) {
 		TRY(eq_apply_state(bar0, p, saved));
 		TRY(ced_measure(bar0, p, CED_WINDOW_MS, &ced));
+		res->saved_tried = true;
+		res->saved_errors = ced_total(&ced);
 		if (ced_any_valid(&ced) && ced_total(&ced) == 0) {
 			res->used_saved = true;
 			res->ced_valid = true;
