@@ -457,6 +457,25 @@ static int eq_force_zero_skew(void *bar0, const struct rx_port *p)
 	return p->set_bank(bar0, BANK0);
 }
 
+/* Force saved RS values and DFE taps (skew is left as it is). */
+static int eq_apply_state(void *bar0, const struct rx_port *p,
+			  const struct gc573_rx_eq_state *st)
+{
+	for (unsigned int ch = 0; ch < CH_COUNT; ch++) {
+		TRY(wr(bar0, p, BANK3, (u8)(0x27 + ch), (u8)(0x80 | st->rs[ch])));
+		if (st->dfe)
+			for (unsigned int k = 0; k < 3; k++)
+				TRY(wr(bar0, p, BANK3, (u8)(0x4b + ch * 3 + k),
+				       st->taps[ch][k]));
+	}
+	if (p->dfe) {
+		/* 0x4b[7] shares a register with ch0's first tap: set last. */
+		TRY(upd(bar0, p, BANK3, 0x4b, 0x80, st->dfe ? 0x80 : 0x00));
+		TRY(upd(bar0, p, BANK3, 0x22, 0x40, st->dfe ? 0x40 : 0x00));
+	}
+	return p->set_bank(bar0, BANK0);
+}
+
 static bool env_flag(const char *name)
 {
 	const char *v = getenv(name);
@@ -522,6 +541,7 @@ static int eq_auto_and_apply(void *bar0, const struct rx_port *p,
 }
 
 int gc573_rx_eq_tune(void *bar0, enum gc573_rx_port port,
+		     const struct gc573_rx_eq_state *saved,
 		     struct gc573_rx_eq_result *res)
 {
 	struct dfe_taps dfe[CH_COUNT][RS_LADDER_LEN];
@@ -559,7 +579,24 @@ int gc573_rx_eq_tune(void *bar0, enum gc573_rx_port port,
 	}
 	res->ran = true;
 
-	/* 2. Hardware auto-EQ (+ DFE where supported). */
+	/*
+	 * 2. Settings that were clean on this port last time.  Source and
+	 *    cable rarely change, so this usually skips the auto-EQ entirely.
+	 */
+	if (saved && saved->valid && (!saved->dfe || p->dfe)) {
+		TRY(eq_apply_state(bar0, p, saved));
+		TRY(ced_measure(bar0, p, CED_WINDOW_MS, &ced));
+		if (ced_any_valid(&ced) && ced_total(&ced) == 0) {
+			res->used_saved = true;
+			res->ced_valid = true;
+			res->dfe_applied = saved->dfe;
+			res->state = *saved;
+			memcpy(best_rs, saved->rs, sizeof(best_rs));
+			goto finish;
+		}
+	}
+
+	/* 3. Hardware auto-EQ (+ DFE where supported). */
 	ret = eq_auto_and_apply(bar0, p, rs, dfe, &dfe_ok);
 	if (ret < 0)
 		return ret;
@@ -574,7 +611,7 @@ int gc573_rx_eq_tune(void *bar0, enum gc573_rx_port port,
 		best_score[ch] = ced_score(&ced, ch);
 
 	/*
-	 * 3. Errors remain: sweep RS per channel with skew forced to 0.  The
+	 * 4. Errors remain: sweep RS per channel with skew forced to 0.  The
 	 *    sweep is scored by CED, so it is pointless without valid counts.
 	 */
 	if (auto_total && ced_any_valid(&ced)) {
@@ -598,7 +635,7 @@ int gc573_rx_eq_tune(void *bar0, enum gc573_rx_port port,
 		for (unsigned int ch = 0; ch < CH_COUNT; ch++)
 			sweep_total += best_score[ch];
 
-		/* 4. Retrain skew around the chosen RS values. */
+		/* 5. Retrain skew around the chosen RS values. */
 		TRY(eq_apply(bar0, p, best_rs, dfe_ok ? dfe : NULL));
 		ret = eq_run_skew(bar0, p);
 		if (ret < 0)
@@ -626,7 +663,20 @@ int gc573_rx_eq_tune(void *bar0, enum gc573_rx_port port,
 		}
 	}
 
-	/* 5. Done: power the EQ engine down and clear its IRQs. */
+	/* Remember what a clean link ended on, for the next lock. */
+	if (ced_any_valid(&ced) && ced_total(&ced) == 0) {
+		struct gc573_rx_eq_state *st = &res->state;
+
+		st->valid = true;
+		st->dfe = dfe_ok;
+		memcpy(st->rs, best_rs, sizeof(st->rs));
+		for (unsigned int ch = 0; ch < CH_COUNT; ch++)
+			memcpy(st->taps[ch], dfe[ch][rs_index(best_rs[ch])].tap,
+			       sizeof(st->taps[ch]));
+	}
+
+finish:
+	/* 6. Done: power the EQ engine down and clear its IRQs. */
 	TRY(upd(bar0, p, BANK3, 0x22, 0x08, 0x00));
 	TRY(wr(bar0, p, BANK0, 0x07, 0xf0));
 

@@ -46,6 +46,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -1122,6 +1123,112 @@ static bool wait_capture_scdt(void *bar0, unsigned int timeout_ms)
 }
 
 /*
+ * Link EQ settings that were clean last time, per receiver, kept in memory
+ * for re-locks and in $XDG_STATE_HOME/everlive/link-eq across restarts.
+ * The tuner verifies them by measurement, so a stale file only costs one
+ * 100 ms check before the normal auto-EQ runs.
+ */
+static struct gc573_rx_eq_state g_eq_saved[GC573_RX_PORT_COUNT];
+static bool g_eq_saved_loaded;
+static const char *const eq_state_key[GC573_RX_PORT_COUNT] = {
+	[GC573_RX_INPUT] = "input",
+	[GC573_RX_CAPTURE] = "capture",
+};
+
+static bool eq_state_path(char *buf, size_t len, bool create_dir)
+{
+	const char *base = getenv("XDG_STATE_HOME");
+	const char *home = getenv("HOME");
+	char dir[PATH_MAX];
+	int n;
+
+	if (base && *base)
+		n = snprintf(dir, sizeof(dir), "%s/everlive", base);
+	else if (home && *home)
+		n = snprintf(dir, sizeof(dir), "%s/.local/state/everlive", home);
+	else
+		return false;
+	if (n < 0 || (size_t)n >= sizeof(dir))
+		return false;
+	if (create_dir) {
+		/* Create each missing component (~/.local/state may not exist). */
+		for (char *c = dir + 1; *c; c++) {
+			if (*c != '/')
+				continue;
+			*c = '\0';
+			mkdir(dir, 0700);
+			*c = '/';
+		}
+		mkdir(dir, 0700);
+	}
+	n = snprintf(buf, len, "%s/link-eq", dir);
+	return n > 0 && (size_t)n < len;
+}
+
+static void eq_state_load(void)
+{
+	char path[PATH_MAX], line[256];
+	FILE *f;
+
+	g_eq_saved_loaded = true;
+	if (!eq_state_path(path, sizeof(path), false))
+		return;
+	f = fopen(path, "r");
+	if (!f)
+		return;
+	while (fgets(line, sizeof(line), f)) {
+		struct gc573_rx_eq_state st = { .valid = true };
+		unsigned int rs[3], t[9], dfe;
+		char key[16];
+
+		if (sscanf(line, "%15s dfe=%u rs=%x,%x,%x taps=%x,%x,%x,%x,%x,%x,%x,%x,%x",
+			   key, &dfe, &rs[0], &rs[1], &rs[2], &t[0], &t[1], &t[2],
+			   &t[3], &t[4], &t[5], &t[6], &t[7], &t[8]) != 14)
+			continue;
+		st.dfe = dfe != 0;
+		for (int ch = 0; ch < 3; ch++) {
+			st.rs[ch] = (u8)(rs[ch] & 0x7f);
+			for (int k = 0; k < 3; k++)
+				st.taps[ch][k] = (u8)t[ch * 3 + k];
+		}
+		for (int port = 0; port < GC573_RX_PORT_COUNT; port++)
+			if (strcmp(key, eq_state_key[port]) == 0)
+				g_eq_saved[port] = st;
+	}
+	fclose(f);
+}
+
+static void eq_state_save(void)
+{
+	char path[PATH_MAX], tmp[PATH_MAX + 8];
+	FILE *f;
+
+	if (!eq_state_path(path, sizeof(path), true))
+		return;
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	f = fopen(tmp, "w");
+	if (!f)
+		return;
+	fprintf(f, "# EverLive GC573 link EQ that was error-free last time (safe to delete)\n");
+	for (int port = 0; port < GC573_RX_PORT_COUNT; port++) {
+		const struct gc573_rx_eq_state *st = &g_eq_saved[port];
+
+		if (!st->valid)
+			continue;
+		fprintf(f, "%s dfe=%d rs=%02x,%02x,%02x taps=%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x\n",
+			eq_state_key[port], st->dfe ? 1 : 0,
+			st->rs[0], st->rs[1], st->rs[2],
+			st->taps[0][0], st->taps[0][1], st->taps[0][2],
+			st->taps[1][0], st->taps[1][1], st->taps[1][2],
+			st->taps[2][0], st->taps[2][1], st->taps[2][2]);
+	}
+	if (fclose(f) == 0)
+		rename(tmp, path);
+	else
+		unlink(tmp);
+}
+
+/*
  * Equalise an HDMI 2.0 link before the timing is measured: first the card's
  * input (IT6664), whose errors are re-encoded and invisible downstream, then
  * the internal hop into the IT6805.  Afterwards give the receiver a moment
@@ -1130,14 +1237,17 @@ static bool wait_capture_scdt(void *bar0, unsigned int timeout_ms)
 static void tune_link_eq(void *bar0)
 {
 	bool touched = false;
+	bool save = false;
 
 	if (!gc573_rx_link_is_hdmi2(bar0))
 		return;
+	if (!g_eq_saved_loaded)
+		eq_state_load();
 
 	for (int port = 0; port < GC573_RX_PORT_COUNT; port++) {
 		struct gc573_rx_eq_result eq;
 		const char *name = gc573_rx_port_name(port);
-		int ret = gc573_rx_eq_tune(bar0, port, &eq);
+		int ret = gc573_rx_eq_tune(bar0, port, &g_eq_saved[port], &eq);
 		char before[16], after[16];
 
 		if (ret < 0) {
@@ -1154,6 +1264,10 @@ static void tune_link_eq(void *bar0)
 			continue;
 		}
 		touched = true;
+		if (eq.state.valid && !eq.used_saved) {
+			g_eq_saved[port] = eq.state;
+			save = true;
+		}
 		if (eq.before_valid)
 			snprintf(before, sizeof(before), "%u", eq.errors_before);
 		else
@@ -1167,12 +1281,15 @@ static void tune_link_eq(void *bar0)
 		       eq.ch_errors_after[0], eq.ch_errors_after[1],
 		       eq.ch_errors_after[2],
 		       eq.rs[0], eq.rs[1], eq.rs[2],
+		       eq.used_saved ? "skipped (saved EQ clean)" :
 		       eq.auto_eq_done ? "done" : "failed",
 		       eq.dfe_applied ? "on" : "off",
 		       !eq.swept ? "no" : eq.kept_auto ? "lost to auto-EQ" : "yes",
 		       !eq.swept ? "auto" : eq.skew_trained ? "trained" : "forced 0",
 		       eq.elapsed_ms);
 	}
+	if (save)
+		eq_state_save();
 	if (!touched)
 		return;
 

@@ -32,8 +32,21 @@ struct gc573_rx_ced {
 	u32 window_ms;
 };
 
+/*
+ * EQ settings that left a link error-free, so the next lock can try them
+ * before running the hardware auto-EQ.  Only RS and the DFE taps are kept;
+ * a saved state is always verified by measurement before it is trusted.
+ */
+struct gc573_rx_eq_state {
+	bool valid;
+	bool dfe;			/* manual DFE taps enabled */
+	u8 rs[GC573_RX_TMDS_CHANNELS];
+	u8 taps[GC573_RX_TMDS_CHANNELS][3];	/* DFE tap registers */
+};
+
 struct gc573_rx_eq_result {
 	bool ran;		/* false: not HDMI 2.0, disabled, or clean */
+	bool used_saved;	/* the saved settings were clean; no auto-EQ */
 	bool ced_valid;		/* CED counters reported valid counts */
 	bool before_valid;	/* baseline window had valid counts */
 	bool auto_eq_done;	/* hardware auto-EQ reported completion */
@@ -46,6 +59,7 @@ struct gc573_rx_eq_result {
 	u32 errors_after;	/* summed CED over the final window */
 	u32 ch_errors_after[GC573_RX_TMDS_CHANNELS];
 	u32 elapsed_ms;
+	struct gc573_rx_eq_state state;	/* valid when the link ended clean */
 };
 
 const char *gc573_rx_port_name(enum gc573_rx_port port);
@@ -76,13 +90,16 @@ void gc573_rx_ced_reset(void);
  * gc573_rx_eq_tune - Equalise one receiver on an HDMI 2.0 link
  *
  * Measures CED first and leaves an error-free link untouched.  Otherwise
- * runs the receiver's hardware auto-EQ, applies the result plus DFE taps
- * and, if errors remain, sweeps the RS (equaliser
- * strength) per TMDS channel and keeps the setting with the fewest errors.
+ * tries @saved (may be NULL) and keeps it if it measures error-free; failing
+ * that, runs the receiver's hardware auto-EQ, applies the result plus DFE
+ * taps and, if errors remain, sweeps the RS (equaliser strength) per TMDS
+ * channel and keeps the setting with the fewest errors.  @result->state
+ * receives the final settings when the link ends error-free.
  * No-op on HDMI 1.x links or when EVERLIVE_NO_AUTO_EQ=1 is set.  Blocks for
  * up to roughly 1.5 s; the link may briefly lose SCDT while EQ runs.
  */
 int gc573_rx_eq_tune(void *bar0, enum gc573_rx_port port,
+		     const struct gc573_rx_eq_state *saved,
 		     struct gc573_rx_eq_result *result);
 
 #endif /* GC573_USER_RX_EQ_H */
