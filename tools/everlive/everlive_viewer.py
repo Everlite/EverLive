@@ -5020,6 +5020,25 @@ if HAS_QT:
             event.accept()
 
 
+def _destroy_qt_objects(app, window):
+    """Tear the Qt object tree down while Python still owns it.
+
+    Leaving it to PySide's interpreter-exit cleanup destroys some QObjects
+    twice (segfault or "corrupted double-linked list" abort in
+    PySide::destroyQCoreApplication on every quit).
+    """
+    try:
+        tray = getattr(window, "tray_icon", None)
+        if tray is not None:
+            tray.hide()
+        window.hide()
+        window.deleteLater()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+    except Exception:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(description="EverLive - Live Gamer 4K Console Gaming Screen")
     parser.add_argument("-f", "--fullscreen", action="store_true", help="Launch directly in fullscreen")
@@ -5193,7 +5212,10 @@ def main():
                             headless_start=args.headless, v4l2_device=args.v4l2)
         if not args.tray:
             window.show()
-        sys.exit(app.exec())
+        code = app.exec()
+        _destroy_qt_objects(app, window)
+        del window
+        sys.exit(code)
 
 
 if __name__ == "__main__":

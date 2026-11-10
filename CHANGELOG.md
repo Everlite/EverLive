@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- The Console Hub no longer crashes on exit (segfault or `corrupted double-linked list` abort in `PySide::destroyQCoreApplication`, leaving a core dump on every quit). The window and tray icon are now destroyed before Python shuts down.
+
+---
+
 ## [1.4.0] - 2026-11-06
 
 ### Added
