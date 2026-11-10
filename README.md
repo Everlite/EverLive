@@ -103,6 +103,18 @@ The following capabilities have been physically tested and verified on physical 
   - Verified on physical hardware by contributor [@haxman](https://github.com/haxman): 240p retro modes (`1440x240`, `1920x240` CRT Super-Resolution), 480i / 576i interlaced modes with automatic 4:3 aspect-ratio preservation, PAL 50Hz/100Hz, and Cinema 95.94Hz BFI modes.
 * **Hardware RGB LED Lighting:**
   - Native 24-bit RGB control via Artix-7 FPGA register writes. Nine lighting modes (static colour profiles plus animated Rainbow Wave (`--wave`) and Spectrum Cycle (`--rainbow`)) and a complete off state. Operates without dropped frames or stream interruptions.
+* **Dynamic HDMI 2.0 Receiver Equalisation & Character Error Monitoring:**
+  - Automatic per-lane TMDS Character Error Detection (CED) across both the IT6664 HDMI input and IT6805 capture receiver cores.
+  - Hardware auto-EQ with Decision Feedback Equalization (DFE) taps and per-lane Receiver Sensitivity (RS) calibration, completely eliminating green/white pixel speckles and audio crackle on HDMI 2.0 signals exceeding 340 MHz TMDS (e.g. 4K60 RGB at ~593 MHz or 1440p120).
+  - Diagnostic logging (`[HDMI] TMDS errors B/G/R`) with tunable environment overrides (`EVERLIVE_NO_AUTO_EQ=1`, `EVERLIVE_EQ_INPUT_DFE=0`).
+* **Sub-6s Fast Start-up & Link-EQ Hardware State Caching:**
+  - Hardware-accelerated start-up sequence reducing time-to-first-frame from ~9.5 s to ~5.2 s.
+  - Active lock polling on the Artix-7 FPGA DDR sampler rather than static delays.
+  - Link EQ fast-path: verified error-free equalization parameters are cached in `$XDG_STATE_HOME/everlive/link-eq` (`~/.local/state/everlive/link-eq`), skipping full auto-EQ sweeps whenever the incoming signal remains pristine.
+  - Synchronous, line-buffered telemetry with microsecond-accurate uptime timestamps (`[   x.xxx]`), ensuring instant UI state propagation to the Console Hub.
+* **Hardened JSON-RPC IPC Engine (jsmn):**
+  - Native RFC-compliant JSON-RPC parser with key-vs-value token validation.
+  - Real-time OSD toast notifications (`toast.show`), live runtime EDID DDC reprogramming without restarts (`edid.set`), hardware HPD reset pulses (`hotplug`), and dynamic tonemapping exposure biasing (`hdr.exposure`).
 * **Standby Daemon Handoff (`everlive_userd`):**
   - Closing the gaming screen hands off the active file descriptor to a lightweight background daemon without triggering a PCIe Function Level Reset (FLR), preserving the HDMI link state and LED configuration.
 
@@ -362,6 +374,7 @@ Writing clean-room Linux drivers for proprietary capture hardware requires havin
 ## Acknowledgements
 
 - **[@PolygonPrincess](https://github.com/PolygonPrincess)**: For authoring the Live Gamer DUO (`GC570D`) userspace VFIO engine and contributing dual-input capture support to EverLive (PR #52), as well as pioneering userspace VFIO control of AVerMedia hardware that inspired EverLive's v1.0.0 architecture.
+- **[@Scyllinice](https://github.com/Scyllinice)**: For diagnosing and engineering the dynamic HDMI 2.0 receiver equalisation (DFE + RS tuning) that eliminated high-bandwidth TMDS character errors (PR #57), optimizing the FPGA DDR startup sequence and line-buffered logging (PR #60), and fixing viewer shutdown lifecycle handling (PR #59).
 - **[@neoyagami](https://github.com/neoyagami)**: For the maintained [OpenGC570D](https://github.com/neoyagami/OpenGC570D) reverse-engineering project, including the validated dual-input GC570D audio and splitter work that EverLive's Live Gamer DUO engine builds on.
 - **[@haxman](https://github.com/haxman)**: For extensive modeline analysis, RetroTINK 4K Pro hardware testing, and verifying high-refresh and retro video timings.
 - **[@ostrich](https://github.com/ostrich)**: Author of the [gc555](https://github.com/ostrich/gc555) driver; his reverse-engineering of the Artix-7 register space laid the foundation for early GC573 open-source development.
