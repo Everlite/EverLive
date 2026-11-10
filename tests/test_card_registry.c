@@ -14,6 +14,7 @@
 #include <limits.h>
 #include <errno.h>
 #include <time.h>
+#include <ftw.h>
 
 #define TEST_PASS(desc) printf("  [PASS] %s\n", (desc))
 
@@ -73,6 +74,13 @@ static void test_card_matching(void)
 	assert(strcmp(gc573_wildcard->model_slug, "gc573") == 0);
 	TEST_PASS("Defaulted 0x0054 to GC573 when subsystem != 0x5700");
 
+	/* Arbitrary non-0x5700 subsystem uses the data-driven fallback entry. */
+	const struct everlive_device_desc *gc573_fallback =
+		everlive_match_card(0x1461, 0x0054, 0x1234);
+	assert(gc573_fallback != NULL);
+	assert(strcmp(gc573_fallback->model_slug, "gc573") == 0);
+	TEST_PASS("Fallback match is driven by the registry, not hard-coded IDs");
+
 	/* Secondary GC573 / BOLT PCIe ID (0x0055) */
 	const struct everlive_device_desc *gc573_alt =
 		everlive_match_card(0x1461, 0x0055, 0x0000);
@@ -102,6 +110,15 @@ static void create_file(const char *path, const char *content)
 	fclose(f);
 }
 
+static int remove_entry(const char *path, const struct stat *sb, int typeflag,
+			struct FTW *ftwbuf)
+{
+	(void)sb;
+	(void)typeflag;
+	(void)ftwbuf;
+	return remove(path);
+}
+
 static void test_mock_sysfs_scan(void)
 {
 	printf("Testing everlive_detect_installed_cards with mock sysfs...\n");
@@ -111,14 +128,16 @@ static void test_mock_sysfs_scan(void)
 	assert(res != NULL);
 
 	/* Mock device 1: GC570D at 0000:03:00.0 */
-	char d1[512], d2[512], d3[512];
+	char d1[512], d2[512], d3[512], d4[512];
 	snprintf(d1, sizeof(d1), "%s/0000:03:00.0", tmp_root);
 	snprintf(d2, sizeof(d2), "%s/0000:04:00.0", tmp_root);
 	snprintf(d3, sizeof(d3), "%s/0000:01:00.0", tmp_root);
+	snprintf(d4, sizeof(d4), "%s/0000:05:00.0", tmp_root);
 
 	assert(mkdir(d1, 0755) == 0);
 	assert(mkdir(d2, 0755) == 0);
 	assert(mkdir(d3, 0755) == 0);
+	assert(mkdir(d4, 0755) == 0);
 
 	/* Populate GC570D */
 	char p[PATH_MAX];
@@ -157,6 +176,14 @@ static void test_mock_sysfs_scan(void)
 	snprintf(p, sizeof(p), "%s/subsystem_device", d3);
 	create_file(p, "0x103c\n");
 
+	/* 0x1461:0x0054 with NO subsystem_device file.  A read failure must not
+	 * be treated as subsystem 0 and silently guessed as a GC573.
+	 */
+	snprintf(p, sizeof(p), "%s/vendor", d4);
+	create_file(p, "0x1461\n");
+	snprintf(p, sizeof(p), "%s/device", d4);
+	create_file(p, "0x0054\n");
+
 	/* Scan using mock root */
 	struct everlive_device found[8];
 	int count = everlive_detect_installed_cards(found, 8, tmp_root);
@@ -186,12 +213,15 @@ static void test_mock_sysfs_scan(void)
 	assert(saw_gc573);
 	TEST_PASS("Correctly populated BDF, IOMMU group, and VFIO binding state");
 
-	/* Cleanup mock directory */
-	unlink(d1); // in case
-	char cmd[PATH_MAX + 16];
-	snprintf(cmd, sizeof(cmd), "rm -rf '%s'", tmp_root);
-	int ret = system(cmd);
-	(void)ret;
+	/* The device with an unreadable subsystem ID must be skipped rather than
+	 * misidentified as a GC573 via the fallback path. */
+	for (int i = 0; i < count; i++)
+		assert(strcmp(found[i].pci_bdf, "0000:05:00.0") != 0);
+	TEST_PASS("Missing subsystem_device does not misidentify a GC570D");
+
+	/* Cleanup mock directory.  FTW_PHYS keeps nftw from following the
+	 * driver/iommu_group symlinks into the real sysfs tree. */
+	assert(nftw(tmp_root, remove_entry, 16, FTW_DEPTH | FTW_PHYS) == 0);
 }
 
 static int g_custom_probe_called = 0;
@@ -202,16 +232,56 @@ static int mock_custom_probe(struct everlive_device *dev)
 	return 0;
 }
 
+/*
+ * Register a vtable that lives only for this call.  The core must copy it,
+ * otherwise the binding table is left pointing at a dead stack frame.  This
+ * runs before any lookup, because the first lookup freezes the registry.
+ */
+static void register_ops_from_stack(void)
+{
+	const struct everlive_device_desc *unbound =
+		everlive_match_card(0x1461, 0x0054, 0x5700); /* GC570D */
+	struct everlive_card_ops stack_ops;
+
+	assert(unbound != NULL && unbound->ops != NULL);
+	stack_ops = *unbound->ops;
+	stack_ops.probe = mock_custom_probe;
+	assert(everlive_register_card_ops("gc573", &stack_ops) == 0);
+}
+
 static void test_card_ops_binding(void)
 {
-	printf("Testing everlive_card_ops binding and defaults...\n");
-
 	const struct everlive_device_desc *gc573_desc =
 		everlive_match_card(0x1461, 0x0054, 0x5730);
-	assert(gc573_desc != NULL);
+	const struct everlive_device_desc *gc570d_desc =
+		everlive_match_card(0x1461, 0x0054, 0x5700);
+	struct everlive_device dev;
+	const struct everlive_card_ops *bound;
+	const struct everlive_card_ops *default_ops;
 
-	/* 1. Default ops retrieval */
-	const struct everlive_card_ops *default_ops = everlive_card_ops_for(gc573_desc);
+	printf("Testing everlive_card_ops binding and defaults...\n");
+	assert(gc573_desc != NULL && gc570d_desc != NULL);
+
+	/* 1. Register before any lookup; the first lookup freezes the table. */
+	register_ops_from_stack();
+
+	/* 2. The copied vtable is visible and outlives the caller's stack. */
+	bound = everlive_card_ops_for(gc573_desc);
+	assert(bound != NULL);
+	assert(bound->probe == mock_custom_probe);
+
+	memset(&dev, 0, sizeof(dev));
+	g_custom_probe_called = 0;
+	assert(bound->probe(&dev) == 0);
+	assert(g_custom_probe_called == 1);
+	TEST_PASS("Registered vtable is copied and outlives the caller's stack");
+
+	/* 3. Registration is closed once a lookup has happened. */
+	assert(everlive_register_card_ops("gc573", bound) == -EBUSY);
+	TEST_PASS("Registry freezes after the first ops lookup");
+
+	/* 4. An unbound model still falls back to the built-in defaults. */
+	default_ops = everlive_card_ops_for(gc570d_desc);
 	assert(default_ops != NULL);
 	assert(default_ops->probe != NULL);
 	assert(default_ops->init_hardware != NULL);
@@ -222,15 +292,13 @@ static void test_card_ops_binding(void)
 	assert(default_ops->enable_passthrough != NULL);
 	assert(default_ops->set_led != NULL);
 	assert(default_ops->get_telemetry != NULL);
-	TEST_PASS("Default ops returned for known model");
+	TEST_PASS("Default ops returned for an unbound model");
 
-	/* 2. Default ops return -ENOTSUP / -EINVAL appropriately */
-	struct everlive_device dev;
 	memset(&dev, 0, sizeof(dev));
 	assert(default_ops->probe(&dev) == -EINVAL);
 
-	dev.desc = gc573_desc;
-	snprintf(dev.pci_bdf, sizeof(dev.pci_bdf), "0000:04:00.0");
+	dev.desc = gc570d_desc;
+	snprintf(dev.pci_bdf, sizeof(dev.pci_bdf), "0000:03:00.0");
 	assert(default_ops->probe(&dev) == 0);
 	assert(default_ops->init_hardware(&dev) == -ENOTSUP);
 	assert(default_ops->standby(&dev) == -ENOTSUP);
@@ -247,24 +315,10 @@ static void test_card_ops_binding(void)
 	default_ops->release(&dev);
 	TEST_PASS("Default ops behave safely and return -ENOTSUP for hardware actions");
 
-	/* 3. Register custom backend ops */
-	struct everlive_card_ops custom_ops = *default_ops;
-	custom_ops.probe = mock_custom_probe;
-
-	assert(everlive_register_card_ops("gc573", &custom_ops) == 0);
-	const struct everlive_card_ops *bound = everlive_card_ops_for(gc573_desc);
-	assert(bound != NULL);
-	assert(bound->probe == mock_custom_probe);
-
-	g_custom_probe_called = 0;
-	assert(bound->probe(&dev) == 0);
-	assert(g_custom_probe_called == 1);
-	TEST_PASS("Successfully registered and dispatched custom backend ops");
-
-	/* 4. Invalid arguments */
-	assert(everlive_register_card_ops(NULL, &custom_ops) == -EINVAL);
+	/* 5. Invalid arguments are still reported after the freeze. */
+	assert(everlive_register_card_ops(NULL, default_ops) == -EINVAL);
 	assert(everlive_register_card_ops("gc573", NULL) == -EINVAL);
-	assert(everlive_register_card_ops("nonexistent_model", &custom_ops) == -ENOENT);
+	assert(everlive_register_card_ops("nonexistent_model", default_ops) == -ENOENT);
 	TEST_PASS("Rejects NULL arguments and unknown model slugs for ops registration");
 }
 
@@ -323,62 +377,6 @@ static void test_resume_detection(void)
 	TEST_PASS("Resume detection threshold strictly enforced at > 2.0 seconds delta");
 }
 
-static void test_everlive_ctl_commands(void)
-{
-	printf("Testing everlive-ctl runtime command construction...\n");
-
-	char req[512];
-	char params[256];
-
-	/* 1. Status command */
-	snprintf(req, sizeof(req), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"%s\",\"params\":%s}\n",
-		 "status.get", "{}");
-	assert(strstr(req, "\"method\":\"status.get\"") != NULL);
-	assert(strstr(req, "\"params\":{}") != NULL);
-	TEST_PASS("Status request formatting verified");
-
-	/* 2. LED static color RGB calculation */
-	unsigned long rgb = strtoul("FF8020", NULL, 16);
-	unsigned long r = (rgb >> 16) & 0xff;
-	unsigned long g = (rgb >> 8) & 0xff;
-	unsigned long b = rgb & 0xff;
-	assert(r == 0xff && g == 0x80 && b == 0x20);
-	snprintf(params, sizeof(params), "{\"r\":%lu,\"g\":%lu,\"b\":%lu}", r, g, b);
-	snprintf(req, sizeof(req), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"%s\",\"params\":%s}\n",
-		 "led.set", params);
-	assert(strstr(req, "\"r\":255,\"g\":128,\"b\":32") != NULL);
-	TEST_PASS("LED RGB formatting verified");
-
-	/* 3. EDID profile command */
-	snprintf(params, sizeof(params), "{\"profile\":\"%s\"}", "1440p120");
-	snprintf(req, sizeof(req), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"%s\",\"params\":%s}\n",
-		 "edid.set", params);
-	assert(strstr(req, "\"method\":\"edid.set\"") != NULL);
-	assert(strstr(req, "\"profile\":\"1440p120\"") != NULL);
-	TEST_PASS("EDID profile request formatting verified");
-
-	/* 4. Hotplug pulse command */
-	snprintf(req, sizeof(req), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"%s\",\"params\":%s}\n",
-		 "hotplug", "{\"pulse\":true}");
-	assert(strstr(req, "\"method\":\"hotplug\"") != NULL);
-	assert(strstr(req, "\"pulse\":true") != NULL);
-	TEST_PASS("Hotplug pulse request formatting verified");
-
-	/* 5. HDR exposure command */
-	snprintf(params, sizeof(params), "{\"exposure\":%s}", "-0.5");
-	snprintf(req, sizeof(req), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"%s\",\"params\":%s}\n",
-		 "hdr.exposure", params);
-	assert(strstr(req, "\"method\":\"hdr.exposure\"") != NULL);
-	assert(strstr(req, "\"exposure\":-0.5") != NULL);
-	TEST_PASS("HDR exposure request formatting verified");
-
-	/* 6. Audio volume / mute switch parsing */
-	double vol = 85.0;
-	snprintf(params, sizeof(params), "{\"gain\":%g}", vol / 100.0);
-	assert(strstr(params, "0.85") != NULL);
-	TEST_PASS("Audio volume gain calculation verified");
-}
-
 int main(void)
 {
 	printf("==================================================\n");
@@ -390,7 +388,6 @@ int main(void)
 	test_mock_sysfs_scan();
 	test_card_ops_binding();
 	test_resume_detection();
-	test_everlive_ctl_commands();
 
 	printf("==================================================\n");
 	printf(" ALL CARD REGISTRY TESTS PASSED!\n");

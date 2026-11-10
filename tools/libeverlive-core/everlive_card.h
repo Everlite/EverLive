@@ -108,6 +108,7 @@ struct everlive_device_desc {
 	uint32_t capabilities;
 	int num_input_ports;
 	const struct everlive_card_ops *ops;
+	bool fallback_match;        /* Last-resort match for this vendor/device */
 };
 
 /* -------------------------------------------------------------------------
@@ -172,9 +173,18 @@ const struct everlive_device_desc *everlive_get_card_registry(size_t *out_count)
 
 /*
  * Bind a backend implementation to every registry entry with @model_slug.
- * Backends own their hardware context; the core only stores the vtable.
- * Returns 0, -EINVAL for bad arguments, -ENOENT for an unknown model, or
- * -ENOSPC when the binding table is full.
+ * Backends own their hardware context; the core copies the vtable by value,
+ * so @ops only has to remain valid for the duration of this call.
+ *
+ * Registration is a startup operation: it must finish before the first
+ * everlive_card_ops_for() call, which is also the point where the library may
+ * start being used from multiple threads.  No lock is taken, so callers must
+ * register before spawning threads.  Once a lookup has happened the registry
+ * is frozen and later calls return -EBUSY.
+ *
+ * Returns 0, -EINVAL for bad arguments, -ENOENT for an unknown model,
+ * -EBUSY if the registry is already frozen, or -ENOSPC when the binding table
+ * is full.
  */
 int everlive_register_card_ops(const char *model_slug,
 			       const struct everlive_card_ops *ops);
@@ -183,7 +193,8 @@ int everlive_register_card_ops(const char *model_slug,
  * Resolve the active operations for a descriptor.  This returns the most
  * recently registered backend vtable, the descriptor's built-in vtable, or
  * the core default (which reports -ENOTSUP for hardware actions) in that
- * order, and never NULL.
+ * order, and never NULL.  The first call freezes the registry; register all
+ * backends before calling this function.
  */
 const struct everlive_card_ops *
 everlive_card_ops_for(const struct everlive_device_desc *desc);

@@ -4,6 +4,7 @@
  */
 
 #include "everlive_card.h"
+#include "everlive_ctl.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,8 +12,12 @@
 #include <unistd.h>
 #include <limits.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
+
+static int ctl_connect(char *path, size_t path_size);
 
 static void print_capabilities(uint32_t caps)
 {
@@ -23,6 +28,10 @@ static void print_capabilities(uint32_t caps)
 		printf("%s%s", first ? "" : ", ", (name)); \
 		first = false; \
 	}
+	CHECK_CAP(EVERLIVE_CAP_VIDEO_CAPTURE, "Video-Capture");
+	CHECK_CAP(EVERLIVE_CAP_AUDIO_CAPTURE, "Audio-Capture");
+	CHECK_CAP(EVERLIVE_CAP_PASSTHROUGH, "Passthrough");
+	CHECK_CAP(EVERLIVE_CAP_EDID_PASSTHROUGH, "EDID-Passthrough");
 	CHECK_CAP(EVERLIVE_CAP_4K60, "4K60");
 	CHECK_CAP(EVERLIVE_CAP_4K120, "4K120");
 	CHECK_CAP(EVERLIVE_CAP_1440P120, "1440p120");
@@ -38,6 +47,50 @@ static void print_capabilities(uint32_t caps)
 	if (first)
 		printf("None");
 	printf("\n");
+}
+
+/*
+ * Execute argv directly (no shell) and return its exit code, or -1 if it could
+ * not be spawned or reaped.  When @quiet is true, stderr is discarded.
+ */
+static int run_command(const char *const argv[], bool quiet)
+{
+	pid_t pid;
+	int status;
+
+	pid = fork();
+	if (pid < 0)
+		return -1;
+
+	if (pid == 0) {
+		if (quiet) {
+			int devnull = open("/dev/null", O_WRONLY);
+
+			if (devnull >= 0) {
+				dup2(devnull, STDERR_FILENO);
+				if (devnull > STDERR_FILENO)
+					close(devnull);
+			}
+		}
+		execvp(argv[0], (char *const *)argv);
+		_exit(127);
+	}
+
+	while (waitpid(pid, &status, 0) < 0) {
+		if (errno != EINTR)
+			return -1;
+	}
+
+	return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
+static bool systemctl_unit_active(const char *unit)
+{
+	const char *const argv[] = {
+		"systemctl", "--user", "is-active", "--quiet", unit, NULL
+	};
+
+	return run_command(argv, true) == 0;
 }
 
 static int cmd_detect(void)
@@ -98,28 +151,28 @@ static void print_usage(const char *prog)
 
 static int cmd_status(void)
 {
+	char path[108];
+	int fd;
+
 	printf("=== EverLive Background Engine Status ===\n");
 
-	/* Check running processes */
-	bool gc570d_proc = (system("pgrep -x opengc570d-userd >/dev/null 2>&1") == 0);
-	bool gc573_proc = (system("pgrep -x gc573_user_streamer >/dev/null 2>&1") == 0 ||
-			   system("pgrep -x everlive_userd >/dev/null 2>&1") == 0);
-
-	if (gc570d_proc) {
-		printf("Active Process:   opengc570d-userd (running)\n");
-	} else if (gc573_proc) {
-		printf("Active Process:   gc573_user_streamer / everlive_userd (running)\n");
+	/* The engine is running when its JSON-RPC control socket answers. */
+	fd = ctl_connect(path, sizeof(path));
+	if (fd >= 0) {
+		close(fd);
+		printf("Active Process:   EverLive engine (running at %s)\n",
+		       path);
 	} else {
 		printf("Active Process:   None (Engine is idle/standby)\n");
 	}
 
 	/* Check systemd user service */
 	printf("Service State:    ");
-	fflush(stdout);
-	int ret = system("systemctl --user is-active everlive.service 2>/dev/null");
-	if (ret != 0) {
-		system("systemctl --user is-active opengc570d-userd.service 2>/dev/null || echo inactive");
-	}
+	if (systemctl_unit_active("everlive.service") ||
+	    systemctl_unit_active("opengc570d-userd.service"))
+		printf("active\n");
+	else
+		printf("inactive\n");
 
 	/* Also report detected card */
 	printf("\n");
@@ -127,67 +180,257 @@ static int cmd_status(void)
 	return 0;
 }
 
+/*
+ * Locate the background service script.  Prefer one sitting next to the
+ * running everlive-ctl binary (true for both an installed tree and a source
+ * build), then the installed locations, then the legacy CWD-relative path.
+ */
+static bool resolve_service_script(char *out, size_t out_size)
+{
+	static const char *const candidates[] = {
+		"/usr/local/bin/everlive-service",
+		"/usr/local/bin/everlive-service.sh",
+		"./tools/libeverlive-core/everlive-service.sh",
+	};
+	char exe_path[PATH_MAX];
+	ssize_t len;
+
+	len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+	if (len > 0) {
+		char *slash;
+
+		exe_path[len] = '\0';
+		slash = strrchr(exe_path, '/');
+		if (slash) {
+			int n;
+
+			*slash = '\0';
+			n = snprintf(out, out_size, "%s/everlive-service",
+				     exe_path);
+			if (n > 0 && (size_t)n < out_size &&
+			    access(out, X_OK) == 0)
+				return true;
+			n = snprintf(out, out_size, "%s/everlive-service.sh",
+				     exe_path);
+			if (n > 0 && (size_t)n < out_size &&
+			    access(out, X_OK) == 0)
+				return true;
+		}
+	}
+
+	for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+		int n = snprintf(out, out_size, "%s", candidates[i]);
+
+		if (n > 0 && (size_t)n < out_size && access(out, X_OK) == 0)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * Launch @path detached from the terminal.  A pipe with O_CLOEXEC tells the
+ * parent whether exec() actually succeeded: EOF means success, four bytes
+ * mean the child failed with that errno.  The parent does not wait, so the
+ * service is not tied to the lifetime of this CLI.
+ */
+static int spawn_detached(const char *path)
+{
+	int pipefd[2];
+	pid_t pid;
+	int err = 0;
+	ssize_t n;
+
+	if (pipe2(pipefd, O_CLOEXEC) < 0)
+		return -1;
+
+	pid = fork();
+	if (pid < 0) {
+		int saved = errno;
+
+		close(pipefd[0]);
+		close(pipefd[1]);
+		errno = saved;
+		return -1;
+	}
+
+	if (pid == 0) {
+		int devnull;
+
+		close(pipefd[0]);
+		if (setsid() < 0)
+			goto fail;
+
+		devnull = open("/dev/null", O_RDWR);
+		if (devnull >= 0) {
+			dup2(devnull, STDIN_FILENO);
+			dup2(devnull, STDOUT_FILENO);
+			dup2(devnull, STDERR_FILENO);
+			if (devnull > STDERR_FILENO)
+				close(devnull);
+		}
+
+		execl(path, path, (char *)NULL);
+fail:
+		err = errno;
+		(void)!write(pipefd[1], &err, sizeof(err));
+		_exit(127);
+	}
+
+	close(pipefd[1]);
+	do {
+		n = read(pipefd[0], &err, sizeof(err));
+	} while (n < 0 && errno == EINTR);
+
+	if (n < 0) {
+		int saved = errno;
+
+		close(pipefd[0]);
+		errno = saved;
+		return -1;
+	}
+	close(pipefd[0]);
+
+	/* Any data means the child failed before exec(); EOF means success. */
+	if (n > 0) {
+		errno = err;
+		return -1;
+	}
+
+	return 0;
+}
+
 static int cmd_init(void)
 {
+	const char *const everlive_enabled[] = {
+		"systemctl", "--user", "is-enabled", "--quiet",
+		"everlive.service", NULL
+	};
+	const char *const gc570d_enabled[] = {
+		"systemctl", "--user", "is-enabled", "--quiet",
+		"opengc570d-userd.service", NULL
+	};
+	const char *const everlive_start[] = {
+		"systemctl", "--user", "start", "everlive.service", NULL
+	};
+	const char *const gc570d_start[] = {
+		"systemctl", "--user", "start",
+		"opengc570d-userd.service", NULL
+	};
+	char script_path[PATH_MAX];
+	char path[108];
+	int fd;
+
 	printf("[*] Initializing EverLive capture hardware in background...\n");
-	/* Check if already running */
-	if (system("pgrep -x opengc570d-userd >/dev/null 2>&1") == 0 ||
-	    system("pgrep -x gc573_user_streamer >/dev/null 2>&1") == 0) {
+
+	/* The engine is already up if its control socket answers. */
+	fd = ctl_connect(path, sizeof(path));
+	if (fd >= 0) {
+		close(fd);
 		printf("[+] Capture engine is already running and hardware is initialized.\n");
 		return 0;
 	}
 
-	/* Try starting via systemd if service file exists */
-	if (system("systemctl --user is-enabled everlive.service >/dev/null 2>&1") == 0 ||
-	    system("systemctl --user is-enabled opengc570d-userd.service >/dev/null 2>&1") == 0) {
+	/* Try starting via systemd if a user unit is installed. */
+	if (run_command(everlive_enabled, true) == 0 ||
+	    run_command(gc570d_enabled, true) == 0) {
 		printf("[*] Starting via systemd user service...\n");
-		system("systemctl --user start everlive.service 2>/dev/null || systemctl --user start opengc570d-userd.service");
-		return 0;
+		if (run_command(everlive_start, true) == 0 ||
+		    run_command(gc570d_start, false) == 0) {
+			printf("[+] EverLive background service started.\n");
+			return 0;
+		}
+		fprintf(stderr,
+			"Failed to start the EverLive systemd user service.\n");
+		return 1;
 	}
 
 	/* Direct script invocation */
-	char script_path[PATH_MAX];
-	snprintf(script_path, sizeof(script_path), "%s/everlive-service.sh", "/usr/local/bin");
-	if (access(script_path, X_OK) != 0) {
-		/* Search relative to executable or current directory */
-		snprintf(script_path, sizeof(script_path), "./tools/libeverlive-core/everlive-service.sh");
+
+	if (!resolve_service_script(script_path, sizeof(script_path))) {
+		fprintf(stderr,
+			"Could not locate everlive-service; install it or run from the source tree.\n");
+		return 1;
 	}
 
-	char cmd[PATH_MAX + 32];
-	snprintf(cmd, sizeof(cmd), "nohup %s >/dev/null 2>&1 &", script_path);
 	printf("[*] Spawning %s...\n", script_path);
-	int res = system(cmd);
-	if (res == 0) {
-		printf("[+] EverLive background service launched successfully.\n");
+	if (spawn_detached(script_path) < 0) {
+		fprintf(stderr, "Failed to launch %s: %s\n",
+			script_path, strerror(errno));
+		return 1;
 	}
-	return res;
+
+	printf("[+] EverLive background service launched successfully.\n");
+	return 0;
 }
 
 static int cmd_service(int argc, char **argv)
 {
-	if (argc < 3) {
-		return system("systemctl --user status everlive.service opengc570d-userd.service 2>/dev/null || true");
-	}
+	const char *action;
 
-	const char *action = argv[2];
-	char cmd[256];
+	if (argc < 3)
+		action = "status";
+	else
+		action = argv[2];
 
 	if (strcmp(action, "status") == 0) {
-		snprintf(cmd, sizeof(cmd), "systemctl --user status everlive.service opengc570d-userd.service");
-	} else if (strcmp(action, "start") == 0) {
-		snprintf(cmd, sizeof(cmd), "systemctl --user start everlive.service 2>/dev/null || systemctl --user start opengc570d-userd.service");
-	} else if (strcmp(action, "stop") == 0) {
-		snprintf(cmd, sizeof(cmd), "systemctl --user stop everlive.service opengc570d-userd.service 2>/dev/null");
-	} else if (strcmp(action, "enable") == 0) {
-		snprintf(cmd, sizeof(cmd), "systemctl --user enable --now everlive.service 2>/dev/null || systemctl --user enable --now opengc570d-userd.service");
-	} else if (strcmp(action, "disable") == 0) {
-		snprintf(cmd, sizeof(cmd), "systemctl --user disable --now everlive.service opengc570d-userd.service 2>/dev/null");
-	} else {
-		fprintf(stderr, "Unknown service action: %s\n", action);
-		return 1;
+		const char *const status_argv[] = {
+			"systemctl", "--user", "status", "everlive.service",
+			"opengc570d-userd.service", NULL
+		};
+
+		return run_command(status_argv, true);
 	}
 
-	return system(cmd);
+	if (strcmp(action, "start") == 0) {
+		const char *const everlive[] = {
+			"systemctl", "--user", "start", "everlive.service", NULL
+		};
+		const char *const gc570d[] = {
+			"systemctl", "--user", "start",
+			"opengc570d-userd.service", NULL
+		};
+
+		if (run_command(everlive, true) == 0)
+			return 0;
+		return run_command(gc570d, false);
+	}
+
+	if (strcmp(action, "stop") == 0) {
+		const char *const stop_argv[] = {
+			"systemctl", "--user", "stop", "everlive.service",
+			"opengc570d-userd.service", NULL
+		};
+
+		return run_command(stop_argv, true);
+	}
+
+	if (strcmp(action, "enable") == 0) {
+		const char *const everlive[] = {
+			"systemctl", "--user", "enable", "--now",
+			"everlive.service", NULL
+		};
+		const char *const gc570d[] = {
+			"systemctl", "--user", "enable", "--now",
+			"opengc570d-userd.service", NULL
+		};
+
+		if (run_command(everlive, true) == 0)
+			return 0;
+		return run_command(gc570d, false);
+	}
+
+	if (strcmp(action, "disable") == 0) {
+		const char *const disable_argv[] = {
+			"systemctl", "--user", "disable", "--now",
+			"everlive.service", "opengc570d-userd.service", NULL
+		};
+
+		return run_command(disable_argv, true);
+	}
+
+	fprintf(stderr, "Unknown service action: %s\n", action);
+	return 1;
 }
 
 static int cmd_list_models(void)
@@ -233,90 +476,83 @@ static int ctl_resolve_socket(char *buf, size_t size)
 	return (n > 0 && (size_t)n < size) ? 0 : -1;
 }
 
-static void json_escape(const char *in, char *out, size_t out_size)
+/*
+ * Resolve and connect to the engine control socket.  Returns the fd on
+ * success, or -1 with errno set.
+ */
+static int ctl_connect(char *path, size_t path_size)
 {
-	size_t o = 0;
-
-	for (const unsigned char *p = (const unsigned char *)in; *p; p++) {
-		if (o + 8 >= out_size)
-			break;
-		switch (*p) {
-		case '"':
-			out[o++] = '\\';
-			out[o++] = '"';
-			break;
-		case '\\':
-			out[o++] = '\\';
-			out[o++] = '\\';
-			break;
-		case '\n':
-			out[o++] = '\\';
-			out[o++] = 'n';
-			break;
-		case '\r':
-			out[o++] = '\\';
-			out[o++] = 'r';
-			break;
-		case '\t':
-			out[o++] = '\\';
-			out[o++] = 't';
-			break;
-		default:
-			if (*p < 0x20)
-				o += (size_t)snprintf(out + o, out_size - o,
-						      "\\u%04x", *p);
-			else
-				out[o++] = (char)*p;
-			break;
-		}
-	}
-	out[o] = '\0';
-}
-
-static int ctl_call(const char *method, const char *params)
-{
-	char path[108];
 	struct sockaddr_un addr;
-	char request[2048];
-	char response[8192];
-	size_t off = 0;
 	int fd;
+	int saved;
 
-	if (ctl_resolve_socket(path, sizeof(path)) < 0) {
-		fprintf(stderr, "EverLive control socket path is too long\n");
-		return 1;
+	if (ctl_resolve_socket(path, path_size) < 0) {
+		errno = ENAMETOOLONG;
+		return -1;
 	}
 
 	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-	if (fd < 0) {
-		fprintf(stderr, "socket: %s\n", strerror(errno));
-		return 1;
-	}
+	if (fd < 0)
+		return -1;
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
 	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
 
 	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		fprintf(stderr,
-			"Cannot connect to the EverLive engine at %s: %s\n"
-			"Is the capture engine running?\n",
-			path, strerror(errno));
+		saved = errno;
+		close(fd);
+		errno = saved;
+		return -1;
+	}
+
+	return fd;
+}
+
+static int ctl_call(const char *method, const char *params)
+{
+	char path[108] = "";
+	char request[2048];
+	char response[8192];
+	size_t off = 0;
+	size_t request_len;
+	int fd;
+
+	fd = ctl_connect(path, sizeof(path));
+	if (fd < 0) {
+		if (errno == ENAMETOOLONG) {
+			fprintf(stderr,
+				"EverLive control socket path is too long\n");
+		} else {
+			fprintf(stderr,
+				"Cannot connect to the EverLive engine at %s: %s\n"
+				"Is the capture engine running?\n",
+				path, strerror(errno));
+		}
+		return 1;
+	}
+
+	if (everlive_ctl_build_request(method, params, request,
+				       sizeof(request)) < 0) {
+		fprintf(stderr, "Request too long\n");
 		close(fd);
 		return 1;
 	}
 
-	snprintf(request, sizeof(request),
-		 "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"%s\",\"params\":%s}\n",
-		 method, params && *params ? params : "{}");
+	request_len = strlen(request);
 
-	while (off < strlen(request)) {
-		ssize_t n = write(fd, request + off, strlen(request) - off);
+	while (off < request_len) {
+		ssize_t n = write(fd, request + off, request_len - off);
 
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
 			fprintf(stderr, "write: %s\n", strerror(errno));
+			close(fd);
+			return 1;
+		}
+		if (n == 0) {
+			fprintf(stderr, "write: no progress\n");
 			close(fd);
 			return 1;
 		}
@@ -353,7 +589,7 @@ static int ctl_call(const char *method, const char *params)
 		response[--off] = '\0';
 
 	printf("%s\n", response);
-	return strstr(response, "\"error\"") ? 1 : 0;
+	return everlive_ctl_response_has_error(response) ? 1 : 0;
 }
 
 static int parse_switch(const char *value)
@@ -399,16 +635,19 @@ static int cmd_runtime(int argc, char **argv)
 		return ctl_call("status.get", "{}");
 
 	if (strcmp(topic, "led") == 0) {
+		unsigned long rgb;
+
 		if (argc < 4) {
 			fprintf(stderr, "runtime led needs RRGGBB or off\n");
 			return 1;
 		}
 		if (strcasecmp(argv[3], "off") == 0)
 			return ctl_call("led.mode.set", "{\"mode\":\"off\"}");
-		unsigned long rgb = strtoul(argv[3], NULL, 16);
-		snprintf(params, sizeof(params),
-			 "{\"r\":%lu,\"g\":%lu,\"b\":%lu}",
-			 (rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff);
+		if (everlive_ctl_parse_hex_rgb(argv[3], &rgb) < 0 ||
+		    everlive_ctl_format_led(rgb, params, sizeof(params)) < 0) {
+			fprintf(stderr, "runtime led needs RRGGBB or off\n");
+			return 1;
+		}
 		return ctl_call("led.set", params);
 	}
 
@@ -417,7 +656,7 @@ static int cmd_runtime(int argc, char **argv)
 			fprintf(stderr, "runtime led-mode needs static|wave|rainbow|off\n");
 			return 1;
 		}
-		json_escape(argv[3], escaped, sizeof(escaped));
+		everlive_ctl_json_escape(argv[3], escaped, sizeof(escaped));
 		snprintf(params, sizeof(params), "{\"mode\":\"%s\"}", escaped);
 		return ctl_call("led.mode.set", params);
 	}
@@ -427,7 +666,7 @@ static int cmd_runtime(int argc, char **argv)
 			fprintf(stderr, "runtime edid needs a profile name or path\n");
 			return 1;
 		}
-		json_escape(argv[3], escaped, sizeof(escaped));
+		everlive_ctl_json_escape(argv[3], escaped, sizeof(escaped));
 		snprintf(params, sizeof(params), "{\"profile\":\"%s\"}", escaped);
 		return ctl_call("edid.set", params);
 	}
@@ -435,17 +674,23 @@ static int cmd_runtime(int argc, char **argv)
 	if (strcmp(topic, "hdr") == 0) {
 		const char *mode = argc >= 4 ? argv[3] : "auto";
 
-		json_escape(mode, escaped, sizeof(escaped));
+		everlive_ctl_json_escape(mode, escaped, sizeof(escaped));
 		snprintf(params, sizeof(params), "{\"mode\":\"%s\"}", escaped);
 		return ctl_call("hdr.set", params);
 	}
 
 	if (strcmp(topic, "hdr-ev") == 0) {
+		double ev;
+
 		if (argc < 4) {
 			fprintf(stderr, "runtime hdr-ev needs an EV value\n");
 			return 1;
 		}
-		snprintf(params, sizeof(params), "{\"exposure\":%s}", argv[3]);
+		if (everlive_ctl_parse_double(argv[3], &ev) < 0 ||
+		    everlive_ctl_format_exposure(ev, params, sizeof(params)) < 0) {
+			fprintf(stderr, "runtime hdr-ev needs a numeric EV value\n");
+			return 1;
+		}
 		return ctl_call("hdr.exposure", params);
 	}
 
@@ -469,18 +714,25 @@ static int cmd_runtime(int argc, char **argv)
 			fprintf(stderr, "runtime toast needs text\n");
 			return 1;
 		}
-		json_escape(argv[3], escaped, sizeof(escaped));
+		everlive_ctl_json_escape(argv[3], escaped, sizeof(escaped));
 		snprintf(params, sizeof(params), "{\"message\":\"%s\"}", escaped);
 		return ctl_call("toast.show", params);
 	}
 
 	if (strcmp(topic, "volume") == 0) {
+		double percent;
+
 		if (argc < 4) {
 			fprintf(stderr, "runtime volume needs 0..150\n");
 			return 1;
 		}
-		snprintf(params, sizeof(params), "{\"gain\":%g}",
-			 strtod(argv[3], NULL) / 100.0);
+		if (everlive_ctl_parse_double(argv[3], &percent) < 0 ||
+		    everlive_ctl_format_volume(percent, params,
+					       sizeof(params)) < 0) {
+			fprintf(stderr,
+				"runtime volume needs a number in 0..150\n");
+			return 1;
+		}
 		return ctl_call("audio.volume.set", params);
 	}
 

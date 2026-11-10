@@ -7,7 +7,7 @@ DEFS := -DGC570D_USERSPACE
 DRIVER_DIR := ../tools/opengc570d-userd/src
 CORE_DIR := ../tools/libeverlive-core
 
-TARGETS := test_edid test_config test_card_registry test_frame_convert
+TARGETS := test_edid test_config test_card_registry test_frame_convert test_ctl_proto
 
 all: $(TARGETS)
 
@@ -23,6 +23,9 @@ test_card_registry: test_card_registry.c $(CORE_DIR)/everlive_card.c
 test_frame_convert: test_frame_convert.c $(CORE_DIR)/everlive_frame.c
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^
 
+test_ctl_proto: test_ctl_proto.c $(CORE_DIR)/everlive_ctl_proto.c
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^
+
 asan: CFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer
 asan: all
 
@@ -32,6 +35,7 @@ test: all
 	@./test_config
 	@./test_card_registry
 	@./test_frame_convert
+	@./test_ctl_proto
 
 clean:
 	rm -f $(TARGETS)

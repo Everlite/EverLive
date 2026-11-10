@@ -89,6 +89,14 @@ static void test_invalid_parameters(void)
 	everlive_yuy2_to_rgb_scaled(buf, buf, 4, 4, 0, 2);
 	everlive_yuy2_to_rgb_scaled(buf, buf, 4, 4, 2, 0);
 
+	/* Odd width is not a valid YUY2 layout; the output must stay untouched. */
+	uint8_t odd_src[8] = { 0 };
+	uint8_t odd_dst[12];
+	memset(odd_dst, 0xAA, sizeof(odd_dst));
+	everlive_yuy2_to_rgb(odd_src, odd_dst, 3, 1);
+	for (size_t i = 0; i < sizeof(odd_dst); i++)
+		assert(odd_dst[i] == 0xAA);
+
 	printf("    Edge cases OK.\n");
 }
 

@@ -13,7 +13,7 @@ extern "C" {
 /**
  * Convert packed YUY2 (YUYV) 4:2:2 buffer to packed 24-bit RGB (RGB888).
  *
- * Fast SIMD/fixed-point conversion using BT.601 color matrix.
+ * Fast fixed-point conversion using the BT.601 color matrix.
  *
  * @param src     Pointer to source YUY2 buffer (width * height * 2 bytes).
  * @param dst     Pointer to destination RGB888 buffer (width * height * 3 bytes).
@@ -25,7 +25,7 @@ void everlive_yuy2_to_rgb(const uint8_t *src, uint8_t *dst, int width, int heigh
 /**
  * Convert and downscale packed YUY2 (YUYV) buffer to packed 24-bit RGB (RGB888).
  *
- * Uses point sampling / box averaging for low-overhead preview scaling.
+ * Uses nearest-neighbour point sampling for low-overhead preview scaling.
  *
  * @param src    Pointer to source YUY2 buffer.
  * @param dst    Pointer to destination RGB888 buffer.

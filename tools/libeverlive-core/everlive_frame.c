@@ -10,25 +10,37 @@ static inline uint8_t clamp_u8(int val)
 	return (uint8_t)val;
 }
 
+/* Arithmetic right shift by 8 without relying on implementation-defined
+ * behaviour for negative operands. */
+static inline int shift8(int val)
+{
+	return val >= 0 ? (val >> 8) : -(((-val) + 255) >> 8);
+}
+
 void everlive_yuy2_to_rgb(const uint8_t *src, uint8_t *dst, int width, int height)
 {
 	if (!src || !dst || width <= 0 || height <= 0)
 		return;
 
-	int total_pairs = (width * height) / 2;
+	/* YUY2 packs two pixels into each 4-byte macro-pixel, so an odd width
+	 * cannot be represented; reject it rather than desynchronising rows. */
+	if ((width & 1) != 0)
+		return;
+
+	size_t total_pairs = ((size_t)width * (size_t)height) / 2;
 	const uint8_t *s = src;
 	uint8_t *d = dst;
 
-	for (int i = 0; i < total_pairs; i++) {
+	for (size_t i = 0; i < total_pairs; i++) {
 		int y0 = s[0];
 		int u  = s[1] - 128;
 		int y1 = s[2];
 		int v  = s[3] - 128;
 		s += 4;
 
-		int r_off = (359 * v) >> 8;
-		int g_off = (88 * u + 183 * v) >> 8;
-		int b_off = (454 * u) >> 8;
+		int r_off = shift8(359 * v);
+		int g_off = shift8(88 * u + 183 * v);
+		int b_off = shift8(454 * u);
 
 		/* Pixel 0 */
 		d[0] = clamp_u8(y0 + r_off);
@@ -77,9 +89,9 @@ void everlive_yuy2_to_rgb_scaled(const uint8_t *src, uint8_t *dst,
 			int u = row[pair_base + 1] - 128;
 			int v = row[pair_base + 3] - 128;
 
-			int r_off = (359 * v) >> 8;
-			int g_off = (88 * u + 183 * v) >> 8;
-			int b_off = (454 * u) >> 8;
+			int r_off = shift8(359 * v);
+			int g_off = shift8(88 * u + 183 * v);
+			int b_off = shift8(454 * u);
 
 			d[0] = clamp_u8(y + r_off);
 			d[1] = clamp_u8(y - g_off);

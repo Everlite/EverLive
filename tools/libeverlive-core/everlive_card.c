@@ -117,11 +117,19 @@ static const struct everlive_card_ops kEverliveDefaultOps = {
 
 struct everlive_ops_binding {
 	const char *model_slug;
-	const struct everlive_card_ops *ops;
+	struct everlive_card_ops ops;   /* copied, not borrowed */
 };
 
 static struct everlive_ops_binding kEverliveOpsBindings[EVERLIVE_MAX_OPS_BINDINGS];
 static size_t kEverliveOpsBindingCount;
+
+/*
+ * Registration is a single-threaded startup step.  The first lookup freezes
+ * the table so a backend cannot rebind while other threads are resolving
+ * operations.  This is an enforcement guard, not a substitute for locking:
+ * callers must still register before starting any threads.
+ */
+static bool kEverliveOpsFrozen;
 
 /* -------------------------------------------------------------------------
  * Static Hardware Registry of Supported Capture Cards
@@ -136,6 +144,7 @@ static const struct everlive_device_desc kEverliveCardRegistry[] = {
 		.capabilities = EVERLIVE_CAP_VIDEO_CAPTURE |
 				EVERLIVE_CAP_AUDIO_CAPTURE |
 				EVERLIVE_CAP_PASSTHROUGH |
+				EVERLIVE_CAP_1080P60 |
 				EVERLIVE_CAP_DUAL_INPUT |
 				EVERLIVE_CAP_RGB_LED |
 				EVERLIVE_CAP_HARDWARE_SPLITTER |
@@ -152,6 +161,7 @@ static const struct everlive_device_desc kEverliveCardRegistry[] = {
 		.capabilities = EVERLIVE_CAP_VIDEO_CAPTURE |
 				EVERLIVE_CAP_AUDIO_CAPTURE |
 				EVERLIVE_CAP_PASSTHROUGH |
+				EVERLIVE_CAP_1080P60 |
 				EVERLIVE_CAP_4K60 |
 				EVERLIVE_CAP_1440P120 |
 				EVERLIVE_CAP_1080P240 |
@@ -162,6 +172,8 @@ static const struct everlive_device_desc kEverliveCardRegistry[] = {
 				EVERLIVE_CAP_EDID_PASSTHROUGH,
 		.num_input_ports = 1,
 		.ops = &kEverliveDefaultOps,
+		/* A 0x0054 device with any other subsystem is a GC573. */
+		.fallback_match = true,
 	},
 	{
 		.vendor_id = 0x1461,
@@ -172,6 +184,7 @@ static const struct everlive_device_desc kEverliveCardRegistry[] = {
 		.capabilities = EVERLIVE_CAP_VIDEO_CAPTURE |
 				EVERLIVE_CAP_AUDIO_CAPTURE |
 				EVERLIVE_CAP_PASSTHROUGH |
+				EVERLIVE_CAP_1080P60 |
 				EVERLIVE_CAP_4K60 |
 				EVERLIVE_CAP_1440P120 |
 				EVERLIVE_CAP_1080P240 |
@@ -192,6 +205,7 @@ static const struct everlive_device_desc kEverliveCardRegistry[] = {
 		.capabilities = EVERLIVE_CAP_VIDEO_CAPTURE |
 				EVERLIVE_CAP_AUDIO_CAPTURE |
 				EVERLIVE_CAP_PASSTHROUGH |
+				EVERLIVE_CAP_1080P60 |
 				EVERLIVE_CAP_4K60 |
 				EVERLIVE_CAP_1440P120 |
 				EVERLIVE_CAP_HDR10 |
@@ -229,10 +243,13 @@ int everlive_register_card_ops(const char *model_slug,
 	if (!canonical)
 		return -ENOENT;
 
+	if (kEverliveOpsFrozen)
+		return -EBUSY;
+
 	/* Replace an existing binding for the same model. */
 	for (size_t i = 0; i < kEverliveOpsBindingCount; i++) {
 		if (kEverliveOpsBindings[i].model_slug == canonical->model_slug) {
-			kEverliveOpsBindings[i].ops = ops;
+			kEverliveOpsBindings[i].ops = *ops;
 			return 0;
 		}
 	}
@@ -242,7 +259,7 @@ int everlive_register_card_ops(const char *model_slug,
 
 	kEverliveOpsBindings[kEverliveOpsBindingCount].model_slug =
 		canonical->model_slug;
-	kEverliveOpsBindings[kEverliveOpsBindingCount].ops = ops;
+	kEverliveOpsBindings[kEverliveOpsBindingCount].ops = *ops;
 	kEverliveOpsBindingCount++;
 	return 0;
 }
@@ -250,6 +267,9 @@ int everlive_register_card_ops(const char *model_slug,
 const struct everlive_card_ops *
 everlive_card_ops_for(const struct everlive_device_desc *desc)
 {
+	/* Any resolution closes the registry against further registration. */
+	kEverliveOpsFrozen = true;
+
 	if (!desc)
 		return &kEverliveDefaultOps;
 
@@ -257,40 +277,49 @@ everlive_card_ops_for(const struct everlive_device_desc *desc)
 		if (kEverliveOpsBindings[i].model_slug == desc->model_slug ||
 		    strcmp(kEverliveOpsBindings[i].model_slug,
 			   desc->model_slug) == 0)
-			return kEverliveOpsBindings[i].ops;
+			return &kEverliveOpsBindings[i].ops;
 	}
 
 	return desc->ops ? desc->ops : &kEverliveDefaultOps;
 }
 
-const struct everlive_device_desc *everlive_match_card(uint16_t vendor,
-						       uint16_t device,
-						       uint16_t subsystem)
+/*
+ * @subsystem_known is false when sysfs could not be read.  In that case an
+ * exact-subsystem entry can never match and a fallback entry is never used,
+ * so a missing ID file is not silently reported as a specific model.
+ */
+static const struct everlive_device_desc *
+everlive_match_card_ex(uint16_t vendor, uint16_t device,
+		       bool subsystem_known, uint16_t subsystem)
 {
-	/* Pass 1: Look for exact match (vendor, device, subsystem) */
+	/* Pass 1: exact match (vendor, device, subsystem) */
 	for (size_t i = 0; i < REGISTRY_COUNT; i++) {
 		const struct everlive_device_desc *d = &kEverliveCardRegistry[i];
-		if (d->vendor_id == vendor && d->device_id == device) {
-			if (d->subsystem_id != 0 && d->subsystem_id == subsystem)
-				return d;
-		}
+		if (d->vendor_id == vendor && d->device_id == device &&
+		    d->subsystem_id != 0 && subsystem_known &&
+		    d->subsystem_id == subsystem)
+			return d;
 	}
 
-	/* Special case: GC570D is distinguished by subsystem 0x5700.
-	 * If device is 0x0054 and subsystem is NOT 0x5700, it is a GC573.
+	/* Pass 2: wildcard subsystem entries (match any/unknown subsystem) */
+	for (size_t i = 0; i < REGISTRY_COUNT; i++) {
+		const struct everlive_device_desc *d = &kEverliveCardRegistry[i];
+		if (d->vendor_id == vendor && d->device_id == device &&
+		    d->subsystem_id == 0)
+			return d;
+	}
+
+	/* Pass 3: per-device fallback, data-driven via fallback_match.  This
+	 * replaces the old hard-coded 0x0054 -> "gc573" special case.  It only
+	 * applies when the subsystem is known, so an unreadable sysfs file can
+	 * never turn a GC570D into a GC573.
 	 */
-	if (vendor == 0x1461 && device == 0x0054 && subsystem != 0x5700) {
+	if (subsystem_known) {
 		for (size_t i = 0; i < REGISTRY_COUNT; i++) {
-			if (strcmp(kEverliveCardRegistry[i].model_slug, "gc573") == 0)
-				return &kEverliveCardRegistry[i];
-		}
-	}
-
-	/* Pass 2: Look for wildcard subsystem match */
-	for (size_t i = 0; i < REGISTRY_COUNT; i++) {
-		const struct everlive_device_desc *d = &kEverliveCardRegistry[i];
-		if (d->vendor_id == vendor && d->device_id == device) {
-			if (d->subsystem_id == 0)
+			const struct everlive_device_desc *d =
+				&kEverliveCardRegistry[i];
+			if (d->vendor_id == vendor && d->device_id == device &&
+			    d->fallback_match)
 				return d;
 		}
 	}
@@ -298,19 +327,50 @@ const struct everlive_device_desc *everlive_match_card(uint16_t vendor,
 	return NULL;
 }
 
-static uint16_t read_sysfs_hex16(const char *path)
+const struct everlive_device_desc *everlive_match_card(uint16_t vendor,
+						       uint16_t device,
+						       uint16_t subsystem)
 {
-	FILE *f = fopen(path, "r");
-	if (!f)
-		return 0;
+	return everlive_match_card_ex(vendor, device, true, subsystem);
+}
 
+/*
+ * Read a 16-bit hex value from sysfs.  Returns 0 on success and stores the
+ * value in @out, or a negative errno on failure.  Callers must not confuse a
+ * read failure with the legitimate value 0 (which is a wildcard sentinel).
+ */
+static int read_sysfs_hex16(const char *path, uint16_t *out)
+{
+	FILE *f;
 	char buf[32];
-	uint16_t val = 0;
-	if (fgets(buf, sizeof(buf), f)) {
-		val = (uint16_t)strtoul(buf, NULL, 16);
+	char *end = NULL;
+	unsigned long val;
+
+	if (!path || !out)
+		return -EINVAL;
+
+	f = fopen(path, "r");
+	if (!f)
+		return -errno;
+
+	if (!fgets(buf, sizeof(buf), f)) {
+		fclose(f);
+		return -EIO;
 	}
 	fclose(f);
-	return val;
+
+	errno = 0;
+	val = strtoul(buf, &end, 16);
+	if (end == buf || errno == ERANGE || val > 0xffff)
+		return -EINVAL;
+
+	while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')
+		end++;
+	if (*end != '\0')
+		return -EINVAL;
+
+	*out = (uint16_t)val;
+	return 0;
 }
 
 static int read_iommu_group(const char *dev_dir)
@@ -389,12 +449,21 @@ int everlive_detect_installed_cards(struct everlive_device *out_devices,
 		snprintf(device_path, sizeof(device_path), "%s/device", dev_path);
 		snprintf(subsystem_path, sizeof(subsystem_path), "%s/subsystem_device", dev_path);
 
-		uint16_t vendor = read_sysfs_hex16(vendor_path);
-		uint16_t device = read_sysfs_hex16(device_path);
-		uint16_t subsystem = read_sysfs_hex16(subsystem_path);
+		uint16_t vendor = 0;
+		uint16_t device = 0;
+		uint16_t subsystem = 0;
+		bool subsystem_known;
+
+		if (read_sysfs_hex16(vendor_path, &vendor) < 0 ||
+		    read_sysfs_hex16(device_path, &device) < 0)
+			continue;
+
+		subsystem_known =
+			read_sysfs_hex16(subsystem_path, &subsystem) == 0;
 
 		const struct everlive_device_desc *desc =
-			everlive_match_card(vendor, device, subsystem);
+			everlive_match_card_ex(vendor, device,
+					       subsystem_known, subsystem);
 
 		if (desc) {
 			struct everlive_device *dev = &out_devices[found_count];
