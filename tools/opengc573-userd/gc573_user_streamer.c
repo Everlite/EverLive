@@ -1458,10 +1458,28 @@ static struct osd_overlay g_osd;
 static struct osd_overlay g_help;
 static bool g_help_overlay;
 
+static struct osd_overlay g_toast;
+static uint64_t g_toast_until_ms;
+static char g_toast_text[64];
+
 /* Filled by the render loop for the OSD latency readout. */
 static double g_osd_dma_ms;
 /* Integer factor used by the last presented frame (0 = not integer scaled). */
 static int g_integer_factor;
+
+static void toast_destroy(void)
+{
+	if (g_toast.texture) {
+		SDL_DestroyTexture(g_toast.texture);
+		g_toast.texture = NULL;
+	}
+	g_toast.width = 0;
+	g_toast.height = 0;
+	g_toast.scale = 0;
+	g_toast.text[0] = '\0';
+	g_toast_until_ms = 0;
+	g_toast_text[0] = '\0';
+}
 
 static void osd_destroy(void)
 {
@@ -1473,6 +1491,7 @@ static void osd_destroy(void)
 	g_osd.height = 0;
 	g_osd.scale = 0;
 	g_osd.text[0] = '\0';
+	toast_destroy();
 }
 
 static void help_destroy(void)
@@ -1814,6 +1833,57 @@ static void help_render(SDL_Renderer *renderer, SDL_Window *window)
 	SDL_RenderCopy(renderer, g_help.texture, NULL, &dst);
 }
 
+static void toast_trigger(const char *msg)
+{
+	struct timespec ts;
+
+	if (!msg || !*msg)
+		return;
+	snprintf(g_toast_text, sizeof(g_toast_text), "%s", msg);
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	g_toast_until_ms = (uint64_t)ts.tv_sec * 1000U +
+			   (uint64_t)(ts.tv_nsec / 1000000L) + 2500U;
+}
+
+static void toast_render(SDL_Renderer *renderer, SDL_Window *window)
+{
+	struct timespec ts;
+	uint64_t now;
+	int win_w = 0;
+	int win_h = 0;
+	int scale;
+	SDL_Rect dst;
+
+	if (!g_toast_text[0])
+		return;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	now = (uint64_t)ts.tv_sec * 1000U + (uint64_t)(ts.tv_nsec / 1000000L);
+	if (now >= g_toast_until_ms)
+		return;
+
+	SDL_GetWindowSize(window, &win_w, &win_h);
+	if (win_w <= 0 || win_h <= 0)
+		return;
+
+	scale = osd_scale_for_height(win_h);
+	if (scale != g_toast.scale || strcmp(g_toast.text, g_toast_text) != 0)
+		osd_build(renderer, scale, g_toast_text, &g_toast);
+	if (!g_toast.texture)
+		return;
+
+	dst.w = g_toast.width;
+	dst.h = g_toast.height;
+	dst.x = (win_w - dst.w) / 2;
+	dst.y = win_h - dst.h - (scale >= 3 ? 36 : (scale == 2 ? 24 : 16));
+	if (dst.x < 0)
+		dst.x = 0;
+	if (dst.y < 0)
+		dst.y = 0;
+
+	SDL_RenderCopy(renderer, g_toast.texture, NULL, &dst);
+}
+
 static void fit_destination(SDL_Rect *dst, int win_w, int win_h,
 			    float src_aspect)
 {
@@ -1929,6 +1999,7 @@ static void render_frame(SDL_Window *window, SDL_Renderer *renderer,
 	SDL_RenderCopy(renderer, texture, NULL, &dst);
 	osd_render(renderer, window);
 	help_render(renderer, window);
+	toast_render(renderer, window);
 	SDL_RenderPresent(renderer);
 }
 
@@ -5507,6 +5578,7 @@ static void hdr_apply(const struct gc573_user_video_signal *sig,
 }
 
 static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
+			      void *bar0,
 			      SDL_Window *window,
 			      struct v4l2_sink *sink,
 			      uint32_t out_w, uint32_t out_h,
@@ -5593,11 +5665,40 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		break;
 	case GC573_IPC_CMD_HDR:
 		g_hdr_enabled = cmd->a != 0;
-		g_hdr_exposure_ev = cmd->f;
+		if (cmd->f >= -2.0f && cmd->f <= 2.0f)
+			g_hdr_exposure_ev = cmd->f;
 		hdr_apply(sig, have_signal);
 		printf("[IPC] HDR: %s, exposure %+.1f EV\n",
 		       g_hdr_enabled ? "auto" : "bypass",
 		       (double)g_hdr_exposure_ev);
+		break;
+	case GC573_IPC_CMD_HDR_EV:
+		if (cmd->f >= -2.0f && cmd->f <= 2.0f)
+			g_hdr_exposure_ev = cmd->f;
+		hdr_apply(sig, have_signal);
+		printf("[IPC] HDR exposure: %+.1f EV\n",
+		       (double)g_hdr_exposure_ev);
+		break;
+	case GC573_IPC_CMD_TOAST:
+		toast_trigger(cmd->path);
+		printf("[IPC] Toast: '%s'\n", cmd->path);
+		break;
+	case GC573_IPC_CMD_EDID:
+		if (bar0) {
+			int ret = gc573_user_program_edid_by_name(bar0, cmd->path, NULL);
+			if (ret == 0) {
+				(void)gc573_user_it6664_enable_source(bar0);
+				printf("[IPC] EDID profile set: %s\n", cmd->path);
+			} else {
+				pr_warn("IPC EDID profile set '%s' failed: %d", cmd->path, ret);
+			}
+		}
+		break;
+	case GC573_IPC_CMD_HOTPLUG:
+		if (bar0) {
+			(void)gc573_user_it6664_pulse_hpd(bar0);
+			printf("[IPC] HDMI HPD pulsed (source resync)\n");
+		}
 		break;
 	case GC573_IPC_CMD_SCALE:
 		g_scale_mode = cmd->a ? SCALE_INTEGER : SCALE_FIT;
@@ -6396,7 +6497,7 @@ int main(int argc, char *argv[])
 		 * ever appends to the lock-free command ring.
 		 */
 		while (gc573_ipc_poll_cmd(&ipc_cmd))
-			apply_ipc_command(&ipc_cmd, window, &v4l2_sink,
+			apply_ipc_command(&ipc_cmd, ctx.bar0, window, &v4l2_sink,
 					  output_width, output_height,
 					  &current_sig, have_signal);
 
