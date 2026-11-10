@@ -56,7 +56,7 @@
  * tools/everlive/everlive_viewer.py.
  */
 #ifndef EVERLIVE_VERSION
-#define EVERLIVE_VERSION "1.4.0"
+#define EVERLIVE_VERSION "1.5.0"
 #endif
 
 /* Desktop identity: window title, Wayland/X11 WM class and PipeWire app name. */
