@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The Console Hub no longer crashes on exit (segfault or `corrupted double-linked list` abort in `PySide::destroyQCoreApplication`, leaving a core dump on every quit). The window and tray icon are now destroyed before Python shuts down.
 - **GC573 green/white speckles and audio crackle on HDMI 2.0 sources (4K60, 1440p120):**
   - The IT6664 input receiver was left at its fixed power-on equaliser (RS `0x1f`, forced), so >340 MHz TMDS links decoded a steady stream of wrong characters. The errors were re-encoded by the IT6664, so they showed up on the HDMI OUT passthrough too and were invisible to the IT6805. Windows was clean on the same hardware and cable.
   - New `gc573_user_rx_eq.[ch]` drives both receivers (IT6664 input and IT6805 capture share the same ITE receiver core). On HDMI 2.0 lock it measures per-lane TMDS character errors (CED), leaves error-free links alone, and otherwise runs hardware auto-EQ with DFE taps, falling back to a per-lane RS sweep and skew retraining scored by measured errors.
