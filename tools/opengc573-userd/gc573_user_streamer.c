@@ -20,6 +20,7 @@
 #include "gc573_user_edid.h"
 #include "gc573_user_it6664.h"
 #include "gc573_user_it6805.h"
+#include "gc573_user_rx_eq.h"
 #include "gc573_user_fpga.h"
 #include "gc573_user_video.h"
 #include "gc573_user_audio.h"
@@ -1103,6 +1104,93 @@ static int compute_output_and_buffers(
 	*out_height = height;
 	*num_buffers = buffers;
 	return 0;
+}
+
+/* Wait up to @timeout_ms for the IT6805 to report SCDT. */
+static bool wait_capture_scdt(void *bar0, unsigned int timeout_ms)
+{
+	for (unsigned int waited = 0; waited < timeout_ms; waited += 20) {
+		struct gc573_user_video_signal st = { 0 };
+
+		if (gc573_user_it6805_poll_status(bar0, &st) == 0 &&
+		    st.scdt_locked)
+			return true;
+		SDL_Delay(20);
+	}
+	return false;
+}
+
+/*
+ * Equalise an HDMI 2.0 link before the timing is measured: first the card's
+ * input (IT6664), whose errors are re-encoded and invisible downstream, then
+ * the internal hop into the IT6805.  Afterwards give the receiver a moment
+ * to re-assert SCDT if the EQ retraining dropped it.
+ */
+static void tune_link_eq(void *bar0)
+{
+	bool touched = false;
+
+	if (!gc573_rx_link_is_hdmi2(bar0))
+		return;
+
+	for (int port = 0; port < GC573_RX_PORT_COUNT; port++) {
+		struct gc573_rx_eq_result eq;
+		const char *name = gc573_rx_port_name(port);
+		int ret = gc573_rx_eq_tune(bar0, port, &eq);
+		char before[16], after[16];
+
+		if (ret < 0) {
+			pr_warn("HDMI 2.0 link EQ (%s) failed: %d", name, ret);
+			touched = true;
+			continue;
+		}
+		if (!eq.ran) {
+			if (eq.ced_valid)
+				printf("[HDMI] Link EQ %s: error-free; keeping current EQ\n",
+				       name);
+			else if (!getenv("EVERLIVE_NO_AUTO_EQ"))
+				printf("[HDMI] Link EQ %s: skipped\n", name);
+			continue;
+		}
+		touched = true;
+		if (eq.before_valid)
+			snprintf(before, sizeof(before), "%u", eq.errors_before);
+		else
+			snprintf(before, sizeof(before), "n/a");
+		if (eq.ced_valid)
+			snprintf(after, sizeof(after), "%u", eq.errors_after);
+		else
+			snprintf(after, sizeof(after), "n/a");
+		printf("[HDMI] Link EQ %s: TMDS errors %s -> %s per 100 ms (B/G/R %u/%u/%u) | RS B/G/R 0x%02x/0x%02x/0x%02x | auto-EQ %s | DFE %s | sweep %s | skew %s | %u ms\n",
+		       name, before, after,
+		       eq.ch_errors_after[0], eq.ch_errors_after[1],
+		       eq.ch_errors_after[2],
+		       eq.rs[0], eq.rs[1], eq.rs[2],
+		       eq.auto_eq_done ? "done" : "failed",
+		       eq.dfe_applied ? "on" : "off",
+		       !eq.swept ? "no" : eq.kept_auto ? "lost to auto-EQ" : "yes",
+		       !eq.swept ? "auto" : eq.skew_trained ? "trained" : "forced 0",
+		       eq.elapsed_ms);
+	}
+	if (!touched)
+		return;
+
+	if (wait_capture_scdt(bar0, 500))
+		return;
+	/*
+	 * Retuning the input can leave the IT6664's TX1 (the internal link to
+	 * the IT6805) on a stale clock without the RX ever reporting a sync
+	 * loss, so nothing re-arms it.  Do what an RX re-lock would do.
+	 */
+	pr_warn("SCDT did not re-lock within 500 ms after link EQ; re-arming the IT6664 outputs");
+	if (gc573_user_it6664_relink_outputs(bar0) < 0) {
+		pr_warn("IT6664 output re-arm failed");
+		return;
+	}
+	if (wait_capture_scdt(bar0, 1000))
+		pr_info("Capture link re-locked after re-arming the IT6664 outputs");
+	else
+		pr_warn("SCDT still not locked after re-arming the IT6664 outputs");
 }
 
 static bool signal_usable(const struct gc573_user_video_signal *sig)
@@ -6521,6 +6609,7 @@ int main(int argc, char *argv[])
 					rate_probe_after_scdt = true;
 					if (signal_lost_hits >= SIGNAL_CHANGE_HITS) {
 						printf("[VIDEO] HDMI signal lost; stopping capture.\n");
+						gc573_rx_ced_reset();
 						audio_stop_capture(&audio);
 						ret = gc573_user_it6805_audio_disable(ctx.bar0);
 						if (ret < 0)
@@ -6562,6 +6651,7 @@ int main(int argc, char *argv[])
 						 * The preview thread keeps draining video DMA.
 						 */
 						audio_stop_capture(&audio);
+						tune_link_eq(ctx.bar0);
 						ret = gc573_user_it6805_poll_signal(ctx.bar0,
 									    &fresh);
 						if (ret < 0 || !signal_usable(&fresh)) {
@@ -6697,6 +6787,7 @@ int main(int argc, char *argv[])
 					struct gc573_user_video_signal sig = { 0 };
 
 					printf("[VIDEO] SCDT locked; measuring input timing...\n");
+					tune_link_eq(ctx.bar0);
 					ret = gc573_user_it6805_poll_signal(ctx.bar0,
 									    &sig);
 					if (ret == 0 && signal_usable(&sig)) {
@@ -7195,6 +7286,55 @@ int main(int argc, char *argv[])
 				       (unsigned long)__atomic_load_n(&g_preview.dropped,
 							      __ATOMIC_RELAXED),
 				       (double)g_preview.taken_age_us / 1000.0);
+				{
+					/*
+					 * TMDS character errors since the last tick on the
+					 * card's input and on the internal capture hop.
+					 * Logged whenever non-zero, otherwise every 10 s, so
+					 * link quality is visible without flooding the log.
+					 */
+					static unsigned int ced_quiet_ticks;
+					struct gc573_rx_ced ced[GC573_RX_PORT_COUNT];
+					bool have[GC573_RX_PORT_COUNT] = { false };
+					bool any = false, errors = false;
+
+					for (int port = 0; port < GC573_RX_PORT_COUNT;
+					     port++) {
+						struct gc573_rx_ced *c = &ced[port];
+
+						if (gc573_rx_ced_poll(ctx.bar0, port, now,
+								      c) != 0 ||
+						    !(c->valid[0] || c->valid[1] ||
+						      c->valid[2]))
+							continue;
+						have[port] = any = true;
+						if (c->count[0] || c->count[1] ||
+						    c->count[2])
+							errors = true;
+					}
+					if (any && (errors || ++ced_quiet_ticks >= 10)) {
+						ced_quiet_ticks = 0;
+						printf("[HDMI] TMDS errors B/G/R");
+						for (int port = 0;
+						     port < GC573_RX_PORT_COUNT; port++) {
+							const struct gc573_rx_ced *c =
+								&ced[port];
+
+							if (!have[port]) {
+								printf(" | %s n/a",
+								       gc573_rx_port_name(port));
+								continue;
+							}
+							printf(" | %s %u/%u/%u in %u ms",
+							       gc573_rx_port_name(port),
+							       c->valid[0] ? c->count[0] : 0,
+							       c->valid[1] ? c->count[1] : 0,
+							       c->valid[2] ? c->count[2] : 0,
+							       c->window_ms);
+						}
+						printf("%s\n", errors ? "" : " (clean)");
+					}
+				}
 				pthread_mutex_lock(&g_v4l2_lock);
 				if (v4l2_sink.path[0]) {
 					if (v4l2_sink.configured)

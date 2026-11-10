@@ -65,6 +65,14 @@ int gc573_user_it6664_poll(void *bar0,
 			   struct gc573_user_it6664_status *status);
 
 /**
+ * gc573_user_it6664_relink_outputs - Re-arm TX1 (capture) and TX2 (HDMI
+ * OUT) as after a fresh RX lock.  For when the RX input was disturbed (e.g.
+ * by equaliser changes) without the poll loop seeing sync drop, leaving the
+ * outputs on a stale clock.  No-op unless the RX is locked.
+ */
+int gc573_user_it6664_relink_outputs(void *bar0);
+
+/**
  * gc573_user_it6664_pulse_hpd - Pulse upstream HDMI RX HPD to trigger source re-sync
  * @bar0: Pointer to mapped BAR0 memory
  */

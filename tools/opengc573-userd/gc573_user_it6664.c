@@ -2597,6 +2597,21 @@ static int it6664_handle_rx_lock(void *bar0)
 	return 0;
 }
 
+int gc573_user_it6664_relink_outputs(void *bar0)
+{
+	if (!bar0)
+		return -EINVAL;
+	if (!g_rx_locked)
+		return 0;
+	/* Same state reset as an RX sync loss, then the normal lock path. */
+	g_tx2_powered = false;
+	g_tx2_output_enabled = false;
+	g_tx2_error_reported = false;
+	g_tx1_powered = false;
+	g_tx1_pclk_khz = 0;
+	return it6664_handle_rx_lock(bar0);
+}
+
 int gc573_user_it6664_poll(void *bar0, struct gc573_user_it6664_status *status)
 {
 	struct gc573_user_it6664_status local = { 0 };
