@@ -1106,6 +1106,20 @@ static int compute_output_and_buffers(
 	return 0;
 }
 
+/* Wait up to @timeout_ms for the IT6805 to report SCDT. */
+static bool wait_capture_scdt(void *bar0, unsigned int timeout_ms)
+{
+	for (unsigned int waited = 0; waited < timeout_ms; waited += 20) {
+		struct gc573_user_video_signal st = { 0 };
+
+		if (gc573_user_it6805_poll_status(bar0, &st) == 0 &&
+		    st.scdt_locked)
+			return true;
+		SDL_Delay(20);
+	}
+	return false;
+}
+
 /*
  * Equalise an HDMI 2.0 link before the timing is measured: first the card's
  * input (IT6664), whose errors are re-encoded and invisible downstream, then
@@ -1161,15 +1175,22 @@ static void tune_link_eq(void *bar0)
 	if (!touched)
 		return;
 
-	for (int i = 0; i < 25; i++) {
-		struct gc573_user_video_signal st = { 0 };
-
-		if (gc573_user_it6805_poll_status(bar0, &st) == 0 &&
-		    st.scdt_locked)
-			return;
-		SDL_Delay(20);
+	if (wait_capture_scdt(bar0, 500))
+		return;
+	/*
+	 * Retuning the input can leave the IT6664's TX1 (the internal link to
+	 * the IT6805) on a stale clock without the RX ever reporting a sync
+	 * loss, so nothing re-arms it.  Do what an RX re-lock would do.
+	 */
+	pr_warn("SCDT did not re-lock within 500 ms after link EQ; re-arming the IT6664 outputs");
+	if (gc573_user_it6664_relink_outputs(bar0) < 0) {
+		pr_warn("IT6664 output re-arm failed");
+		return;
 	}
-	pr_warn("SCDT did not re-lock within 500 ms after link EQ");
+	if (wait_capture_scdt(bar0, 1000))
+		pr_info("Capture link re-locked after re-arming the IT6664 outputs");
+	else
+		pr_warn("SCDT still not locked after re-arming the IT6664 outputs");
 }
 
 static bool signal_usable(const struct gc573_user_video_signal *sig)
