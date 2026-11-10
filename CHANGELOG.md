@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `[HDMI] TMDS errors B/G/R` line in `streamer.log` with per-lane error counts for the card input and the internal capture hop: every second while errors occur, otherwise every 10 s.
 - `EVERLIVE_NO_AUTO_EQ=1` disables link equalisation; `EVERLIVE_EQ_INPUT_DFE=0` keeps the input on RS-only EQ (for comparison and troubleshooting).
+- `streamer.log` lines carry the seconds since the streamer started (`[   5.706] ...`), and the log is now written line by line instead of in 4 KB blocks, so the Control Hub sees status changes immediately. `EVERLIVE_LOG_TIMESTAMPS=0` turns the prefix off.
+
+### Changed
+- **Faster GC573 start-up:**
+  - The FPGA DDR sampler lock is polled instead of waited out with a fixed 2 s sleep (it locks after ~1.6 s on the test card).
+  - Link EQ settings that left a receiver error-free are saved in `~/.local/state/everlive/link-eq` and tried first on the next lock. One 100 ms error count confirms them, which skips the hardware auto-EQ (227 ms instead of ~730 ms on the input). Stale settings fall back to the full tune automatically.
 
 ## [1.4.0] - 2026-11-06
 

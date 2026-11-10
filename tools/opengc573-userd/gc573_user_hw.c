@@ -8,6 +8,11 @@
 #include "gc573_user_hw.h"
 #include "gc573_user_i2c.h"
 
+/* FPGA DDR sampler gate: budget per attempt and poll interval. */
+#define DDR_LOCK_TIMEOUT_MS	2000
+#define DDR_LOCK_POLL_MS	10
+#define DDR_LOCK_STABLE_POLLS	5	/* 50 ms of continuous lock */
+
 /*
  * Software copy of the GPIO output latch (reg 0x00040).
  *
@@ -158,12 +163,24 @@ int gc573_user_bridge_wait_for_ddr(void *bar0)
 		writel(0x8, base + GC573_REG_DDR_STATUS);
 		writel(0x1, base + GC573_REG_DDR_STATUS);
 
-		msleep(2000);
-		status = readl(base + GC573_REG_DDR_STATUS);
-		if (status & BIT(0)) {
-			pr_info("FPGA DDR sampler locked on attempt %d (status 0x%08x)",
-				attempt + 1, status);
-			return 0;
+		/*
+		 * Poll instead of sleeping the whole window: the sampler
+		 * normally locks long before the 2 s budget runs out.  Only
+		 * accept a lock that holds for several consecutive polls, so a
+		 * transient bit right after the kick is not mistaken for it.
+		 */
+		int stable = 0;
+
+		for (int waited = DDR_LOCK_POLL_MS; waited <= DDR_LOCK_TIMEOUT_MS;
+		     waited += DDR_LOCK_POLL_MS) {
+			msleep(DDR_LOCK_POLL_MS);
+			status = readl(base + GC573_REG_DDR_STATUS);
+			stable = (status & BIT(0)) ? stable + 1 : 0;
+			if (stable >= DDR_LOCK_STABLE_POLLS) {
+				pr_info("FPGA DDR sampler locked on attempt %d after %d ms (status 0x%08x)",
+					attempt + 1, waited, status);
+				return 0;
+			}
 		}
 	}
 
