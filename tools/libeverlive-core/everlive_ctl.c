@@ -5,6 +5,7 @@
 
 #include "everlive_card.h"
 #include "everlive_ctl.h"
+#include "everlive_ipc.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -450,30 +451,7 @@ static int cmd_list_models(void)
 
 static int ctl_resolve_socket(char *buf, size_t size)
 {
-	const char *override = getenv("EVERLIVE_CONTROL_SOCKET");
-	const char *xdg = getenv("XDG_RUNTIME_DIR");
-	uid_t uid = getuid();
-	int n;
-
-	if (override && *override) {
-		n = snprintf(buf, size, "%s", override);
-		return (n > 0 && (size_t)n < size) ? 0 : -1;
-	}
-
-	if (xdg && *xdg) {
-		n = snprintf(buf, size, "%s/everlive-experimental.sock", xdg);
-		if (n > 0 && (size_t)n < size && access(buf, F_OK) == 0)
-			return 0;
-	}
-
-	n = snprintf(buf, size, "/run/user/%u/everlive-experimental.sock",
-		     (unsigned int)uid);
-	if (n > 0 && (size_t)n < size && access(buf, F_OK) == 0)
-		return 0;
-
-	n = snprintf(buf, size, "/tmp/everlive-%u/everlive-experimental.sock",
-		     (unsigned int)uid);
-	return (n > 0 && (size_t)n < size) ? 0 : -1;
+	return everlive_ipc_resolve_socket_path(buf, size, NULL) == 0 ? 0 : -1;
 }
 
 /*

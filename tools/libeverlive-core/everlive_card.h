@@ -171,6 +171,10 @@ struct everlive_device {
 /* Returns a pointer to the static registry table and sets out_count */
 const struct everlive_device_desc *everlive_get_card_registry(size_t *out_count);
 
+/* Returns the registry entry for @model_slug, or NULL when unknown. */
+const struct everlive_device_desc *
+everlive_find_card_by_slug(const char *model_slug);
+
 /*
  * Bind a backend implementation to every registry entry with @model_slug.
  * Backends own their hardware context; the core copies the vtable by value,

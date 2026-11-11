@@ -226,20 +226,29 @@ const struct everlive_device_desc *everlive_get_card_registry(size_t *out_count)
 	return kEverliveCardRegistry;
 }
 
+const struct everlive_device_desc *
+everlive_find_card_by_slug(const char *model_slug)
+{
+	if (!model_slug || !*model_slug)
+		return NULL;
+
+	for (size_t i = 0; i < REGISTRY_COUNT; i++) {
+		if (strcmp(kEverliveCardRegistry[i].model_slug, model_slug) == 0)
+			return &kEverliveCardRegistry[i];
+	}
+
+	return NULL;
+}
+
 int everlive_register_card_ops(const char *model_slug,
 			       const struct everlive_card_ops *ops)
 {
-	const struct everlive_device_desc *canonical = NULL;
+	const struct everlive_device_desc *canonical;
 
 	if (!model_slug || !*model_slug || !ops)
 		return -EINVAL;
 
-	for (size_t i = 0; i < REGISTRY_COUNT; i++) {
-		if (strcmp(kEverliveCardRegistry[i].model_slug, model_slug) == 0) {
-			canonical = &kEverliveCardRegistry[i];
-			break;
-		}
-	}
+	canonical = everlive_find_card_by_slug(model_slug);
 	if (!canonical)
 		return -ENOENT;
 

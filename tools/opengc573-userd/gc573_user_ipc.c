@@ -25,10 +25,8 @@
 #include <sys/un.h>
 #include <time.h>
 
-/* jsmn JSON parser - single header library (MIT licensed) */
-#define JSMN_HEADER
-#define JSMN_PARENT_LINKS
-#include "third_party/jsmn.h"
+/* JSON-RPC scanning, escaping, and id formatting live in libeverlive-core. */
+#include "everlive_json.h"
 
 /*
  * Control socket name shared by the engine and the Console Hub.
@@ -122,238 +120,6 @@ static uint64_t ipc_now_ms(void)
 	return (uint64_t)ts.tv_sec * 1000U + (uint64_t)(ts.tv_nsec / 1000000L);
 }
 
-/* JSON parsing with jsmn - limits: 128 tokens, max depth 16, max input 16KB */
-#define IPC_JSON_MAX_TOKENS    128
-#define IPC_JSON_MAX_DEPTH     16
-#define IPC_JSON_MAX_INPUT     (16 * 1024)
-
-typedef enum {
-	JSON_GET_STRING,
-	JSON_GET_LONG,
-	JSON_GET_DOUBLE,
-	JSON_GET_BOOL,
-	JSON_GET_RAW
-} json_get_type_e;
-
-/* Find a key in the JSON token tree. Direct children of root are matched first. */
-static int json_token_find_key(const jsmntok_t *tokens, int tok_count,
-			       const char *key, const char *json)
-{
-	const size_t klen = strlen(key);
-
-	/* Pass 1: check direct keys of the root object (tokens[0]) */
-	for (int i = 1; i < tok_count; i++) {
-		if (tokens[i].type != JSMN_STRING || tokens[i].parent != 0)
-			continue;
-		size_t len = (size_t)(tokens[i].end - tokens[i].start);
-		if (len == klen && memcmp(json + tokens[i].start, key, klen) == 0) {
-			if (i + 1 < tok_count)
-				return i + 1;
-		}
-	}
-
-	/* Pass 2: check keys of nested objects (e.g. inside "params") */
-	for (int i = 1; i < tok_count; i++) {
-		if (tokens[i].type != JSMN_STRING)
-			continue;
-		if (tokens[i].parent <= 0 || tokens[tokens[i].parent].type != JSMN_OBJECT)
-			continue;
-		size_t len = (size_t)(tokens[i].end - tokens[i].start);
-		if (len == klen && memcmp(json + tokens[i].start, key, klen) == 0) {
-			if (i + 1 < tok_count)
-				return i + 1;
-		}
-	}
-
-	return -1;
-}
-
-static bool json_token_to_string(const jsmntok_t *tok, const char *json,
-				 char *out, size_t outsz)
-{
-	if (!tok || tok->type != JSMN_STRING)
-		return false;
-	int len = tok->end - tok->start;
-	if (len < 0 || (size_t)len >= outsz)
-		return false;
-	memcpy(out, json + tok->start, len);
-	out[len] = '\0';
-	return true;
-}
-
-static bool json_token_to_long(const jsmntok_t *tok, const char *json,
-			       long *out)
-{
-	if (!tok || tok->type != JSMN_PRIMITIVE)
-		return false;
-	char buf[64];
-	int len = tok->end - tok->start;
-	if (len < 0 || len >= (int)sizeof(buf))
-		return false;
-	memcpy(buf, json + tok->start, len);
-	buf[len] = '\0';
-	char *end;
-	errno = 0;
-	long val = strtol(buf, &end, 10);
-	if (errno || end == buf || *end != '\0')
-		return false;
-	*out = val;
-	return true;
-}
-
-static bool json_token_to_double(const jsmntok_t *tok, const char *json,
-				 double *out)
-{
-	if (!tok || tok->type != JSMN_PRIMITIVE)
-		return false;
-	char buf[64];
-	int len = tok->end - tok->start;
-	if (len < 0 || len >= (int)sizeof(buf))
-		return false;
-	memcpy(buf, json + tok->start, len);
-	buf[len] = '\0';
-	char *end;
-	errno = 0;
-	double val = strtod(buf, &end);
-	if (errno || end == buf || *end != '\0')
-		return false;
-	*out = val;
-	return true;
-}
-
-static bool json_token_to_bool(const jsmntok_t *tok, const char *json,
-			       bool *out)
-{
-	if (!tok || tok->type != JSMN_PRIMITIVE)
-		return false;
-	int len = tok->end - tok->start;
-	if (len == 4 && strncmp(json + tok->start, "true", 4) == 0) {
-		*out = true;
-		return true;
-	}
-	if (len == 5 && strncmp(json + tok->start, "false", 5) == 0) {
-		*out = false;
-		return true;
-	}
-	return false;
-}
-
-static bool json_token_to_raw(const jsmntok_t *tok, const char *json,
-			      char *out, size_t outsz)
-{
-	if (!tok || !json || !out || outsz == 0)
-		return false;
-	int len = tok->end - tok->start;
-	if (len < 0 || (size_t)len >= outsz)
-		return false;
-	memcpy(out, json + tok->start, len);
-	out[len] = '\0';
-	return true;
-}
-
-static bool json_parse_request(const char *input, size_t len,
-			       const char *key, char *out, size_t outsz,
-			       json_get_type_e type, void *num_out)
-{
-	if (len >= IPC_JSON_MAX_INPUT)
-		return false;
-
-	jsmn_parser parser;
-	jsmntok_t tokens[IPC_JSON_MAX_TOKENS];
-	jsmn_init(&parser);
-	int tok_count = jsmn_parse(&parser, input, len, tokens, IPC_JSON_MAX_TOKENS);
-	if (tok_count < 1 || tokens[0].type != JSMN_OBJECT)
-		return false;
-
-	/* Search for the key anywhere in the JSON token tree */
-	int val_idx = json_token_find_key(tokens, tok_count, key, input);
-	if (val_idx < 0)
-		return false;
-
-	const jsmntok_t *val = &tokens[val_idx];
-	switch (type) {
-	case JSON_GET_STRING:
-		return json_token_to_string(val, input, out, outsz);
-	case JSON_GET_LONG:
-		return json_token_to_long(val, input, (long *)num_out);
-	case JSON_GET_DOUBLE:
-		return json_token_to_double(val, input, (double *)num_out);
-	case JSON_GET_BOOL:
-		return json_token_to_bool(val, input, (bool *)num_out);
-	case JSON_GET_RAW:
-		return json_token_to_raw(val, input, out, outsz);
-	}
-	return false;
-}
-
-static bool json_get_string(const char *s, const char *key, char *out, size_t outsz)
-{
-	if (!s || !key || !out || !outsz)
-		return false;
-	return json_parse_request(s, strlen(s), key, out, outsz, JSON_GET_STRING, NULL);
-}
-
-static bool json_get_long(const char *s, const char *key, long *out)
-{
-	if (!s || !key || !out)
-		return false;
-	return json_parse_request(s, strlen(s), key, NULL, 0, JSON_GET_LONG, out);
-}
-
-static bool json_get_double(const char *s, const char *key, double *out)
-{
-	if (!s || !key || !out)
-		return false;
-	return json_parse_request(s, strlen(s), key, NULL, 0, JSON_GET_DOUBLE, out);
-}
-
-static bool json_get_bool(const char *s, const char *key, bool *out)
-{
-	if (!s || !key || !out)
-		return false;
-	return json_parse_request(s, strlen(s), key, NULL, 0, JSON_GET_BOOL, out);
-}
-
-/* Legacy wrapper for json_find_value (used in ipc_handle_line for "id" and "method") */
-static bool json_find_value(const char *s, const char *key, char *out, size_t outsz)
-{
-	if (!s || !key || !out || !outsz)
-		return false;
-	/* For "method", extract unquoted string */
-	if (strcmp(key, "method") == 0) {
-		return json_get_string(s, key, out, outsz);
-	}
-	/* For "id", return raw token (string value, number, or null) */
-	return json_parse_request(s, strlen(s), key, out, outsz, JSON_GET_RAW, NULL);
-}
-
-static void json_escape_into(char *dst, size_t dstsz, const char *src)
-{
-	size_t o = 0;
-
-	if (!dst || dstsz == 0)
-		return;
-	if (!src) {
-		dst[0] = '\0';
-		return;
-	}
-	while (src && *src && o + 2 < dstsz) {
-		unsigned char ch = (unsigned char)*src++;
-
-		if (ch == '"' || ch == '\\') {
-			dst[o++] = '\\';
-			dst[o++] = (char)ch;
-		} else if (ch < 0x20) {
-			if (o + 6 >= dstsz)
-				break;
-			o += (size_t)snprintf(dst + o, dstsz - o, "\\u%04x", ch);
-		} else {
-			dst[o++] = (char)ch;
-		}
-	}
-	dst[o] = '\0';
-}
-
 /* ------------------------------------------------------------------ */
 /* Wire I/O                                                            */
 /* ------------------------------------------------------------------ */
@@ -373,49 +139,13 @@ static void ipc_send_raw(struct ipc_client *c, const char *data, size_t len)
 	}
 }
 
-static void json_format_id(char *dst, size_t dstsz, const char *id)
-{
-	if (!dst || dstsz == 0)
-		return;
-	if (!id || !*id || strcmp(id, "null") == 0) {
-		snprintf(dst, dstsz, "null");
-		return;
-	}
-	char *end = NULL;
-	strtol(id, &end, 10);
-	if (end && *end == '\0') {
-		snprintf(dst, dstsz, "%s", id);
-		return;
-	}
-	size_t len = strlen(id);
-	char inner[IPC_ID_MAX];
-	const char *to_esc = id;
-	if (id[0] == '"' && len >= 2 && id[len - 1] == '"') {
-		size_t in_len = len - 2;
-		if (in_len >= sizeof(inner))
-			in_len = sizeof(inner) - 1;
-		memcpy(inner, id + 1, in_len);
-		inner[in_len] = '\0';
-		to_esc = inner;
-	}
-	if (dstsz >= 3) {
-		dst[0] = '"';
-		json_escape_into(dst + 1, dstsz - 2, to_esc);
-		size_t elen = strlen(dst);
-		dst[elen] = '"';
-		dst[elen + 1] = '\0';
-	} else {
-		snprintf(dst, dstsz, "null");
-	}
-}
-
 static void ipc_reply(struct ipc_client *c, const char *id,
 		      const char *result_json)
 {
 	char esc_id[IPC_ID_MAX * 2];
 	char buf[IPC_REPLY_MAX];
 
-	json_format_id(esc_id, sizeof(esc_id), id);
+	everlive_json_format_id(esc_id, sizeof(esc_id), id);
 	int n = snprintf(buf, sizeof(buf),
 			 "{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":%s}\n",
 			 esc_id, result_json);
@@ -431,8 +161,8 @@ static void ipc_error(struct ipc_client *c, const char *id, int code,
 	char esc_msg[256];
 	char buf[512];
 
-	json_format_id(esc_id, sizeof(esc_id), id);
-	json_escape_into(esc_msg, sizeof(esc_msg), message ? message : "error");
+	everlive_json_format_id(esc_id, sizeof(esc_id), id);
+	everlive_json_escape_into(esc_msg, sizeof(esc_msg), message ? message : "error");
 	int n = snprintf(buf, sizeof(buf),
 			 "{\"jsonrpc\":\"2.0\",\"id\":%s,"
 			 "\"error\":{\"code\":%d,\"message\":\"%s\"}}\n",
@@ -527,13 +257,13 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 	ipc_snapshot_read(&st);
 	age_ms = st.timestamp_ms ? ipc_now_ms() - st.timestamp_ms : 0;
 
-	json_escape_into(path_esc, sizeof(path_esc), st.v4l2_path);
-	json_escape_into(label_esc, sizeof(label_esc), st.audio_label);
-	json_escape_into(pos_esc, sizeof(pos_esc), st.osd_position);
-	json_escape_into(aspect_esc, sizeof(aspect_esc), st.aspect);
-	json_escape_into(dll_esc, sizeof(dll_esc), st.framegen_dll_path);
-	json_escape_into(scale_esc, sizeof(scale_esc), st.scale);
-	json_escape_into(layout_esc, sizeof(layout_esc), st.audio_layout);
+	everlive_json_escape_into(path_esc, sizeof(path_esc), st.v4l2_path);
+	everlive_json_escape_into(label_esc, sizeof(label_esc), st.audio_label);
+	everlive_json_escape_into(pos_esc, sizeof(pos_esc), st.osd_position);
+	everlive_json_escape_into(aspect_esc, sizeof(aspect_esc), st.aspect);
+	everlive_json_escape_into(dll_esc, sizeof(dll_esc), st.framegen_dll_path);
+	everlive_json_escape_into(scale_esc, sizeof(scale_esc), st.scale);
+	everlive_json_escape_into(layout_esc, sizeof(layout_esc), st.audio_layout);
 
 	n = snprintf(result, sizeof(result),
 		     "{\"proto\":%d,\"version\":\"%s\",\"pid\":%ld,"
@@ -611,7 +341,7 @@ static void ipc_send_hello(struct ipc_server *s, struct ipc_client *c,
 	char path_esc[128];
 	int n;
 
-	json_escape_into(path_esc, sizeof(path_esc), s->path);
+	everlive_json_escape_into(path_esc, sizeof(path_esc), s->path);
 	n = snprintf(result, sizeof(result),
 		     "{\"proto\":%d,\"app\":\"everlive\",\"version\":\"%s\","
 		     "\"pid\":%ld,\"socket\":\"%s\","
@@ -707,8 +437,8 @@ static void ipc_handle_led_set(struct ipc_client *c, const char *id,
 	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_LED_SET };
 	long r, g, b;
 
-	if (!json_get_long(line, "r", &r) || !json_get_long(line, "g", &g) ||
-	    !json_get_long(line, "b", &b)) {
+	if (!everlive_json_get_long(line, "r", &r) || !everlive_json_get_long(line, "g", &g) ||
+	    !everlive_json_get_long(line, "b", &b)) {
 		ipc_error(c, id, -32602, "invalid params: r, g, b required");
 		return;
 	}
@@ -726,7 +456,7 @@ static void ipc_handle_led_mode(struct ipc_client *c, const char *id,
 	char mode[24];
 	int code;
 
-	if (!json_get_string(line, "mode", mode, sizeof(mode))) {
+	if (!everlive_json_get_string(line, "mode", mode, sizeof(mode))) {
 		ipc_error(c, id, -32602, "invalid params: mode required");
 		return;
 	}
@@ -748,7 +478,7 @@ static void ipc_handle_audio_gain(struct ipc_client *c, const char *id,
 	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_AUDIO_GAIN };
 	double gain;
 
-	if (!json_get_double(line, "gain", &gain)) {
+	if (!everlive_json_get_double(line, "gain", &gain)) {
 		ipc_error(c, id, -32602, "invalid params: gain required");
 		return;
 	}
@@ -768,7 +498,7 @@ static void ipc_handle_audio_mute(struct ipc_client *c, const char *id,
 	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_AUDIO_MUTE };
 	bool muted;
 
-	if (!json_get_bool(line, "muted", &muted)) {
+	if (!everlive_json_get_bool(line, "muted", &muted)) {
 		ipc_error(c, id, -32602, "invalid params: muted required");
 		return;
 	}
@@ -784,7 +514,7 @@ static void ipc_handle_audio_channels(struct ipc_client *c, const char *id,
 	char mode[16];
 	const char *canonical;
 
-	if (!json_get_string(line, "mode", mode, sizeof(mode))) {
+	if (!everlive_json_get_string(line, "mode", mode, sizeof(mode))) {
 		ipc_error(c, id, -32602, "invalid params: mode required");
 		return;
 	}
@@ -805,7 +535,7 @@ static void ipc_handle_osd_enable(struct ipc_client *c, const char *id,
 	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_OSD_ENABLE };
 	bool enabled;
 
-	if (!json_get_bool(line, "enabled", &enabled)) {
+	if (!everlive_json_get_bool(line, "enabled", &enabled)) {
 		ipc_error(c, id, -32602, "invalid params: enabled required");
 		return;
 	}
@@ -821,7 +551,7 @@ static void ipc_handle_osd_position(struct ipc_client *c, const char *id,
 	char pos[24];
 	int code;
 
-	if (!json_get_string(line, "pos", pos, sizeof(pos))) {
+	if (!everlive_json_get_string(line, "pos", pos, sizeof(pos))) {
 		ipc_error(c, id, -32602, "invalid params: pos required");
 		return;
 	}
@@ -843,7 +573,7 @@ static void ipc_handle_aspect(struct ipc_client *c, const char *id,
 	char mode[24];
 	int code;
 
-	if (!json_get_string(line, "mode", mode, sizeof(mode))) {
+	if (!everlive_json_get_string(line, "mode", mode, sizeof(mode))) {
 		ipc_error(c, id, -32602, "invalid params: mode required");
 		return;
 	}
@@ -865,7 +595,7 @@ static void ipc_handle_scale(struct ipc_client *c, const char *id,
 	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_SCALE };
 	char mode[16];
 
-	if (!json_get_string(line, "mode", mode, sizeof(mode))) {
+	if (!everlive_json_get_string(line, "mode", mode, sizeof(mode))) {
 		ipc_error(c, id, -32602, "invalid params: mode required");
 		return;
 	}
@@ -892,7 +622,7 @@ static void ipc_handle_hdr(struct ipc_client *c, const char *id,
 
 	cmd.f = -999.0f; /* -999 means leave current exposure unchanged */
 
-	if (!json_get_string(line, "mode", mode, sizeof(mode))) {
+	if (!everlive_json_get_string(line, "mode", mode, sizeof(mode))) {
 		ipc_error(c, id, -32602, "invalid params: mode required");
 		return;
 	}
@@ -909,10 +639,10 @@ static void ipc_handle_hdr(struct ipc_client *c, const char *id,
 		return;
 	}
 
-	if (json_get_bool(line, "passthrough", &passthrough))
+	if (everlive_json_get_bool(line, "passthrough", &passthrough))
 		cmd.b = passthrough ? 1 : 0;
 
-	if (json_get_double(line, "exposure", &exposure)) {
+	if (everlive_json_get_double(line, "exposure", &exposure)) {
 		if (exposure < -2.0)
 			exposure = -2.0;
 		if (exposure > 2.0)
@@ -931,10 +661,10 @@ static void ipc_handle_hdr_passthrough(struct ipc_client *c, const char *id,
 
 	cmd.f = -999.0f; /* leave exposure unchanged */
 
-	if (!json_get_bool(line, "enabled", &enable) &&
-	    !json_get_bool(line, "passthrough", &enable)) {
+	if (!everlive_json_get_bool(line, "enabled", &enable) &&
+	    !everlive_json_get_bool(line, "passthrough", &enable)) {
 		char mode[16];
-		if (json_get_string(line, "mode", mode, sizeof(mode)))
+		if (everlive_json_get_string(line, "mode", mode, sizeof(mode)))
 			enable = (!strcasecmp(mode, "on") || !strcasecmp(mode, "true") ||
 				  !strcasecmp(mode, "passthrough"));
 	}
@@ -958,7 +688,7 @@ static void ipc_handle_framegen(struct ipc_client *c, const char *id,
 	cmd.c = -1;
 	cmd.f = -1.0f;
 
-	if (json_get_string(line, "mode", mode, sizeof(mode))) {
+	if (everlive_json_get_string(line, "mode", mode, sizeof(mode))) {
 		if (!strcasecmp(mode, "off") || !strcasecmp(mode, "none"))
 			cmd.a = GC573_IPC_FG_OFF;
 		else if (!strcasecmp(mode, "60to120") ||
@@ -975,16 +705,16 @@ static void ipc_handle_framegen(struct ipc_client *c, const char *id,
 		}
 	}
 
-	if (json_get_double(line, "flow_scale", &scale)) {
+	if (everlive_json_get_double(line, "flow_scale", &scale)) {
 		if (scale < 0.5)
 			scale = 0.5;
 		if (scale > 1.0)
 			scale = 1.0;
 		cmd.f = (float)scale;
 	}
-	if (json_get_bool(line, "perf_mode", &flag))
+	if (everlive_json_get_bool(line, "perf_mode", &flag))
 		cmd.b = flag ? 1 : 0;
-	if (json_get_bool(line, "low_latency", &flag))
+	if (everlive_json_get_bool(line, "low_latency", &flag))
 		cmd.c = flag ? 1 : 0;
 
 	if (cmd.a < 0 && cmd.b < 0 && cmd.c < 0 && cmd.f < 0.0f) {
@@ -1002,7 +732,7 @@ static void ipc_handle_mode(struct ipc_client *c, const char *id,
 	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_MODE };
 	char mode[24];
 
-	if (!json_get_string(line, "mode", mode, sizeof(mode))) {
+	if (!everlive_json_get_string(line, "mode", mode, sizeof(mode))) {
 		ipc_error(c, id, -32602, "invalid params: mode required");
 		return;
 	}
@@ -1027,14 +757,14 @@ static void ipc_handle_v4l2(struct ipc_client *c, const char *id,
 	char device[64];
 	bool enabled;
 
-	if (!json_get_bool(line, "enabled", &enabled)) {
+	if (!everlive_json_get_bool(line, "enabled", &enabled)) {
 		ipc_error(c, id, -32602, "invalid params: enabled required");
 		return;
 	}
 
 	cmd.a = enabled ? 1 : 0;
 
-	if (json_get_string(line, "device", device, sizeof(device))) {
+	if (everlive_json_get_string(line, "device", device, sizeof(device))) {
 		/* Only character devices; allowlist /dev/video[0-9]+ */
 		if (strncmp(device, "/dev/video", 10) != 0) {
 			ipc_error(c, id, -32602, "device must match /dev/video[0-9]+");
@@ -1058,8 +788,8 @@ static void ipc_handle_edid_set(struct ipc_client *c, const char *id,
 	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_EDID };
 	char name[64];
 
-	if (!json_get_string(line, "profile", name, sizeof(name)) &&
-	    !json_get_string(line, "name", name, sizeof(name))) {
+	if (!everlive_json_get_string(line, "profile", name, sizeof(name)) &&
+	    !everlive_json_get_string(line, "name", name, sizeof(name))) {
 		ipc_error(c, id, -32602, "invalid params: profile required");
 		return;
 	}
@@ -1079,9 +809,9 @@ static void ipc_handle_hotplug(struct ipc_client *c, const char *id,
 	bool pulse = true;
 	char action[16];
 
-	if (json_get_bool(line, "pulse", &pulse))
+	if (everlive_json_get_bool(line, "pulse", &pulse))
 		cmd.a = pulse ? 1 : 0;
-	if (json_get_string(line, "action", action, sizeof(action)))
+	if (everlive_json_get_string(line, "action", action, sizeof(action)))
 		cmd.a = (strcasecmp(action, "off") != 0 &&
 			 strcasecmp(action, "disable") != 0 &&
 			 strcasecmp(action, "0") != 0);
@@ -1095,8 +825,8 @@ static void ipc_handle_hdr_exposure(struct ipc_client *c, const char *id,
 	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_HDR_EV };
 	double exposure = 0.0;
 
-	if (!json_get_double(line, "exposure", &exposure) &&
-	    !json_get_double(line, "ev", &exposure)) {
+	if (!everlive_json_get_double(line, "exposure", &exposure) &&
+	    !everlive_json_get_double(line, "ev", &exposure)) {
 		ipc_error(c, id, -32602, "invalid params: exposure required");
 		return;
 	}
@@ -1115,8 +845,8 @@ static void ipc_handle_toast_show(struct ipc_client *c, const char *id,
 	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_TOAST };
 	char msg[64] = { 0 };
 
-	if (json_get_string(line, "message", msg, sizeof(msg)) ||
-	    json_get_string(line, "text", msg, sizeof(msg))) {
+	if (everlive_json_get_string(line, "message", msg, sizeof(msg)) ||
+	    everlive_json_get_string(line, "text", msg, sizeof(msg))) {
 		snprintf(cmd.path, sizeof(cmd.path), "%s", msg);
 	} else {
 		snprintf(cmd.path, sizeof(cmd.path), "Notification");
@@ -1130,10 +860,10 @@ static void ipc_handle_line(struct ipc_server *s, struct ipc_client *c,
 {
 	char id[IPC_ID_MAX];
 	char method[IPC_METHOD_MAX];
-	bool has_id = json_find_value(line, "id", id, sizeof(id)) &&
+	bool has_id = everlive_json_find_value(line, "id", id, sizeof(id)) &&
 		      strcmp(id, "null") != 0;
 
-	if (!json_get_string(line, "method", method, sizeof(method))) {
+	if (!everlive_json_get_string(line, "method", method, sizeof(method))) {
 		if (has_id)
 			ipc_error(c, id, -32700, "parse error: missing method");
 		return;

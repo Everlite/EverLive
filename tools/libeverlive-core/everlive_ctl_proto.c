@@ -7,6 +7,7 @@
  */
 
 #include "everlive_ctl.h"
+#include "everlive_json.h"
 
 #include <errno.h>
 #include <float.h>
@@ -30,70 +31,12 @@ int everlive_ctl_build_request(const char *method, const char *params,
 
 void everlive_ctl_json_escape(const char *in, char *out, size_t out_size)
 {
-	size_t o = 0;
-
-	if (!out || out_size == 0)
-		return;
-
-	if (!in) {
-		out[0] = '\0';
-		return;
-	}
-
-	for (const unsigned char *p = (const unsigned char *)in; *p; p++) {
-		if (o + 8 >= out_size)
-			break;
-		switch (*p) {
-		case '"':
-			out[o++] = '\\';
-			out[o++] = '"';
-			break;
-		case '\\':
-			out[o++] = '\\';
-			out[o++] = '\\';
-			break;
-		case '\n':
-			out[o++] = '\\';
-			out[o++] = 'n';
-			break;
-		case '\r':
-			out[o++] = '\\';
-			out[o++] = 'r';
-			break;
-		case '\t':
-			out[o++] = '\\';
-			out[o++] = 't';
-			break;
-		default:
-			if (*p < 0x20)
-				o += (size_t)snprintf(out + o, out_size - o,
-						      "\\u%04x", *p);
-			else
-				out[o++] = (char)*p;
-			break;
-		}
-	}
-	out[o] = '\0';
+	everlive_json_escape_into(out, out_size, in);
 }
 
 bool everlive_ctl_response_has_error(const char *json)
 {
-	const char *p = json;
-
-	if (!json)
-		return false;
-
-	while ((p = strstr(p, "\"error\"")) != NULL) {
-		const char *q = p + 7; /* strlen("\"error\"") */
-
-		while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')
-			q++;
-		if (*q == ':')
-			return true;
-		p = q;
-	}
-
-	return false;
+	return everlive_json_has_top_level_key(json, "error");
 }
 
 int everlive_ctl_parse_double(const char *value, double *out)

@@ -44,6 +44,12 @@ tests/test_edid
 tests/test_config
 tools/opengc573-userd/gc573_framegen_selftest
 
+# libeverlive-core build outputs
+tools/libeverlive-core/*.a
+tools/libeverlive-core/*.so*
+tools/libeverlive-core/everlive-ctl
+tools/libeverlive-core/**/*.d
+
 # Raw uncompressed video dumps
 20261010_131220.mp4
 *.mkv
