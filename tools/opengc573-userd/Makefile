@@ -1,59 +1,104 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# Makefile for OpenGC573 Userspace Driver Tools & EverLive User Daemon
+#
+# EverLive GC573 (Live Gamer 4K) userspace VFIO engine.
+#
+# Sources live in src/.  Binaries stay in this directory: play.sh, install.sh,
+# uninstall.sh and the systemd units resolve them by path.
 
 CC ?= gcc
-CFLAGS ?= -O2 -Wall -Wextra -pthread -D_GNU_SOURCE
+PKG_CONFIG ?= pkg-config
+DEPFLAGS := -MMD -MP
+
+# Flags every translation unit needs.
+BASE_CFLAGS := -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
+	-std=gnu11 -D_GNU_SOURCE
+BASE_CFLAGS += -Isrc -I../libeverlive-core
 LDFLAGS ?= -pthread
-SDL_CFLAGS = $(shell pkg-config --cflags sdl2)
-SDL_LIBS = $(shell pkg-config --libs sdl2)
-# libavcodec/libswresample are only needed by the streamer's bitstream decoder;
-# libswscale rescales the V4L2 feed when a reader (OBS) holds a fixed format.
-AV_CFLAGS = $(shell pkg-config --cflags libavcodec libavutil libswresample libswscale)
-AV_LIBS = $(shell pkg-config --libs libavcodec libavutil libswresample libswscale)
-# libpipewire backs the optional "EverLive Capture Audio" tap.
-PW_CFLAGS = $(shell pkg-config --cflags libpipewire-0.3)
-PW_LIBS = $(shell pkg-config --libs libpipewire-0.3)
 
-# Frame generation is delegated to the system lsfg-vk Vulkan implicit layer,
-# which the SDL2 "vulkan" renderer feeds directly.  No GL, no Vulkan headers.
+SDL_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl2 2>/dev/null)
+SDL_LIBS   := $(shell $(PKG_CONFIG) --libs sdl2 2>/dev/null)
+AV_CFLAGS  := $(shell $(PKG_CONFIG) --cflags libavcodec libavutil libswresample libswscale 2>/dev/null)
+AV_LIBS    := $(shell $(PKG_CONFIG) --libs libavcodec libavutil libswresample libswscale 2>/dev/null)
+PW_CFLAGS  := $(shell $(PKG_CONFIG) --cflags libpipewire-0.3 2>/dev/null)
+PW_LIBS    := $(shell $(PKG_CONFIG) --libs libpipewire-0.3 2>/dev/null)
 
-COMMON_OBJS = gc573_vfio.o gc573_user_i2c.o gc573_user_hw.o gc573_user_edid.o gc573_user_it6805.o gc573_user_rx_eq.o gc573_user_it6664.o
-STREAM_OBJS = gc573_user_log.o gc573_user_fpga.o gc573_user_video.o gc573_user_audio.o gc573_user_bitstream.o gc573_user_nosignal.o gc573_user_ipc.o gc573_user_audio_tap.o gc573_user_hdr.o gc573_user_framegen.o
-CORE_LIB = ../libeverlive-core/libeverlive_core.a
-TARGETS = gc573_user_probe gc573_user_streamer everlive_userd gc573_user_diag
-HEADERS = gc573-user-compat.h gc573_user_log.h gc573_vfio.h gc573_user_i2c.h gc573_user_hw.h gc573_user_edid.h gc573_user_it6805.h gc573_user_rx_eq.h gc573_user_it6664.h gc573_user_fpga.h gc573_user_video.h gc573_user_audio.h gc573_user_bitstream.h gc573_user_nosignal.h gc573_user_ipc.h gc573_user_audio_tap.h gc573_user_hdr.h gc573_user_framegen.h
+CORE_LIB := ../libeverlive-core/libeverlive_core.a
+
+# Hardware / register layer: no SDL, no FFmpeg, no PipeWire.
+HW_OBJS := \
+	src/gc573_vfio.o \
+	src/gc573_user_i2c.o \
+	src/gc573_user_hw.o \
+	src/gc573_user_edid.o \
+	src/gc573_user_it6805.o \
+	src/gc573_user_it6664.o \
+	src/gc573_user_rx_eq.o
+
+# Capture / presentation pipeline.
+STREAM_OBJS := \
+	src/gc573_user_log.o \
+	src/gc573_user_fpga.o \
+	src/gc573_user_video.o \
+	src/gc573_user_audio.o \
+	src/gc573_user_bitstream.o \
+	src/gc573_user_nosignal.o \
+	src/gc573_user_ipc.o \
+	src/gc573_user_audio_tap.o \
+	src/gc573_user_hdr.o \
+	src/gc573_user_framegen.o
+
+ENTRY_OBJS := \
+	src/gc573_user_probe.o \
+	src/gc573_user_streamer.o \
+	src/everlive_userd.o \
+	src/gc573_user_diag.o
+
+TARGETS := gc573_user_probe gc573_user_streamer everlive_userd gc573_user_diag
 
 all: $(TARGETS)
 
-gc573_user_probe: gc573_user_probe.o $(COMMON_OBJS) $(CORE_LIB)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+gc573_user_probe: src/gc573_user_probe.o $(HW_OBJS) $(CORE_LIB)
+	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS)
 
-gc573_user_streamer: gc573_user_streamer.o $(COMMON_OBJS) $(STREAM_OBJS) $(CORE_LIB)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(SDL_LIBS) $(AV_LIBS) $(PW_LIBS) -lm
+gc573_user_streamer: src/gc573_user_streamer.o $(HW_OBJS) $(STREAM_OBJS) $(CORE_LIB)
+	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS) $(SDL_LIBS) $(AV_LIBS) $(PW_LIBS) -lm
 
-everlive_userd: everlive_userd.o $(COMMON_OBJS) $(CORE_LIB)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+everlive_userd: src/everlive_userd.o $(HW_OBJS) $(CORE_LIB)
+	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS)
 
-gc573_user_diag: gc573_user_diag.o $(COMMON_OBJS) $(CORE_LIB)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-
-# Headless smoke test for the console cadence detector: a synthetic
-# "30 FPS duplicated inside a 60 Hz HDMI container" stream must be recognised
-# as 30 unique FPS, including a noisy/dithered variant and a phase slip.
-# Pure CPU: the framegen module has no SDL/GL/Vulkan dependency.
-gc573_framegen_selftest: test_framegen.o gc573_user_framegen.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+gc573_user_diag: src/gc573_user_diag.o $(HW_OBJS) $(CORE_LIB)
+	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(CORE_LIB):
 	$(MAKE) -C ../libeverlive-core
 
+# Headless/hardware TUs: base flags only.
+$(HW_OBJS) src/gc573_user_probe.o src/gc573_user_diag.o src/everlive_userd.o: \
+		src/%.o: src/%.c
+	$(CC) $(BASE_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+# Capture pipeline: FFmpeg libav* and PipeWire headers.
+$(STREAM_OBJS): src/%.o: src/%.c
+	$(CC) $(BASE_CFLAGS) $(AV_CFLAGS) $(PW_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+# Only the SDL2 renderer needs SDL headers.
+src/gc573_user_streamer.o: src/gc573_user_streamer.c
+	$(CC) $(BASE_CFLAGS) $(SDL_CFLAGS) $(AV_CFLAGS) $(PW_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+# Headless framegen self-test.  Task 4 moves this fully into tests/.
+gc573_framegen_selftest: src/gc573_user_framegen.o ../../tests/test_framegen.c
+	$(CC) $(BASE_CFLAGS) -o $@ ../../tests/test_framegen.c \
+		src/gc573_user_framegen.o $(LDFLAGS) -lm
+
 selftest: gc573_framegen_selftest
 	./gc573_framegen_selftest
 
-%.o: %.c $(HEADERS)
-	$(CC) $(CFLAGS) -I../libeverlive-core $(SDL_CFLAGS) $(AV_CFLAGS) $(PW_CFLAGS) -c -o $@ $<
+test: all
+	$(MAKE) -C ../../tests test
+
+-include $(HW_OBJS:.o=.d) $(STREAM_OBJS:.o=.d) $(ENTRY_OBJS:.o=.d)
 
 clean:
-	rm -f *.o $(TARGETS) gc573_framegen_selftest
+	rm -f src/*.o src/*.d $(TARGETS) gc573_framegen_selftest
 
-.PHONY: all clean selftest
+.PHONY: all test selftest clean

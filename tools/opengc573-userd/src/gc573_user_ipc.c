@@ -28,11 +28,9 @@
 /* JSON-RPC scanning, escaping, and id formatting live in libeverlive-core. */
 #include "everlive_json.h"
 
-/*
- * Control socket name shared by the engine and the Console Hub.
- */
-#define IPC_DEFAULT_NAME	"everlive.sock"
-#define IPC_PATH_LIMIT		100U	/* stay clear of sun_path[108] */
+/* Control socket name and path resolution live in libeverlive-core. */
+#include "everlive_ipc.h"
+
 #define IPC_REPLY_MAX		3072U
 #define IPC_METHOD_MAX		48U
 #define IPC_ID_MAX		48U
@@ -1078,11 +1076,8 @@ int gc573_ipc_start(const char *version, const char *socket_override)
 	struct ipc_server *s = &g_ipc;
 	struct sockaddr_un addr;
 	struct epoll_event ev;
-	const char *dir;
 	const char *stage = "resolve path";
-	char candidate[128];
 	int ret;
-	int n;
 
 	if (__atomic_load_n(&s->running, __ATOMIC_ACQUIRE))
 		return 0;
@@ -1097,37 +1092,15 @@ int gc573_ipc_start(const char *version, const char *socket_override)
 	snprintf(s->version, sizeof(s->version), "%s",
 		 version && *version ? version : "unknown");
 
-	/* 1. Resolve the socket path. */
-	if (socket_override && *socket_override) {
-		if (strlen(socket_override) >= IPC_PATH_LIMIT) {
-			ret = -ENAMETOOLONG;
-			goto fail;
-		}
-		snprintf(s->path, sizeof(s->path), "%s", socket_override);
-	} else {
-		dir = getenv("XDG_RUNTIME_DIR");
-		if (!dir || !*dir || access(dir, W_OK) != 0) {
-			snprintf(candidate, sizeof(candidate), "/run/user/%u",
-				 (unsigned int)getuid());
-			if (access(candidate, W_OK) == 0) {
-				dir = candidate;
-			} else {
-				snprintf(candidate, sizeof(candidate),
-					 "/tmp/everlive-%u", (unsigned int)getuid());
-				if (mkdir(candidate, 0700) < 0 && errno != EEXIST) {
-					ret = -errno;
-					goto fail;
-				}
-				dir = candidate;
-			}
-		}
-		n = snprintf(s->path, sizeof(s->path), "%s/%s", dir,
-			     IPC_DEFAULT_NAME);
-		if (n < 0 || (size_t)n >= IPC_PATH_LIMIT) {
-			ret = -ENAMETOOLONG;
-			goto fail;
-		}
-	}
+	/*
+	 * 1. Resolve the socket path.  Precedence: explicit --ipc-socket,
+	 * $EVERLIVE_SOCKET, legacy $EVERLIVE_CONTROL_SOCKET, then the user
+	 * runtime directory.  prepare() also creates /tmp/everlive-<uid>.
+	 */
+	ret = everlive_ipc_prepare_socket_path(s->path, sizeof(s->path),
+					       socket_override);
+	if (ret < 0)
+		goto fail;
 
 	/* 2. Take the lock file — this is the authoritative ownership test. */
 	stage = "lock file";

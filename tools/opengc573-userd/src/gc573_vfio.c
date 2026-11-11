@@ -4,76 +4,35 @@
  */
 
 #include "gc573_vfio.h"
-#include <dirent.h>
+#include "everlive_card.h"
 #include <sys/resource.h>
 
+/*
+ * Card discovery lives in libeverlive-core.  Only descriptors matched as
+ * "gc573" are accepted: 1461:0054 with subsystem 0x5700 is a GC570D and
+ * must never be claimed by this engine, and an unreadable subsystem file
+ * is treated as "unknown" rather than guessed.
+ */
 static int find_gc573_pci_device(char *out_addr, size_t max_len, int *out_group)
 {
-	DIR *dir = opendir("/sys/bus/pci/devices");
-	if (!dir) {
-		pr_err("Failed to open /sys/bus/pci/devices: %s", strerror(errno));
-		return -errno;
-	}
+	struct everlive_device cards[8];
+	int count;
+	int i;
 
-	struct dirent *ent;
-	int found = 0;
+	count = everlive_detect_installed_cards(cards, ARRAY_SIZE(cards), NULL);
 
-	while ((ent = readdir(dir)) != NULL) {
-		if (ent->d_name[0] == '.')
+	for (i = 0; i < count; i++) {
+		if (strcmp(cards[i].desc->model_slug, "gc573") != 0)
 			continue;
-
-		char path[512];
-		snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/vendor", ent->d_name);
-		FILE *f = fopen(path, "r");
-		if (!f)
+		if (cards[i].iommu_group < 0)
 			continue;
-
-		char vendor[32] = "";
-		if (fgets(vendor, sizeof(vendor), f)) {
-			fclose(f);
-			if (strncasecmp(vendor, "0x1461", 6) == 0) {
-				snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/device", ent->d_name);
-				f = fopen(path, "r");
-				if (f) {
-					char dev_id[32] = "";
-					if (fgets(dev_id, sizeof(dev_id), f)) {
-						fclose(f);
-						/* 0x0054 = GC573 / GC555, 0x0055 = GC573 PCIe alternate */
-						if (strncasecmp(dev_id, "0x0054", 6) == 0 ||
-						    strncasecmp(dev_id, "0x0055", 6) == 0) {
-							snprintf(out_addr, max_len, "%.32s", ent->d_name);
-
-							/* Find IOMMU group */
-							snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/iommu_group", ent->d_name);
-							char link_buf[512];
-							ssize_t len = readlink(path, link_buf, sizeof(link_buf) - 1);
-							if (len > 0) {
-								link_buf[len] = '\0';
-								char *base = strrchr(link_buf, '/');
-								if (base) {
-									*out_group = atoi(base + 1);
-									found = 1;
-									break;
-								}
-							}
-						}
-					} else {
-						fclose(f);
-					}
-				}
-			}
-		} else {
-			fclose(f);
-		}
-	}
-	closedir(dir);
-
-	if (!found) {
-		pr_err("No AVerMedia GC573 device (1461:0054/0055) found on PCIe bus!");
-		return -ENODEV;
+		snprintf(out_addr, max_len, "%s", cards[i].pci_bdf);
+		*out_group = cards[i].iommu_group;
+		return 0;
 	}
 
-	return 0;
+	pr_err("No AVerMedia GC573 device (1461:0054/0055) found on PCIe bus!");
+	return -ENODEV;
 }
 
 int gc573_vfio_init(struct gc573_vfio_ctx *ctx, const char *pci_addr)

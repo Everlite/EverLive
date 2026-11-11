@@ -66,3 +66,6 @@ refactor/
 # Chronik / Notizen
 crhonic.md
 chronic.md
+
+# Framegen selftest (lives in tests/ after the source move)
+tests/test_framegen

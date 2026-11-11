@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 CC ?= gcc
 CFLAGS ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -std=gnu11 -D_GNU_SOURCE
-INCLUDES := -I../tools/opengc570d-userd/src -I../tools/opengc570d-userd -I../tools/libeverlive-core -I../tools/opengc573-userd
+INCLUDES := -I../tools/opengc570d-userd/src -I../tools/opengc570d-userd -I../tools/libeverlive-core -I../tools/opengc573-userd/src
 DEFS := -DGC570D_USERSPACE
 
 GC570D_DIR := ../tools/opengc570d-userd/src
@@ -9,7 +9,7 @@ CORE_DIR := ../tools/libeverlive-core
 GC573_DIR := ../tools/opengc573-userd
 CORE_LIB := $(CORE_DIR)/libeverlive_core.a
 
-TARGETS := test_edid test_config test_card_registry test_frame_convert test_ctl_proto test_ipc_json
+TARGETS := test_edid test_config test_card_registry test_frame_convert test_ctl_proto test_ipc_json test_framegen
 
 all: $(TARGETS)
 
@@ -37,6 +37,9 @@ test_ipc_json: test_ipc_json.c $(CORE_LIB)
 $(CORE_LIB):
 	$(MAKE) -C $(CORE_DIR)
 
+test_framegen: test_framegen.c $(GC573_DIR)/src/gc573_user_framegen.c
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^ -pthread -lm
+
 test: all
 	@echo "Running GC570D & GC573 unit tests..."
 	@./test_edid
@@ -45,6 +48,7 @@ test: all
 	@./test_frame_convert
 	@./test_ctl_proto
 	@./test_ipc_json
+	@./test_framegen
 
 clean:
 	rm -f $(TARGETS)
