@@ -7,32 +7,59 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CORE_DIR="${SCRIPT_DIR}/tools/libeverlive-core"
+CORE_CTL="${CORE_DIR}/everlive-ctl"
 GC573_DIR="${SCRIPT_DIR}/tools/opengc573-userd"
 GC570D_DIR="${SCRIPT_DIR}/tools/opengc570d-userd"
 VIEWER="${SCRIPT_DIR}/tools/everlive/everlive_viewer.py"
 
 # 0. Detect the installed capture card.  GC573 and GC570D share PCI device
-# 1461:0054; only the subsystem device ID distinguishes them.
-CARD_MODEL="gc573"
+# 1461:0054; only the subsystem device ID distinguishes them.  Prefer the
+# core registry and fall back to sysfs when everlive-ctl is unavailable.
+detect_card_sysfs() {
+    local dev vendor device subsystem
+
+    CARD_MODEL=""
+    CARD_PCI=""
+    for dev in /sys/bus/pci/devices/*; do
+        [ -f "$dev/vendor" ] || continue
+        [ -f "$dev/device" ] || continue
+        vendor=$(cat "$dev/vendor" 2>/dev/null || true)
+        device=$(cat "$dev/device" 2>/dev/null || true)
+        if [ "$vendor" != "0x1461" ]; then
+            continue
+        fi
+        if [ "$device" != "0x0054" ] && [ "$device" != "0x0055" ]; then
+            continue
+        fi
+        CARD_PCI=$(basename "$dev")
+        subsystem=$(cat "$dev/subsystem_device" 2>/dev/null || true)
+        if [ "$device" = "0x0054" ] && [ "$subsystem" = "0x5700" ]; then
+            CARD_MODEL="gc570d"
+        else
+            CARD_MODEL="gc573"
+        fi
+        break
+    done
+}
+
+CARD_MODEL=""
 CARD_PCI=""
-for dev in /sys/bus/pci/devices/*; do
-    [ -f "$dev/vendor" ] || continue
-    [ -f "$dev/device" ] || continue
-    vendor=$(cat "$dev/vendor" 2>/dev/null || true)
-    device=$(cat "$dev/device" 2>/dev/null || true)
-    if [ "$vendor" != "0x1461" ]; then
-        continue
-    fi
-    if [ "$device" != "0x0054" ] && [ "$device" != "0x0055" ]; then
-        continue
-    fi
-    CARD_PCI=$(basename "$dev")
-    subsystem=$(cat "$dev/subsystem_device" 2>/dev/null || true)
-    if [ "$device" = "0x0054" ] && [ "$subsystem" = "0x5700" ]; then
-        CARD_MODEL="gc570d"
-    fi
-    break
-done
+if [ -x "${CORE_CTL}" ]; then
+    DETECT_OUT="$("${CORE_CTL}" detect 2>/dev/null || true)"
+    CARD_MODEL="$(printf '%s\n' "${DETECT_OUT}" \
+        | sed -n 's/.*Model Slug:[[:space:]]*//p' | head -n 1)"
+    CARD_PCI="$(printf '%s\n' "${DETECT_OUT}" \
+        | sed -n 's/.*PCI BDF:[[:space:]]*//p' | head -n 1)"
+    case "${CARD_MODEL}" in
+        gc573|gc570d) ;;
+        *) CARD_MODEL="" ;;
+    esac
+fi
+if [ -z "${CARD_MODEL}" ]; then
+    detect_card_sysfs
+fi
+CARD_MODEL="${CARD_MODEL:-gc573}"
 
 if [ "$CARD_MODEL" = "gc570d" ]; then
     USERD_DIR="${GC570D_DIR}"
@@ -48,8 +75,14 @@ else
     LOOPBACK_LABEL_2=""
 fi
 
-# 1. Ensure userspace engine binaries are built and up to date
-if ! make -C "${USERD_DIR}" -q >/dev/null 2>&1; then
+# 1. Ensure the core and userspace engine binaries are built and up to date
+if [ ! -x "${CORE_CTL}" ] || \
+   ! make -q -C "${CORE_DIR}" everlive-ctl >/dev/null 2>&1; then
+    echo "[*] Aktualisiere/Kompiliere EverLive Core Library..."
+    make -C "${CORE_DIR}" -j"$(nproc)"
+fi
+if [ ! -x "${STREAMER_BIN}" ] || \
+   ! make -q -C "${USERD_DIR}" "$(basename "${STREAMER_BIN}")" >/dev/null 2>&1; then
     echo "[*] Aktualisiere/Kompiliere EverLive Userspace VFIO Engine..."
     make -C "${USERD_DIR}" -j"$(nproc)"
 fi

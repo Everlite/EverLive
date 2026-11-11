@@ -20,7 +20,9 @@ echo "[*] Deinstalliere EverLive..."
 
 # 1. Laufende Daemons beenden
 killall -9 everlive_userd gc573_user_streamer opengc570d-userd gc570d-ctl 2>/dev/null || true
-rm -f "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/gc570d/control.sock" 2>/dev/null || true
+EVERLIVE_RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+rm -f "${EVERLIVE_RUNTIME}/gc570d/control.sock" 2>/dev/null || true
+rm -f "${EVERLIVE_RUNTIME}/everlive.sock" "${EVERLIVE_RUNTIME}/everlive.sock.lock" 2>/dev/null || true
 rm -f /dev/shm/gc570d_v4l2_shm 2>/dev/null || true
 
 # 2. VFIO & Memlock Regeln entfernen
@@ -39,6 +41,18 @@ rm -f /usr/local/lib/libgc570d-v4l2.so
 rm -f /usr/local/libexec/gc570d-vfio-bind.sh /usr/local/libexec/gc570d-sleep.sh
 rm -f /usr/local/lib/systemd/user/opengc570d-userd.service
 rm -f /etc/udev/rules.d/99-gc570d-vfio.rules
+
+# libeverlive-core (everlive-ctl, library, headers, service unit, service script)
+if [ -d "${SCRIPT_DIR}/tools/libeverlive-core" ]; then
+    make -C "${SCRIPT_DIR}/tools/libeverlive-core" uninstall >/dev/null 2>&1 || true
+fi
+rm -f /usr/local/bin/everlive-ctl /usr/local/bin/everlive-service
+rm -f /usr/local/lib/libeverlive_core.so* /usr/local/lib/libeverlive_core.a
+rm -f /usr/local/include/everlive_card.h /usr/local/include/everlive_frame.h \
+      /usr/local/include/everlive_ctl.h /usr/local/include/everlive_json.h \
+      /usr/local/include/everlive_ipc.h
+rm -f /usr/local/lib/systemd/user/everlive.service
+rm -f /usr/local/bin/vfio_pci_bind.sh
 
 # 3. Legacy Kernel-Treiber & DKMS Reste entfernen (falls vorhanden)
 rmmod open_gc573 2>/dev/null || true

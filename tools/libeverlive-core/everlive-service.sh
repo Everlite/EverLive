@@ -21,22 +21,13 @@ CARD_MODEL=""
 CARD_PCI=""
 IS_BOUND=0
 
-# 1. Detect installed card
-if [ -x "${CTL_BIN}" ]; then
-    detect_out="$("${CTL_BIN}" detect 2>/dev/null || true)"
-    if echo "${detect_out}" | grep -q "Model Slug:   gc570d"; then
-        CARD_MODEL="gc570d"
-    elif echo "${detect_out}" | grep -q "Model Slug:   gc573"; then
-        CARD_MODEL="gc573"
-    fi
-    CARD_PCI="$(echo "${detect_out}" | grep "PCI BDF:" | head -n 1 | awk '{print $3}')"
-    if echo "${detect_out}" | grep -q "Driver Bound: vfio-pci"; then
-        IS_BOUND=1
-    fi
-fi
+# 1. Detect the installed card.  Prefer the core registry (everlive-ctl),
+#    then fall back to sysfs when the CLI is unavailable.
+detect_card_sysfs() {
+    local dev vendor device subsystem
 
-# Fallback sysfs check if everlive-ctl didn't find it
-if [ -z "$CARD_MODEL" ]; then
+    CARD_MODEL=""
+    CARD_PCI=""
     for dev in /sys/bus/pci/devices/*; do
         [ -f "$dev/vendor" ] || continue
         [ -f "$dev/device" ] || continue
@@ -60,6 +51,32 @@ if [ -z "$CARD_MODEL" ]; then
             break
         fi
     done
+}
+
+if [ -n "${CTL_BIN}" ] && [ -x "${CTL_BIN}" ]; then
+    detect_out="$("${CTL_BIN}" detect 2>/dev/null || true)"
+    CARD_MODEL="$(printf '%s\n' "${detect_out}" \
+        | sed -n 's/.*Model Slug:[[:space:]]*//p' | head -n 1)"
+    CARD_PCI="$(printf '%s\n' "${detect_out}" \
+        | sed -n 's/.*PCI BDF:[[:space:]]*//p' | head -n 1)"
+    case "${CARD_MODEL}" in
+        gc573|gc570d) ;;
+        *) CARD_MODEL="" ;;
+    esac
+    if printf '%s\n' "${detect_out}" | grep -q "Driver Bound: vfio-pci"; then
+        IS_BOUND=1
+    fi
+fi
+
+if [ -z "$CARD_MODEL" ]; then
+    detect_card_sysfs
+    if [ -n "$CARD_PCI" ]; then
+        driver_link="/sys/bus/pci/devices/${CARD_PCI}/driver"
+        if [ -L "$driver_link" ] &&
+           [ "$(basename "$(readlink -f "$driver_link")")" = "vfio-pci" ]; then
+            IS_BOUND=1
+        fi
+    fi
 fi
 
 if [ -z "$CARD_MODEL" ]; then
@@ -73,20 +90,29 @@ echo "[*] everlive-service: Initializing ${CARD_MODEL} (${CARD_PCI:-unknown BDF}
 if [ "$CARD_MODEL" = "gc570d" ]; then
     if [ -x "${REPO_DIR}/tools/opengc570d-userd/opengc570d-userd" ]; then
         ENGINE_BIN="${REPO_DIR}/tools/opengc570d-userd/opengc570d-userd"
-        BIND_SCRIPT="${REPO_DIR}/tools/opengc570d-userd/gc570d-vfio-bind.sh"
     else
         ENGINE_BIN="/usr/local/bin/opengc570d-userd"
-        BIND_SCRIPT="/usr/local/bin/gc570d-vfio-bind.sh"
     fi
+    BIND_SCRIPT=""
+    for candidate in \
+        "${REPO_DIR}/tools/opengc570d-userd/gc570d-vfio-bind.sh" \
+        "/usr/local/libexec/gc570d-vfio-bind.sh" \
+        "/usr/local/bin/gc570d-vfio-bind.sh"; do
+        [ -x "${candidate}" ] && BIND_SCRIPT="${candidate}" && break
+    done
     ENGINE_ARGS=(--headless --loopback)
 else
     if [ -x "${REPO_DIR}/tools/opengc573-userd/gc573_user_streamer" ]; then
         ENGINE_BIN="${REPO_DIR}/tools/opengc573-userd/gc573_user_streamer"
-        BIND_SCRIPT="${REPO_DIR}/tools/opengc573-userd/vfio_pci_bind.sh"
     else
         ENGINE_BIN="/usr/local/bin/gc573_user_streamer"
-        BIND_SCRIPT="/usr/local/bin/vfio_pci_bind.sh"
     fi
+    BIND_SCRIPT=""
+    for candidate in \
+        "${REPO_DIR}/tools/opengc573-userd/vfio_pci_bind.sh" \
+        "/usr/local/bin/vfio_pci_bind.sh"; do
+        [ -x "${candidate}" ] && BIND_SCRIPT="${candidate}" && break
+    done
     ENGINE_ARGS=(--headless)
 fi
 

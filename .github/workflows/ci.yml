@@ -31,25 +31,26 @@ jobs:
             libgl-dev \
             python3
 
-      - name: Compile EverLive Userspace Engine (GCC)
-        run: |
-          make -C tools/opengc573-userd -j"$(nproc)"
-          make -C tools/opengc570d-userd CC=gcc -j"$(nproc)"
-          make -C tools/opengc573-userd clean
-          make -C tools/opengc570d-userd clean
+      - name: Compile everything (GCC)
+        run: make -j"$(nproc)"
 
-      - name: Compile EverLive Userspace Engine (Clang)
-        run: |
-          make -C tools/opengc573-userd CC=clang -j"$(nproc)"
-          make -C tools/opengc570d-userd CC=clang -j"$(nproc)"
+      - name: Unit tests (GCC)
+        run: make -C tests clean test
 
       - name: Frame generation cadence self-test
-        run: |
-          make -C tools/opengc573-userd selftest
+        run: make -C tools/opengc573-userd framegen-selftest
 
-      - name: OpenGC570D EDID & config unit tests
+      - name: Compile everything (Clang)
         run: |
-          make -C tools/opengc570d-userd selftest
+          make clean
+          make CC=clang -j"$(nproc)"
+          make CC=clang -C tests clean test
+
+      - name: Sanitizer run
+        run: make -C tests asan
+
+      - name: Clean
+        run: make clean
 
       - name: Verify Python syntax
         run: |
@@ -66,3 +67,4 @@ jobs:
           bash -n tools/opengc573-userd/vfio_pci_bind.sh
           bash -n tools/opengc570d-userd/gc570d-vfio-bind.sh
           bash -n tools/opengc570d-userd/gc570d-sleep.sh
+          bash -n tools/libeverlive-core/everlive-service.sh
