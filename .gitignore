@@ -43,7 +43,11 @@ tools/opengc570d-userd/libgc570d-v4l2.so
 # Test binaries
 tests/test_edid
 tests/test_config
-tools/opengc573-userd/gc573_framegen_selftest
+tests/test_card_registry
+tests/test_frame_convert
+tests/test_ctl_proto
+tests/test_json_rpc
+tests/test_framegen
 
 # libeverlive-core build outputs
 tools/libeverlive-core/*.a
@@ -67,6 +71,3 @@ refactor/
 # Chronik / Notizen
 crhonic.md
 chronic.md
-
-# Framegen selftest (lives in tests/ after the source move)
-tests/test_framegen

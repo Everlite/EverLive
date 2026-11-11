@@ -85,20 +85,17 @@ $(STREAM_OBJS): src/%.o: src/%.c
 src/gc573_user_streamer.o: src/gc573_user_streamer.c
 	$(CC) $(BASE_CFLAGS) $(SDL_CFLAGS) $(AV_CFLAGS) $(PW_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-# Headless framegen self-test.  Task 4 moves this fully into tests/.
-gc573_framegen_selftest: src/gc573_user_framegen.o ../../tests/test_framegen.c
-	$(CC) $(BASE_CFLAGS) -o $@ ../../tests/test_framegen.c \
-		src/gc573_user_framegen.o $(LDFLAGS) -lm
-
-selftest: gc573_framegen_selftest
-	./gc573_framegen_selftest
-
-test: all
+# The framegen cadence test now lives in tests/; forward the legacy target.
+test selftest:
 	$(MAKE) -C ../../tests test
+
+framegen-selftest:
+	$(MAKE) -C ../../tests test_framegen
+	../../tests/test_framegen
 
 -include $(HW_OBJS:.o=.d) $(STREAM_OBJS:.o=.d) $(ENTRY_OBJS:.o=.d)
 
 clean:
-	rm -f src/*.o src/*.d $(TARGETS) gc573_framegen_selftest
+	rm -f src/*.o src/*.d $(TARGETS)
 
 .PHONY: all test selftest clean

@@ -1,56 +1,81 @@
 # SPDX-License-Identifier: GPL-2.0-only
+#
+# EverLive unit tests: libeverlive-core, GC570D, and GC573.
+# Core tests link libeverlive_core.a; engine tests compile only the modules
+# they exercise.
+
 CC ?= gcc
-CFLAGS ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -std=gnu11 -D_GNU_SOURCE
-INCLUDES := -I../tools/opengc570d-userd/src -I../tools/opengc570d-userd -I../tools/libeverlive-core -I../tools/opengc573-userd/src
-DEFS := -DGC570D_USERSPACE
+CFLAGS ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
+          -std=gnu11 -D_GNU_SOURCE
+DEPFLAGS := -MMD -MP
 
-GC570D_DIR := ../tools/opengc570d-userd/src
-CORE_DIR := ../tools/libeverlive-core
-GC573_DIR := ../tools/opengc573-userd
+CORE_DIR   := ../tools/libeverlive-core
+GC573_DIR  := ../tools/opengc573-userd
+GC570D_DIR := ../tools/opengc570d-userd
+GC570D_SRC := $(GC570D_DIR)/src
+
+INCLUDES := -I$(CORE_DIR) -I$(GC570D_SRC) -I$(GC570D_DIR) -I$(GC573_DIR)/src
+DEFS_GC570D := -DGC570D_USERSPACE
+
 CORE_LIB := $(CORE_DIR)/libeverlive_core.a
+SANITIZE := -fsanitize=address,undefined -fno-omit-frame-pointer
 
-TARGETS := test_edid test_config test_card_registry test_frame_convert test_ctl_proto test_ipc_json test_framegen
+TARGETS := test_card_registry test_frame_convert test_ctl_proto test_json_rpc \
+           test_edid test_config test_framegen
 
 all: $(TARGETS)
-
-test_edid: test_edid.c $(GC570D_DIR)/gc570d-receiver.c $(GC570D_DIR)/gc570d-splitter.c
-	$(CC) $(CFLAGS) $(INCLUDES) $(DEFS) -o $@ $^
-
-test_config: test_config.c $(GC570D_DIR)/gc570d-config.c
-	$(CC) $(CFLAGS) $(INCLUDES) $(DEFS) -o $@ $^
-
-test_card_registry: test_card_registry.c $(CORE_DIR)/everlive_card.c
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^
-
-test_frame_convert: test_frame_convert.c $(CORE_DIR)/everlive_frame.c
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^
-
-test_ctl_proto: test_ctl_proto.c $(CORE_LIB)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_ctl_proto.c $(CORE_LIB)
-
-asan: CFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer
-asan: all
-
-test_ipc_json: test_ipc_json.c $(CORE_LIB)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(CORE_LIB) -pthread
 
 $(CORE_LIB):
 	$(MAKE) -C $(CORE_DIR)
 
+# --- libeverlive-core ---------------------------------------------------
+test_card_registry: test_card_registry.c $(CORE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ $< $(CORE_LIB)
+
+test_frame_convert: test_frame_convert.c $(CORE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ $< $(CORE_LIB)
+
+test_ctl_proto: test_ctl_proto.c $(CORE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ $< $(CORE_LIB)
+
+test_json_rpc: test_json_rpc.c $(CORE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ $< $(CORE_LIB)
+
+# --- GC570D -------------------------------------------------------------
+# These two provide their own kernel-shim stubs, so they must compile the
+# engine modules directly and must NOT link the core archive.
+test_edid: test_edid.c $(GC570D_SRC)/gc570d-receiver.c \
+                        $(GC570D_SRC)/gc570d-splitter.c
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEFS_GC570D) -o $@ $^
+
+test_config: test_config.c $(GC570D_SRC)/gc570d-config.c
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEFS_GC570D) -o $@ $^
+
+# --- GC573 --------------------------------------------------------------
 test_framegen: test_framegen.c $(GC573_DIR)/src/gc573_user_framegen.c
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^ -pthread -lm
 
+-include $(TARGETS:=.d)
+
 test: all
-	@echo "Running GC570D & GC573 unit tests..."
-	@./test_edid
-	@./test_config
+	@echo "=== libeverlive-core ==="
 	@./test_card_registry
 	@./test_frame_convert
 	@./test_ctl_proto
-	@./test_ipc_json
+	@./test_json_rpc
+	@echo "=== GC570D (Live Gamer DUO) ==="
+	@./test_edid
+	@./test_config
+	@echo "=== GC573 (Live Gamer 4K) ==="
 	@./test_framegen
+	@echo "=== All EverLive tests passed ==="
+
+asan:
+	$(MAKE) clean
+	$(MAKE) CFLAGS="$(CFLAGS) $(SANITIZE)" all
+	$(MAKE) CFLAGS="$(CFLAGS) $(SANITIZE)" test
 
 clean:
-	rm -f $(TARGETS)
+	rm -f $(TARGETS) $(TARGETS:=.d)
 
-.PHONY: all test clean asan
+.PHONY: all test asan clean

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * test_ipc_json.c — Unit tests for the libeverlive-core JSON scanners and RPC formatters
+ * test_json_rpc.c — Unit tests for the libeverlive-core JSON scanners and RPC formatters
  */
 
 #include <stdio.h>
@@ -221,7 +221,7 @@ static void test_json_negative_edge_cases(void)
 int main(void)
 {
 	printf("==================================================\n");
-	printf(" GC573 IPC JSON Scanner Test Suite\n");
+	printf(" libeverlive-core JSON-RPC Scanner Tests          \n");
 	printf("==================================================\n");
 
 	test_json_get_string();
@@ -235,7 +235,7 @@ int main(void)
 
 	printf("==================================================\n");
 	if (g_failures == 0) {
-		printf(" ALL GC573 IPC JSON TESTS PASSED!\n");
+		printf(" ALL JSON-RPC SCANNER TESTS PASSED!\n");
 		return 0;
 	} else {
 		printf(" %d TESTS FAILED!\n", g_failures);
