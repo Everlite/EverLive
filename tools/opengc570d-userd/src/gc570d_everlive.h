@@ -52,4 +52,17 @@ void gc570d_everlive_set_volume(int volume_pct);
 void gc570d_everlive_set_mute(bool muted);
 void gc570d_everlive_push_audio(int port, const uint8_t *pcm, size_t bytes);
 
+/* Read-only accessors for the control plane (safe before start). */
+bool gc570d_everlive_running(void);
+bool gc570d_everlive_headless(void);
+int gc570d_everlive_port(void);
+bool gc570d_everlive_pip(void);
+bool gc570d_everlive_osd(void);
+const char *gc570d_everlive_osd_pos(void);
+const char *gc570d_everlive_aspect(void);
+const char *gc570d_everlive_scale(void);
+int gc570d_everlive_volume(void);
+bool gc570d_everlive_muted(void);
+const char *gc570d_everlive_v4l2(int port);
+
 #endif /* GC570D_EVERLIVE_H */

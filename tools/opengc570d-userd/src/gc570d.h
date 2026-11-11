@@ -561,6 +561,8 @@ int gc570d_led_register(struct gc570d_dev *gc);
 void gc570d_led_unregister(struct gc570d_dev *gc);
 void gc570d_led_suspend(struct gc570d_dev *gc);
 int gc570d_led_resume(struct gc570d_dev *gc);
+int gc570d_led_set_rgb(struct gc570d_dev *gc, u8 red, u8 green, u8 blue);
+int gc570d_led_set_effect(struct gc570d_dev *gc, const char *effect);
 void gc570d_reset_resume_state(struct gc570d_dev *gc);
 int gc570d_receiver_read8(struct gc570d_dev *gc,
 				 const struct gc570d_i2c_bus *bus,
@@ -582,6 +584,12 @@ int gc570d_receiver_write8(struct gc570d_dev *gc,
  * capture path is running.
  */
 bool gc570d_subsystem_busy(struct gc570d_dev *gc);
+/*
+ * Userspace shim: invoke a registered debugfs-style action node by name
+ * (for example "it68051_hpd" or "splitter_windows_bridge_edid").
+ * Returns the underlying write() result (>= 0), or -ENOENT/-EINVAL.
+ */
+int gc570d_user_diag_action(const char *name, const char *value);
 void gc570d_reset_audio_channel(struct gc570d_dev *gc,
 					unsigned int channel);
 void gc570d_reset_channel(struct gc570d_dev *gc, unsigned int channel);
