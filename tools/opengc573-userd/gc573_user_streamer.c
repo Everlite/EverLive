@@ -20,6 +20,7 @@
 #include "gc573_user_edid.h"
 #include "gc573_user_it6664.h"
 #include "gc573_user_it6805.h"
+#include "gc573_user_rx_eq.h"
 #include "gc573_user_fpga.h"
 #include "gc573_user_video.h"
 #include "gc573_user_audio.h"
@@ -29,6 +30,7 @@
 #include "gc573_user_audio_tap.h"
 #include "gc573_user_hdr.h"
 #include "gc573_user_framegen.h"
+#include "gc573_user_log.h"
 #include "gc573_user_font8x8.h"
 #include <SDL2/SDL.h>
 #include <libswscale/swscale.h>
@@ -44,6 +46,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -53,7 +56,7 @@
  * tools/everlive/everlive_viewer.py.
  */
 #ifndef EVERLIVE_VERSION
-#define EVERLIVE_VERSION "1.4.0"
+#define EVERLIVE_VERSION "1.5.0"
 #endif
 
 /* Desktop identity: window title, Wayland/X11 WM class and PipeWire app name. */
@@ -1105,6 +1108,215 @@ static int compute_output_and_buffers(
 	return 0;
 }
 
+/* Wait up to @timeout_ms for the IT6805 to report SCDT. */
+static bool wait_capture_scdt(void *bar0, unsigned int timeout_ms)
+{
+	for (unsigned int waited = 0; waited < timeout_ms; waited += 20) {
+		struct gc573_user_video_signal st = { 0 };
+
+		if (gc573_user_it6805_poll_status(bar0, &st) == 0 &&
+		    st.scdt_locked)
+			return true;
+		SDL_Delay(20);
+	}
+	return false;
+}
+
+/*
+ * Link EQ settings that were clean last time, per receiver, kept in memory
+ * for re-locks and in $XDG_STATE_HOME/everlive/link-eq across restarts.
+ * The tuner verifies them by measurement, so a stale file only costs one
+ * 100 ms check before the normal auto-EQ runs.
+ */
+static struct gc573_rx_eq_state g_eq_saved[GC573_RX_PORT_COUNT];
+static bool g_eq_saved_loaded;
+static const char *const eq_state_key[GC573_RX_PORT_COUNT] = {
+	[GC573_RX_INPUT] = "input",
+	[GC573_RX_CAPTURE] = "capture",
+};
+
+static bool eq_state_path(char *buf, size_t len, bool create_dir)
+{
+	const char *base = getenv("XDG_STATE_HOME");
+	const char *home = getenv("HOME");
+	char dir[PATH_MAX];
+	int n;
+
+	if (base && *base)
+		n = snprintf(dir, sizeof(dir), "%s/everlive", base);
+	else if (home && *home)
+		n = snprintf(dir, sizeof(dir), "%s/.local/state/everlive", home);
+	else
+		return false;
+	if (n < 0 || (size_t)n >= sizeof(dir))
+		return false;
+	if (create_dir) {
+		/* Create each missing component (~/.local/state may not exist). */
+		for (char *c = dir + 1; *c; c++) {
+			if (*c != '/')
+				continue;
+			*c = '\0';
+			mkdir(dir, 0700);
+			*c = '/';
+		}
+		mkdir(dir, 0700);
+	}
+	n = snprintf(buf, len, "%s/link-eq", dir);
+	return n > 0 && (size_t)n < len;
+}
+
+static void eq_state_load(void)
+{
+	char path[PATH_MAX], line[256];
+	FILE *f;
+
+	g_eq_saved_loaded = true;
+	if (!eq_state_path(path, sizeof(path), false))
+		return;
+	f = fopen(path, "r");
+	if (!f)
+		return;
+	while (fgets(line, sizeof(line), f)) {
+		struct gc573_rx_eq_state st = { .valid = true };
+		unsigned int rs[3], t[9], dfe;
+		char key[16];
+
+		if (sscanf(line, "%15s dfe=%u rs=%x,%x,%x taps=%x,%x,%x,%x,%x,%x,%x,%x,%x",
+			   key, &dfe, &rs[0], &rs[1], &rs[2], &t[0], &t[1], &t[2],
+			   &t[3], &t[4], &t[5], &t[6], &t[7], &t[8]) != 14)
+			continue;
+		st.dfe = dfe != 0;
+		for (int ch = 0; ch < 3; ch++) {
+			st.rs[ch] = (u8)(rs[ch] & 0x7f);
+			for (int k = 0; k < 3; k++)
+				st.taps[ch][k] = (u8)t[ch * 3 + k];
+		}
+		for (int port = 0; port < GC573_RX_PORT_COUNT; port++)
+			if (strcmp(key, eq_state_key[port]) == 0)
+				g_eq_saved[port] = st;
+	}
+	fclose(f);
+}
+
+static void eq_state_save(void)
+{
+	char path[PATH_MAX], tmp[PATH_MAX + 8];
+	FILE *f;
+
+	if (!eq_state_path(path, sizeof(path), true))
+		return;
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	f = fopen(tmp, "w");
+	if (!f)
+		return;
+	fprintf(f, "# EverLive GC573 link EQ that was error-free last time (safe to delete)\n");
+	for (int port = 0; port < GC573_RX_PORT_COUNT; port++) {
+		const struct gc573_rx_eq_state *st = &g_eq_saved[port];
+
+		if (!st->valid)
+			continue;
+		fprintf(f, "%s dfe=%d rs=%02x,%02x,%02x taps=%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x\n",
+			eq_state_key[port], st->dfe ? 1 : 0,
+			st->rs[0], st->rs[1], st->rs[2],
+			st->taps[0][0], st->taps[0][1], st->taps[0][2],
+			st->taps[1][0], st->taps[1][1], st->taps[1][2],
+			st->taps[2][0], st->taps[2][1], st->taps[2][2]);
+	}
+	if (fclose(f) == 0)
+		rename(tmp, path);
+	else
+		unlink(tmp);
+}
+
+/*
+ * Equalise an HDMI 2.0 link before the timing is measured: first the card's
+ * input (IT6664), whose errors are re-encoded and invisible downstream, then
+ * the internal hop into the IT6805.  Afterwards give the receiver a moment
+ * to re-assert SCDT if the EQ retraining dropped it.
+ */
+static void tune_link_eq(void *bar0)
+{
+	bool touched = false;
+	bool save = false;
+
+	if (!gc573_rx_link_is_hdmi2(bar0))
+		return;
+	if (!g_eq_saved_loaded)
+		eq_state_load();
+
+	for (int port = 0; port < GC573_RX_PORT_COUNT; port++) {
+		struct gc573_rx_eq_result eq;
+		const char *name = gc573_rx_port_name(port);
+		int ret = gc573_rx_eq_tune(bar0, port, &g_eq_saved[port], &eq);
+		char before[16], after[16], saved_info[24];
+
+		if (ret < 0) {
+			pr_warn("HDMI 2.0 link EQ (%s) failed: %d", name, ret);
+			touched = true;
+			continue;
+		}
+		if (!eq.ran) {
+			if (eq.ced_valid)
+				printf("[HDMI] Link EQ %s: error-free; keeping current EQ\n",
+				       name);
+			else if (!getenv("EVERLIVE_NO_AUTO_EQ"))
+				printf("[HDMI] Link EQ %s: skipped\n", name);
+			continue;
+		}
+		touched = true;
+		if (eq.state.valid && !eq.used_saved) {
+			g_eq_saved[port] = eq.state;
+			save = true;
+		}
+		if (!eq.saved_tried)
+			snprintf(saved_info, sizeof(saved_info), "none");
+		else
+			snprintf(saved_info, sizeof(saved_info), "%u errors",
+				 eq.saved_errors);
+		if (eq.before_valid)
+			snprintf(before, sizeof(before), "%u", eq.errors_before);
+		else
+			snprintf(before, sizeof(before), "n/a");
+		if (eq.ced_valid)
+			snprintf(after, sizeof(after), "%u", eq.errors_after);
+		else
+			snprintf(after, sizeof(after), "n/a");
+		printf("[HDMI] Link EQ %s: TMDS errors %s -> %s per 100 ms (B/G/R %u/%u/%u) | RS B/G/R 0x%02x/0x%02x/0x%02x | saved EQ %s | auto-EQ %s | DFE %s | sweep %s | skew %s | %u ms\n",
+		       name, before, after,
+		       eq.ch_errors_after[0], eq.ch_errors_after[1],
+		       eq.ch_errors_after[2],
+		       eq.rs[0], eq.rs[1], eq.rs[2],
+		       saved_info,
+		       eq.used_saved ? "skipped" :
+		       eq.auto_eq_done ? "done" : "failed",
+		       eq.dfe_applied ? "on" : "off",
+		       !eq.swept ? "no" : eq.kept_auto ? "lost to auto-EQ" : "yes",
+		       !eq.swept ? "auto" : eq.skew_trained ? "trained" : "forced 0",
+		       eq.elapsed_ms);
+	}
+	if (save)
+		eq_state_save();
+	if (!touched)
+		return;
+
+	if (wait_capture_scdt(bar0, 500))
+		return;
+	/*
+	 * Retuning the input can leave the IT6664's TX1 (the internal link to
+	 * the IT6805) on a stale clock without the RX ever reporting a sync
+	 * loss, so nothing re-arms it.  Do what an RX re-lock would do.
+	 */
+	pr_warn("SCDT did not re-lock within 500 ms after link EQ; re-arming the IT6664 outputs");
+	if (gc573_user_it6664_relink_outputs(bar0) < 0) {
+		pr_warn("IT6664 output re-arm failed");
+		return;
+	}
+	if (wait_capture_scdt(bar0, 1000))
+		pr_info("Capture link re-locked after re-arming the IT6664 outputs");
+	else
+		pr_warn("SCDT still not locked after re-arming the IT6664 outputs");
+}
+
 static bool signal_usable(const struct gc573_user_video_signal *sig)
 {
 	return sig->scdt_locked && sig->avi_valid && sig->width && sig->height &&
@@ -1370,10 +1582,28 @@ static struct osd_overlay g_osd;
 static struct osd_overlay g_help;
 static bool g_help_overlay;
 
+static struct osd_overlay g_toast;
+static uint64_t g_toast_until_ms;
+static char g_toast_text[64];
+
 /* Filled by the render loop for the OSD latency readout. */
 static double g_osd_dma_ms;
 /* Integer factor used by the last presented frame (0 = not integer scaled). */
 static int g_integer_factor;
+
+static void toast_destroy(void)
+{
+	if (g_toast.texture) {
+		SDL_DestroyTexture(g_toast.texture);
+		g_toast.texture = NULL;
+	}
+	g_toast.width = 0;
+	g_toast.height = 0;
+	g_toast.scale = 0;
+	g_toast.text[0] = '\0';
+	g_toast_until_ms = 0;
+	g_toast_text[0] = '\0';
+}
 
 static void osd_destroy(void)
 {
@@ -1385,6 +1615,7 @@ static void osd_destroy(void)
 	g_osd.height = 0;
 	g_osd.scale = 0;
 	g_osd.text[0] = '\0';
+	toast_destroy();
 }
 
 static void help_destroy(void)
@@ -1726,6 +1957,57 @@ static void help_render(SDL_Renderer *renderer, SDL_Window *window)
 	SDL_RenderCopy(renderer, g_help.texture, NULL, &dst);
 }
 
+static void toast_trigger(const char *msg)
+{
+	struct timespec ts;
+
+	if (!msg || !*msg)
+		return;
+	snprintf(g_toast_text, sizeof(g_toast_text), "%s", msg);
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	g_toast_until_ms = (uint64_t)ts.tv_sec * 1000U +
+			   (uint64_t)(ts.tv_nsec / 1000000L) + 2500U;
+}
+
+static void toast_render(SDL_Renderer *renderer, SDL_Window *window)
+{
+	struct timespec ts;
+	uint64_t now;
+	int win_w = 0;
+	int win_h = 0;
+	int scale;
+	SDL_Rect dst;
+
+	if (!g_toast_text[0])
+		return;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	now = (uint64_t)ts.tv_sec * 1000U + (uint64_t)(ts.tv_nsec / 1000000L);
+	if (now >= g_toast_until_ms)
+		return;
+
+	SDL_GetWindowSize(window, &win_w, &win_h);
+	if (win_w <= 0 || win_h <= 0)
+		return;
+
+	scale = osd_scale_for_height(win_h);
+	if (scale != g_toast.scale || strcmp(g_toast.text, g_toast_text) != 0)
+		osd_build(renderer, scale, g_toast_text, &g_toast);
+	if (!g_toast.texture)
+		return;
+
+	dst.w = g_toast.width;
+	dst.h = g_toast.height;
+	dst.x = (win_w - dst.w) / 2;
+	dst.y = win_h - dst.h - (scale >= 3 ? 36 : (scale == 2 ? 24 : 16));
+	if (dst.x < 0)
+		dst.x = 0;
+	if (dst.y < 0)
+		dst.y = 0;
+
+	SDL_RenderCopy(renderer, g_toast.texture, NULL, &dst);
+}
+
 static void fit_destination(SDL_Rect *dst, int win_w, int win_h,
 			    float src_aspect)
 {
@@ -1841,6 +2123,7 @@ static void render_frame(SDL_Window *window, SDL_Renderer *renderer,
 	SDL_RenderCopy(renderer, texture, NULL, &dst);
 	osd_render(renderer, window);
 	help_render(renderer, window);
+	toast_render(renderer, window);
 	SDL_RenderPresent(renderer);
 }
 
@@ -5419,6 +5702,7 @@ static void hdr_apply(const struct gc573_user_video_signal *sig,
 }
 
 static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
+			      void *bar0,
 			      SDL_Window *window,
 			      struct v4l2_sink *sink,
 			      uint32_t out_w, uint32_t out_h,
@@ -5505,11 +5789,40 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		break;
 	case GC573_IPC_CMD_HDR:
 		g_hdr_enabled = cmd->a != 0;
-		g_hdr_exposure_ev = cmd->f;
+		if (cmd->f >= -2.0f && cmd->f <= 2.0f)
+			g_hdr_exposure_ev = cmd->f;
 		hdr_apply(sig, have_signal);
 		printf("[IPC] HDR: %s, exposure %+.1f EV\n",
 		       g_hdr_enabled ? "auto" : "bypass",
 		       (double)g_hdr_exposure_ev);
+		break;
+	case GC573_IPC_CMD_HDR_EV:
+		if (cmd->f >= -2.0f && cmd->f <= 2.0f)
+			g_hdr_exposure_ev = cmd->f;
+		hdr_apply(sig, have_signal);
+		printf("[IPC] HDR exposure: %+.1f EV\n",
+		       (double)g_hdr_exposure_ev);
+		break;
+	case GC573_IPC_CMD_TOAST:
+		toast_trigger(cmd->path);
+		printf("[IPC] Toast: '%s'\n", cmd->path);
+		break;
+	case GC573_IPC_CMD_EDID:
+		if (bar0) {
+			int ret = gc573_user_program_edid_by_name(bar0, cmd->path, NULL);
+			if (ret == 0) {
+				(void)gc573_user_it6664_enable_source(bar0);
+				printf("[IPC] EDID profile set: %s\n", cmd->path);
+			} else {
+				pr_warn("IPC EDID profile set '%s' failed: %d", cmd->path, ret);
+			}
+		}
+		break;
+	case GC573_IPC_CMD_HOTPLUG:
+		if (bar0) {
+			(void)gc573_user_it6664_pulse_hpd(bar0);
+			printf("[IPC] HDMI HPD pulsed (source resync)\n");
+		}
 		break;
 	case GC573_IPC_CMD_SCALE:
 		g_scale_mode = cmd->a ? SCALE_INTEGER : SCALE_FIT;
@@ -5864,9 +6177,12 @@ int main(int argc, char *argv[])
 		g_osd_pos = OSD_POS_TR;
 	}
 
+	gc573_user_log_init();
 	printf("==================================================================\n");
 	printf("  EverLive — Userspace VFIO Streamer (v" EVERLIVE_VERSION ")\n");
-	printf("==================================================================\n\n");
+	printf("==================================================================\n");
+	printf("[LOG] Started %s; line prefixes are seconds since start.\n\n",
+	       gc573_user_log_start_time());
 	if (g_trace_mode)
 		printf("[TRACE] Teardown trace enabled: press T while streaming to start the phase test.\n");
 
@@ -6308,7 +6624,7 @@ int main(int argc, char *argv[])
 		 * ever appends to the lock-free command ring.
 		 */
 		while (gc573_ipc_poll_cmd(&ipc_cmd))
-			apply_ipc_command(&ipc_cmd, window, &v4l2_sink,
+			apply_ipc_command(&ipc_cmd, ctx.bar0, window, &v4l2_sink,
 					  output_width, output_height,
 					  &current_sig, have_signal);
 
@@ -6420,6 +6736,7 @@ int main(int argc, char *argv[])
 					rate_probe_after_scdt = true;
 					if (signal_lost_hits >= SIGNAL_CHANGE_HITS) {
 						printf("[VIDEO] HDMI signal lost; stopping capture.\n");
+						gc573_rx_ced_reset();
 						audio_stop_capture(&audio);
 						ret = gc573_user_it6805_audio_disable(ctx.bar0);
 						if (ret < 0)
@@ -6461,6 +6778,7 @@ int main(int argc, char *argv[])
 						 * The preview thread keeps draining video DMA.
 						 */
 						audio_stop_capture(&audio);
+						tune_link_eq(ctx.bar0);
 						ret = gc573_user_it6805_poll_signal(ctx.bar0,
 									    &fresh);
 						if (ret < 0 || !signal_usable(&fresh)) {
@@ -6596,6 +6914,7 @@ int main(int argc, char *argv[])
 					struct gc573_user_video_signal sig = { 0 };
 
 					printf("[VIDEO] SCDT locked; measuring input timing...\n");
+					tune_link_eq(ctx.bar0);
 					ret = gc573_user_it6805_poll_signal(ctx.bar0,
 									    &sig);
 					if (ret == 0 && signal_usable(&sig)) {
@@ -7094,6 +7413,55 @@ int main(int argc, char *argv[])
 				       (unsigned long)__atomic_load_n(&g_preview.dropped,
 							      __ATOMIC_RELAXED),
 				       (double)g_preview.taken_age_us / 1000.0);
+				{
+					/*
+					 * TMDS character errors since the last tick on the
+					 * card's input and on the internal capture hop.
+					 * Logged whenever non-zero, otherwise every 10 s, so
+					 * link quality is visible without flooding the log.
+					 */
+					static unsigned int ced_quiet_ticks;
+					struct gc573_rx_ced ced[GC573_RX_PORT_COUNT];
+					bool have[GC573_RX_PORT_COUNT] = { false };
+					bool any = false, errors = false;
+
+					for (int port = 0; port < GC573_RX_PORT_COUNT;
+					     port++) {
+						struct gc573_rx_ced *c = &ced[port];
+
+						if (gc573_rx_ced_poll(ctx.bar0, port, now,
+								      c) != 0 ||
+						    !(c->valid[0] || c->valid[1] ||
+						      c->valid[2]))
+							continue;
+						have[port] = any = true;
+						if (c->count[0] || c->count[1] ||
+						    c->count[2])
+							errors = true;
+					}
+					if (any && (errors || ++ced_quiet_ticks >= 10)) {
+						ced_quiet_ticks = 0;
+						printf("[HDMI] TMDS errors B/G/R");
+						for (int port = 0;
+						     port < GC573_RX_PORT_COUNT; port++) {
+							const struct gc573_rx_ced *c =
+								&ced[port];
+
+							if (!have[port]) {
+								printf(" | %s n/a",
+								       gc573_rx_port_name(port));
+								continue;
+							}
+							printf(" | %s %u/%u/%u in %u ms",
+							       gc573_rx_port_name(port),
+							       c->valid[0] ? c->count[0] : 0,
+							       c->valid[1] ? c->count[1] : 0,
+							       c->valid[2] ? c->count[2] : 0,
+							       c->window_ms);
+						}
+						printf("%s\n", errors ? "" : " (clean)");
+					}
+				}
 				pthread_mutex_lock(&g_v4l2_lock);
 				if (v4l2_sink.path[0]) {
 					if (v4l2_sink.configured)

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.0] - 2026-11-10
+
+### Added
+- **Dynamic HDMI 2.0 Receiver Equalisation & Character Error Monitoring (GC573):**
+  - New `gc573_user_rx_eq.[ch]` subsystem driving both IT6664 input and IT6805 capture receivers with active per-lane TMDS Character Error Detection (CED), Decision Feedback Equalization (DFE), and Receiver Sensitivity (RS) sweeps.
+  - Completely eliminates green/white pixel speckles and audio crackle on HDMI 2.0 sources exceeding 340 MHz TMDS (e.g. 4K60 RGB at ~593 MHz and 1440p120).
+  - Diagnostic `[HDMI] TMDS errors B/G/R` logging with per-lane error telemetry.
+  - Tunable environment overrides: `EVERLIVE_NO_AUTO_EQ=1` and `EVERLIVE_EQ_INPUT_DFE=0`.
+- **Sub-6s Fast Start-up & Link-EQ Hardware State Caching (GC573):**
+  - Launch-to-capture startup time reduced from ~9.5 s to ~5.2 s.
+  - Active lock polling on the Artix-7 FPGA DDR sampler rather than static delays (~1.6 s lock).
+  - Error-free equalization parameters are cached in `$XDG_STATE_HOME/everlive/link-eq` (`~/.local/state/everlive/link-eq`), skipping full auto-EQ sweeps whenever the incoming signal remains pristine.
+  - Line-buffered, timestamped synchronous logging (`[   x.xxx] ...`) via `gc573_user_log.[ch]` with `EVERLIVE_LOG_TIMESTAMPS=0` override.
+- **Hardened JSON-RPC IPC Engine (jsmn):**
+  - Replaced manual scanner with an RFC-compliant `jsmn` parser featuring strict object key-vs-value validation to prevent token collision bugs.
+  - New IPC commands wired and verified: `toast.show` (on-screen OSD toasts), `edid.set` (live runtime EDID DDC reprogramming without restarts), `hotplug` (150 ms hardware HPD reset pulses), `hdr.exposure` (live tonemapping EV exposure adjustment), and `audio.channels.set` (dynamic layout switching).
+  - Comprehensive unit test suite in `tests/test_ipc_json.c` covering positive, negative, and edge-case tokenization.
+
+### Fixed
+- **Console Hub Exit Stability:** Window and system tray icon are explicitly destroyed before Python shutdown, eliminating core dumps and segmentation faults (`corrupted double-linked list` / `PySide::destroyQCoreApplication`).
+- **GC570D Driver Hardening:** Modularized IT68051 EDID programmer, hardened userspace VFIO receiver, and resolved MSI interrupt allocation order.
+
 ## [1.4.0] - 2026-11-06
 
 ### Added
