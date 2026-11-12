@@ -14,11 +14,12 @@ DEPFLAGS := -MMD -MP
 CORE_DIR := ../libeverlive-core
 CORE_LIB := $(CORE_DIR)/libeverlive_core.a
 
-USER_CFLAGS := -O2 -g -Wall -Wextra -Wno-unused-parameter \
+USER_CFLAGS := $(CFLAGS) -O2 -g -Wall -Wextra -Wno-unused-parameter \
 	-Wno-sign-compare -std=gnu11 \
 	-D_GNU_SOURCE -DGC570D_USERSPACE -DGC570D_DEVELOPER_DEBUGFS \
 	-Isrc -I. -I$(CORE_DIR)
-USER_LDFLAGS := -pthread -lm -lrt
+override LDFLAGS += -pthread
+USER_LDFLAGS := $(LDFLAGS) -lm -lrt
 
 SDL_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl2 2>/dev/null)
 SDL_LIBS   := $(shell $(PKG_CONFIG) --libs sdl2 2>/dev/null)
@@ -101,12 +102,14 @@ SYSTEM_SLEEP_DIR := $(DESTDIR)/usr/lib/systemd/system-sleep
 UDEV_RULES_DIR := $(DESTDIR)/etc/udev/rules.d
 LIMITS_DIR := $(DESTDIR)/etc/security/limits.d
 
-install: all
-	install -d $(BINDIR) $(LIBDIR) $(LIBEXECDIR) $(SYSTEMD_USER_DIR)
-	install -d $(SYSTEM_SLEEP_DIR) $(UDEV_RULES_DIR) $(LIMITS_DIR)
+install-bin: all
+	install -d $(BINDIR) $(LIBDIR)
 	install -m 0755 opengc570d-userd gc570d-ctl $(BINDIR)/
 	command -v setcap >/dev/null 2>&1 && setcap cap_ipc_lock=+ep $(BINDIR)/opengc570d-userd 2>/dev/null || true
 	install -m 0644 libgc570d-v4l2.so $(LIBDIR)/
+
+install-system:
+	install -d $(LIBEXECDIR) $(SYSTEMD_USER_DIR) $(SYSTEM_SLEEP_DIR) $(UDEV_RULES_DIR) $(LIMITS_DIR)
 	install -m 0755 gc570d-vfio-bind.sh $(LIBEXECDIR)/
 	sed 's|/usr/local|$(PREFIX)|g' gc570d-sleep.sh > $(LIBEXECDIR)/gc570d-sleep.sh
 	chmod 0755 $(LIBEXECDIR)/gc570d-sleep.sh
@@ -118,15 +121,21 @@ install: all
 	chmod 0644 $(SYSTEMD_USER_DIR)/opengc570d-userd.service
 	install -m 0644 gc570d.conf.example $(DESTDIR)/etc/gc570d.conf.example
 
-uninstall:
+install: install-bin install-system
+
+uninstall-bin:
 	rm -f $(BINDIR)/opengc570d-userd $(BINDIR)/gc570d-ctl
 	rm -f $(LIBDIR)/libgc570d-v4l2.so
+
+uninstall-system:
 	rm -f $(LIBEXECDIR)/gc570d-vfio-bind.sh $(LIBEXECDIR)/gc570d-sleep.sh
 	rm -f $(SYSTEM_SLEEP_DIR)/gc570d-sleep.sh
 	rm -f $(UDEV_RULES_DIR)/99-gc570d-vfio.rules
 	rm -f $(LIMITS_DIR)/99-gc570d-memlock.conf
 	rm -f $(SYSTEMD_USER_DIR)/opengc570d-userd.service
 	rm -f $(DESTDIR)/etc/gc570d.conf.example
+
+uninstall: uninstall-bin uninstall-system
 
 clean:
 	rm -f $(USERD_OBJS) $(USERD_OBJS:.o=.d) $(TARGETS)

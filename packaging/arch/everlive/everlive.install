@@ -1,0 +1,46 @@
+_caps() {
+    local d=/usr/lib/everlive/tools
+    setcap cap_ipc_lock=+ep "$d/opengc573-userd/gc573_user_streamer" 2>/dev/null || true
+    setcap cap_ipc_lock=+ep "$d/opengc570d-userd/opengc570d-userd" 2>/dev/null || true
+    setcap cap_ipc_lock=+ep /usr/bin/gc573_user_streamer 2>/dev/null || true
+    setcap cap_ipc_lock=+ep /usr/bin/opengc570d-userd 2>/dev/null || true
+}
+
+_legacy_warning() {
+    local f found=0
+    for f in /etc/udev/rules.d/70-everlive.rules /etc/udev/rules.d/99-gc570d-vfio.rules \
+             /etc/modprobe.d/everlive-vfio.conf /etc/modprobe.d/everlive-v4l2loopback.conf \
+             /etc/modules-load.d/everlive-vfio.conf /etc/pipewire/pipewire.conf.d/50-everlive-capture.conf \
+             /usr/local/bin/opengc570d-userd /usr/local/bin/gc573_user_streamer; do
+        [ -e "$f" ] && found=1
+    done
+    if [ "$found" -eq 1 ]; then
+        echo ">>> Files from a previous install.sh setup were found (e.g. in /etc)."
+        echo ">>> They override this package. Remove them by running uninstall.sh"
+        echo ">>> from your old EverLive checkout, then reinstall this package."
+    fi
+}
+
+post_install() {
+    _caps
+    udevadm trigger --subsystem-match=pci --attr-match=vendor=0x1461 2>/dev/null || true
+    _legacy_warning
+    cat <<'MSG'
+>>> EverLive installed. The capture card (1461:0054 / 1461:0055) is bound to
+>>> vfio-pci at boot. Reboot once, or replug/rebind the card, then launch
+>>> "EverLive" from your menu or run: everlive
+>>>
+>>> Your user needs to be in the 'video' group:  sudo usermod -aG video $USER
+>>> Restart PipeWire for the "EverLive Capture Audio" sink:
+>>>   systemctl --user restart pipewire pipewire-pulse
+>>> Background engine service (optional, headless/daemon mode):
+>>>   systemctl --user enable --now everlive.service
+>>> Live Gamer DUO (GC570D) background service (optional):
+>>>   systemctl --user enable --now opengc570d-userd.service
+MSG
+}
+
+post_upgrade() {
+    _caps
+    _legacy_warning
+}

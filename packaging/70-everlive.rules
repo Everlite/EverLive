@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# EverLive: AVerMedia Live Gamer 4K (GC573), Live Gamer BOLT (GC555) and
+# Live Gamer DUO (GC570D) use the userspace VFIO engine.
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1461", ATTR{device}=="0x0054", ATTR{driver_override}="vfio-pci"
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1461", ATTR{device}=="0x0055", ATTR{driver_override}="vfio-pci"
+SUBSYSTEM=="vfio", MODE="0660", TAG+="uaccess", GROUP="video"

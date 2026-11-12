@@ -1,0 +1,3 @@
+#!/bin/sh
+# EverLive launcher for system-wide installs.
+exec @EVERLIVE_LIBDIR@/play.sh "$@"

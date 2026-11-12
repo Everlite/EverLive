@@ -71,3 +71,9 @@ refactor/
 # Chronik / Notizen
 crhonic.md
 chronic.md
+
+# makepkg output
+packaging/arch/*/src/
+packaging/arch/*/pkg/
+packaging/arch/*/everlive/
+packaging/arch/*/*.tar.*

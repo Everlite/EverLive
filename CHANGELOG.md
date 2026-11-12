@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Shared `libeverlive-core`:** card registry and subsystem-aware autodiscovery, YUY2 frame conversion, jsmn-backed JSON-RPC helpers, control-socket path resolution, and the `everlive-ctl` CLI.
 - **Unified control plane for the GC570D:** the DUO daemon now serves the same newline-delimited JSON-RPC 2.0 protocol on `everlive.sock` (status, LED, audio, OSD, aspect/scale, input switching, HPD, EDID policy) alongside the legacy `gc570d-ctl` socket.
+- **System-wide install and Arch Linux packaging:**
+  - Top-level `Makefile` supports `make install DESTDIR=... PREFIX=/usr`. It installs the app to `$(PREFIX)/lib/everlive` with an `everlive` launcher, plus udev, `vfio-pci`, memlock, PipeWire, desktop, and systemd files in their standard locations.
+  - `everlive` and `everlive-git` PKGBUILDs in `packaging/arch/`.
 
 ### Changed
 - **GC573 layout:** sources moved to `tools/opengc573-userd/src/`; the build links `libeverlive_core.a` and only applies SDL/FFmpeg/PipeWire flags to the translation units that need them.
@@ -19,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Launchers:** `play.sh` and `everlive-service.sh` share `everlive-ctl detect` instead of duplicating PCI ID logic.
 
 ### Fixed
+- The GC573 and GC570D engines build with distribution `CFLAGS`/`LDFLAGS` (such as makepkg's); required compiler flags (`-pthread`, `-D_GNU_SOURCE`, etc.) are preserved.
+- `play.sh` skips source rebuilding when run from a system install without Makefiles, and recognises the packaged v4l2loopback configuration in `/usr/lib/modprobe.d`.
 - The GC573 engine no longer claims a GC570D that shares PCI ID `1461:0054`; discovery is subsystem-aware and fails safe when the subsystem ID is unreadable.
 - `everlive-ctl` connects to the live `everlive.sock` instead of the stale `everlive-experimental.sock` path.
 

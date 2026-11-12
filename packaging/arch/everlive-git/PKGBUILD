@@ -1,0 +1,43 @@
+# Maintainer: Scyllinice
+
+pkgname=everlive-git
+_pkgname=everlive
+pkgver=r0
+pkgrel=1
+pkgdesc="Userspace VFIO capture and console gaming suite for AVerMedia Live Gamer 4K (GC573) and Live Gamer DUO (GC570D) (git)"
+arch=('x86_64')
+url="https://github.com/Everlite/EverLive"
+license=('GPL-2.0-only')
+depends=('sdl2' 'ffmpeg' 'libpipewire' 'python' 'pyside6' 'xcb-util-cursor' 'libcap' 'sh')
+makedepends=('git' 'pkgconf')
+optdepends=('v4l2loopback-dkms: Virtual Camera (/dev/video10) for OBS'
+            'v4l-utils: v4l2-ctl for the virtual camera'
+            'lsfg-vk: 2x console frame generation'
+            'polkit: bind the card to vfio-pci from the desktop without a terminal')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+backup=('etc/security/limits.d/99-everlive-memlock.conf')
+install=everlive.install
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$_pkgname"
+  git describe --long --tags --abbrev=7 | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+build() {
+  cd "$_pkgname"
+  make
+}
+
+check() {
+  cd "$_pkgname"
+  make check
+}
+
+package() {
+  cd "$_pkgname"
+  make DESTDIR="$pkgdir" PREFIX=/usr install
+  install -Dm0644 LICENSE.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE.md"
+}

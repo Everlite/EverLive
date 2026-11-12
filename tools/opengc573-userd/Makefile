@@ -10,10 +10,10 @@ PKG_CONFIG ?= pkg-config
 DEPFLAGS := -MMD -MP
 
 # Flags every translation unit needs.
-BASE_CFLAGS := -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
+BASE_CFLAGS := $(CFLAGS) -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
 	-std=gnu11 -D_GNU_SOURCE
 BASE_CFLAGS += -Isrc -I../libeverlive-core
-LDFLAGS ?= -pthread
+override LDFLAGS += -pthread
 
 SDL_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl2 2>/dev/null)
 SDL_LIBS   := $(shell $(PKG_CONFIG) --libs sdl2 2>/dev/null)

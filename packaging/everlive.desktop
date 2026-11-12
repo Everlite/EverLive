@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=EverLive
+GenericName=Console Gaming Screen
+Comment=Console gaming suite with userspace VFIO capture and optional 2x frame generation
+Exec=everlive
+Icon=everlive
+Terminal=false
+Type=Application
+Categories=Game;AudioVideo;Video;
+Keywords=EverLive;FrameGen;LSFG;Vulkan;PS5;Capture;AVerMedia;GC573;GC570D;HDMI;Gaming;Console;VFIO;
+StartupWMClass=EverLive

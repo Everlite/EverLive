@@ -37,6 +37,15 @@ jobs:
       - name: Unit tests (GCC)
         run: make -C tests clean test
 
+      - name: Staged system-wide install and uninstall
+        run: |
+          make install DESTDIR="$RUNNER_TEMP/stage" PREFIX=/usr
+          test -x "$RUNNER_TEMP/stage/usr/bin/everlive"
+          test -x "$RUNNER_TEMP/stage/usr/bin/everlive-ctl"
+          test -x "$RUNNER_TEMP/stage/usr/lib/everlive/tools/opengc573-userd/gc573_user_streamer"
+          test -x "$RUNNER_TEMP/stage/usr/lib/everlive/tools/opengc570d-userd/opengc570d-userd"
+          make uninstall DESTDIR="$RUNNER_TEMP/stage" PREFIX=/usr
+
       - name: Frame generation cadence self-test
         run: make -C tools/opengc573-userd framegen-selftest
 
