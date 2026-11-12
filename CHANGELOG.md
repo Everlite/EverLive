@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `everlive` and `everlive-git` PKGBUILDs in `packaging/arch/`.
 
 ### Changed
+- **Documentation:** expanded `docs/ADDING_A_NEW_CARD.md` with the shared frame-store and optional module-free V4L2 preload integration contract, and cross-linked it from the root/engine documentation.
 - **GC573 layout:** sources moved to `tools/opengc573-userd/src/`; the build links `libeverlive_core.a` and only applies SDL/FFmpeg/PipeWire flags to the translation units that need them.
 - **Build and install:** a top-level `Makefile` orchestrates the core and both engines; `build.sh`, `install.sh`, and `uninstall.sh` now install and remove `everlive-ctl`, the core library and headers, and the universal `everlive.service` unit.
 - **Launchers:** `play.sh` and `everlive-service.sh` share `everlive-ctl detect` instead of duplicating PCI ID logic.

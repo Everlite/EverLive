@@ -94,6 +94,10 @@ the same two feeds as `/dev/video60` (HDMI 1) and `/dev/video61` (HDMI 2) to
 applications that do not use the loopback nodes. It reads the shared-memory
 frame store directly and does not replace the v4l2loopback path.
 
+> For a new capture card, see
+> [`docs/ADDING_A_NEW_CARD.md`](../../docs/ADDING_A_NEW_CARD.md) §3.4, §4.3 and
+> §6.5 for the shared frame-store and preload-descriptor contract.
+
 ## Control socket
 
 The daemon listens on `$XDG_RUNTIME_DIR/gc570d/control.sock`. `gc570d-ctl`

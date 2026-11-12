@@ -194,6 +194,10 @@ standby cards and scaling behave the same as the recommended
 `/dev/video10` loopback path. Neither preload library requires `v4l2loopback`
 or DKMS.
 
+> Adding support for another capture card? See
+> [`docs/ADDING_A_NEW_CARD.md`](docs/ADDING_A_NEW_CARD.md) §3.4, §4.3 and §6.5
+> for the shared frame-store and preload-descriptor integration contract.
+
 ---
 
 ## ⚙️ IOMMU & PCIe Group Requirements

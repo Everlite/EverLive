@@ -212,6 +212,10 @@ engine at `/dev/video60` and `/dev/video61` via `libgc570d-v4l2.so`.
 Set `EVERLIVE_V4L2_TARGET` to a comma-separated list of executable names (or
 `*`) to keep the shim dormant in child processes that inherit `LD_PRELOAD`.
 
+> For a new capture card, see
+> [`docs/ADDING_A_NEW_CARD.md`](../../docs/ADDING_A_NEW_CARD.md) §3.4, §4.3 and
+> §6.5 for the shared frame-store and preload-descriptor contract.
+
 ## Live Mode Switch
 
 `mode.set {"mode": "gaming"|"headless"}` swaps the presentation layer of a

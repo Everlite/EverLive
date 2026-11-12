@@ -12,9 +12,9 @@ This guide documents the contributor workflow for adding support for new capture
 
 EverLive separates hardware abstraction, streaming daemons, and client applications:
 
-- **Core Hardware Abstraction Layer (`tools/libeverlive-core`)**: Provides the static card registry, hardware capability flags, polymorphic `everlive_card_ops` vtable, allocation-free JSON-RPC 2.0 helpers, and high-performance YUY2/RGB frame conversion.
-- **Engine Daemon (`tools/opengc*-userd`)**: Runs the hardware-specific driver logic, manages video/audio streaming, and hosts the Unix domain socket server (`everlive.sock`).
-- **Clients & Packaging**: The PySide6 Console Hub (`tools/everlive/everlive_viewer.py`), the `everlive-ctl` CLI, system udev rules, modprobe configs, and Arch/AUR packaging (`packaging/arch/`).
+- **Core Hardware Abstraction Layer (`tools/libeverlive-core`)**: Provides the static card registry, hardware capability flags, polymorphic `everlive_card_ops` vtable, allocation-free JSON-RPC 2.0 helpers, high-performance YUY2/RGB frame conversion, the triple-buffered shared frame store (`everlive_framestore`), and the reusable V4L2 preload engine (`libeverlive-core/v4l2`).
+- **Engine Daemon (`tools/opengc*-userd`)**: Runs the hardware-specific driver logic, manages video/audio streaming, publishes post-processing frames to the shared store, and hosts the Unix domain socket server (`everlive.sock`).
+- **Clients & Packaging**: The PySide6 Console Hub (`tools/everlive/everlive_viewer.py`), the `everlive-ctl` CLI, system udev rules, modprobe configs, optional per-card V4L2 preload DSOs, and Arch/AUR packaging (`packaging/arch/`).
 
 ```
 +--------------------------------------------------------------------------+
@@ -34,6 +34,7 @@ EverLive separates hardware abstraction, streaming daemons, and client applicati
 |     |  - Branch A: Native PCIe FPGA DMA via VFIO (Implemented)       |   |
 |     |  - Branch B: UVC / USB-Bridge via V4L2 (Planned Blueprint)     |   |
 |     |  - PipeWire Audio & SDL2 / V4L2 Loopback Presenter             |   |
+|     |  - Publishes post-processed frames to shared SHM store         |   |
 |     +----------------------------------------------------------------+   |
 |                  |                               |                       |
 |                  | Links                         | Registers Ops (Opt)   |
@@ -45,13 +46,21 @@ EverLive separates hardware abstraction, streaming daemons, and client applicati
 |     |  - Operations Vtable Dispatch (struct everlive_card_ops)       |   |
 |     |  - JSON-RPC 2.0 Helpers (jsmn) & Socket Path Resolver (IPC)    |   |
 |     |  - SIMD/Scalar Frame & Color Space Converters                  |   |
+|     |  - Triple-buffered Frame Store (everlive_framestore)           |   |
+|     |  - Shared V4L2 Preload Engine (card descriptors + interposer)  |   |
 |     +----------------------------------------------------------------+   |
 |                                                                          |
 |  [ Kernel & Hardware Layer ]                                             |
 |     /dev/vfio/<iommu_group>  OR  /dev/video* (uvcvideo, planned)         |
+|     /dev/shm/<slug>_v4l2_shm -> virtual /dev/videoN (LD_PRELOAD only)    |
 |                                                                          |
 +--------------------------------------------------------------------------+
 ```
+
+Both streaming branches can publish their final frames into the shared store.
+The optional module-free V4L2 path then exposes them as a process-local
+`/dev/videoN` through a per-card `LD_PRELOAD` DSO; it is independent of
+`v4l2loopback` and of the JSON-RPC control plane.
 
 ### Transport Decision Tree: Native PCIe DMA vs. UVC Bridge
 
@@ -206,6 +215,62 @@ if (ret < 0) {
 ```
 
 > **Registry Freeze Guard**: The first call to `everlive_card_ops_for()` freezes the ops binding table (`kEverliveOpsFrozen = true`). Subsequent registrations return `-EBUSY`.
+
+### 3.4 Optional V4L2 Preload Descriptor
+
+The module-free V4L2 preload path is optional. If the new engine supports it,
+add a descriptor under the engine directory:
+
+```text
+tools/opengc<slug>-userd/src/<slug>-v4l2.c
+```
+
+This descriptor is separate from `struct everlive_device_desc`: the core
+registry identifies hardware, while the preload descriptor tells the shared
+`libeverlive-core/v4l2` engine how to expose the card's frames. Do **not**
+copy `everlive_v4l2_state.c` or `everlive_v4l2_preload.c`; write only the
+descriptor and let the common engine do the work. The descriptor file defines
+exactly one `everlive_v4l2_card_descriptor()`.
+
+Required fields include:
+
+| Field | Purpose |
+|---|---|
+| `shm_name` | POSIX SHM store, e.g. `/gc573_v4l2_shm` |
+| `slug`, `driver`, `card_name` | Identity reported by `VIDIOC_QUERYCAP` |
+| `port_names[]`, `bus_suffixes[]` | Per-port card names and `bus_info` suffixes |
+| `fallback_bdf` | Bus info BDF when no publisher/store is available |
+| `node_base`, `port_count` | Virtual node range (`node_base + port_count - 1`) |
+| `max_width`, `max_height` | Largest source frame the descriptor accepts |
+| `default_width`, `default_height` | Initial `VIDIOC_G_FMT` geometry |
+| `mmap_base`, `mmap_stride` | Virtual buffer offset layout |
+| `sizes[]`, `fps_denominators[]` | `VIDIOC_ENUM_FRAMESIZES` / intervals |
+| `clamps[]` | `VIDIOC_TRY_FMT` / `S_FMT` request-to-output buckets |
+
+Current examples:
+
+| Card | Store | Nodes | Ports | Max | Default | mmap stride |
+|---|---|---|---|---|---|---|
+| GC570D | `/gc570d_v4l2_shm` | 60, 61 | 2 | 1920×1080 | 1920×1080 | `0x00800000` |
+| GC573 | `/gc573_v4l2_shm` | 63 | 1 | 3840×2160 | 1920×1080 | `0x02000000` |
+
+**Node allocation:** reserve `/dev/video60–69` for EverLive preload nodes.
+GC570D uses 60/61 and GC573 uses 63; `/dev/video62` is currently unused and the
+next recommended allocation is 64. A new card must use a `node_base` range that
+does not overlap another preload descriptor or a real system node.
+
+**Store geometry:** use three slots per port. The card-specific `frame_stride`
+must hold the largest source YUY2 frame (`3840×2160×2 = 16,588,800` bytes for
+4K). The `mmap_stride` must exceed the largest **converted** output frame so
+virtual buffer offsets cannot overlap; 4K RGB32 is `33,177,600` bytes, so
+GC573's `0x02000000` (33,554,432) is the current minimum-safe example. A 4K
+single-port card therefore uses roughly 50 MB in `/dev/shm`.
+
+The shared engine enumerates seven output formats and accepts the existing
+YUY2/UYVY/NV12/YUV420/RGB24/BGR24/XBGR32/BGR32 conversion set. If the new card
+needs a source or output format outside that set, extend the shared engine
+instead of adding a private conversion layer. Branch B engines that receive
+MJPEG or NV12 must decode/convert to YUY2 before publishing.
 
 ---
 
@@ -555,6 +620,56 @@ if (ioctl(v4l2_fd, UVCIOC_CTRL_QUERY, &q) < 0) {
 }
 ```
 
+### 4.3 Publishing Frames to the Shared V4L2 Store
+
+Any engine can optionally publish its final video frames into the shared
+frame store. The store is the contract between the capture engine and the
+preload DSO; the V4L2 state machine never touches BAR0, DMA rings or audio.
+
+A small per-card module (for example `gc573_camera.[ch]`) should wrap the core
+API:
+
+```c
+struct everlive_framestore_config cfg = {
+    .name = "/gc<slug>_v4l2_shm",
+    .pci_bdf = pci_bdf,
+    .port_count = <ports>,
+    .slot_count = 3,
+    .frame_stride = <max_yuy2_frame_bytes>,
+};
+struct everlive_framestore *fs = everlive_framestore_create(&cfg);
+```
+
+Publisher contract:
+
+- Create the store only after fatal hardware initialization succeeds, so early
+  error paths do not need camera cleanup.
+- Publish the **post-processing** frame: after HDR tonemapping, deinterlacing,
+  scaling or any other operation the display and loopback consumers see. Do not
+  publish raw HDR DMA frames; the preload feed would look washed out while the
+  window looks correct.
+- Publish the generated standby card with `no_signal = 1` at roughly 30 fps
+  while capture is idle.
+- Call `everlive_framestore_mark_no_signal()` or
+  `everlive_framestore_reset()` when capture stops. A reset clears `seq` and
+  sets `no_signal = 1`; a subsequent standby publish makes the outage visible.
+- Keep the store mapped across S3 suspend/resume; reset it and republish after
+  the hardware reinitialises. Do not unlink and recreate it during recovery.
+- Do **not** add a background heartbeat thread. Liveness comes only from
+  successful publishes; a dead or stalled publisher must eventually produce the
+  black-frame timeout in the preload reader.
+- Use `everlive_framestore_read_begin()` + `read_validate()` for zero-copy
+  consumers such as the V4L2 shim. Use `read_snapshot()` when the consumer wants
+  a private stable copy.
+- Keep the raw `mmap`/`munmap`/`close` syscalls inside `everlive_framestore.c`.
+  Replacing them with libc calls reintroduces the deadlock that occurs when the
+  preload shim attaches a store while holding its own internal mutex.
+- One publisher per card model is supported. Two simultaneous instances of the
+  same model share one store name and are not currently isolated.
+
+The store payload is YUY2 by design. Branch B engines that capture MJPEG/NV12
+must decode/convert to YUY2 before calling `everlive_framestore_publish()`.
+
 ---
 
 ## 5. Control Plane & Unified JSON-RPC 2.0 Protocol
@@ -719,6 +834,23 @@ If a feature method is not supported by your hardware (e.g. HDR on an SDR card, 
 ```
 Clients and utilities (such as `everlive-ctl`) inspect the declared `methods[]` array from `hello` and treat `-32601` as the protocol signal that a given feature is unsupported on the active engine, gracefully disabling or skipping corresponding controls.
 
+### 5.5 V4L2 Preload vs. `v4l2loopback`
+
+These are two separate output paths:
+
+- `v4l2.set` controls the `/dev/video10`/`/dev/video11` **v4l2loopback**
+  sink. It is a runtime JSON-RPC mutation.
+- The preload DSO is selected at process launch with `LD_PRELOAD`; it is not a
+  JSON-RPC method and does not create a system-wide node.
+- The virtual `/dev/videoN` from a preload DSO exists only inside the process
+  that loaded it, and only when the per-process opt-in allows it:
+  `EVERLIVE_V4L2_TARGET` may contain a comma-separated list of executable
+  basenames (or `*`).
+- No udev rule, kernel module, VFIO binding or modprobe change is needed for the
+  preload node. It is injected through the shared interposer.
+- Load only one card's preload DSO in a given process. The DSOs export the same
+  interposition symbols.
+
 ---
 
 ## 6. System Configuration & Packaging
@@ -805,7 +937,58 @@ install: all
 	+$(MAKE) -C $(GC575_DIR) install-bin PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 ```
 
-> **Makefile Convention**: New capture engines should expose an `install-bin` target (the modern GC570D convention). The GC573 `install` target is historical.
+> **Makefile Convention**: New capture engines should expose an `install-bin` target (the modern GC570D convention). The GC573 `install` target is historical. When a preload DSO exists, `install-bin` must also install it to `$(PREFIX)/lib`.
+
+### 6.5 Preload DSO Build and Packaging
+
+A per-card preload DSO is built from four inputs:
+
+1. the card descriptor (`src/<slug>-v4l2.c`),
+2. `tools/libeverlive-core/v4l2/everlive_v4l2_state.c`,
+3. `tools/libeverlive-core/v4l2/everlive_v4l2_preload.c`,
+4. the core frame-store object (`libeverlive_core.a`; the linker pulls only
+   the required frame-store object).
+
+```make
+lib<slug>-v4l2.so: src/<slug>-v4l2.c \
+		$(CORE_V4L2_DIR)/everlive_v4l2_state.c \
+		$(CORE_V4L2_DIR)/everlive_v4l2_preload.c \
+		$(CORE_LIB)
+	$(CC) -O2 -g -Wall -Wextra -Wno-unused-parameter \
+		-std=gnu11 -D_GNU_SOURCE -shared -fPIC \
+		-Isrc -I$(CORE_DIR) -I$(CORE_V4L2_DIR) \
+		-o $@ src/<slug>-v4l2.c \
+		$(CORE_V4L2_DIR)/everlive_v4l2_state.c \
+		$(CORE_V4L2_DIR)/everlive_v4l2_preload.c \
+		$(CORE_LIB) -ldl -lrt -pthread
+	@chmod 0644 $@
+```
+
+Packaging rules:
+
+- Install the DSO to `$(PREFIX)/lib`, not a private subdirectory. With
+  `PREFIX=/usr`, both current DSOs live at `/usr/lib/libgc570d-v4l2.so` and
+  `/usr/lib/libgc573-v4l2.so`. Do not keep a second copy under
+  `$(PREFIX)/lib/everlive`.
+- Add the DSO to the engine's `install`/`install-bin` and `uninstall` targets.
+- Add the build output to `.gitignore`.
+- Add `/dev/shm/<slug>_v4l2_shm` removal to `uninstall.sh`.
+- Keep the top-level `Makefile` install/uninstall path in sync so packaging
+  (`make DESTDIR=... PREFIX=/usr install`) carries the DSO automatically.
+- `play.sh` does not load the preload DSO; the user selects it when launching
+  the consuming application (OBS, Discord, Chromium, etc.).
+- Do not put the interposition object into `libeverlive_core.so`; it would
+  hijack `open`/`ioctl`/`mmap` for every daemon and CLI tool.
+- No udev or modprobe files are involved. The node is process-local.
+
+Staged verification:
+
+```bash
+stage="$(mktemp -d)"
+make DESTDIR="$stage" PREFIX=/usr install
+ls -l "$stage/usr/lib/libgc570d-v4l2.so" "$stage/usr/lib/libgc573-v4l2.so"
+make DESTDIR="$stage" PREFIX=/usr uninstall
+```
 
 ---
 
@@ -849,7 +1032,7 @@ nftw(tmp_root, remove_entry, 64, FTW_DEPTH | FTW_PHYS);
 ### 7.2 Verification Commands
 
 ```bash
-# 1. Compile everything and run the 7-suite unit test matrix
+# 1. Compile everything and run the 9-suite unit test matrix
 make test
 
 # 2. Run AddressSanitizer and UndefinedBehaviorSanitizer
@@ -864,6 +1047,51 @@ make uninstall DESTDIR=/tmp/test-stage PREFIX=/usr
 ./tools/libeverlive-core/everlive-ctl status
 ```
 
+### 7.3 Preload and Frame-Store Tests
+
+The shared suite already provides:
+
+- `tests/test_framestore.c` — publish/snapshot, slot rotation, invalid
+  mappings, heartbeat, flags, reset and a threaded torn-frame stress test.
+- `tests/test_v4l2_shim.c` — the V4L2 state machine without libc
+  interposition: QUERYCAP, formats, S_FMT clamping, REQBUFS/QUERYBUF/QBUF/
+  DQBUF, STREAMON/OFF, mmap resolution, read path, duplicate and close.
+
+A new descriptor should add assertions for its identity and layout. The
+simplest pattern is a dedicated test target that links the new
+`src/<slug>-v4l2.c` with `everlive_v4l2_state.c` and asserts:
+
+- node base and port count,
+- driver/card names and bus-info fallback/BDF suffix,
+- maximum and default geometry,
+- `sizes[]` and `fps_denominators[]` enumeration,
+- clamp buckets,
+- mmap base/stride and buffer offsets.
+
+Synthetic preload smoke test:
+
+```bash
+# 1. Create /dev/shm/<slug>_v4l2_shm with the core API and publish a frame.
+# 2. Then exercise the card DSO:
+LD_PRELOAD=$PWD/tools/opengc<slug>-userd/lib<slug>-v4l2.so \
+    v4l2-ctl --list-devices
+LD_PRELOAD=$PWD/tools/opengc<slug>-userd/lib<slug>-v4l2.so \
+    v4l2-ctl -d /dev/videoN --all
+LD_PRELOAD=$PWD/tools/opengc<slug>-userd/lib<slug>-v4l2.so \
+    v4l2-ctl -d /dev/videoN --list-formats-ext
+LD_PRELOAD=$PWD/tools/opengc<slug>-userd/lib<slug>-v4l2.so \
+    v4l2-ctl -d /dev/videoN \
+        --set-fmt-video=width=1920,height=1080,pixelformat=YUYV \
+        --stream-mmap --stream-count=10
+```
+
+`v4l2-ctl --all` depends on the shared `/sys/dev/char/<major>:<minor>/uevent`
+and `fopen` interposition; do not reimplement those in a card descriptor.
+
+Also verify the failure paths: no store/publisher (black frame), stale
+heartbeat after `kill -9`, no-signal standby publication, and process-local
+node visibility (the node must not appear in a process without `LD_PRELOAD`).
+
 ---
 
 ## 8. Hardware Validation & Evidence Standards
@@ -874,6 +1102,8 @@ Before a Pull Request is merged, new capture hardware must clear this evidence s
 |---|---|
 | **Hardware Detection** | `everlive-ctl detect` outputs accurate BDF, model slug, and IOMMU group (PCI hardware). |
 | **Video Ingestion** | Continuous streaming at 60 FPS baseline AND at the card's maximum claimed resolution/refresh rate (e.g. 1080p240 or 4K120) without dropped frames or tearing for >= 30 minutes. |
+| **Module-free V4L2 preload** | Under `LD_PRELOAD`, the virtual node appears with the expected number/name/bus info; 4K/1440p/1080p negotiation works; YUYV plus at least one converted format streams; standby frames appear with no signal; `kill -9` of the publisher produces black after the heartbeat timeout; OBS/Discord/Chromium can open the node. The node must not exist in processes without the preload. |
+| **Suspend / resume** | Suspend and resume with a live preload consumer. The publisher reinitialises, `/dev/shm/<slug>_v4l2_shm` resumes publishing, and the consumer recovers without restarting the engine. |
 | **High-Bandwidth Link (EQ / TMDS / FRL)** | - **HDMI 2.0**: 4K60 RGB or 1440p120 (>340 MHz TMDS clock) capture verified for >= 30 minutes with zero Character Error Detection (CED) errors, no visual sparkles, and no audio crackle.<br>- **HDMI 2.1**: Verified Fixed Rate Link (FRL) link training (e.g. 3L/3G up to 4L/12G), error status register monitoring, and sustained capture at maximum advertised FRL modes (e.g. 4K120 / 4K144 HDR) without link retraining. |
 | **Audio Pipeline** | Clean L-PCM / bitstream audio capture routed into PipeWire without buffer underruns, with A/V sync drift < 10 ms over a 30-minute run. |
 | **Passthrough** | HDMI pass-through signal and low latency verified on an external display. |
@@ -908,3 +1138,21 @@ Ensure all items are verified before submitting a pull request:
 - [ ] `make test` and `make asan` pass 100% with zero memory leaks.
 - [ ] Hardware capabilities documented in `README.md` with model slug and support tier.
 - [ ] `CHANGELOG.md` updated under `[Unreleased]`.
+
+### Optional Module-Free V4L2 Preload Checklist
+
+Only needed when the engine opts into the preload path:
+
+- [ ] Per-card `<slug>-v4l2.c` descriptor added; shared engine sources reused, not copied.
+- [ ] `shm_name`, `slug`, `driver`, `card_name`, port names and bus-info fallback/suffix configured.
+- [ ] `node_base`/`port_count` use the reserved 60–69 range without collisions.
+- [ ] `max_width/height`, default geometry, sizes, fps and clamp buckets match the hardware.
+- [ ] Store uses three slots and a `frame_stride` covering the largest YUY2 frame.
+- [ ] `mmap_stride` covers the largest converted output (4K RGB32 needs >= 33,177,600 bytes).
+- [ ] Publisher creates the store after fatal init, publishes post-tonemap frames and standby no-signal frames, and resets/marks no-signal on capture stop.
+- [ ] Publisher keeps the store mapped across S3 resume and does not add a background heartbeat thread.
+- [ ] DSO built from the shared `libeverlive-core/v4l2` engine and installed to `$(PREFIX)/lib`.
+- [ ] `.gitignore`, `install.sh`/`uninstall.sh`, top-level `Makefile`, and `/dev/shm/<slug>_v4l2_shm` cleanup updated.
+- [ ] Descriptor/state tests and synthetic `LD_PRELOAD` (`v4l2-ctl`) checks pass.
+- [ ] `EVERLIVE_V4L2_TARGET` opt-in behavior verified for child processes.
+- [ ] The preload node is verified to be process-local and absent without `LD_PRELOAD`.
