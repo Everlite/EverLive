@@ -45,6 +45,7 @@ tests/test_edid
 tests/test_config
 tests/test_card_registry
 tests/test_frame_convert
+tests/test_framestore
 tests/test_ctl_proto
 tests/test_json_rpc
 tests/test_framegen

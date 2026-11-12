@@ -18,8 +18,9 @@ TARGET_STATIC := libeverlive_core.a
 TARGET_SHARED := libeverlive_core.so
 TARGET_CLI    := everlive-ctl
 
-CORE_OBJS := everlive_card.o everlive_frame.o everlive_json.o \
-             everlive_ipc.o everlive_ctl_proto.o third_party/jsmn.o
+CORE_OBJS := everlive_card.o everlive_frame.o everlive_framestore.o \
+             everlive_json.o everlive_ipc.o everlive_ctl_proto.o \
+             third_party/jsmn.o
 CTL_OBJS  := everlive_ctl.o
 
 INCLUDES := -I.
@@ -68,8 +69,9 @@ install: all
 	ln -sf $(SHARED_REAL) $(DESTDIR)$(LIBDIR)/$(SONAME)
 	ln -sf $(SONAME) $(DESTDIR)$(LIBDIR)/$(TARGET_SHARED)
 	install -m 0644 $(TARGET_STATIC) $(DESTDIR)$(LIBDIR)/$(TARGET_STATIC)
-	install -m 0644 everlive_card.h everlive_frame.h everlive_ctl.h \
-		everlive_json.h everlive_ipc.h $(DESTDIR)$(INCLUDEDIR)/
+	install -m 0644 everlive_card.h everlive_frame.h everlive_framestore.h \
+		everlive_ctl.h everlive_json.h everlive_ipc.h \
+		$(DESTDIR)$(INCLUDEDIR)/
 	sed 's|/usr/local|$(PREFIX)|g' everlive.service \
 		> $(DESTDIR)$(SYSTEMD_USER_DIR)/everlive.service
 	chmod 0644 $(DESTDIR)$(SYSTEMD_USER_DIR)/everlive.service
@@ -83,6 +85,7 @@ uninstall:
 		$(DESTDIR)$(LIBDIR)/$(TARGET_STATIC) \
 		$(DESTDIR)$(INCLUDEDIR)/everlive_card.h \
 		$(DESTDIR)$(INCLUDEDIR)/everlive_frame.h \
+		$(DESTDIR)$(INCLUDEDIR)/everlive_framestore.h \
 		$(DESTDIR)$(INCLUDEDIR)/everlive_ctl.h \
 		$(DESTDIR)$(INCLUDEDIR)/everlive_json.h \
 		$(DESTDIR)$(INCLUDEDIR)/everlive_ipc.h \
