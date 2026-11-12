@@ -48,6 +48,7 @@ tests/test_frame_convert
 tests/test_framestore
 tests/test_ctl_proto
 tests/test_json_rpc
+tests/test_v4l2_shim
 tests/test_framegen
 
 # libeverlive-core build outputs
