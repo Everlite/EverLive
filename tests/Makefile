@@ -5,8 +5,8 @@
 # they exercise.
 
 CC ?= gcc
-CFLAGS ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
-          -std=gnu11 -D_GNU_SOURCE
+CFLAGS ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare
+override CFLAGS += -std=gnu11 -D_GNU_SOURCE
 DEPFLAGS := -MMD -MP
 
 CORE_DIR   := ../tools/libeverlive-core

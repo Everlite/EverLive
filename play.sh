@@ -45,6 +45,9 @@ detect_card_sysfs() {
 
 CARD_MODEL=""
 CARD_PCI=""
+if [ ! -x "${CORE_CTL}" ] && command -v everlive-ctl >/dev/null 2>&1; then
+    CORE_CTL="$(command -v everlive-ctl)"
+fi
 if [ -x "${CORE_CTL}" ]; then
     DETECT_OUT="$("${CORE_CTL}" detect 2>/dev/null || true)"
     CARD_MODEL="$(printf '%s\n' "${DETECT_OUT}" \
@@ -74,15 +77,28 @@ else
     LOOPBACK_LABEL="EverLive Capture"
     LOOPBACK_LABEL_2=""
 fi
+if [ ! -x "${STREAMER_BIN}" ]; then
+    if [ "$CARD_MODEL" = "gc570d" ] && command -v opengc570d-userd >/dev/null 2>&1; then
+        STREAMER_BIN="$(command -v opengc570d-userd)"
+    elif command -v gc573_user_streamer >/dev/null 2>&1; then
+        STREAMER_BIN="$(command -v gc573_user_streamer)"
+    fi
+fi
+if [ ! -x "${BIND_SCRIPT}" ]; then
+    if [ "$CARD_MODEL" = "gc570d" ] && command -v gc570d-vfio-bind.sh >/dev/null 2>&1; then
+        BIND_SCRIPT="$(command -v gc570d-vfio-bind.sh)"
+    elif command -v vfio_pci_bind.sh >/dev/null 2>&1; then
+        BIND_SCRIPT="$(command -v vfio_pci_bind.sh)"
+    fi
+fi
 
 # 1. Ensure the core and userspace engine binaries are built and up to date
-if [ ! -x "${CORE_CTL}" ] || \
-   ! make -q -C "${CORE_DIR}" everlive-ctl >/dev/null 2>&1; then
+# (git checkout only; a system-wide install ships prebuilt binaries and no Makefile).
+if [ -f "${CORE_DIR}/Makefile" ] && { [ ! -x "${CORE_CTL}" ] || ! make -q -C "${CORE_DIR}" everlive-ctl >/dev/null 2>&1; }; then
     echo "[*] Aktualisiere/Kompiliere EverLive Core Library..."
     make -C "${CORE_DIR}" -j"$(nproc)"
 fi
-if [ ! -x "${STREAMER_BIN}" ] || \
-   ! make -q -C "${USERD_DIR}" "$(basename "${STREAMER_BIN}")" >/dev/null 2>&1; then
+if [ -f "${USERD_DIR}/Makefile" ] && { [ ! -x "${STREAMER_BIN}" ] || ! make -q -C "${USERD_DIR}" "$(basename "${STREAMER_BIN}")" >/dev/null 2>&1; }; then
     echo "[*] Aktualisiere/Kompiliere EverLive Userspace VFIO Engine..."
     make -C "${USERD_DIR}" -j"$(nproc)"
 fi
@@ -219,10 +235,12 @@ if [ "$NO_LOOPBACK" -eq 0 ]; then
         [ -z "$V4L2_DEV" ] && V4L2_DEV="/dev/video10"
     fi
 
-    # Only attempt to auto-load the module if explicitly configured in /etc
-    # by install.sh and launching with no arguments.
+    # Only attempt to auto-load the module if explicitly configured (in /etc
+    # by install.sh, or in /usr/lib by the system package) and launching with
+    # no arguments.
     if [ "$WANT_V4L2" -eq 0 ] && [ $# -eq 0 ]; then
-        if [ -f "/etc/modprobe.d/everlive-v4l2loopback.conf" ] || [ -f "/etc/modules-load.d/everlive-v4l2loopback.conf" ]; then
+        if [ -f "/etc/modprobe.d/everlive-v4l2loopback.conf" ] || [ -f "/etc/modules-load.d/everlive-v4l2loopback.conf" ] ||
+           [ -f "/usr/lib/modprobe.d/everlive-v4l2loopback.conf" ]; then
             if modprobe -n v4l2loopback >/dev/null 2>&1; then
                 WANT_V4L2=1
                 V4L2_DEV="/dev/video10"

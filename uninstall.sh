@@ -94,6 +94,12 @@ rm -f "${TARGET_HOME}/.local/share/applications/everlive-intern.desktop"
 rm -f "${TARGET_HOME}/.config/autostart/everlive.desktop"
 rmdir "${TARGET_HOME}/.config/everlive-experimental" 2>/dev/null || true
 rm -f "${TARGET_HOME}/.local/share/icons/hicolor/"*/apps/everlive.png
+# install.sh also copies the icons system-wide. Skip this when the pacman
+# package owns them, so it is not left with missing files.
+if ! { command -v pacman >/dev/null 2>&1 && pacman -Qqo /usr/share/icons/hicolor/48x48/apps/everlive.png >/dev/null 2>&1; }; then
+    rm -f /usr/share/icons/hicolor/*/apps/everlive.png
+    rm -f /usr/share/pixmaps/everlive.bmp
+fi
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "${TARGET_HOME}/.local/share/applications" 2>/dev/null || true
 fi

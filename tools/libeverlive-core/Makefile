@@ -5,7 +5,8 @@
 
 CC ?= gcc
 AR ?= ar
-CFLAGS ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -std=gnu11 -D_GNU_SOURCE -fPIC
+CFLAGS ?= -O2 -g -Wall -Wextra -Wno-unused-parameter
+override CFLAGS += -std=gnu11 -D_GNU_SOURCE -fPIC
 DEPFLAGS := -MMD -MP
 
 SOVERSION   := 0

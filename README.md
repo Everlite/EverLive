@@ -242,6 +242,18 @@ cd EverLive
 sudo ./install.sh
 ```
 
+### Arch Linux (AUR)
+Arch users can install EverLive system-wide as a pacman package instead of running `install.sh` (once the packages are published on the AUR):
+
+```bash
+yay -S everlive        # latest release
+yay -S everlive-git    # latest commit
+```
+
+The package installs the app to `/usr/lib/everlive`, the `everlive` launcher to `/usr/bin`, and the udev, `vfio-pci`, memlock, PipeWire and systemd files to their standard `/usr/lib` and `/etc` locations, so `pacman -R` removes everything cleanly. `v4l2loopback-dkms` (Virtual Camera) and `lsfg-vk` (frame generation) are optional dependencies. Your user needs to be in the `video` group.
+
+Do not combine the package with `install.sh`: the installer's files in `/etc` take precedence over the package's. If you used `install.sh` before, run `sudo ./uninstall.sh` from that checkout first. The PKGBUILDs live in `packaging/arch/`, and `make install DESTDIR=... PREFIX=/usr` is available for other distributions.
+
 ### 🧊 Strictly module-free setup (no loopback)
 If you chose EverLive for its module-free architecture and want to keep the system completely free of DKMS modules and kernel headers, skip the optional Virtual Camera:
 
