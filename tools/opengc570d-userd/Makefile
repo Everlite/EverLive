@@ -57,7 +57,6 @@ USER_HEADERS := \
 	src/gc570d.h \
 	src/gc570d-config.h \
 	src/gc570d-user-compat.h \
-	src/gc570d-shm.h \
 	src/gc570d_everlive.h \
 	src/gc570d-jsonrpc.h \
 	src/gc570d_font8x8.h \
@@ -82,9 +81,11 @@ gc570d-ctl: src/gc570d-ctl.c
 	$(CC) -O2 -g -Wall -Wextra -std=gnu11 -D_GNU_SOURCE -o $@ $<
 	@chmod 0755 $@
 
-libgc570d-v4l2.so: src/gc570d-v4l2-preload.c src/gc570d-shm.h
+libgc570d-v4l2.so: src/gc570d-v4l2-preload.c $(CORE_LIB)
 	$(CC) -O2 -g -Wall -Wextra -Wno-unused-parameter \
-		-std=gnu11 -D_GNU_SOURCE -shared -fPIC -Isrc -o $@ $< -ldl -lrt -pthread
+		-std=gnu11 -D_GNU_SOURCE -shared -fPIC -Isrc -I$(CORE_DIR) \
+		-o $@ src/gc570d-v4l2-preload.c $(CORE_LIB) \
+		-ldl -lrt -pthread
 	@chmod 0644 $@
 
 test selftest:

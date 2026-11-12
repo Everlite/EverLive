@@ -23,11 +23,41 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
 #define FRAMESTORE_NAME_MAX	64U
 #define FRAMESTORE_ALIGN	64U
+
+/*
+ * The frame store is linked into the LD_PRELOAD shim, where mmap(), munmap()
+ * and close() are interposed and may take the shim's own lock.  Use raw
+ * syscalls for the store's private mapping so creating/attaching a store from
+ * inside an ioctl handler can never recurse into that lock.
+ */
+static void *fs_mmap(void *addr, size_t length, int prot, int flags,
+		     int fd, off_t offset)
+{
+#if defined(SYS_mmap)
+	return (void *)syscall(SYS_mmap, addr, length, prot, flags, fd, offset);
+#elif defined(SYS_mmap2)
+	return (void *)syscall(SYS_mmap2, addr, length, prot, flags, fd,
+			       (unsigned long)(offset / 4096));
+#else
+#error "everlive_framestore requires SYS_mmap or SYS_mmap2"
+#endif
+}
+
+static int fs_munmap(void *addr, size_t length)
+{
+	return (int)syscall(SYS_munmap, addr, length);
+}
+
+static int fs_close(int fd)
+{
+	return (int)syscall(SYS_close, fd);
+}
 
 struct everlive_framestore_port {
 	uint64_t seq;
@@ -213,20 +243,20 @@ everlive_framestore_create(const struct everlive_framestore_config *cfg)
 	if (ftruncate(fd, (off_t)region_size) != 0)
 		goto fail;
 
-	map = mmap(NULL, region_size, PROT_READ | PROT_WRITE, MAP_SHARED,
-		   fd, 0);
+	map = fs_mmap(NULL, region_size, PROT_READ | PROT_WRITE, MAP_SHARED,
+		      fd, 0);
 	if (map == MAP_FAILED)
 		goto fail;
 
 	if (fstat(fd, &st) != 0 || st.st_size < (off_t)region_size) {
-		munmap(map, region_size);
+		fs_munmap(map, region_size);
 		map = MAP_FAILED;
 		goto fail;
 	}
 
 	fs = calloc(1, sizeof(*fs));
 	if (!fs) {
-		munmap(map, region_size);
+		fs_munmap(map, region_size);
 		map = MAP_FAILED;
 		goto fail;
 	}
@@ -263,9 +293,9 @@ everlive_framestore_create(const struct everlive_framestore_config *cfg)
 
 fail:
 	if (map != MAP_FAILED)
-		munmap(map, region_size);
+		fs_munmap(map, region_size);
 	if (fd >= 0)
-		close(fd);
+		fs_close(fd);
 	return NULL;
 }
 
@@ -289,37 +319,37 @@ struct everlive_framestore *everlive_framestore_attach(const char *name)
 		return NULL;
 
 	if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof(*hdr)) {
-		close(fd);
+		fs_close(fd);
 		return NULL;
 	}
 
 	header_map_size = sizeof(*hdr);
-	header_map = mmap(NULL, header_map_size, PROT_READ, MAP_SHARED, fd, 0);
+	header_map = fs_mmap(NULL, header_map_size, PROT_READ, MAP_SHARED, fd, 0);
 	if (header_map == MAP_FAILED) {
-		close(fd);
+		fs_close(fd);
 		return NULL;
 	}
 
 	hdr = header_map;
 	if (!validate_header(hdr, (size_t)st.st_size, &payload_offset,
 			     &region_size)) {
-		munmap(header_map, header_map_size);
-		close(fd);
+		fs_munmap(header_map, header_map_size);
+		fs_close(fd);
 		return NULL;
 	}
 
-	munmap(header_map, header_map_size);
+	fs_munmap(header_map, header_map_size);
 
-	map = mmap(NULL, region_size, PROT_READ, MAP_SHARED, fd, 0);
+	map = fs_mmap(NULL, region_size, PROT_READ, MAP_SHARED, fd, 0);
 	if (map == MAP_FAILED) {
-		close(fd);
+		fs_close(fd);
 		return NULL;
 	}
 
 	fs = calloc(1, sizeof(*fs));
 	if (!fs) {
-		munmap(map, region_size);
-		close(fd);
+		fs_munmap(map, region_size);
+		fs_close(fd);
 		return NULL;
 	}
 
@@ -330,7 +360,7 @@ struct everlive_framestore *everlive_framestore_attach(const char *name)
 	fs->owner = false;
 	snprintf(fs->name, sizeof(fs->name), "%s", name);
 
-	close(fd);
+	fs_close(fd);
 	return fs;
 }
 
@@ -352,14 +382,14 @@ void everlive_framestore_destroy(struct everlive_framestore *fs)
 			    created.st_dev == current.st_dev &&
 			    created.st_ino == current.st_ino)
 				ours = true;
-			close(probe);
+			fs_close(probe);
 		}
 	}
 
 	if (fs->map && fs->map_size)
-		munmap(fs->map, fs->map_size);
+		fs_munmap(fs->map, fs->map_size);
 	if (fs->fd >= 0)
-		close(fs->fd);
+		fs_close(fs->fd);
 	if (fs->owner && ours)
 		shm_unlink(fs->name);
 
@@ -617,6 +647,23 @@ void everlive_framestore_reset(struct everlive_framestore *fs,
 	__atomic_store_n(&sp->write_idx, 0U, __ATOMIC_RELAXED);
 	__atomic_store_n(&sp->ready_idx, 0U, __ATOMIC_RELAXED);
 	__atomic_store_n(&sp->read_idx, 0U, __ATOMIC_RELAXED);
+}
+
+void everlive_framestore_set_geometry(struct everlive_framestore *fs,
+				      unsigned int port,
+				      uint32_t width, uint32_t height)
+{
+	struct everlive_framestore_header *hdr;
+
+	if (!fs || !fs->map)
+		return;
+
+	hdr = fs->map;
+	if (port >= hdr->port_count)
+		return;
+
+	__atomic_store_n(&hdr->ports[port].width, width, __ATOMIC_RELAXED);
+	__atomic_store_n(&hdr->ports[port].height, height, __ATOMIC_RELAXED);
 }
 
 void everlive_framestore_mark_no_signal(struct everlive_framestore *fs,

@@ -99,6 +99,9 @@ static void test_create_roundtrip(void)
 	assert(strcmp(everlive_framestore_bdf(fs), cfg.pci_bdf) == 0);
 	assert(!everlive_framestore_alive(fs, TEST_TIMEOUT_NS));
 
+	everlive_framestore_set_geometry(fs, 0, width, height);
+	assert(!everlive_framestore_read_begin(fs, 0, &frame));
+
 	src = malloc(bytes);
 	dst = malloc(bytes);
 	assert(src && dst);

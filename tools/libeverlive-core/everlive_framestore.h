@@ -153,6 +153,16 @@ void everlive_framestore_reset(struct everlive_framestore *fs,
 			       unsigned int port);
 
 /*
+ * Set the advertised geometry for a port before the first frame is
+ * published.  This does not create a readable frame: readers still require a
+ * non-zero sequence number.  Useful for diagnostics and for preserving the
+ * previous "initial width/height" behaviour.
+ */
+void everlive_framestore_set_geometry(struct everlive_framestore *fs,
+				      unsigned int port,
+				      uint32_t width, uint32_t height);
+
+/*
  * Mark a port as temporarily unavailable: no_signal = 1, streaming = 0.
  * Does not clear seq or the heartbeat.
  */

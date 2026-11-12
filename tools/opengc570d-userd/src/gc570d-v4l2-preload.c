@@ -40,8 +40,9 @@
 #include <poll.h>
 #include <linux/videodev2.h>
 
-#include "gc570d-shm.h"
+#include "everlive_framestore.h"
 
+#define GC570D_FRAMESTORE_NAME  "/gc570d_v4l2_shm"
 #define GC570D_V4L2_MAX_FDS     64
 #define GC570D_V4L2_MAX_BUFS    8
 #define GC570D_V4L2_MAX_DIRS    16
@@ -82,7 +83,7 @@ static struct gc570d_v4l2_handle g_handles[GC570D_V4L2_MAX_FDS];
 static struct gc570d_dir_track g_dev_dirs[GC570D_V4L2_MAX_DIRS];
 static pthread_mutex_t g_v4l2_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int g_open_handle_count = 0;
-static struct gc570d_shm_region *g_shm_ptr = NULL;
+static struct everlive_framestore *g_framestore = NULL;
 
 /*
  * Optional per-process opt-in.  LD_PRELOAD is inherited by every child of a
@@ -136,16 +137,6 @@ static bool shim_target_allowed(void)
 	__atomic_store_n(&g_target_allowed, match ? 1 : 0, __ATOMIC_RELAXED);
 	return match;
 }
-
-static uint64_t shim_now_ns(void)
-{
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
-
 
 /* Real libc & libv4l2 function pointers */
 static int (*real_open)(const char *, int, ...) = NULL;
@@ -222,21 +213,13 @@ static void init_real_v4l2_funcs(void)
 	real_v4l2_munmap  = dlsym(RTLD_NEXT, "v4l2_munmap");
 }
 
-static struct gc570d_shm_region *get_shm(void)
+static struct everlive_framestore *get_framestore(void)
 {
-	if (g_shm_ptr)
-		return g_shm_ptr;
-	int fd = shm_open(GC570D_SHM_NAME, O_RDONLY, 0);
-	if (fd < 0)
-		return NULL;
-	void *p = real_mmap ? real_mmap(NULL, sizeof(struct gc570d_shm_region),
-					PROT_READ, MAP_SHARED, fd, 0) : NULL;
-	if (real_close)
-		real_close(fd);
-	if (!p || p == MAP_FAILED)
-		return NULL;
-	g_shm_ptr = (struct gc570d_shm_region *)p;
-	return g_shm_ptr;
+	if (g_framestore)
+		return g_framestore;
+
+	g_framestore = everlive_framestore_attach(GC570D_FRAMESTORE_NAME);
+	return g_framestore;
 }
 
 static void convert_yuy2_frame(const uint8_t *src, uint32_t src_w, uint32_t src_h,
@@ -244,69 +227,39 @@ static void convert_yuy2_frame(const uint8_t *src, uint32_t src_w, uint32_t src_
 			       uint32_t dst_w, uint32_t dst_h, uint32_t pixfmt);
 
 /*
- * Snapshot and convert one SHM port under its seqlock.  The publisher makes
- * seq odd before touching the payload and even again afterwards, so a frame
- * is only accepted when seq is even and unchanged across the conversion.
+ * Snapshot and convert one frame-store port.  read_begin()/read_validate()
+ * accept a frame only when the producer has not replaced it during the
+ * conversion, so a slow or lapping writer produces a black frame rather than
+ * a torn one.
  */
 static void shm_convert_port(int port, uint8_t *dst, size_t dst_max,
 			     uint32_t dst_w, uint32_t dst_h, uint32_t pixfmt)
 {
-	struct gc570d_shm_region *shm = get_shm();
-	uint32_t src_w, src_h;
-	uint64_t seq;
+	struct everlive_framestore *fs = get_framestore();
 	int tries;
 
-	if (!shm || shm->magic != GC570D_SHM_MAGIC) {
+	if (!fs || !everlive_framestore_alive(fs, 1000000000ULL)) {
 		convert_yuy2_frame(NULL, 0, 0, dst, dst_max,
 				   dst_w, dst_h, pixfmt);
 		return;
 	}
 
-	/*
-	 * If the publisher died (or was SIGKILLed) its last frame would
-	 * otherwise loop forever.  The daemon stamps this ~frame rate; a
-	 * missing beacon older than one second means "no signal", not "freeze".
-	 */
-	{
-		uint64_t heartbeat = __atomic_load_n(&shm->heartbeat_ns,
-						     __ATOMIC_ACQUIRE);
-		if (heartbeat && shim_now_ns() > heartbeat + 1000000000ULL) {
-			convert_yuy2_frame(NULL, 0, 0, dst, dst_max,
-					   dst_w, dst_h, pixfmt);
-			return;
-		}
-	}
-
 	for (tries = 0; tries < 8; tries++) {
-		uint32_t slot;
+		struct everlive_framestore_frame frame;
 
-		seq = __atomic_load_n(&shm->ports[port].seq, __ATOMIC_ACQUIRE);
-		if (!seq) {
-			usleep(100);
-			continue;
-		}
-		slot = __atomic_load_n(&shm->ports[port].ready_idx,
-				       __ATOMIC_ACQUIRE);
-		if (slot >= GC570D_SHM_SLOTS) {
+		if (!everlive_framestore_read_begin(fs, (unsigned int)port,
+						    &frame)) {
 			usleep(100);
 			continue;
 		}
 
-		src_w = __atomic_load_n(&shm->ports[port].width,
-					__ATOMIC_ACQUIRE);
-		src_h = __atomic_load_n(&shm->ports[port].height,
-					__ATOMIC_ACQUIRE);
-		__atomic_thread_fence(__ATOMIC_ACQUIRE);
-
-		convert_yuy2_frame(shm->ports[port].yuy2[slot], src_w, src_h,
+		convert_yuy2_frame(frame.data, frame.width, frame.height,
 				   dst, dst_max, dst_w, dst_h, pixfmt);
 
-		__atomic_thread_fence(__ATOMIC_ACQUIRE);
-		if (__atomic_load_n(&shm->ports[port].seq, __ATOMIC_ACQUIRE) == seq) {
-			__atomic_store_n(&shm->ports[port].read_idx, slot,
-					 __ATOMIC_RELAXED);
+		if (everlive_framestore_read_validate(fs, (unsigned int)port,
+						      &frame))
 			return;
-		}
+
 		usleep(100);
 	}
 
