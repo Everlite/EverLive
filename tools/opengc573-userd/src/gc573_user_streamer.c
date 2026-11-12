@@ -30,6 +30,7 @@
 #include "gc573_user_audio_tap.h"
 #include "gc573_user_hdr.h"
 #include "gc573_user_framegen.h"
+#include "gc573_camera.h"
 #include "gc573_user_log.h"
 #include "gc573_user_font8x8.h"
 #include <SDL2/SDL.h>
@@ -2160,6 +2161,8 @@ struct frame_preview {
 	unsigned int count;
 	int latest;
 	size_t bytes;
+	unsigned int width;
+	unsigned int height;
 	uint64_t seq;
 	uint64_t consumed;
 	uint64_t dropped;
@@ -2284,6 +2287,18 @@ static void *preview_thread(void *arg)
 		memcpy(preview->buffers[slot],
 		       preview->video->buffers[index].vaddr, preview->bytes);
 
+		/*
+		 * Tonemap once, in place, before the window and the async V4L2 pump
+		 * read the slot.  The virtual-camera feed then sees exactly the same
+		 * picture as the display and OBS.
+		 */
+		if (gc573_hdr_active())
+			gc573_hdr_tonemap_yuyv(preview->buffers[slot],
+					       preview->width, preview->height);
+
+		gc573_camera_publish(preview->buffers[slot], preview->bytes,
+				     preview->width, preview->height, false);
+
 		pthread_mutex_lock(&preview->lock);
 		preview->ts_us[slot] = frame_us;
 		preview->latest = slot;
@@ -2320,6 +2335,7 @@ static void preview_stop(void)
 		g_preview.started = false;
 	}
 	preview_free_buffers();
+	gc573_camera_mark_no_signal();
 }
 
 /*
@@ -2364,6 +2380,8 @@ static int preview_start(struct gc573_user_video *video, size_t bytes,
 	g_preview.count = depth;
 	g_preview.video = video;
 	g_preview.bytes = bytes;
+	g_preview.width = video->width;
+	g_preview.height = video->height;
 	g_preview.seq = 0;
 	g_preview.consumed = 0;
 	g_preview.dropped = 0;
@@ -3256,10 +3274,6 @@ static void *v4l2_pump_thread(void *arg)
 			continue;
 		}
 
-		/* Tonemap the loopback copy only: the window has its own copy. */
-		if (gc573_hdr_active())
-			gc573_hdr_tonemap_yuyv(pixels, pump->width, pump->height);
-
 		v4l2_sink_write_guarded(pump->sink, pixels, pump->bytes,
 					pump->width, pump->height);
 		preview_release(ph);
@@ -3362,6 +3376,8 @@ static void standby_present(SDL_Window *window, SDL_Renderer *renderer,
 	frame = gc573_no_signal_frame(&g_standby->frame, &bytes);
 	if (!frame || !bytes)
 		return;
+
+	gc573_camera_publish(frame, bytes, width, height, true);
 
 	/*
 	 * Feed the loopback sink even in headless sessions, so OBS shows the
@@ -6491,6 +6507,11 @@ int main(int argc, char *argv[])
 				strerror(-tap_ret));
 	}
 
+	if (gc573_camera_start(ctx.pci_addr) == 0)
+		pr_info("Virtual camera frame store: /dev/shm/gc573_v4l2_shm");
+	else
+		pr_warn("Virtual camera frame store unavailable; continuing without it");
+
 	last_stats = now_ms();
 	last_stats_us = now_us();
 	last_status_poll = 0;
@@ -7146,9 +7167,12 @@ int main(int argc, char *argv[])
 							 __ATOMIC_RELAXED);
 				}
 
+				bool camera = gc573_camera_active();
+
 				__atomic_store_n(&g_preview_needed,
 						 ((!g_headless && !fg_live) ||
-						  (want_pump && !sink_throttle)) ? 1 : 0,
+						  (want_pump && !sink_throttle) ||
+						  camera) ? 1 : 0,
 						 __ATOMIC_RELAXED);
 				__atomic_store_n(&g_preview_keepalive,
 						 sink_throttle ? 1 : 0,
@@ -7218,15 +7242,6 @@ int main(int argc, char *argv[])
 				if (ph > 0) {
 					have_frame = true;
 					osd_note_dma_age(g_preview.taken_age_us);
-					/*
-					 * Tonemap once, in place, before both consumers read
-					 * the slot: the window and the OBS feed then show the
-					 * same picture.  SDR is a pure pass-through.
-					 */
-					if (gc573_hdr_active())
-						gc573_hdr_tonemap_yuyv(
-							pixels, output_width,
-							output_height);
 					if (v4l2_sink.path[0])
 						v4l2_sink_write_guarded(
 							&v4l2_sink, pixels,
@@ -7297,10 +7312,6 @@ int main(int argc, char *argv[])
 				if (!v4l2_pump_running()) {
 					ph = preview_take(&pixels);
 					if (ph > 0) {
-						if (gc573_hdr_active())
-							gc573_hdr_tonemap_yuyv(
-								pixels, output_width,
-								output_height);
 						if (v4l2_sink.path[0])
 							v4l2_sink_write_guarded(
 								&v4l2_sink, pixels,
@@ -7550,6 +7561,7 @@ int main(int argc, char *argv[])
 		 * the pump must never write into a fd that is being torn down.
 		 */
 		preview_stop();
+		gc573_camera_stop();
 		v4l2_sink_close_guarded(&v4l2_sink);
 		if (standby.texture) {
 			SDL_DestroyTexture(standby.texture);
@@ -7574,6 +7586,7 @@ int main(int argc, char *argv[])
 	audio_cleanup(&audio);
 	gc573_user_it6805_audio_disable(ctx.bar0);
 	preview_stop();
+	gc573_camera_stop();
 	/* The capture thread is joined; the framegen ring is now safe to free. */
 	framegen_teardown();
 	v4l2_sink_close_guarded(&v4l2_sink);

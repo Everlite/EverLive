@@ -45,6 +45,7 @@ STREAM_OBJS := \
 	src/gc573_user_ipc.o \
 	src/gc573_user_audio_tap.o \
 	src/gc573_user_hdr.o \
+	src/gc573_camera.o \
 	src/gc573_user_framegen.o
 
 ENTRY_OBJS := \
