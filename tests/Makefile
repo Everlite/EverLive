@@ -22,7 +22,7 @@ CORE_LIB := $(CORE_DIR)/libeverlive_core.a
 SANITIZE := -fsanitize=address,undefined -fno-omit-frame-pointer
 
 TARGETS := test_card_registry test_frame_convert test_framestore test_ctl_proto \
-           test_json_rpc test_v4l2_shim test_edid test_config test_framegen
+           test_json_rpc test_v4l2_shim test_handoff test_edid test_config test_framegen
 
 all: $(TARGETS)
 
@@ -55,6 +55,9 @@ test_v4l2_shim: test_v4l2_shim.c \
 		-o $@ $< $(CORE_V4L2_DIR)/everlive_v4l2_state.c \
 		$(CORE_LIB) -pthread
 
+test_handoff: test_handoff.c $(CORE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ $< $(CORE_LIB) -pthread
+
 # --- GC570D -------------------------------------------------------------
 # These two provide their own kernel-shim stubs, so they must compile the
 # engine modules directly and must NOT link the core archive.
@@ -79,6 +82,7 @@ test: all
 	@./test_ctl_proto
 	@./test_json_rpc
 	@./test_v4l2_shim
+	@./test_handoff
 	@echo "=== GC570D (Live Gamer DUO) ==="
 	@./test_edid
 	@./test_config

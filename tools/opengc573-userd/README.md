@@ -146,6 +146,34 @@ $ printf '{"jsonrpc":"2.0","id":1,"method":"status.get"}\n' \
 {"jsonrpc":"2.0","id":1,"result":{"proto":1,"version":"1.5.0",...}}
 ```
 
+## Sharing the Card Between Users
+
+VFIO gives the card to one process, so two users logged in at the same time
+cannot both capture. Instead of making one of them shut everything down, the
+engine that holds the card releases it when another user starts capture:
+
+1. The holder listens on an abstract Unix socket named after the card
+   (`everlive-handoff-<pci address>`).
+2. A starting streamer that finds the card taken by another user asks for it.
+3. The running engine tears down, closes VFIO and stays alive in a paused
+   state. An idle `everlive_userd` LED daemon simply exits.
+4. When the other session ends, the paused engine restarts itself with its
+   original arguments. It never interrupts a capture that is still running.
+
+While paused, the Control Hub shows **Capture Paused** and offers
+**Take Back Capture**; without the Hub, `kill -USR1 <pid>` does the same and
+`SIGTERM` quits the paused engine. The paused state is published in
+`$XDG_RUNTIME_DIR/everlive.paused`.
+
+- Auth: `SO_PEERCRED` / `SO_PEERGROUPS`. Only users who have group access to
+  the card's `/dev/vfio/<group>` node (the `video` group in the shipped udev
+  rule) may ask. A user who reaches the node only through a logind ACL is not
+  recognised.
+- A second instance started by the *same* user still fails as before.
+  `EVERLIVE_HANDOFF_SAME_USER=1` lifts that for testing with one account.
+- Capture in the yielding session stops for as long as the other user holds
+  the card, and the card is fully closed for a moment during each handoff.
+
 ## HDR10 / HLG to SDR
 
 The IT6805 DRM InfoFrame (packet `0x87`, bank 2, `0x24..0x42`) is decoded to

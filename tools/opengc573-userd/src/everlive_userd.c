@@ -8,6 +8,7 @@
 
 #include "gc573_vfio.h"
 #include "gc573_user_hw.h"
+#include "everlive_handoff.h"
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -22,6 +23,13 @@ static volatile sig_atomic_t g_running = 1;
 static void sig_handler(int sig)
 {
 	(void)sig;
+	g_running = 0;
+}
+
+/* Another user's engine asked for the card: an idle keeper simply exits. */
+static void handoff_request_cb(void *user)
+{
+	(void)user;
 	g_running = 0;
 }
 
@@ -307,6 +315,25 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	/*
+	 * Let another user's engine ask for the card.  When this daemon was
+	 * spawned by an exiting streamer, that streamer may still own the
+	 * socket name for a moment; the listener retries until it is free.
+	 */
+	{
+		char card_id[64];
+		char node[64];
+		int group = -1;
+
+		if (gc573_vfio_resolve(pci_addr, card_id, sizeof(card_id),
+				       &group) == 0 && group >= 0) {
+			snprintf(node, sizeof(node), "/dev/vfio/%d", group);
+			(void)everlive_handoff_serve(card_id, node,
+						     EVERLIVE_HANDOFF_ROLE_KEEPER,
+						     handoff_request_cb, NULL);
+		}
+	}
+
 	if (mode == LED_MODE_WAVE)
 		printf("[everlive-userd] LED keepalive: multi-zone wave (%.1f s per revolution), enable 0x%08x.\n",
 		       cycle_seconds, readl((uint8_t *)ctx.bar0 + 0x0804));
@@ -349,6 +376,8 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	if (everlive_handoff_pending(NULL))
+		printf("\n[everlive-userd] Releasing the card for another user...\n");
 	printf("\n[everlive-userd] Shutting down...\n");
 	gc573_vfio_cleanup(&ctx);
 	return 0;
