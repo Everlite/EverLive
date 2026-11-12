@@ -9,11 +9,15 @@ CC ?= gcc
 PKG_CONFIG ?= pkg-config
 CFLAGS ?= -O2 -g -Wall -Wextra -pthread
 LDFLAGS ?= -pthread
+DEPFLAGS := -MMD -MP
+
+CORE_DIR := ../libeverlive-core
+CORE_LIB := $(CORE_DIR)/libeverlive_core.a
 
 USER_CFLAGS := -O2 -g -Wall -Wextra -Wno-unused-parameter \
 	-Wno-sign-compare -std=gnu11 \
 	-D_GNU_SOURCE -DGC570D_USERSPACE -DGC570D_DEVELOPER_DEBUGFS \
-	-Isrc -I.
+	-Isrc -I. -I$(CORE_DIR)
 USER_LDFLAGS := -pthread -lm -lrt
 
 SDL_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl2 2>/dev/null)
@@ -43,7 +47,10 @@ USERD_SRCS := \
 	src/gc570d-dma.c \
 	src/gc570d-audio.c \
 	src/gc570d-video.c \
-	src/gc570d_everlive.c
+	src/gc570d_everlive.c \
+	src/gc570d-jsonrpc.c
+
+USERD_OBJS := $(USERD_SRCS:.c=.o)
 
 USER_HEADERS := \
 	src/gc570d.h \
@@ -51,6 +58,7 @@ USER_HEADERS := \
 	src/gc570d-user-compat.h \
 	src/gc570d-shm.h \
 	src/gc570d_everlive.h \
+	src/gc570d-jsonrpc.h \
 	src/gc570d_font8x8.h \
 	data/gc570d_hdr_lut_3000.inc \
 	data/gc570d_no_signal_640x360.inc
@@ -59,9 +67,15 @@ TARGETS := opengc570d-userd gc570d-ctl libgc570d-v4l2.so
 
 all: $(TARGETS)
 
-opengc570d-userd: $(USERD_SRCS) $(USER_HEADERS)
-	$(CC) $(USER_CFLAGS) -o $@ $(USERD_SRCS) $(USER_LDFLAGS) $(LDFLAGS)
+opengc570d-userd: $(USERD_OBJS) $(CORE_LIB)
+	$(CC) $(USER_CFLAGS) -o $@ $(USERD_OBJS) $(USER_LDFLAGS) $(LDFLAGS) $(CORE_LIB)
 	@chmod 0755 $@
+
+$(CORE_LIB):
+	$(MAKE) -C $(CORE_DIR)
+
+src/%.o: src/%.c $(USER_HEADERS)
+	$(CC) $(USER_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 gc570d-ctl: src/gc570d-ctl.c
 	$(CC) -O2 -g -Wall -Wextra -std=gnu11 -D_GNU_SOURCE -o $@ $<
@@ -74,6 +88,8 @@ libgc570d-v4l2.so: src/gc570d-v4l2-preload.c src/gc570d-shm.h
 
 test selftest:
 	$(MAKE) -C ../../tests test
+
+-include $(USERD_OBJS:.o=.d)
 
 PREFIX ?= /usr/local
 DESTDIR ?=
@@ -113,6 +129,6 @@ uninstall:
 	rm -f $(DESTDIR)/etc/gc570d.conf.example
 
 clean:
-	rm -f $(TARGETS)
+	rm -f $(USERD_OBJS) $(USERD_OBJS:.o=.d) $(TARGETS)
 
 .PHONY: all clean test selftest install uninstall

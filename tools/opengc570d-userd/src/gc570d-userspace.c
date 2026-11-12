@@ -10,6 +10,12 @@
 #include "gc570d.h"
 #include "gc570d-shm.h"
 #include "gc570d_everlive.h"
+#include "everlive_card.h"
+#include "gc570d-jsonrpc.h"
+
+#ifndef EVERLIVE_VERSION
+#define EVERLIVE_VERSION "1.5.0"
+#endif
 
 #include <dirent.h>
 #include <poll.h>
@@ -965,6 +971,29 @@ void debugfs_remove_recursive(struct dentry *dentry)
 {
 	(void)dentry;
 	g_diag_count = 0;
+}
+
+int gc570d_user_diag_action(const char *name, const char *value)
+{
+	if (!name || !*name || !value)
+		return -EINVAL;
+
+	for (size_t i = 0; i < g_diag_count; i++) {
+		struct file f;
+		loff_t pos = 0;
+		ssize_t r;
+
+		if (strcmp(g_diag_entries[i].name, name) != 0 ||
+		    !g_diag_entries[i].fops->write)
+			continue;
+		memset(&f, 0, sizeof(f));
+		f.private_data = g_diag_entries[i].data;
+		r = g_diag_entries[i].fops->write(&f, value, strlen(value),
+						  &pos);
+		return (int)r;
+	}
+
+	return -ENOENT;
 }
 
 int led_classdev_multicolor_register(struct device *parent, struct led_classdev_mc *mcled_cdev)
@@ -2297,6 +2326,28 @@ void snd_card_free(struct snd_card *card)
 	free(card);
 }
 
+/*
+ * Snapshot for the JSON-RPC status.get handler.  Monotonic counters are read
+ * without the stream locks: they only ever advance, and a torn sample would
+ * at worst under-report a frame count for one poll interval.
+ */
+void gc570d_user_pipeline_stats(struct gc570d_jsonrpc_stats *out)
+{
+	if (!out)
+		return;
+
+	memset(out, 0, sizeof(*out));
+	for (int i = 0; i < 2; i++) {
+		out->video_seq[i] = g_vstreams[i].latest_seq;
+		out->audio_periods[i] = g_astreams[i].periods_published;
+		out->v4l2_configured[i] = gc570d_everlive_v4l2(i)[0] != '\0';
+	}
+	if (g_gc) {
+		out->irq_dma0 = (uint64_t)atomic64_read(&g_gc->irq_dma0);
+		out->irq_dma1 = (uint64_t)atomic64_read(&g_gc->irq_dma1);
+	}
+}
+
 /* =========================================================================
  * 5. UNIX Control & Diagnostic Socket (/run/user/$UID/gc570d/control.sock)
  * ========================================================================= */
@@ -2404,21 +2455,14 @@ static void gc570d_handle_ctl_client(int client_fd)
 	} else if (strncmp(cmd, "action ", 7) == 0) {
 		char name[64] = { 0 };
 		char val[64] = "1";
+		int r;
+
 		sscanf(cmd + 7, "%63s %63s", name, val);
-		bool found = false;
-		for (size_t i = 0; i < g_diag_count; i++) {
-			if (strcmp(g_diag_entries[i].name, name) == 0 &&
-			    g_diag_entries[i].fops->write) {
-				struct file f = { .private_data = g_diag_entries[i].data };
-				loff_t pos = 0;
-				ssize_t r = g_diag_entries[i].fops->write(&f, val, strlen(val), &pos);
-				fprintf(fp, "action %s(%s) -> %zd\n", name, val, r);
-				found = true;
-				break;
-			}
-		}
-		if (!found)
+		r = gc570d_user_diag_action(name, val);
+		if (r == -ENOENT)
 			fprintf(fp, "Unknown or read-only action node: %s\n", name);
+		else
+			fprintf(fp, "action %s(%s) -> %d\n", name, val, r);
 	} else if (strncmp(cmd, "led ", 4) == 0) {
 		const char *mode = cmd + 4;
 		if (strcmp(mode, "off") == 0 || strcmp(mode, "0") == 0) {
@@ -2542,53 +2586,24 @@ static void gc570d_ctl_server_shutdown(void)
  * 6. VFIO-PCI Setup & Main Daemon Loop
  * ========================================================================= */
 
-static int read_sysfs_hex(const char *dir, const char *attr, uint32_t *out)
-{
-	char path[512], buf[64];
-	snprintf(path, sizeof(path), "%s/%s", dir, attr);
-	FILE *fp = fopen(path, "r");
-	if (!fp)
-		return -errno;
-	if (!fgets(buf, sizeof(buf), fp)) {
-		fclose(fp);
-		return -EIO;
-	}
-	fclose(fp);
-	*out = (uint32_t)strtoul(buf, NULL, 0);
-	return 0;
-}
-
+/*
+ * Card discovery lives in libeverlive-core.  1461:0054 is shared with the
+ * GC573/GC555, so only a descriptor positively identified as "gc570d"
+ * (subsystem 1461:5700) is accepted.  A missing subsystem file fails safe.
+ */
 static int find_gc570d_pci_bdf(char *bdf_out, size_t bdf_size)
 {
-	DIR *d = opendir("/sys/bus/pci/devices");
-	if (!d)
-		return -errno;
-	struct dirent *ent;
-	while ((ent = readdir(d)) != NULL) {
-		if (ent->d_name[0] == '.')
+	struct everlive_device cards[8];
+	int count;
+
+	count = everlive_detect_installed_cards(cards, ARRAY_SIZE(cards), NULL);
+	for (int i = 0; i < count; i++) {
+		if (strcmp(cards[i].desc->model_slug, "gc570d") != 0)
 			continue;
-		char dir[512];
-		uint32_t vendor = 0, device = 0, subvend = 0, subdev = 0;
-		snprintf(dir, sizeof(dir), "/sys/bus/pci/devices/%s", ent->d_name);
-		if (read_sysfs_hex(dir, "vendor", &vendor) == 0 &&
-		    read_sysfs_hex(dir, "device", &device) == 0 &&
-		    vendor == GC570D_VENDOR_ID && device == GC570D_DEVICE_ID) {
-			/*
-			 * 1461:0054 is shared with other AVerMedia cards
-			 * (GC573/GC555).  Only the DUO exposes subsystem
-			 * 1461:5700; skip anything we cannot positively identify.
-			 */
-			if (read_sysfs_hex(dir, "subsystem_vendor", &subvend) < 0 ||
-			    read_sysfs_hex(dir, "subsystem_device", &subdev) < 0 ||
-			    subvend != GC570D_SUBSYSTEM_VENDOR_ID ||
-			    subdev != GC570D_SUBSYSTEM_ID)
-				continue;
-			strscpy(bdf_out, ent->d_name, bdf_size);
-			closedir(d);
-			return 0;
-		}
+		strscpy(bdf_out, cards[i].pci_bdf, bdf_size);
+		return 0;
 	}
-	closedir(d);
+
 	return -ENODEV;
 }
 
@@ -3170,6 +3185,17 @@ int main(int argc, char **argv)
 			"[gc570d WARN] Failed to start EverLive frontend: %d\n",
 			ret);
 
+	gc570d_jsonrpc_set_stats_fn(gc570d_user_pipeline_stats);
+	gc570d_jsonrpc_set_dev(g_gc);
+	if (gc570d_jsonrpc_init(EVERLIVE_VERSION) < 0) {
+		fprintf(stderr,
+			"[gc570d WARN] JSON-RPC control socket unavailable; continuing without remote control\n");
+	} else {
+		fprintf(stderr,
+			"[gc570d INFO] JSON-RPC control socket: %s\n",
+			gc570d_jsonrpc_socket_path());
+	}
+
 	struct timespec ts_mono_prev = { 0 }, ts_boot_prev = { 0 };
 	clock_gettime(CLOCK_MONOTONIC, &ts_mono_prev);
 	clock_gettime(CLOCK_BOOTTIME, &ts_boot_prev);
@@ -3182,16 +3208,43 @@ int main(int argc, char **argv)
 
 	while (!atomic_load(&g_daemon_quit) &&
 	       !gc570d_everlive_quit_requested()) {
-		struct pollfd pfd = {
-			.fd = g_ctl_listen_fd,
-			.events = POLLIN,
-		};
-		int pr = poll(&pfd, g_ctl_listen_fd >= 0 ? 1 : 0, 250);
-		if (pr > 0 && (pfd.revents & POLLIN)) {
-			int cfd = accept4(g_ctl_listen_fd, NULL, NULL, SOCK_CLOEXEC);
-			if (cfd >= 0) {
-				gc570d_handle_ctl_client(cfd);
-				close(cfd);
+		struct pollfd pfd[1 + GC570D_JSONRPC_MAX_CLIENTS + 1];
+		int nfds = 0;
+		int rpc_base;
+		int pr;
+
+		if (g_ctl_listen_fd >= 0) {
+			pfd[nfds].fd = g_ctl_listen_fd;
+			pfd[nfds].events = POLLIN;
+			nfds++;
+		}
+		rpc_base = nfds;
+		nfds += gc570d_jsonrpc_fill_pollfds(&pfd[nfds],
+				(int)(ARRAY_SIZE(pfd) - (size_t)nfds));
+
+		pr = poll(pfd, (nfds_t)nfds, 250);
+
+		if (pr > 0) {
+			bool rpc_ready = false;
+
+			for (int i = rpc_base; i < nfds; i++) {
+				if (pfd[i].revents) {
+					rpc_ready = true;
+					break;
+				}
+			}
+			if (rpc_ready)
+				gc570d_jsonrpc_service();
+
+			if (g_ctl_listen_fd >= 0 &&
+			    (pfd[0].revents & POLLIN)) {
+				int cfd = accept4(g_ctl_listen_fd, NULL, NULL,
+						  SOCK_CLOEXEC);
+
+				if (cfd >= 0) {
+					gc570d_handle_ctl_client(cfd);
+					close(cfd);
+				}
 			}
 		}
 
@@ -3239,6 +3292,7 @@ int main(int argc, char **argv)
 		if (g_reinit_requested && !atomic_load(&g_daemon_quit)) {
 			fprintf(stderr, "[gc570d INFO] Re-initializing GC570D hardware pipeline in place...\n");
 			gc570d_everlive_set_dev(NULL);
+			gc570d_jsonrpc_set_dev(NULL);
 			drv->remove(&g_pdev);
 			probed = false;
 			g_gc = NULL;
@@ -3249,6 +3303,7 @@ int main(int argc, char **argv)
 				g_gc = pci_get_drvdata(&g_pdev);
 				probed = true;
 				gc570d_everlive_set_dev(g_gc);
+				gc570d_jsonrpc_set_dev(g_gc);
 				gc570d_start_user_video_streams();
 				gc570d_start_user_audio_streams();
 				clock_gettime(CLOCK_MONOTONIC, &ts_mono_prev);
@@ -3266,6 +3321,7 @@ int main(int argc, char **argv)
 
 	fprintf(stderr, "[gc570d INFO] Shutting down userspace driver...\n");
 	gc570d_everlive_stop();
+	gc570d_jsonrpc_shutdown();
 	gc570d_ctl_server_shutdown();
 #ifdef HAVE_LIBPIPEWIRE
 	gc570d_pipewire_shutdown();

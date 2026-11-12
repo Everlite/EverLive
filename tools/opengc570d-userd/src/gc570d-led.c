@@ -308,6 +308,145 @@ out_unlock:
 	return ret;
 }
 
+/*
+ * Set a static RGB colour, cancelling any breathing/colorful animation.
+ * Public entry point for the JSON-RPC control plane.
+ */
+int gc570d_led_set_rgb(struct gc570d_dev *gc, u8 red, u8 green, u8 blue)
+{
+	int ret;
+
+	if (!gc)
+		return -EINVAL;
+	if (READ_ONCE(gc->led_removing))
+		return -ENODEV;
+
+	cancel_delayed_work_sync(&gc->led_work);
+
+	mutex_lock(&gc->led_lock);
+	if (gc->led_removing) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+
+	gc->led_breathing = false;
+	gc->led_colorful = false;
+	gc->led_subleds[0].brightness = red;
+	gc->led_subleds[1].brightness = green;
+	gc->led_subleds[2].brightness = blue;
+	gc->led_subleds[0].intensity = red;
+	gc->led_subleds[1].intensity = green;
+	gc->led_subleds[2].intensity = blue;
+	if (red || green || blue)
+		gc->led_mcdev.led_cdev.brightness = GC570D_LED_MAX_BRIGHTNESS;
+	else
+		gc->led_mcdev.led_cdev.brightness = LED_OFF;
+
+	ret = gc570d_led_hw_init(gc);
+	if (!ret)
+		ret = gc570d_led_hw_set_rgb(gc, red, green, blue);
+
+out_unlock:
+	mutex_unlock(&gc->led_lock);
+	return ret;
+}
+
+/*
+ * Select an LED effect by name: "off", "static", "breathing", "colorful".
+ * The legacy spellings accepted by the sysfs attribute ("breathe",
+ * "colorful-breathing") and the hub's "rainbow" alias are handled too.
+ */
+int gc570d_led_set_effect(struct gc570d_dev *gc, const char *effect)
+{
+	bool breathing;
+	bool colorful;
+	bool off = false;
+	int ret;
+
+	if (!gc || !effect)
+		return -EINVAL;
+
+	if (strcmp(effect, "colorful") == 0 ||
+	    strcmp(effect, "colorful-breathing") == 0 ||
+	    strcmp(effect, "rainbow") == 0) {
+		breathing = false;
+		colorful = true;
+	} else if (strcmp(effect, "breathing") == 0 ||
+		   strcmp(effect, "breathe") == 0) {
+		breathing = true;
+		colorful = false;
+	} else if (strcmp(effect, "static") == 0) {
+		breathing = false;
+		colorful = false;
+	} else if (strcmp(effect, "off") == 0) {
+		breathing = false;
+		colorful = false;
+		off = true;
+	} else {
+		return -EINVAL;
+	}
+
+	if (READ_ONCE(gc->led_removing))
+		return -ENODEV;
+
+	cancel_delayed_work_sync(&gc->led_work);
+
+	mutex_lock(&gc->led_lock);
+	if (gc->led_removing) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+
+	if (off) {
+		gc->led_breathing = false;
+		gc->led_colorful = false;
+		gc->led_mcdev.led_cdev.brightness = LED_OFF;
+		ret = gc570d_led_shutdown(gc);
+		goto out_unlock;
+	}
+
+	/*
+	 * When switching from 'off' (or zero brightness) to an active effect,
+	 * restore default brightness so breathing and colorful effects do not
+	 * scale all color channels to zero.
+	 */
+	if (gc->led_mcdev.led_cdev.brightness == LED_OFF)
+		gc->led_mcdev.led_cdev.brightness = GC570D_LED_MAX_BRIGHTNESS;
+
+	if (breathing &&
+	    gc->led_subleds[0].intensity == 0 &&
+	    gc->led_subleds[1].intensity == 0 &&
+	    gc->led_subleds[2].intensity == 0) {
+		gc->led_subleds[2].intensity = GC570D_LED_WINDOWS_BLUE;
+	}
+
+	ret = led_mc_calc_color_components(&gc->led_mcdev,
+					   gc->led_mcdev.led_cdev.brightness);
+	if (!ret)
+		ret = gc570d_led_hw_init(gc);
+	if (ret)
+		goto out_unlock;
+
+	gc->led_breathing = breathing;
+	gc->led_colorful = colorful;
+	if (breathing || colorful) {
+		gc->led_step = 1;
+		gc->led_descending = false;
+		gc->led_palette_index = 0;
+		/* Route slow blocking I2C operations to a dedicated workqueue. */
+		mod_delayed_work(system_unbound_wq, &gc->led_work, 0);
+	} else {
+		ret = gc570d_led_hw_set_rgb(gc,
+					    gc->led_subleds[0].brightness,
+					    gc->led_subleds[1].brightness,
+					    gc->led_subleds[2].brightness);
+	}
+
+out_unlock:
+	mutex_unlock(&gc->led_lock);
+	return ret;
+}
+
 static ssize_t gc570d_led_effect_show(struct device *dev,
 				      struct device_attribute *attr, char *buf)
 {
@@ -332,62 +471,20 @@ static ssize_t gc570d_led_effect_store(struct device *dev,
 {
 	struct led_classdev *led_cdev = dev_get_drvdata(dev);
 	struct gc570d_dev *gc = gc570d_led_to_gc(led_cdev);
-	bool breathing;
-	bool colorful;
+	char effect[24];
+	size_t len = count;
 	int ret;
 
-	if (sysfs_streq(buf, "colorful") ||
-	    sysfs_streq(buf, "colorful-breathing")) {
-		breathing = false;
-		colorful = true;
-	} else if (sysfs_streq(buf, "breathing") ||
-		   sysfs_streq(buf, "breathe")) {
-		breathing = true;
-		colorful = false;
-	} else if (sysfs_streq(buf, "static")) {
-		breathing = false;
-		colorful = false;
-	} else {
+	while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r' ||
+			   buf[len - 1] == ' ' || buf[len - 1] == '\t'))
+		len--;
+	if (len == 0 || len >= sizeof(effect))
 		return -EINVAL;
-	}
+	memcpy(effect, buf, len);
+	effect[len] = '\0';
 
-	/* FIX: Check the removing flag before attempting to cancel work to prevent unregister deadlocks */
-	if (READ_ONCE(gc->led_removing))
-		return -ENODEV;
-
-	cancel_delayed_work_sync(&gc->led_work);
-	
-	mutex_lock(&gc->led_lock);
-	if (gc->led_removing) {
-		ret = -ENODEV;
-		goto out_unlock;
-	}
-
-	ret = led_mc_calc_color_components(&gc->led_mcdev,
-					   led_cdev->brightness);
-	if (!ret)
-		ret = gc570d_led_hw_init(gc);
-	if (ret)
-		goto out_unlock;
-
-	gc->led_breathing = breathing;
-	gc->led_colorful = colorful;
-	if (breathing || colorful) {
-		gc->led_step = 1;
-		gc->led_descending = false;
-		gc->led_palette_index = 0;
-		/* FIX: Route slow blocking I2C operations to a dedicated system_unbound_wq */
-		mod_delayed_work(system_unbound_wq, &gc->led_work, 0);
-	} else {
-		ret = gc570d_led_hw_set_rgb(gc,
-					    gc->led_subleds[0].brightness,
-					    gc->led_subleds[1].brightness,
-					    gc->led_subleds[2].brightness);
-	}
-
-out_unlock:
-	mutex_unlock(&gc->led_lock);
-	return ret ? ret : count;
+	ret = gc570d_led_set_effect(gc, effect);
+	return ret ? ret : (ssize_t)count;
 }
 
 static DEVICE_ATTR(effect, 0644, gc570d_led_effect_show,

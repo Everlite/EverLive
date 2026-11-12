@@ -27,7 +27,7 @@ As of **EverLive v1.0.0**, this userspace engine is the default, primary driver 
 9. **Virtual Camera & Headless Mode:**
    Native unscaled YUYV frames can be written to a `v4l2loopback` node (`--v4l2 /dev/video10`) for OBS, Discord or FFmpeg, either alongside the gaming window or with `--headless` (no SDL window at all). The writer probes the node with `VIDIOC_TRY_FMT` before every negotiation: if a reader (OBS) already holds a fixed format, that geometry is adopted and every frame is rescaled into it with `libswscale`, so the picture appears immediately instead of staying black. The native mode is retried every 2 s and picked up automatically as soon as the reader releases the format.
 10. **Procedural No-Signal Screen:**
-   When no HDMI signal is present (console off, cable pulled, signal loss mid-session), the engine renders a generated "NO HDMI SIGNAL" card — dark gradient, subtle grid, crossed-out monitor icon, bitmap-font text — and pushes it at ~30 fps to both the SDL window and the loopback node, so OBS never sees a frozen or black feed. The picture is generated once per geometry (`gc573_user_nosignal.[ch]`), costs no CPU while cached, and is replaced seamlessly by the live DMA feed as soon as the signal locks.
+   When no HDMI signal is present (console off, cable pulled, signal loss mid-session), the engine renders a generated "NO HDMI SIGNAL" card — dark gradient, subtle grid, crossed-out monitor icon, bitmap-font text — and pushes it at ~30 fps to both the SDL window and the loopback node, so OBS never sees a frozen or black feed. The picture is generated once per geometry (`src/gc573_user_nosignal.[ch]`), costs no CPU while cached, and is replaced seamlessly by the live DMA feed as soon as the signal locks.
 
 ---
 
@@ -55,9 +55,21 @@ As of **EverLive v1.0.0**, this userspace engine is the default, primary driver 
 
 ## Building
 
+Sources live in `src/`; the four binaries are written to this directory so
+`play.sh`, `install.sh`, `uninstall.sh` and the systemd units resolve them by
+path.
+
+The engine links `../libeverlive-core/libeverlive_core.a` for card discovery,
+JSON-RPC helpers, and control-socket resolution. Build the core first (or let
+the engine Makefile do it automatically):
+
 ```bash
+make -C tools/libeverlive-core
 make -C tools/opengc573-userd -j"$(nproc)"
 ```
+
+From the repository root, `make` (or `./build.sh`) builds the core and both
+engines in the correct order.
 
 ---
 

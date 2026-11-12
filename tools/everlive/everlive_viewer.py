@@ -1551,6 +1551,13 @@ class GameStreamer:
         except Exception:
             return None
 
+    def _duo_ipc(self):
+        """Return the attached control client, or None when unavailable."""
+        ipc = getattr(self, "ipc", None)
+        if ipc is not None and getattr(ipc, "connected", False):
+            return ipc
+        return None
+
     def set_duo_input(self, port: int) -> bool:
         """Select HDMI 1 (0) or HDMI 2 (1) on the Live Gamer DUO."""
         port = 1 if int(port) else 0
@@ -1560,6 +1567,9 @@ class GameStreamer:
             return False
         if not self.is_running:
             return True
+        ipc = self._duo_ipc()
+        if ipc is not None:
+            return ipc.request("input.set", {"port": port + 1})
         return self.ctl("input", str(port + 1)) is not None
 
     def apply_duo_led(self, mode: int) -> bool:
@@ -1573,17 +1583,27 @@ class GameStreamer:
             effect = "breathing"
         else:
             effect = "static"
+        ipc = self._duo_ipc()
+        if ipc is not None:
+            return ipc.request("led.mode.set", {"mode": effect})
         return self.ctl("led", effect) is not None
 
     def duo_hotplug(self, port: int = 0) -> bool:
         """Pulse HPD on IT68051 (HDMI 1) or IT6802 (HDMI 2)."""
         node = "it68051_hpd" if int(port) == 0 else "it6802_hpd"
+        ipc = self._duo_ipc()
+        if ipc is not None:
+            return ipc.request("hotplug", {"port": 1 if int(port) == 0 else 2})
         return self.ctl("action", node, "1") is not None
 
     def duo_edid_policy(self, bridge: bool) -> bool:
         """Select internal bridge EDID (True) or downstream copy (False)."""
         node = ("splitter_windows_bridge_edid" if bridge
                 else "splitter_windows_edid_copy")
+        ipc = self._duo_ipc()
+        if ipc is not None:
+            return ipc.request("edid.set",
+                               {"profile": "default" if bridge else "copy"})
         return self.ctl("action", node, "1") is not None
 
     def _start_vfio_duo(self, fullscreen: bool, vsync: bool,
@@ -2217,6 +2237,10 @@ if HAS_QT:
             # QSocketNotifier keeps this on the GUI thread: no worker threads
             # and no cross-thread signals.
             self._ipc = EverLiveIpcClient(self)
+            if self.streamer is not None:
+                # Let the engine wrapper prefer IPC for DUO input/HPD/EDID
+                # when the hub is attached; gc570d-ctl stays as the fallback.
+                self.streamer.ipc = self._ipc
             self._ipc.connectedChanged.connect(self._on_remote_connection)
             self._ipc.statusReceived.connect(self._on_remote_status)
             self._ipc.errorRaised.connect(lambda msg: print(f"[IPC] {msg}"))
@@ -3631,7 +3655,7 @@ if HAS_QT:
         # -----------------------------------------------------------------
         def _ipc_try_attach(self):
             """Attach to a running streamer (local or external)."""
-            if self.duo_mode or self._ipc is None or self._ipc_shutdown:
+            if self._ipc is None or self._ipc_shutdown:
                 return
             if self._ipc.connected:
                 return
@@ -3885,6 +3909,13 @@ if HAS_QT:
             """
             if self._ipc is None or not self._ipc.connected:
                 return False
+            if self.duo_mode:
+                # The DUO's animations are named differently from the GC573
+                # renderer's: mode 8 is its colorful cycle, mode 9 breathing.
+                if mode == 8:
+                    return self._ipc.set_led_mode("colorful")
+                if mode == 9:
+                    return self._ipc.set_led_mode("breathing")
             if mode == 8:
                 return self._ipc.set_led_mode("wave")
             if mode == 9:

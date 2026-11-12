@@ -251,12 +251,21 @@ sudo ./install.sh --no-loopback
 
 `--skip-loopback` is an alias, and `sudo ./install.sh --help` lists all options. Without `v4l2loopback`, `/dev/video10` is unavailable — capture the game window via PipeWire instead (see [Streaming & Recording with OBS](#-streaming--recording-with-obs)). Re-running the installer without the flag re-enables the Virtual Camera.
 
+### Building and testing from source
+```bash
+make -j"$(nproc)"          # libeverlive-core + both engines
+make -C tests test         # 7 unit-test suites
+make -C tests asan         # sanitizer run
+```
+
+`./build.sh` is a thin wrapper around the same top-level `make`.
+
 ### What the installer does:
 1. Installs the build/runtime dependencies: SDL2, FFmpeg development libraries (`libavcodec`/`libswresample`/`libavutil`), `libcap` (`setcap`), PipeWire/WirePlumber, `xcb-util-cursor`, PySide6, standard build tools, optional `lsfg-vk` frame generation layer (skip with `--no-framegen`), and `v4l2loopback` where packaged (skip with `--no-loopback`).
 2. Configures udev rules (`/etc/udev/rules.d/70-everlive.rules`) and early-boot VFIO autobind (`/etc/modules-load.d/everlive-vfio.conf` + `/etc/modprobe.d/everlive-vfio.conf`) granting your local user read/write access to the card's VFIO group and binding `vfio-pci`.
 3. Sets `/etc/security/limits.d/99-everlive-memlock.conf` and adds `cap_ipc_lock` capabilities so unprivileged users can pin DMA buffers required for native 4K and dual-HDMI capture.
 4. Blacklists the legacy out-of-tree `open_gc573` module (`/etc/modprobe.d/blacklist-everlive-legacy.conf`) so it cannot race with `vfio-pci` at boot.
-5. Compiles userspace engines: `opengc573-userd` (`gc573_user_streamer`, `everlive_userd`, `gc573_user_probe`, `gc573_user_diag`) and `opengc570d-userd` (`opengc570d-userd`, `gc570d-ctl`, `libgc570d-v4l2.so`).
+5. Compiles the shared core and userspace engines through the top-level `Makefile`: `libeverlive-core` (`everlive-ctl`, `libeverlive_core.so`), `opengc573-userd` (`gc573_user_streamer`, `everlive_userd`, `gc573_user_probe`, `gc573_user_diag`) and `opengc570d-userd` (`opengc570d-userd`, `gc570d-ctl`, `libgc570d-v4l2.so`). The core library, its headers, `everlive-ctl`, `everlive-service`, and the universal `everlive.service` unit are installed system-wide.
 6. Configures an isolated PipeWire audio sink (`50-everlive-capture.conf`) providing the dedicated `"EverLive Capture Audio"` source for OBS.
 7. Configures the Virtual Camera: `/etc/modprobe.d/everlive-v4l2loopback.conf` (`video_nr=10,11 card_label="EverLive Capture,EverLive Capture HDMI 2" exclusive_caps=0`) and loads the module at boot via `/etc/modules-load.d/`.
 8. Installs the desktop application launcher and icon.
@@ -361,6 +370,7 @@ Writing clean-room Linux drivers for proprietary capture hardware requires havin
 | Component | Path | License | Notes |
 |:---|:---|:---:|:---|
 | **Userspace Driver & Streamer** | `tools/opengc573-userd/` | **GPL-2.0-only** | Userspace VFIO implementation. Copyright © 2026 Everlite. |
+| **Shared Core Library** | `tools/libeverlive-core/` | **GPL-2.0-only** | Card registry and autodiscovery, YUY2 frame conversion, jsmn-backed JSON-RPC helpers, control-socket resolution, `everlive-ctl`, and the `everlive.service` unit. Copyright © 2026 Everlite. |
 | **Live Gamer DUO Engine** | `tools/opengc570d-userd/` | **GPL-2.0-only** | Derived from [`neoyagami/OpenGC570D`](https://github.com/neoyagami/OpenGC570D) with userspace VFIO-PCI + PipeWire port by [@PolygonPrincess](https://github.com/PolygonPrincess). Upstream base `4673bb9`, splitter PR #6 `484aa8d`, userspace import `afbb06e`. EverLive integration and frontend © 2026 Everlite & PolygonPrincess. |
 | **EverLive Console Hub** | `tools/everlive/`, `play.sh`, `install.sh` | **GPL-2.0-only** | Python/Qt hub and launcher scripts. Copyright © 2026 Everlite. |
 | **Legacy Kernel Module** | `legacy/open_gc573-kernel/` | **GPL-2.0-only** | Historical kernel module based on work by ostrich, extended by Everlite. |

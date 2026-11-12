@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Shared `libeverlive-core`:** card registry and subsystem-aware autodiscovery, YUY2 frame conversion, jsmn-backed JSON-RPC helpers, control-socket path resolution, and the `everlive-ctl` CLI.
+- **Unified control plane for the GC570D:** the DUO daemon now serves the same newline-delimited JSON-RPC 2.0 protocol on `everlive.sock` (status, LED, audio, OSD, aspect/scale, input switching, HPD, EDID policy) alongside the legacy `gc570d-ctl` socket.
+
+### Changed
+- **GC573 layout:** sources moved to `tools/opengc573-userd/src/`; the build links `libeverlive_core.a` and only applies SDL/FFmpeg/PipeWire flags to the translation units that need them.
+- **Build and install:** a top-level `Makefile` orchestrates the core and both engines; `build.sh`, `install.sh`, and `uninstall.sh` now install and remove `everlive-ctl`, the core library and headers, and the universal `everlive.service` unit.
+- **Launchers:** `play.sh` and `everlive-service.sh` share `everlive-ctl detect` instead of duplicating PCI ID logic.
+
+### Fixed
+- The GC573 engine no longer claims a GC570D that shares PCI ID `1461:0054`; discovery is subsystem-aware and fails safe when the subsystem ID is unreadable.
+- `everlive-ctl` connects to the live `everlive.sock` instead of the stale `everlive-experimental.sock` path.
+
+### Tests
+- Unified `tests/` suite linking the core archive, `test_json_rpc` (renamed from `test_ipc_json`), the framegen cadence test, `make -C tests asan`, and `run_tests.sh --asan`.
+
 ## [1.5.0] - 2026-11-10
 
 ### Added

@@ -1410,3 +1410,104 @@ void gc570d_everlive_push_audio(int port, const uint8_t *pcm, size_t bytes)
 	(void)bytes;
 #endif
 }
+
+/* ------------------------------------------------------------------ */
+/* Read-only accessors for the JSON-RPC control plane                  */
+/* ------------------------------------------------------------------ */
+
+static const char *everlive_osd_pos_name(int pos)
+{
+	switch (pos) {
+	case EVERLIVE_OSD_BR:
+		return "br";
+	case EVERLIVE_OSD_BL:
+		return "bl";
+	case EVERLIVE_OSD_TL:
+		return "tl";
+	case EVERLIVE_OSD_TR:
+	default:
+		return "tr";
+	}
+}
+
+static const char *everlive_aspect_name(int aspect)
+{
+	switch (aspect) {
+	case EVERLIVE_ASPECT_16_9:
+		return "16:9";
+	case EVERLIVE_ASPECT_4_3:
+		return "4:3";
+	case EVERLIVE_ASPECT_STRETCH:
+		return "stretch";
+	case EVERLIVE_ASPECT_AUTO:
+	default:
+		return "auto";
+	}
+}
+
+static const char *everlive_scale_name(int scale)
+{
+	return scale == EVERLIVE_SCALE_INTEGER ? "integer" : "fit";
+}
+
+bool gc570d_everlive_running(void)
+{
+	return atomic_load_explicit(&g_everlive.running, __ATOMIC_RELAXED);
+}
+
+bool gc570d_everlive_headless(void)
+{
+	if (!atomic_load_explicit(&g_everlive.started, __ATOMIC_RELAXED))
+		return true;
+	return READ_ONCE(g_everlive.opt.headless);
+}
+
+int gc570d_everlive_port(void)
+{
+	return atomic_load_explicit(&g_everlive.port, __ATOMIC_RELAXED);
+}
+
+bool gc570d_everlive_pip(void)
+{
+	return atomic_load_explicit(&g_everlive.pip, __ATOMIC_RELAXED);
+}
+
+bool gc570d_everlive_osd(void)
+{
+	return atomic_load_explicit(&g_everlive.osd, __ATOMIC_RELAXED);
+}
+
+const char *gc570d_everlive_osd_pos(void)
+{
+	return everlive_osd_pos_name(
+		atomic_load_explicit(&g_everlive.osd_pos, __ATOMIC_RELAXED));
+}
+
+const char *gc570d_everlive_aspect(void)
+{
+	return everlive_aspect_name(
+		atomic_load_explicit(&g_everlive.aspect, __ATOMIC_RELAXED));
+}
+
+const char *gc570d_everlive_scale(void)
+{
+	return everlive_scale_name(
+		atomic_load_explicit(&g_everlive.scale, __ATOMIC_RELAXED));
+}
+
+int gc570d_everlive_volume(void)
+{
+	return atomic_load_explicit(&g_everlive.volume_pct, __ATOMIC_RELAXED);
+}
+
+bool gc570d_everlive_muted(void)
+{
+	return atomic_load_explicit(&g_everlive.muted, __ATOMIC_RELAXED);
+}
+
+const char *gc570d_everlive_v4l2(int port)
+{
+	if (port < 0 || port > 1)
+		return "";
+	return g_everlive.opt.v4l2[port] ? g_everlive.opt.v4l2[port] : "";
+}
