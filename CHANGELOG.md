@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Lock-free shared frame store and reusable V4L2 preload engine:**
+  - `libeverlive-core` now provides a triple-buffered POSIX shared-memory frame store (`everlive_framestore`) and a card-descriptor-driven V4L2 virtual-camera engine (`libeverlive-core/v4l2`).
+  - GC570D keeps `/dev/video60` and `/dev/video61` through `libgc570d-v4l2.so`, now built from the shared engine.
+  - GC573 gains `libgc573-v4l2.so`, exposing the live post-tonemap capture feed as `/dev/video63` with 4K60, 1440p120 and 1080p240 modes, without `v4l2loopback` or any kernel module.
+  - The GC573 streamer publishes tonemapped frames (and the no-signal standby card) to `/dev/shm/gc573_v4l2_shm` from the preview thread; the SDL window, loopback sink and preload feed see the same picture.
 - **Shared `libeverlive-core`:** card registry and subsystem-aware autodiscovery, YUY2 frame conversion, jsmn-backed JSON-RPC helpers, control-socket path resolution, and the `everlive-ctl` CLI.
 - **Unified control plane for the GC570D:** the DUO daemon now serves the same newline-delimited JSON-RPC 2.0 protocol on `everlive.sock` (status, LED, audio, OSD, aspect/scale, input switching, HPD, EDID policy) alongside the legacy `gc570d-ctl` socket.
 - **System-wide install and Arch Linux packaging:**

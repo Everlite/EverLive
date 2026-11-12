@@ -46,6 +46,8 @@ As of **EverLive v1.0.0**, this userspace engine is the default, primary driver 
 | **`gc573_user_audio.[ch]`** | PCIe DMA audio ring buffer, IEC 61937 scan/mute guard, audio worker thread and SDL2 playback. |
 | **`gc573_user_bitstream.[ch]`** | IEC 61937 unpacker plus AC-3/DTS decoder (`libavcodec`) and stereo downmix (`libswresample`). |
 | **`gc573_user_nosignal.[ch]`** | Procedural YUYV standby screen (gradient, grid, icon, bitmap-font text) for the window and the V4L2 sink. |
+| **`gc573_camera.[ch]`** | Publishes post-tonemap frames and the standby card to the shared `/dev/shm/gc573_v4l2_shm` store. |
+| **`libgc573-v4l2.so`** | Optional module-free `LD_PRELOAD` bridge exposing `/dev/video63` via the shared core V4L2 engine. |
 | **`gc573_user_video.[ch]`** | Mode table, timings verification, and FPGA VIP configuration. |
 | **`gc573_user_fpga.[ch]`** | Artix-7 FPGA register definitions and RGB lighting control. |
 | **`gc573_vfio.[ch]`** | Low-level VFIO container, group, device, and IOMMU DMA mapping primitives. |
@@ -68,8 +70,9 @@ make -C tools/libeverlive-core
 make -C tools/opengc573-userd -j"$(nproc)"
 ```
 
-From the repository root, `make` (or `./build.sh`) builds the core and both
-engines in the correct order.
+This also builds the optional `libgc573-v4l2.so` preload bridge. From the
+repository root, `make` (or `./build.sh`) builds the core and both engines in
+the correct order.
 
 ---
 
@@ -187,6 +190,27 @@ audio tap and the VFIO container keep running. When a signal is already locked,
 the sink is negotiated immediately so the next frame reaches OBS without
 waiting for the writer's retry interval. `device` is optional and must be an
 absolute `/dev/` path; it defaults to `/dev/video10`.
+
+## Module-free V4L2 preload (`/dev/video63`)
+
+`libgc573-v4l2.so` exposes the live capture feed as a virtual V4L2 camera
+without `v4l2loopback` or any other kernel module. It is installed to
+`/usr/local/lib` (or `$(PREFIX)/lib`):
+
+```bash
+LD_PRELOAD=/usr/local/lib/libgc573-v4l2.so obs
+```
+
+The preload library presents `/dev/video63` only inside the process it is
+loaded into, reading post-tonemap frames from
+`/dev/shm/gc573_v4l2_shm`. It supports 4K60, 1440p120, 1080p240 and the usual
+lower modes, with YUYV plus NV12/YUV420/RGB/BGR conversions. This is separate
+from the `/dev/video10` v4l2loopback sink: the preload path needs no kernel
+module and does not create a system-wide device node. The GC570D uses the same
+engine at `/dev/video60` and `/dev/video61` via `libgc570d-v4l2.so`.
+
+Set `EVERLIVE_V4L2_TARGET` to a comma-separated list of executable names (or
+`*`) to keep the shim dormant in child processes that inherit `LD_PRELOAD`.
 
 ## Live Mode Switch
 

@@ -404,6 +404,7 @@ chmod 0755 "${USERD_DIR}/gc573_user_streamer" "${USERD_DIR}/everlive_userd" \
     "${GC570D_DIR}/opengc570d-userd" "${GC570D_DIR}/gc570d-ctl" \
     "${SCRIPT_DIR}/play.sh"
 chmod 0644 "${GC570D_DIR}/libgc570d-v4l2.so" 2>/dev/null || true
+chmod 0644 "${USERD_DIR}/libgc573-v4l2.so" 2>/dev/null || true
 
 # Core library, everlive-ctl, everlive-service, headers, and systemd unit.
 make -C "${CORE_DIR}" install

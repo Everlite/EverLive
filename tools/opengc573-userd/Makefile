@@ -23,6 +23,7 @@ PW_CFLAGS  := $(shell $(PKG_CONFIG) --cflags libpipewire-0.3 2>/dev/null)
 PW_LIBS    := $(shell $(PKG_CONFIG) --libs libpipewire-0.3 2>/dev/null)
 
 CORE_LIB := ../libeverlive-core/libeverlive_core.a
+CORE_V4L2_DIR := ../libeverlive-core/v4l2
 
 # Hardware / register layer: no SDL, no FFmpeg, no PipeWire.
 HW_OBJS := \
@@ -54,7 +55,8 @@ ENTRY_OBJS := \
 	src/everlive_userd.o \
 	src/gc573_user_diag.o
 
-TARGETS := gc573_user_probe gc573_user_streamer everlive_userd gc573_user_diag
+TARGETS := gc573_user_probe gc573_user_streamer everlive_userd gc573_user_diag \
+           libgc573-v4l2.so
 
 all: $(TARGETS)
 
@@ -69,6 +71,22 @@ everlive_userd: src/everlive_userd.o $(HW_OBJS) $(CORE_LIB)
 
 gc573_user_diag: src/gc573_user_diag.o $(HW_OBJS) $(CORE_LIB)
 	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS)
+
+libgc573-v4l2.so: src/gc573-v4l2.c \
+		$(CORE_V4L2_DIR)/everlive_v4l2_card.h \
+		$(CORE_V4L2_DIR)/everlive_v4l2_state.h \
+		$(CORE_V4L2_DIR)/everlive_v4l2_state.c \
+		$(CORE_V4L2_DIR)/everlive_v4l2_preload.c \
+		../libeverlive-core/everlive_framestore.h \
+		$(CORE_LIB)
+	$(CC) -O2 -g -Wall -Wextra -Wno-unused-parameter \
+		-std=gnu11 -D_GNU_SOURCE -shared -fPIC \
+		-Isrc -I../libeverlive-core -I$(CORE_V4L2_DIR) \
+		-o $@ src/gc573-v4l2.c \
+		$(CORE_V4L2_DIR)/everlive_v4l2_state.c \
+		$(CORE_V4L2_DIR)/everlive_v4l2_preload.c \
+		$(CORE_LIB) -ldl -lrt -pthread
+	@chmod 0644 $@
 
 $(CORE_LIB):
 	$(MAKE) -C ../libeverlive-core
@@ -102,13 +120,16 @@ clean:
 PREFIX ?= /usr/local
 DESTDIR ?=
 BINDIR := $(DESTDIR)$(PREFIX)/bin
+LIBDIR := $(DESTDIR)$(PREFIX)/lib
 
 install: all
-	install -d $(BINDIR)
+	install -d $(BINDIR) $(LIBDIR)
 	install -m 0755 gc573_user_streamer everlive_userd gc573_user_probe $(BINDIR)/
+	install -m 0644 libgc573-v4l2.so $(LIBDIR)/
 	command -v setcap >/dev/null 2>&1 && setcap cap_ipc_lock=+ep $(BINDIR)/gc573_user_streamer 2>/dev/null || true
 
 uninstall:
 	rm -f $(BINDIR)/gc573_user_streamer $(BINDIR)/everlive_userd $(BINDIR)/gc573_user_probe
+	rm -f $(LIBDIR)/libgc573-v4l2.so
 
 .PHONY: all test selftest clean install uninstall

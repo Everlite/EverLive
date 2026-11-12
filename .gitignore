@@ -40,6 +40,9 @@ tools/opengc570d-userd/opengc570d-userd
 tools/opengc570d-userd/gc570d-ctl
 tools/opengc570d-userd/libgc570d-v4l2.so
 
+# GC573 userspace engine binaries
+tools/opengc573-userd/libgc573-v4l2.so
+
 # Test binaries
 tests/test_edid
 tests/test_config
