@@ -35,12 +35,12 @@ clean:
 	+$(MAKE) -C $(GC570D_DIR) clean
 	+$(MAKE) -C $(TESTS_DIR) clean
 
-# GC573 has no install target: its binaries, bind script, udev rule, and
-# systemd wiring are placed by install.sh.  Core and GC570D own their files.
 install: all
 	+$(MAKE) -C $(CORE_DIR) install
+	+$(MAKE) -C $(GC573_DIR) install
 	+$(MAKE) -C $(GC570D_DIR) install
 
 uninstall:
 	+$(MAKE) -C $(CORE_DIR) uninstall
+	+$(MAKE) -C $(GC573_DIR) uninstall
 	+$(MAKE) -C $(GC570D_DIR) uninstall

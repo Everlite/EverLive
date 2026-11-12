@@ -98,4 +98,16 @@ framegen-selftest:
 clean:
 	rm -f src/*.o src/*.d $(TARGETS)
 
-.PHONY: all test selftest clean
+PREFIX ?= /usr/local
+DESTDIR ?=
+BINDIR := $(DESTDIR)$(PREFIX)/bin
+
+install: all
+	install -d $(BINDIR)
+	install -m 0755 gc573_user_streamer everlive_userd gc573_user_probe $(BINDIR)/
+	command -v setcap >/dev/null 2>&1 && setcap cap_ipc_lock=+ep $(BINDIR)/gc573_user_streamer 2>/dev/null || true
+
+uninstall:
+	rm -f $(BINDIR)/gc573_user_streamer $(BINDIR)/everlive_userd $(BINDIR)/gc573_user_probe
+
+.PHONY: all test selftest clean install uninstall

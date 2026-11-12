@@ -408,6 +408,9 @@ chmod 0644 "${GC570D_DIR}/libgc570d-v4l2.so" 2>/dev/null || true
 # Core library, everlive-ctl, everlive-service, headers, and systemd unit.
 make -C "${CORE_DIR}" install
 
+# Install the GC573 engine binaries into /usr/local/bin with cap_ipc_lock.
+make -C "${USERD_DIR}" install
+
 # Install the GC570D helpers (udev rule, memlock, systemd unit, sleep hook)
 # through the engine's own Makefile so both installers stay in sync.
 make -C "${GC570D_DIR}" install
@@ -416,7 +419,9 @@ make -C "${GC570D_DIR}" install
 install -m 0755 "${USERD_DIR}/vfio_pci_bind.sh" /usr/local/bin/vfio_pci_bind.sh
 
 setcap cap_ipc_lock=+ep "${USERD_DIR}/gc573_user_streamer" 2>/dev/null || true
+setcap cap_ipc_lock=+ep /usr/local/bin/gc573_user_streamer 2>/dev/null || true
 setcap cap_ipc_lock=+ep "${GC570D_DIR}/opengc570d-userd" 2>/dev/null || true
+setcap cap_ipc_lock=+ep /usr/local/bin/opengc570d-userd 2>/dev/null || true
 echo -e "${GREEN}[+] Userspace VFIO Engines erfolgreich gebaut & berechtigt!${NC}"
 
 # Python GUI-Umgebung (PySide6) für Benutzer prüfen und bei Bedarf einrichten

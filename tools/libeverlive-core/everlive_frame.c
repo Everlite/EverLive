@@ -59,7 +59,7 @@ void everlive_yuy2_to_rgb_scaled(const uint8_t *src, uint8_t *dst,
 				 int src_w, int src_h,
 				 int dst_w, int dst_h)
 {
-	if (!src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0)
+	if (!src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0 || (src_w & 1))
 		return;
 
 	/* Fixed-point step in 16.16 format */

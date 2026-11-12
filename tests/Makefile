@@ -25,8 +25,10 @@ TARGETS := test_card_registry test_frame_convert test_ctl_proto test_json_rpc \
 
 all: $(TARGETS)
 
-$(CORE_LIB):
+$(CORE_LIB): FORCE
 	$(MAKE) -C $(CORE_DIR)
+
+.PHONY: FORCE
 
 # --- libeverlive-core ---------------------------------------------------
 test_card_registry: test_card_registry.c $(CORE_LIB)

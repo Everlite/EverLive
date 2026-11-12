@@ -11,6 +11,7 @@
 #include "everlive_json.h"
 
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -134,7 +135,7 @@ static bool json_token_to_double(const jsmntok_t *tok, const char *json,
 	buf[len] = '\0';
 	errno = 0;
 	val = strtod(buf, &end);
-	if (errno || end == buf || *end != '\0')
+	if (errno || end == buf || *end != '\0' || !isfinite(val))
 		return false;
 	*out = val;
 	return true;

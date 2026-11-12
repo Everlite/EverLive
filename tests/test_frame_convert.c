@@ -97,6 +97,11 @@ static void test_invalid_parameters(void)
 	for (size_t i = 0; i < sizeof(odd_dst); i++)
 		assert(odd_dst[i] == 0xAA);
 
+	memset(odd_dst, 0x55, sizeof(odd_dst));
+	everlive_yuy2_to_rgb_scaled(odd_src, odd_dst, 3, 1, 2, 2);
+	for (size_t i = 0; i < sizeof(odd_dst); i++)
+		assert(odd_dst[i] == 0x55);
+
 	printf("    Edge cases OK.\n");
 }
 

@@ -334,6 +334,13 @@ int gc570d_led_set_rgb(struct gc570d_dev *gc, u8 red, u8 green, u8 blue)
 	gc->led_subleds[0].brightness = red;
 	gc->led_subleds[1].brightness = green;
 	gc->led_subleds[2].brightness = blue;
+	gc->led_subleds[0].intensity = red;
+	gc->led_subleds[1].intensity = green;
+	gc->led_subleds[2].intensity = blue;
+	if (red || green || blue)
+		gc->led_mcdev.led_cdev.brightness = GC570D_LED_MAX_BRIGHTNESS;
+	else
+		gc->led_mcdev.led_cdev.brightness = LED_OFF;
 
 	ret = gc570d_led_hw_init(gc);
 	if (!ret)
@@ -396,6 +403,21 @@ int gc570d_led_set_effect(struct gc570d_dev *gc, const char *effect)
 		gc->led_mcdev.led_cdev.brightness = LED_OFF;
 		ret = gc570d_led_shutdown(gc);
 		goto out_unlock;
+	}
+
+	/*
+	 * When switching from 'off' (or zero brightness) to an active effect,
+	 * restore default brightness so breathing and colorful effects do not
+	 * scale all color channels to zero.
+	 */
+	if (gc->led_mcdev.led_cdev.brightness == LED_OFF)
+		gc->led_mcdev.led_cdev.brightness = GC570D_LED_MAX_BRIGHTNESS;
+
+	if (breathing &&
+	    gc->led_subleds[0].intensity == 0 &&
+	    gc->led_subleds[1].intensity == 0 &&
+	    gc->led_subleds[2].intensity == 0) {
+		gc->led_subleds[2].intensity = GC570D_LED_WINDOWS_BLUE;
 	}
 
 	ret = led_mc_calc_color_components(&gc->led_mcdev,

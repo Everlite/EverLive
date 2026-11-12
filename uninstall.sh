@@ -12,6 +12,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 TARGET_USER="${SUDO_USER:-$USER}"
+TARGET_UID="$(id -u "${TARGET_USER}" 2>/dev/null || echo 0)"
 # Resolve the home directory without eval-ing user-controlled text.
 TARGET_HOME="$(getent passwd "${TARGET_USER}" | cut -d: -f6)"
 [ -n "${TARGET_HOME}" ] || TARGET_HOME="/home/${TARGET_USER}"
@@ -20,7 +21,7 @@ echo "[*] Deinstalliere EverLive..."
 
 # 1. Laufende Daemons beenden
 killall -9 everlive_userd gc573_user_streamer opengc570d-userd gc570d-ctl 2>/dev/null || true
-EVERLIVE_RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+EVERLIVE_RUNTIME="${XDG_RUNTIME_DIR:-/run/user/${TARGET_UID}}"
 rm -f "${EVERLIVE_RUNTIME}/gc570d/control.sock" 2>/dev/null || true
 rm -f "${EVERLIVE_RUNTIME}/everlive.sock" "${EVERLIVE_RUNTIME}/everlive.sock.lock" 2>/dev/null || true
 rm -f /dev/shm/gc570d_v4l2_shm 2>/dev/null || true
@@ -28,6 +29,11 @@ rm -f /dev/shm/gc570d_v4l2_shm 2>/dev/null || true
 # 2. VFIO & Memlock Regeln entfernen
 rm -f /etc/udev/rules.d/99-gc573-vfio.rules
 rm -f /etc/security/limits.d/99-everlive-memlock.conf
+# GC573 engine binaries:
+if [ -d "${SCRIPT_DIR}/tools/opengc573-userd" ]; then
+    make -C "${SCRIPT_DIR}/tools/opengc573-userd" uninstall >/dev/null 2>&1 || true
+fi
+rm -f /usr/local/bin/gc573_user_streamer /usr/local/bin/everlive_userd /usr/local/bin/gc573_user_probe
 # GC570D (DUO) packaging installed through tools/opengc570d-userd/Makefile:
 # binaries, udev rule, memlock limits, systemd user unit and sleep hook.
 if [ -d "${SCRIPT_DIR}/tools/opengc570d-userd" ]; then

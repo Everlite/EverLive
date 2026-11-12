@@ -84,6 +84,10 @@ static void test_json_get_double(void)
 		    "Extracts positive float 'gain': 0.85");
 	TEST_ASSERT(!everlive_json_get_double(json, "nonexistent", &val),
 		    "Fails cleanly on missing float key");
+	TEST_ASSERT(!everlive_json_get_double("{\"val\":NaN}", "val", &val),
+		    "Rejects NaN in double field");
+	TEST_ASSERT(!everlive_json_get_double("{\"val\":Infinity}", "val", &val),
+		    "Rejects Infinity in double field");
 }
 
 static void test_json_escape_into(void)

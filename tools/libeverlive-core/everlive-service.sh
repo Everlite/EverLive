@@ -90,27 +90,36 @@ echo "[*] everlive-service: Initializing ${CARD_MODEL} (${CARD_PCI:-unknown BDF}
 if [ "$CARD_MODEL" = "gc570d" ]; then
     if [ -x "${REPO_DIR}/tools/opengc570d-userd/opengc570d-userd" ]; then
         ENGINE_BIN="${REPO_DIR}/tools/opengc570d-userd/opengc570d-userd"
-    else
+    elif [ -x "/usr/local/bin/opengc570d-userd" ]; then
         ENGINE_BIN="/usr/local/bin/opengc570d-userd"
+    else
+        ENGINE_BIN="$(command -v opengc570d-userd 2>/dev/null || echo /usr/local/bin/opengc570d-userd)"
     fi
     BIND_SCRIPT=""
     for candidate in \
         "${REPO_DIR}/tools/opengc570d-userd/gc570d-vfio-bind.sh" \
         "/usr/local/libexec/gc570d-vfio-bind.sh" \
-        "/usr/local/bin/gc570d-vfio-bind.sh"; do
+        "/usr/local/bin/gc570d-vfio-bind.sh" \
+        "/usr/libexec/gc570d-vfio-bind.sh" \
+        "/usr/bin/gc570d-vfio-bind.sh"; do
         [ -x "${candidate}" ] && BIND_SCRIPT="${candidate}" && break
     done
     ENGINE_ARGS=(--headless --loopback)
 else
     if [ -x "${REPO_DIR}/tools/opengc573-userd/gc573_user_streamer" ]; then
         ENGINE_BIN="${REPO_DIR}/tools/opengc573-userd/gc573_user_streamer"
-    else
+    elif [ -x "/usr/local/bin/gc573_user_streamer" ]; then
         ENGINE_BIN="/usr/local/bin/gc573_user_streamer"
+    else
+        ENGINE_BIN="$(command -v gc573_user_streamer 2>/dev/null || echo /usr/local/bin/gc573_user_streamer)"
     fi
     BIND_SCRIPT=""
     for candidate in \
         "${REPO_DIR}/tools/opengc573-userd/vfio_pci_bind.sh" \
-        "/usr/local/bin/vfio_pci_bind.sh"; do
+        "/usr/local/libexec/vfio_pci_bind.sh" \
+        "/usr/local/bin/vfio_pci_bind.sh" \
+        "/usr/libexec/vfio_pci_bind.sh" \
+        "/usr/bin/vfio_pci_bind.sh"; do
         [ -x "${candidate}" ] && BIND_SCRIPT="${candidate}" && break
     done
     ENGINE_ARGS=(--headless)
