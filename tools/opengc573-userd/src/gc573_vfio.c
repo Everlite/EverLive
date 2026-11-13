@@ -35,6 +35,41 @@ static int find_gc573_pci_device(char *out_addr, size_t max_len, int *out_group)
 	return -ENODEV;
 }
 
+int gc573_vfio_resolve(const char *pci_addr, char *bdf, size_t len,
+		       int *iommu_group)
+{
+	char path[512];
+	char link_buf[512];
+	ssize_t n;
+	char *base;
+
+	if (!bdf || !len)
+		return -EINVAL;
+	if (!pci_addr || !pci_addr[0]) {
+		int group = -1;
+		int ret = find_gc573_pci_device(bdf, len, &group);
+
+		if (ret == 0 && iommu_group)
+			*iommu_group = group;
+		return ret;
+	}
+
+	snprintf(bdf, len, "%s", pci_addr);
+	if (iommu_group) {
+		*iommu_group = -1;
+		snprintf(path, sizeof(path),
+			 "/sys/bus/pci/devices/%s/iommu_group", pci_addr);
+		n = readlink(path, link_buf, sizeof(link_buf) - 1);
+		if (n > 0) {
+			link_buf[n] = '\0';
+			base = strrchr(link_buf, '/');
+			if (base)
+				*iommu_group = atoi(base + 1);
+		}
+	}
+	return 0;
+}
+
 int gc573_vfio_init(struct gc573_vfio_ctx *ctx, const char *pci_addr)
 {
 	struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
@@ -98,10 +133,16 @@ int gc573_vfio_init(struct gc573_vfio_ctx *ctx, const char *pci_addr)
 	snprintf(group_path, sizeof(group_path), "/dev/vfio/%d", ctx->iommu_group);
 	ctx->group_fd = open(group_path, O_RDWR);
 	if (ctx->group_fd < 0) {
-		pr_err("Cannot open %s: %s (Has vfio-pci claimed the device? Try running vfio_bind.sh)",
-		       group_path, strerror(errno));
+		int err = errno;
+
+		if (err == EBUSY)
+			pr_err("Cannot open %s: %s (another process is using the capture card)",
+			       group_path, strerror(err));
+		else
+			pr_err("Cannot open %s: %s (Has vfio-pci claimed the device? Try running vfio_bind.sh)",
+			       group_path, strerror(err));
 		gc573_vfio_cleanup(ctx);
-		return -errno;
+		return -err;
 	}
 
 	struct vfio_group_status group_status = { .argsz = sizeof(group_status) };

@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **System-wide install and Arch Linux packaging:**
   - Top-level `Makefile` supports `make install DESTDIR=... PREFIX=/usr`. It installs the app to `$(PREFIX)/lib/everlive` with an `everlive` launcher, plus udev, `vfio-pci`, memlock, PipeWire, desktop, and systemd files in their standard locations.
   - `everlive` and `everlive-git` PKGBUILDs in `packaging/arch/`.
+- **Cross-user card handoff (GC573):** two users on one machine can share the capture card without shutting anything down by hand. Starting capture asks the other user's engine (or idle LED daemon) to release the card; that engine pauses, the Control Hub shows "Capture Paused" with a **Take Back Capture** button, and it resumes by itself when the other session ends. Only users with group access to the card's VFIO node may ask. The protocol lives in `libeverlive-core` (`everlive_handoff.h`); the GC570D engine does not use it yet.
 
 ### Changed
 - **Documentation:** expanded `docs/ADDING_A_NEW_CARD.md` with the shared frame-store and optional module-free V4L2 preload integration contract, and cross-linked it from the root/engine documentation.

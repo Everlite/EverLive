@@ -64,6 +64,18 @@ static inline void gc573_vfio_irq_unlock(struct gc573_vfio_ctx *ctx)
 int gc573_vfio_init(struct gc573_vfio_ctx *ctx, const char *pci_addr);
 
 /**
+ * gc573_vfio_resolve - Find the card without opening it
+ * @pci_addr: PCI BDF address, or NULL for auto-detect
+ * @bdf: Receives the PCI BDF address
+ * @len: Size of @bdf
+ * @iommu_group: Optional; receives the IOMMU group or -1
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int gc573_vfio_resolve(const char *pci_addr, char *bdf, size_t len,
+		       int *iommu_group);
+
+/**
  * gc573_vfio_cleanup - Unmap memory and close all VFIO descriptors
  * @ctx: Context structure
  */

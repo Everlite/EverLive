@@ -83,6 +83,50 @@ def socket_path() -> str:
     return os.path.join(f"/tmp/everlive-{os.getuid()}", SOCKET_NAME)
 
 
+def runtime_dir() -> str:
+    """Mirror ``everlive_ipc_runtime_dir()`` in libeverlive-core."""
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if base and os.path.isdir(base):
+        return base
+    fallback = f"/run/user/{os.getuid()}"
+    if os.path.isdir(fallback):
+        return fallback
+    return f"/tmp/everlive-{os.getuid()}"
+
+
+def paused_state():
+    """Describe one of this user's engines that handed the card to another user.
+
+    A paused engine publishes ``everlive.paused`` in the runtime directory
+    (see ``everlive_handoff.h``).  Returns ``{"pid": int, "holder": str}``, or
+    ``None`` when no engine is paused.  A marker left behind by a killed
+    process is ignored.
+    """
+    path = os.path.join(runtime_dir(), "everlive.paused")
+    fields = {}
+    try:
+        with open(path, "r", errors="ignore") as f:
+            for line in f:
+                key, sep, value = line.strip().partition("=")
+                if sep:
+                    fields[key] = value
+        pid = int(fields.get("pid", "0"))
+    except (OSError, ValueError):
+        return None
+    if pid <= 1:
+        return None
+    try:
+        if os.stat(f"/proc/{pid}").st_uid != os.getuid():
+            return None
+        with open(f"/proc/{pid}/comm", "r") as f:
+            comm = f.read().strip()
+    except OSError:
+        return None
+    if not comm.startswith(("gc573_user_stre", "opengc570d-user")):
+        return None
+    return {"pid": pid, "holder": fields.get("holder") or "another user"}
+
+
 def probe(timeout: float = 0.25):
     """Synchronously ask a running streamer who it is.
 

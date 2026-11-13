@@ -20,7 +20,7 @@ TARGET_CLI    := everlive-ctl
 
 CORE_OBJS := everlive_card.o everlive_frame.o everlive_framestore.o \
              everlive_json.o everlive_ipc.o everlive_ctl_proto.o \
-             third_party/jsmn.o
+             everlive_handoff.o third_party/jsmn.o
 CTL_OBJS  := everlive_ctl.o
 
 INCLUDES := -I.
@@ -70,7 +70,7 @@ install: all
 	ln -sf $(SONAME) $(DESTDIR)$(LIBDIR)/$(TARGET_SHARED)
 	install -m 0644 $(TARGET_STATIC) $(DESTDIR)$(LIBDIR)/$(TARGET_STATIC)
 	install -m 0644 everlive_card.h everlive_frame.h everlive_framestore.h \
-		everlive_ctl.h everlive_json.h everlive_ipc.h \
+		everlive_ctl.h everlive_json.h everlive_ipc.h everlive_handoff.h \
 		$(DESTDIR)$(INCLUDEDIR)/
 	sed 's|/usr/local|$(PREFIX)|g' everlive.service \
 		> $(DESTDIR)$(SYSTEMD_USER_DIR)/everlive.service

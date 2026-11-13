@@ -33,6 +33,7 @@
 #include "gc573_camera.h"
 #include "gc573_user_log.h"
 #include "gc573_user_font8x8.h"
+#include "everlive_handoff.h"
 #include <SDL2/SDL.h>
 #include <libswscale/swscale.h>
 #include <stdint.h>
@@ -515,6 +516,163 @@ static void sig_handler(int sig)
 {
 	(void)sig;
 	g_running = 0;
+}
+
+/*
+ * Cross-user handoff (see everlive_handoff.h).  Another user starting capture
+ * asks this engine to release the card: the request lands on the handoff
+ * thread, which only raises these flags.  The main loop then runs the normal
+ * teardown, closes VFIO and parks in handoff_pause() until the card is free
+ * again, at which point the engine re-executes itself with its original
+ * arguments.
+ */
+#define HANDOFF_RELEASE_TIMEOUT_MS	15000
+#define HANDOFF_RESUME_GRACE_MS		2000
+#define HANDOFF_RESUME_ENV		"EVERLIVE_HANDOFF_RESUME"
+
+static volatile sig_atomic_t g_handoff_takeback;
+/* Held for the whole capture session: EOF on the peer's end frees it. */
+static int g_handoff_lease_fd = -1;
+
+static void handoff_request_cb(void *user)
+{
+	(void)user;
+	__atomic_store_n(&g_running, 0, __ATOMIC_RELAXED);
+}
+
+static void handoff_takeback_handler(int sig)
+{
+	(void)sig;
+	g_handoff_takeback = 1;
+}
+
+static void mark_extra_fds_close_on_exec(int keep_a, int keep_b, int keep_c);
+
+/*
+ * Wait without the card until @fd reports that @holder is done (or the user
+ * asks for the card back with SIGUSR1), then start over.  Never returns.
+ */
+static void handoff_pause(char **argv, const char *card_id, int fd,
+			  const struct everlive_handoff_peer *holder)
+{
+	bool takeback = false;
+	int grace_ms = HANDOFF_RESUME_GRACE_MS;
+
+	g_handoff_takeback = 0;
+	__atomic_store_n(&g_running, 1, __ATOMIC_RELAXED);
+	signal(SIGINT, sig_handler);
+	signal(SIGTERM, sig_handler);
+	signal(SIGUSR1, handoff_takeback_handler);
+
+	(void)everlive_handoff_state_write(card_id, holder);
+	printf("[HANDOFF] Paused: the capture card is in use by user '%s'.\n",
+	       holder->name);
+	printf("[HANDOFF] Capture resumes automatically when they finish; "
+	       "send SIGUSR1 to take the card back now.\n");
+	fflush(stdout);
+
+	while (g_running && !g_handoff_takeback) {
+		if (everlive_handoff_wait(fd, 500))
+			break;
+	}
+	if (g_running && g_handoff_takeback)
+		takeback = true;
+
+	/*
+	 * The other engine often restarts right away (a Gaming <-> Studio
+	 * switch does).  Give it a moment to come back before reclaiming.
+	 */
+	while (g_running && !takeback && grace_ms > 0) {
+		usleep(100000);
+		grace_ms -= 100;
+		if (g_handoff_takeback)
+			takeback = true;
+	}
+
+	everlive_handoff_state_clear();
+	if (fd >= 0)
+		close(fd);
+	if (!g_running) {
+		printf("[HANDOFF] Stopped while paused.\n");
+		exit(0);
+	}
+
+	if (takeback) {
+		unsetenv(HANDOFF_RESUME_ENV);
+		printf("[HANDOFF] Taking the capture card back...\n");
+	} else {
+		setenv(HANDOFF_RESUME_ENV, "1", 1);
+		printf("[HANDOFF] Capture card is free again; resuming...\n");
+	}
+	fflush(stdout);
+	fflush(stderr);
+
+	signal(SIGUSR1, SIG_DFL);
+	mark_extra_fds_close_on_exec(-1, -1, -1);
+	execv("/proc/self/exe", argv);
+	fprintf(stderr, "[HANDOFF] Restart failed: %s\n", strerror(errno));
+	exit(1);
+}
+
+/*
+ * Ask whoever holds @card_id to release it.
+ *
+ * Returns 0 when the card was handed over, -ENOENT when nobody is listening
+ * and another negative errno when the holder keeps it.  In resume mode a
+ * refusal parks this process in handoff_pause() instead of returning.
+ */
+static int handoff_claim(char **argv, const char *card_id, bool resume)
+{
+	struct everlive_handoff_peer holder;
+	int fd = everlive_handoff_connect(card_id, &holder);
+	int ret;
+
+	if (fd < 0)
+		return fd;
+	if (holder.uid == (unsigned int)getuid() &&
+	    !getenv("EVERLIVE_HANDOFF_SAME_USER")) {
+		/*
+		 * Same user: keep the old "second instance fails" behaviour.
+		 * EVERLIVE_HANDOFF_SAME_USER=1 lifts this for testing the
+		 * handoff with a single account.
+		 */
+		close(fd);
+		return -EEXIST;
+	}
+
+	printf("[HANDOFF] Capture card is in use by user '%s'; %s\n",
+	       holder.name, resume ? "checking whether it is free..."
+				   : "asking them to release it...");
+	fflush(stdout);
+
+	ret = everlive_handoff_request(fd, resume, HANDOFF_RELEASE_TIMEOUT_MS);
+	switch (ret) {
+	case EVERLIVE_HANDOFF_RELEASED:
+		g_handoff_lease_fd = fd;
+		printf("[HANDOFF] '%s' released the capture card.\n",
+		       holder.name);
+		return 0;
+	case EVERLIVE_HANDOFF_GONE:
+		close(fd);
+		printf("[HANDOFF] '%s' released the capture card.\n",
+		       holder.name);
+		return 0;
+	case -EBUSY:
+		handoff_pause(argv, card_id, fd, &holder);
+		return -EBUSY;	/* not reached */
+	case -EACCES:
+		fprintf(stderr, "[HANDOFF] '%s' refused: this user has no "
+			"access to the card's VFIO group.\n", holder.name);
+		break;
+	case -ETIMEDOUT:
+		fprintf(stderr, "[HANDOFF] '%s' did not release the card "
+			"in time.\n", holder.name);
+		break;
+	default:
+		break;
+	}
+	close(fd);
+	return ret;
 }
 
 static bool parse_led_color(const char *spec, uint8_t *r, uint8_t *g, uint8_t *b)
@@ -6135,8 +6293,13 @@ int main(int argc, char *argv[])
 	bool have_signal = false;
 	unsigned int signal_lost_hits = 0;
 	bool rate_probe_after_scdt = false;
+	char card_id[64] = "";
+	int card_group = -1;
+	bool handoff_resume = getenv(HANDOFF_RESUME_ENV) != NULL;
 	int ret;
 
+	/* Internal marker only: never leak it into child processes. */
+	unsetenv(HANDOFF_RESUME_ENV);
 	signal(SIGINT, sig_handler);
 	signal(SIGTERM, sig_handler);
 	g_trace_mode = getenv("GC573_TEARDOWN_TRACE") != NULL;
@@ -6385,13 +6548,45 @@ int main(int argc, char *argv[])
 	stop_led_daemon();
 	usleep(150000);
 
+	/*
+	 * 0b. If another user's engine or LED keeper holds the card, ask it to
+	 *     release it.  A keeper that was only just spawned may not be
+	 *     listening yet, so a busy card is retried for a few seconds.
+	 */
+	if (gc573_vfio_resolve(pci_addr, card_id, sizeof(card_id),
+			       &card_group) < 0)
+		card_id[0] = '\0';
+	if (card_id[0])
+		(void)handoff_claim(argv, card_id, handoff_resume);
+
 	/* 1. Initialize VFIO interface. */
 	ret = gc573_vfio_init(&ctx, pci_addr);
+	if (ret == -EBUSY && card_id[0]) {
+		pr_info("Capture card is busy; waiting for its owner to answer");
+		for (int tries = 0; tries < 20; tries++) {
+			usleep(250000);
+			ret = handoff_claim(argv, card_id, handoff_resume);
+			if (ret != -ENOENT && ret != -EAGAIN)
+				break;
+		}
+		ret = gc573_vfio_init(&ctx, pci_addr);
+	}
 	if (ret < 0) {
 		fprintf(stderr, "[ERROR] Failed to initialize VFIO: %d\n", ret);
 		fprintf(stderr, "Ensure device is bound to vfio-pci:\n");
 		fprintf(stderr, "  sudo ./tools/opengc573-userd/vfio_pci_bind.sh --bind\n");
 		return 1;
+	}
+
+	/* 1b. From here on another user may ask for the card. */
+	if (card_id[0]) {
+		char node[64];
+
+		snprintf(node, sizeof(node), "/dev/vfio/%d", ctx.iommu_group);
+		if (everlive_handoff_serve(card_id, node,
+					   EVERLIVE_HANDOFF_ROLE_ENGINE,
+					   handoff_request_cb, NULL) < 0)
+			pr_warn("Handoff listener unavailable; other users cannot take over the card");
 	}
 
 	/* 2. Initialize FPGA bridge, rails, HDMI link, and assert HPD. */
@@ -7844,6 +8039,20 @@ int main(int argc, char *argv[])
 	printf("\n[*] Stopping Userspace Streamer...\n");
 
 	/*
+	 * Another user asked for the card: release it completely instead of
+	 * passing it to our own LED daemon.  Otherwise stop listening now so
+	 * the daemon can take over the handoff socket.
+	 */
+	struct everlive_handoff_peer handoff_peer;
+	bool yielding = everlive_handoff_pending(&handoff_peer);
+
+	if (yielding)
+		printf("[HANDOFF] Handing the capture card to user '%s'.\n",
+		       handoff_peer.name);
+	else
+		everlive_handoff_stop();
+
+	/*
 	 * Start the daemon before stopping the video DMA.  It re-arms the
 	 * selected colour at 20 Hz, so the LED never has to fall back
 	 * to the red blink while we tear the stream down.
@@ -7854,7 +8063,7 @@ int main(int argc, char *argv[])
 	bool hardware_live = ctx.bar0 != NULL;
 	bool daemon_started = false;
 
-	if (hardware_live)
+	if (hardware_live && !yielding)
 		daemon_started = start_led_daemon(&ctx, false);
 
 	audio_cleanup(&audio);
@@ -7884,9 +8093,15 @@ int main(int argc, char *argv[])
 	 * Otherwise the daemon already owns the inherited VFIO descriptors;
 	 * closing ours is safe because it holds the last references.
 	 */
-	if (hardware_live && !daemon_started)
+	if (hardware_live && !daemon_started && !yielding)
 		start_led_daemon(&ctx, true);
 	gc573_vfio_cleanup(&ctx);
+
+	if (yielding) {
+		/* Never returns: resumes by re-executing, or exits. */
+		handoff_pause(argv, card_id, everlive_handoff_release(),
+			      &handoff_peer);
+	}
 
 	printf("[✓] EverLive Userspace Streamer closed cleanly.\n");
 	return 0;
