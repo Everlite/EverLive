@@ -10,6 +10,7 @@ override CFLAGS += -std=gnu11 -D_GNU_SOURCE
 DEPFLAGS := -MMD -MP
 
 CORE_DIR   := ../tools/libeverlive-core
+CORE_V4L2_DIR := $(CORE_DIR)/v4l2
 GC573_DIR  := ../tools/opengc573-userd
 GC570D_DIR := ../tools/opengc570d-userd
 GC570D_SRC := $(GC570D_DIR)/src
@@ -20,8 +21,8 @@ DEFS_GC570D := -DGC570D_USERSPACE
 CORE_LIB := $(CORE_DIR)/libeverlive_core.a
 SANITIZE := -fsanitize=address,undefined -fno-omit-frame-pointer
 
-TARGETS := test_card_registry test_frame_convert test_ctl_proto test_json_rpc \
-           test_edid test_config test_framegen
+TARGETS := test_card_registry test_frame_convert test_framestore test_ctl_proto \
+           test_json_rpc test_v4l2_shim test_edid test_config test_framegen
 
 all: $(TARGETS)
 
@@ -37,11 +38,22 @@ test_card_registry: test_card_registry.c $(CORE_LIB)
 test_frame_convert: test_frame_convert.c $(CORE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ $< $(CORE_LIB)
 
+test_framestore: test_framestore.c $(CORE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ $< $(CORE_LIB) -pthread
+
 test_ctl_proto: test_ctl_proto.c $(CORE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ $< $(CORE_LIB)
 
 test_json_rpc: test_json_rpc.c $(CORE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ $< $(CORE_LIB)
+
+test_v4l2_shim: test_v4l2_shim.c \
+		$(CORE_V4L2_DIR)/everlive_v4l2_card.h \
+		$(CORE_V4L2_DIR)/everlive_v4l2_state.h \
+		$(CORE_V4L2_DIR)/everlive_v4l2_state.c $(CORE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(CORE_V4L2_DIR) $(DEPFLAGS) \
+		-o $@ $< $(CORE_V4L2_DIR)/everlive_v4l2_state.c \
+		$(CORE_LIB) -pthread
 
 # --- GC570D -------------------------------------------------------------
 # These two provide their own kernel-shim stubs, so they must compile the
@@ -63,8 +75,10 @@ test: all
 	@echo "=== libeverlive-core ==="
 	@./test_card_registry
 	@./test_frame_convert
+	@./test_framestore
 	@./test_ctl_proto
 	@./test_json_rpc
+	@./test_v4l2_shim
 	@echo "=== GC570D (Live Gamer DUO) ==="
 	@./test_edid
 	@./test_config

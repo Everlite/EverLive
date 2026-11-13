@@ -174,6 +174,30 @@ If you play directly on a TV or secondary monitor connected to the GC573's **HDM
 ### Option 3: Direct Wayland Window Capture (PipeWire)
 If you prefer not to use `v4l2loopback`, you can still capture the interactive game window directly in OBS Studio via **Window Capture (PipeWire)**.
 
+### Option 4: Module-free V4L2 preload (`LD_PRELOAD`)
+For applications that only understand a classic V4L2 device node, EverLive also
+ships optional `LD_PRELOAD` virtual-camera libraries that need no kernel module:
+
+```bash
+# GC573 / GC555 (Live Gamer 4K / BOLT)
+LD_PRELOAD=/usr/local/lib/libgc573-v4l2.so obs
+
+# GC570D (Live Gamer DUO): HDMI 1 / HDMI 2
+LD_PRELOAD=/usr/local/lib/libgc570d-v4l2.so obs
+```
+
+The GC573 library exposes `/dev/video63`; the GC570D library exposes
+`/dev/video60` and `/dev/video61`. The nodes exist only inside the process that
+loads the library. Frames are read from the shared post-tonemap store
+(`/dev/shm/gc573_v4l2_shm` or `/dev/shm/gc570d_v4l2_shm`), so HDR sources,
+standby cards and scaling behave the same as the recommended
+`/dev/video10` loopback path. Neither preload library requires `v4l2loopback`
+or DKMS.
+
+> Adding support for another capture card? See
+> [`docs/ADDING_A_NEW_CARD.md`](docs/ADDING_A_NEW_CARD.md) §3.4, §4.3 and §6.5
+> for the shared frame-store and preload-descriptor integration contract.
+
 ---
 
 ## ⚙️ IOMMU & PCIe Group Requirements
@@ -277,7 +301,7 @@ make -C tests asan         # sanitizer run
 2. Configures udev rules (`/etc/udev/rules.d/70-everlive.rules`) and early-boot VFIO autobind (`/etc/modules-load.d/everlive-vfio.conf` + `/etc/modprobe.d/everlive-vfio.conf`) granting your local user read/write access to the card's VFIO group and binding `vfio-pci`.
 3. Sets `/etc/security/limits.d/99-everlive-memlock.conf` and adds `cap_ipc_lock` capabilities so unprivileged users can pin DMA buffers required for native 4K and dual-HDMI capture.
 4. Blacklists the legacy out-of-tree `open_gc573` module (`/etc/modprobe.d/blacklist-everlive-legacy.conf`) so it cannot race with `vfio-pci` at boot.
-5. Compiles the shared core and userspace engines through the top-level `Makefile`: `libeverlive-core` (`everlive-ctl`, `libeverlive_core.so`), `opengc573-userd` (`gc573_user_streamer`, `everlive_userd`, `gc573_user_probe`, `gc573_user_diag`) and `opengc570d-userd` (`opengc570d-userd`, `gc570d-ctl`, `libgc570d-v4l2.so`). The core library, its headers, `everlive-ctl`, `everlive-service`, and the universal `everlive.service` unit are installed system-wide.
+5. Compiles the shared core and userspace engines through the top-level `Makefile`: `libeverlive-core` (`everlive-ctl`, `libeverlive_core.so`), `opengc573-userd` (`gc573_user_streamer`, `everlive_userd`, `gc573_user_probe`, `gc573_user_diag`, `libgc573-v4l2.so`) and `opengc570d-userd` (`opengc570d-userd`, `gc570d-ctl`, `libgc570d-v4l2.so`). The core library, its headers, `everlive-ctl`, `everlive-service`, the module-free V4L2 preload libraries, and the universal `everlive.service` unit are installed system-wide.
 6. Configures an isolated PipeWire audio sink (`50-everlive-capture.conf`) providing the dedicated `"EverLive Capture Audio"` source for OBS.
 7. Configures the Virtual Camera: `/etc/modprobe.d/everlive-v4l2loopback.conf` (`video_nr=10,11 card_label="EverLive Capture,EverLive Capture HDMI 2" exclusive_caps=0`) and loads the module at boot via `/etc/modules-load.d/`.
 8. Installs the desktop application launcher and icon.

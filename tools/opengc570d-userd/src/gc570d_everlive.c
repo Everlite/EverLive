@@ -14,7 +14,7 @@
 
 #include "gc570d-user-compat.h"
 #include "gc570d.h"
-#include "gc570d-shm.h"
+#include "everlive_framestore.h"
 #include "gc570d_everlive.h"
 #include "gc570d_font8x8.h"
 
@@ -35,7 +35,7 @@
 #include <SDL2/SDL.h>
 #endif
 
-#define EVERLIVE_FRAME_BYTES GC570D_SHM_FRAME_BYTES
+#define EVERLIVE_FRAME_BYTES (1920U * 1080U * 2U)
 #define EVERLIVE_V4L2_RETRY_NS (2ULL * 1000000000ULL)
 #define EVERLIVE_STATUS_NS (1ULL * 1000000000ULL)
 
@@ -83,7 +83,7 @@ struct everlive_v4l2 {
 };
 
 struct everlive_state {
-	struct gc570d_shm_region *shm;
+	struct everlive_framestore *framestore;
 	struct gc570d_dev *gc;
 	struct gc570d_everlive_options opt;
 	pthread_t thread;
@@ -276,58 +276,49 @@ static unsigned int shm_port_profile(const struct everlive_state *st, int port)
 }
 
 /*
- * Snapshot one port with a seqlock.  The DMA completion path publishes the
- * sequence number with release semantics after the payload copy; retrying on a
- * changed sequence prevents a half-written frame from reaching SDL or OBS.
+ * Snapshot one port through the core frame store.  The sequence check before
+ * the copy keeps the old "only copy when a new frame arrived" behaviour, and
+ * the post-copy validation makes a lapping producer produce no frame rather
+ * than a torn one.
  */
 static bool everlive_snapshot(struct everlive_state *st, int port)
 {
-	struct gc570d_shm_port *sp = &st->shm->ports[port];
 	struct everlive_frame *frame = &st->frame[port];
-	uint64_t seq;
-	uint32_t width;
-	uint32_t height;
-	uint32_t bytes;
 	unsigned int tries;
 
+	if (!st->framestore || !frame->pixels)
+		return false;
+
 	for (tries = 0; tries < 8; tries++) {
-		uint32_t slot;
+		struct everlive_framestore_frame view;
 
-		seq = __atomic_load_n(&sp->seq, __ATOMIC_ACQUIRE);
-		if (!seq)
+		if (!everlive_framestore_read_begin(st->framestore,
+						    (unsigned int)port,
+						    &view))
+			return false;
+		if (view.seq == st->last_seen[port])
+			return false;
+		if (view.width < 2 || view.height < 2 ||
+		    view.width > 1920 || view.height > 1080)
+			return false;
+		if (view.bytes > EVERLIVE_FRAME_BYTES)
+			return false;
+
+		memcpy(frame->pixels, view.data, view.bytes);
+		if (!everlive_framestore_read_validate(st->framestore,
+						       (unsigned int)port,
+						       &view))
 			continue;
-		if (seq == st->last_seen[port])
-			return false;
 
-		slot = __atomic_load_n(&sp->ready_idx, __ATOMIC_ACQUIRE);
-		if (slot >= GC570D_SHM_SLOTS)
-			continue;
-
-		width = __atomic_load_n(&sp->width, __ATOMIC_ACQUIRE);
-		height = __atomic_load_n(&sp->height, __ATOMIC_ACQUIRE);
-		if (width < 2 || height < 2 || width > 1920 || height > 1080)
-			return false;
-		bytes = width * height * 2;
-		if (bytes > EVERLIVE_FRAME_BYTES)
-			return false;
-
-		__atomic_thread_fence(__ATOMIC_ACQUIRE);
-		memcpy(frame->pixels, sp->yuy2[slot], bytes);
-		frame->width = width;
-		frame->height = height;
-		frame->no_signal = __atomic_load_n(&sp->no_signal, __ATOMIC_RELAXED);
-		frame->streaming = __atomic_load_n(&sp->streaming, __ATOMIC_RELAXED);
-		frame->timestamp_ns = __atomic_load_n(&sp->timestamp_ns,
-						      __ATOMIC_RELAXED);
-
-		__atomic_thread_fence(__ATOMIC_ACQUIRE);
-		if (__atomic_load_n(&sp->seq, __ATOMIC_ACQUIRE) == seq) {
-			__atomic_store_n(&sp->read_idx, slot, __ATOMIC_RELAXED);
-			frame->seq = seq;
-			st->last_seen[port] = seq;
-			st->last_profile[port] = shm_port_profile(st, port);
-			return true;
-		}
+		frame->width = view.width;
+		frame->height = view.height;
+		frame->no_signal = view.no_signal;
+		frame->streaming = view.streaming;
+		frame->timestamp_ns = view.timestamp_ns;
+		frame->seq = view.seq;
+		st->last_seen[port] = view.seq;
+		st->last_profile[port] = shm_port_profile(st, port);
+		return true;
 	}
 
 	return false;
@@ -1169,14 +1160,14 @@ static void *everlive_thread(void *arg)
 	return NULL;
 }
 
-int gc570d_everlive_start(struct gc570d_shm_region *shm,
+int gc570d_everlive_start(struct everlive_framestore *framestore,
 			  struct gc570d_dev *gc,
 			  const struct gc570d_everlive_options *options)
 {
 	int i;
 	int vol;
 
-	if (!shm || !options)
+	if (!framestore || !options)
 		return -EINVAL;
 	if (!options->enable_sdl && !options->headless && !options->v4l2[0] && !options->v4l2[1])
 		return 0;
@@ -1184,7 +1175,7 @@ int gc570d_everlive_start(struct gc570d_shm_region *shm,
 		return -EBUSY;
 
 	memset(&g_everlive, 0, sizeof(g_everlive));
-	g_everlive.shm = shm;
+	g_everlive.framestore = framestore;
 	g_everlive.gc = gc;
 	g_everlive.opt = *options;
 	vol = options->volume_pct;

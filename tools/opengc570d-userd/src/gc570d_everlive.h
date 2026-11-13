@@ -16,7 +16,7 @@
 #include <stdint.h>
 
 struct gc570d_dev;
-struct gc570d_shm_region;
+struct everlive_framestore;
 
 struct gc570d_everlive_options {
 	bool enable_sdl;
@@ -36,7 +36,7 @@ struct gc570d_everlive_options {
 	const char *title;
 };
 
-int gc570d_everlive_start(struct gc570d_shm_region *shm,
+int gc570d_everlive_start(struct everlive_framestore *framestore,
 			  struct gc570d_dev *gc,
 			  const struct gc570d_everlive_options *options);
 void gc570d_everlive_stop(void);

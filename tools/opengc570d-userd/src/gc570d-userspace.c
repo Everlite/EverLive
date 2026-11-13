@@ -8,7 +8,7 @@
  * the stock Linux kernel's signed `vfio-pci` driver and `libpipewire-0.3`.
  */
 #include "gc570d.h"
-#include "gc570d-shm.h"
+#include "everlive_framestore.h"
 #include "gc570d_everlive.h"
 #include "everlive_card.h"
 #include "gc570d-jsonrpc.h"
@@ -45,8 +45,7 @@ static struct pci_dev g_pdev;
 static struct gc570d_dev *g_gc;
 static _Atomic bool g_daemon_quit = false;
 static volatile bool g_reinit_requested = false;
-static struct gc570d_shm_region *g_shm = NULL;
-static int g_shm_fd = -1;
+static struct everlive_framestore *g_framestore = NULL;
 
 /* Thread-local pointer to identify current kthread for kthread_should_stop() */
 static __thread struct task_struct *tls_current_task = NULL;
@@ -1912,47 +1911,18 @@ void vb2_buffer_done(struct vb2_buffer *vb, enum vb2_buffer_state state)
 			}
 			vs->latest_seq++;
 			vs->latest_ts_ns = vb->timestamp;
-			if (g_shm && vb->payload <= GC570D_SHM_FRAME_BYTES) {
-				struct gc570d_shm_port *sp = &g_shm->ports[port];
+			if (g_framestore &&
+			    vb->payload <= everlive_framestore_frame_stride(g_framestore) &&
+			    (size_t)frame_w * frame_h * 2 == vb->payload) {
+				uint32_t no_signal = g_gc ?
+					(port == 0 ? READ_ONCE(g_gc->video0_no_signal) :
+						     READ_ONCE(g_gc->video_no_signal)) : 0;
 
-				if ((size_t)frame_w * frame_h * 2 == vb->payload) {
-					uint32_t slot = __atomic_load_n(
-							&sp->write_idx,
-							__ATOMIC_RELAXED);
-					uint64_t seq = __atomic_load_n(&sp->seq,
-								       __ATOMIC_RELAXED);
-
-					if (slot >= GC570D_SHM_SLOTS)
-						slot = 0;
-
-					/* Write the back buffer, then swap it in. */
-					memcpy(sp->yuy2[slot], vb->vaddr,
-					       vb->payload);
-					__atomic_store_n(&sp->width, frame_w,
-							 __ATOMIC_RELAXED);
-					__atomic_store_n(&sp->height, frame_h,
-							 __ATOMIC_RELAXED);
-					__atomic_store_n(&sp->no_signal,
-							 g_gc ? (port == 0 ? READ_ONCE(g_gc->video0_no_signal) :
-								 READ_ONCE(g_gc->video_no_signal)) : 0,
-							 __ATOMIC_RELAXED);
-					__atomic_store_n(&sp->streaming, 1,
-							 __ATOMIC_RELAXED);
-					__atomic_store_n(&sp->timestamp_ns,
-							 vb->timestamp,
-							 __ATOMIC_RELAXED);
-					__atomic_store_n(&g_shm->heartbeat_ns,
-							 ktime_get_ns(),
-							 __ATOMIC_RELAXED);
-					__atomic_thread_fence(__ATOMIC_RELEASE);
-					__atomic_store_n(&sp->ready_idx, slot,
-							 __ATOMIC_RELEASE);
-					__atomic_store_n(&sp->seq, seq + 1,
-							 __ATOMIC_RELEASE);
-					__atomic_store_n(&sp->write_idx,
-							 (slot + 1) % GC570D_SHM_SLOTS,
-							 __ATOMIC_RELAXED);
-				}
+				everlive_framestore_publish(g_framestore,
+							    (unsigned int)port,
+							    vb->vaddr, vb->payload,
+							    frame_w, frame_h,
+							    no_signal != 0, true);
 			}
 		}
 		pthread_mutex_unlock(&vs->frame_lock);
@@ -3136,29 +3106,26 @@ int main(int argc, char **argv)
 	probed = true;
 
 	/* Initialize POSIX shared-memory frame store for libgc570d-v4l2.so */
-	g_shm_fd = shm_open(GC570D_SHM_NAME, O_CREAT | O_RDWR, 0600);
-	if (g_shm_fd >= 0) {
-		/* Frame store is private to the owning user. */
-		fchmod(g_shm_fd, 0600);
-		if (ftruncate(g_shm_fd, sizeof(struct gc570d_shm_region)) == 0) {
-			g_shm = mmap(NULL, sizeof(struct gc570d_shm_region),
-				     PROT_READ | PROT_WRITE, MAP_SHARED, g_shm_fd, 0);
-			if (g_shm != MAP_FAILED) {
-				memset(g_shm, 0, sizeof(struct gc570d_shm_region));
-				g_shm->magic = GC570D_SHM_MAGIC;
-				g_shm->version = 2;
-				g_shm->publisher_pid = (uint32_t)getpid();
-				g_shm->heartbeat_ns = ktime_get_ns();
-				strscpy(g_shm->pci_bdf, g_pdev.bdf, sizeof(g_shm->pci_bdf));
-				for (int p = 0; p < 2; p++) {
-					g_shm->ports[p].width = p == 0 ?
-						gc570d_cfg.width : GC570D_WIDTH;
-					g_shm->ports[p].height = p == 0 ?
-						gc570d_cfg.height : GC570D_HEIGHT;
-				}
-			} else {
-				g_shm = NULL;
-			}
+	{
+		struct everlive_framestore_config fs_cfg = {
+			.name = "/gc570d_v4l2_shm",
+			.pci_bdf = g_pdev.bdf,
+			.port_count = 2,
+			.slot_count = 3,
+			.frame_stride = GC570D_WIDTH * GC570D_HEIGHT * 2,
+		};
+
+		g_framestore = everlive_framestore_create(&fs_cfg);
+		if (!g_framestore) {
+			fprintf(stderr,
+				"[gc570d WARN] Virtual-camera frame store unavailable; continuing without it\n");
+		} else {
+			everlive_framestore_set_geometry(g_framestore, 0,
+							 gc570d_cfg.width,
+							 gc570d_cfg.height);
+			everlive_framestore_set_geometry(g_framestore, 1,
+							 GC570D_WIDTH,
+							 GC570D_HEIGHT);
 		}
 	}
 
@@ -3179,7 +3146,7 @@ int main(int argc, char **argv)
 		"[gc570d INFO] Userspace daemon running (control socket: %s)\n",
 		g_ctl_sock_path);
 
-	ret = gc570d_everlive_start(g_shm, g_gc, &live);
+	ret = gc570d_everlive_start(g_framestore, g_gc, &live);
 	if (ret < 0)
 		fprintf(stderr,
 			"[gc570d WARN] Failed to start EverLive frontend: %d\n",
@@ -3329,32 +3296,7 @@ int main(int argc, char **argv)
 	if (probed)
 		drv->remove(&g_pdev);
 	gc570d_vfio_close(&g_pdev);
-	if (g_shm) {
-		munmap(g_shm, sizeof(struct gc570d_shm_region));
-		g_shm = NULL;
-	}
-	if (g_shm_fd >= 0) {
-		struct stat st_fd, st_obj;
-		bool ours = false;
-		int probe_fd = shm_open(GC570D_SHM_NAME, O_RDONLY, 0);
-
-		if (probe_fd >= 0) {
-			if (fstat(g_shm_fd, &st_fd) == 0 &&
-			    fstat(probe_fd, &st_obj) == 0 &&
-			    st_fd.st_dev == st_obj.st_dev &&
-			    st_fd.st_ino == st_obj.st_ino)
-				ours = true;
-			close(probe_fd);
-		}
-
-		close(g_shm_fd);
-		g_shm_fd = -1;
-		/*
-		 * Only remove the object if it is still the one we created;
-		 * a concurrently started instance may have replaced it.
-		 */
-		if (ours)
-			shm_unlink(GC570D_SHM_NAME);
-	}
+	everlive_framestore_destroy(g_framestore);
+	g_framestore = NULL;
 	return 0;
 }

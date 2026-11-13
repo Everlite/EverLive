@@ -20,7 +20,7 @@ Please provide:
 For feature proposals, requests for new capture cards (such as GC575, GC553, etc.), or questions about setup and audio routing, please open a thread in [GitHub Discussions](https://github.com/Everlite/EverLive/discussions)!
 This keeps GitHub Issues clean and focused on verified bugs and active implementation tasks.
 
-Interested in contributing hardware reverse-engineering findings or building an engine driver for another capture card? Check out our step-by-step contributor guide: [Adding a New Capture Card](docs/ADDING_A_NEW_CARD.md).
+Interested in contributing hardware reverse-engineering findings or building an engine driver for another capture card? Check out our step-by-step contributor guide: [Adding a New Capture Card](docs/ADDING_A_NEW_CARD.md). It also covers the optional shared frame-store and module-free V4L2 preload integration path.
 
 ---
 

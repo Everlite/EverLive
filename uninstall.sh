@@ -25,6 +25,7 @@ EVERLIVE_RUNTIME="${XDG_RUNTIME_DIR:-/run/user/${TARGET_UID}}"
 rm -f "${EVERLIVE_RUNTIME}/gc570d/control.sock" 2>/dev/null || true
 rm -f "${EVERLIVE_RUNTIME}/everlive.sock" "${EVERLIVE_RUNTIME}/everlive.sock.lock" 2>/dev/null || true
 rm -f /dev/shm/gc570d_v4l2_shm 2>/dev/null || true
+rm -f /dev/shm/gc573_v4l2_shm 2>/dev/null || true
 
 # 2. VFIO & Memlock Regeln entfernen
 rm -f /etc/udev/rules.d/99-gc573-vfio.rules
@@ -44,6 +45,7 @@ rm -f /usr/lib/systemd/system-sleep/gc570d-sleep.sh
 rm -f /etc/gc570d.conf.example
 rm -f /usr/local/bin/opengc570d-userd /usr/local/bin/gc570d-ctl
 rm -f /usr/local/lib/libgc570d-v4l2.so
+rm -f /usr/local/lib/libgc573-v4l2.so
 rm -f /usr/local/libexec/gc570d-vfio-bind.sh /usr/local/libexec/gc570d-sleep.sh
 rm -f /usr/local/lib/systemd/user/opengc570d-userd.service
 rm -f /etc/udev/rules.d/99-gc570d-vfio.rules
@@ -55,6 +57,7 @@ fi
 rm -f /usr/local/bin/everlive-ctl /usr/local/bin/everlive-service
 rm -f /usr/local/lib/libeverlive_core.so* /usr/local/lib/libeverlive_core.a
 rm -f /usr/local/include/everlive_card.h /usr/local/include/everlive_frame.h \
+      /usr/local/include/everlive_framestore.h \
       /usr/local/include/everlive_ctl.h /usr/local/include/everlive_json.h \
       /usr/local/include/everlive_ipc.h
 rm -f /usr/local/lib/systemd/user/everlive.service

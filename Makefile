@@ -81,7 +81,6 @@ install: all
 	install -m0755 $(addprefix $(GC573_DIR)/,$(GC573_BINS)) $(GC573_DIR)/vfio_pci_bind.sh $(L)/$(GC573_DIR)/
 	install -m0755 $(addprefix $(GC570D_DIR)/,$(GC570D_BINS)) $(GC570D_DIR)/gc570d-vfio-bind.sh $(L)/$(GC570D_DIR)/
 	install -m0755 $(CORE_DIR)/everlive-ctl $(CORE_DIR)/everlive-service.sh $(L)/$(CORE_DIR)/
-	install -m0644 $(GC570D_DIR)/libgc570d-v4l2.so $(L)/$(GC570D_DIR)/
 	$(GC570D_SED) $(GC570D_DIR)/gc570d-sleep.sh > $(L)/$(GC570D_DIR)/gc570d-sleep.sh
 	chmod 0755 $(L)/$(GC570D_DIR)/gc570d-sleep.sh
 	# 3. Main launcher, desktop entry and icons
@@ -118,6 +117,8 @@ uninstall:
 	+$(MAKE) -C $(CORE_DIR) uninstall PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 	+$(MAKE) -C $(GC573_DIR) uninstall PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 	+$(MAKE) -C $(GC570D_DIR) uninstall-bin PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
+	rm -f $(DESTDIR)$(LIBDIR)/libgc570d-v4l2.so \
+	      $(DESTDIR)$(LIBDIR)/libgc573-v4l2.so
 	rm -rf $(L)
 	rm -f $(DESTDIR)$(BINDIR)/everlive
 	rm -f $(DESTDIR)$(DATADIR)/applications/everlive.desktop

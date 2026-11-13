@@ -13,6 +13,7 @@ DEPFLAGS := -MMD -MP
 
 CORE_DIR := ../libeverlive-core
 CORE_LIB := $(CORE_DIR)/libeverlive_core.a
+CORE_V4L2_DIR := $(CORE_DIR)/v4l2
 
 USER_CFLAGS := $(CFLAGS) -O2 -g -Wall -Wextra -Wno-unused-parameter \
 	-Wno-sign-compare -std=gnu11 \
@@ -57,7 +58,6 @@ USER_HEADERS := \
 	src/gc570d.h \
 	src/gc570d-config.h \
 	src/gc570d-user-compat.h \
-	src/gc570d-shm.h \
 	src/gc570d_everlive.h \
 	src/gc570d-jsonrpc.h \
 	src/gc570d_font8x8.h \
@@ -82,9 +82,20 @@ gc570d-ctl: src/gc570d-ctl.c
 	$(CC) -O2 -g -Wall -Wextra -std=gnu11 -D_GNU_SOURCE -o $@ $<
 	@chmod 0755 $@
 
-libgc570d-v4l2.so: src/gc570d-v4l2-preload.c src/gc570d-shm.h
+libgc570d-v4l2.so: src/gc570d-v4l2.c \
+		$(CORE_V4L2_DIR)/everlive_v4l2_card.h \
+		$(CORE_V4L2_DIR)/everlive_v4l2_state.h \
+		$(CORE_V4L2_DIR)/everlive_v4l2_state.c \
+		$(CORE_V4L2_DIR)/everlive_v4l2_preload.c \
+		$(CORE_DIR)/everlive_framestore.h \
+		$(CORE_LIB)
 	$(CC) -O2 -g -Wall -Wextra -Wno-unused-parameter \
-		-std=gnu11 -D_GNU_SOURCE -shared -fPIC -Isrc -o $@ $< -ldl -lrt -pthread
+		-std=gnu11 -D_GNU_SOURCE -shared -fPIC \
+		-Isrc -I$(CORE_DIR) -I$(CORE_V4L2_DIR) \
+		-o $@ src/gc570d-v4l2.c \
+		$(CORE_V4L2_DIR)/everlive_v4l2_state.c \
+		$(CORE_V4L2_DIR)/everlive_v4l2_preload.c \
+		$(CORE_LIB) -ldl -lrt -pthread
 	@chmod 0644 $@
 
 test selftest:

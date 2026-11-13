@@ -52,7 +52,7 @@ In this fork (`OpenGC570D-Userspace`), **Gemini Argon** was used to:
 
 - design and implement the pure userspace `vfio-pci` runtime (`src/gc570d-userspace.c`) and kernel compatibility shim (`src/gc570d-user-compat.h`);
 - implement native PipeWire video streaming and lock-free SPSC ring-buffer audio streaming;
-- build the `LD_PRELOAD` POSIX shared-memory V4L2 compatibility bridge (`src/gc570d-v4l2-preload.c` and `src/gc570d-shm.h`) with `libv4l2` interception and Electron/Discord child-process filtering;
+- build the `LD_PRELOAD` POSIX shared-memory V4L2 compatibility bridge (`src/gc570d-v4l2.c`, the shared `libeverlive-core/v4l2` engine and `libeverlive-core/everlive_framestore.h`) with `libv4l2` interception and Electron/Discord child-process filtering;
 - diagnose and implement standalone `HDMI IN 1` capture (without an `HDMI OUT` monitor) and S3 sleep/resume (`D3hot -> D0`) hardware recovery;
 - merge upstream hardware updates and restore original code comments across all shared source files; and
 - author the unified userspace installer scripts and project documentation.

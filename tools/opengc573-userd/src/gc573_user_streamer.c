@@ -30,10 +30,12 @@
 #include "gc573_user_audio_tap.h"
 #include "gc573_user_hdr.h"
 #include "gc573_user_framegen.h"
+#include "gc573_camera.h"
 #include "gc573_user_log.h"
 #include "gc573_user_font8x8.h"
 #include <SDL2/SDL.h>
 #include <libswscale/swscale.h>
+#include <stdint.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -779,6 +781,15 @@ static uint64_t now_ms(void)
 	return now_us() / 1000;
 }
 
+static uint64_t timespec_delta_ns(const struct timespec *a,
+				  const struct timespec *b)
+{
+	int64_t sec = (int64_t)b->tv_sec - (int64_t)a->tv_sec;
+	int64_t nsec = (int64_t)b->tv_nsec - (int64_t)a->tv_nsec;
+
+	return (uint64_t)(sec * 1000000000LL + nsec);
+}
+
 #define RAINBOW_SATURATION	150U
 #define RAINBOW_VALUE_MIN	150U
 #define RAINBOW_VALUE_MAX	205U
@@ -834,6 +845,7 @@ static void wave_tick(uint64_t elapsed_ms, uint32_t cycle_ms, uint32_t colors[5]
 
 static pthread_t g_led_thread;
 static bool g_led_thread_running;
+static int g_led_stop;
 
 static void *led_worker(void *arg)
 {
@@ -842,7 +854,8 @@ static void *led_worker(void *arg)
 	uint32_t last_static = 0xFFFFFFFFu;
 	int last_mode = -1;
 
-	while (__atomic_load_n(&g_running, __ATOMIC_RELAXED)) {
+	while (!__atomic_load_n(&g_led_stop, __ATOMIC_ACQUIRE) &&
+	       __atomic_load_n(&g_running, __ATOMIC_RELAXED)) {
 		int mode = __atomic_load_n(&g_led_mode_raw, __ATOMIC_RELAXED);
 
 		if (mode == STREAM_LED_WAVE) {
@@ -872,6 +885,48 @@ static void *led_worker(void *arg)
 		usleep(50000);
 	}
 	return NULL;
+}
+
+static void apply_led_initial(void *bar0)
+{
+	if (g_led_mode == STREAM_LED_WAVE) {
+		uint32_t default_zones[5] = {
+			0x00ff0000, 0x00ffff00, 0x0000ff00, 0x0000ffff, 0x008000ff,
+		};
+
+		gc573_user_set_led_zones(bar0, default_zones);
+		printf("[LED] Multi-zone rainbow wave active\n");
+	} else if (g_led_mode == STREAM_LED_RAINBOW) {
+		gc573_user_set_led_rgb(bar0, g_led_r, g_led_g, g_led_b);
+		printf("[LED] Rainbow spectrum active\n");
+	} else {
+		gc573_user_set_led_rgb(bar0, g_led_r, g_led_g, g_led_b);
+		printf("[LED] Active colour #%02x%02x%02x\n",
+		       g_led_r, g_led_g, g_led_b);
+	}
+}
+
+static bool start_led_worker(struct gc573_vfio_ctx *ctx)
+{
+	if (g_led_thread_running)
+		return true;
+
+	__atomic_store_n(&g_led_stop, 0, __ATOMIC_RELEASE);
+	if (pthread_create(&g_led_thread, NULL, led_worker, ctx) == 0) {
+		g_led_thread_running = true;
+		return true;
+	}
+	return false;
+}
+
+static void stop_led_worker(void)
+{
+	if (!g_led_thread_running)
+		return;
+
+	__atomic_store_n(&g_led_stop, 1, __ATOMIC_RELEASE);
+	pthread_join(g_led_thread, NULL);
+	g_led_thread_running = false;
 }
 
 static const char *colorspace_name(uint8_t colorspace)
@@ -2160,6 +2215,8 @@ struct frame_preview {
 	unsigned int count;
 	int latest;
 	size_t bytes;
+	unsigned int width;
+	unsigned int height;
 	uint64_t seq;
 	uint64_t consumed;
 	uint64_t dropped;
@@ -2284,6 +2341,18 @@ static void *preview_thread(void *arg)
 		memcpy(preview->buffers[slot],
 		       preview->video->buffers[index].vaddr, preview->bytes);
 
+		/*
+		 * Tonemap once, in place, before the window and the async V4L2 pump
+		 * read the slot.  The virtual-camera feed then sees exactly the same
+		 * picture as the display and OBS.
+		 */
+		if (gc573_hdr_active())
+			gc573_hdr_tonemap_yuyv(preview->buffers[slot],
+					       preview->width, preview->height);
+
+		gc573_camera_publish(preview->buffers[slot], preview->bytes,
+				     preview->width, preview->height, false);
+
 		pthread_mutex_lock(&preview->lock);
 		preview->ts_us[slot] = frame_us;
 		preview->latest = slot;
@@ -2320,6 +2389,7 @@ static void preview_stop(void)
 		g_preview.started = false;
 	}
 	preview_free_buffers();
+	gc573_camera_mark_no_signal();
 }
 
 /*
@@ -2364,6 +2434,8 @@ static int preview_start(struct gc573_user_video *video, size_t bytes,
 	g_preview.count = depth;
 	g_preview.video = video;
 	g_preview.bytes = bytes;
+	g_preview.width = video->width;
+	g_preview.height = video->height;
 	g_preview.seq = 0;
 	g_preview.consumed = 0;
 	g_preview.dropped = 0;
@@ -3256,10 +3328,6 @@ static void *v4l2_pump_thread(void *arg)
 			continue;
 		}
 
-		/* Tonemap the loopback copy only: the window has its own copy. */
-		if (gc573_hdr_active())
-			gc573_hdr_tonemap_yuyv(pixels, pump->width, pump->height);
-
 		v4l2_sink_write_guarded(pump->sink, pixels, pump->bytes,
 					pump->width, pump->height);
 		preview_release(ph);
@@ -3362,6 +3430,8 @@ static void standby_present(SDL_Window *window, SDL_Renderer *renderer,
 	frame = gc573_no_signal_frame(&g_standby->frame, &bytes);
 	if (!frame || !bytes)
 		return;
+
+	gc573_camera_publish(frame, bytes, width, height, true);
 
 	/*
 	 * Feed the loopback sink even in headless sessions, so OBS shows the
@@ -5918,6 +5988,114 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 	fflush(stdout);
 }
 
+struct resume_ctx {
+	struct gc573_vfio_ctx *vfio;
+	struct gc573_user_video *video;
+	struct audio_stream *audio;
+	const char *pci_addr;
+	const char *edid_spec;
+	bool *video_ready;
+	bool worker_was_running;
+};
+
+/*
+ * Stop every producer/consumer before the VFIO and DMA mappings disappear.
+ * The camera store itself stays mapped; it is only marked unavailable until
+ * the new hardware bring-up publishes the first frame.
+ */
+static void resume_quiesce(struct resume_ctx *rc)
+{
+	rc->worker_was_running = rc->audio->worker_started;
+
+	v4l2_pump_stop();
+	preview_stop();
+	stop_led_worker();
+	audio_stop_capture(rc->audio);
+	audio_worker_stop(rc->audio);
+	gc573_user_video_stop_timeout(rc->video, VIDEO_STOP_HOT_MS);
+	gc573_camera_mark_no_signal();
+
+	if (rc->audio->dma_ready) {
+		gc573_user_audio_cleanup(&rc->audio->dma);
+		rc->audio->dma_ready = false;
+	}
+	gc573_user_video_cleanup(rc->video);
+	if (rc->video_ready)
+		*rc->video_ready = false;
+	gc573_vfio_cleanup(rc->vfio);
+}
+
+/*
+ * Re-run the startup hardware bring-up.  Video/audio DMA mappings and worker
+ * threads were already torn down by resume_quiesce().  On failure the VFIO
+ * context is cleaned up so the caller can retry with a fresh container.
+ */
+static int resume_reinit(struct resume_ctx *rc)
+{
+	int ret;
+
+	ret = gc573_vfio_init(rc->vfio, rc->pci_addr);
+	if (ret < 0) {
+		gc573_vfio_cleanup(rc->vfio);
+		return ret;
+	}
+
+	ret = gc573_user_hw_init(rc->vfio->bar0);
+	if (ret < 0)
+		goto fail_vfio;
+
+	apply_led_initial(rc->vfio->bar0);
+	if (!start_led_worker(rc->vfio))
+		pr_warn("LED worker restart failed after resume");
+
+	ret = gc573_user_it6664_init(rc->vfio->bar0);
+	if (ret < 0)
+		goto fail_led;
+
+	if (gc573_user_edid_select(rc->edid_spec, NULL) < 0) {
+		pr_warn("EDID profile '%s' unusable after resume; using default",
+			rc->edid_spec ? rc->edid_spec : "(default)");
+		gc573_user_edid_select(GC573_EDID_PROFILE_DEFAULT, NULL);
+	}
+	g_bitstream_enabled = gc573_user_edid_advertises_bitstream();
+
+	ret = gc573_user_it6805_init(rc->vfio->bar0);
+	if (ret < 0)
+		goto fail_led;
+
+	ret = gc573_user_program_edid_by_name(rc->vfio->bar0,
+					      gc573_user_edid_active_name(), NULL);
+	if (ret < 0)
+		goto fail_led;
+
+	ret = gc573_user_it6664_enable_source(rc->vfio->bar0);
+	if (ret < 0)
+		goto fail_led;
+
+	if (gc573_vfio_setup_msi(rc->vfio) < 0)
+		pr_warn("Interrupt setup failed after resume; falling back to IRQ polling");
+
+	if (gc573_user_audio_init(&rc->audio->dma, rc->vfio,
+				  rc->vfio->bar0) == 0) {
+		rc->audio->dma_ready = true;
+		if (rc->worker_was_running &&
+		    audio_worker_start(rc->audio) < 0)
+			pr_warn("Audio worker restart failed after resume");
+	} else {
+		pr_warn("Audio DMA remap failed after resume; continuing video-only");
+		rc->audio->dma_ready = false;
+	}
+
+	stream_reset_audio(rc->audio);
+	return 0;
+
+fail_led:
+	stop_led_worker();
+fail_vfio:
+	gc573_vfio_cleanup(rc->vfio);
+	return ret < 0 ? ret : -EIO;
+}
+
 int main(int argc, char *argv[])
 {
 	const char *pci_addr = NULL;
@@ -6229,28 +6407,15 @@ int main(int argc, char *argv[])
 	 *     the card never sits in unprogrammed red-blinking state during the
 	 *     ~3 seconds of HDMI receiver init and EDID handshake.
 	 */
-	if (g_led_mode == STREAM_LED_WAVE) {
-		uint32_t default_zones[5] = {
-			0x00ff0000, 0x00ffff00, 0x0000ff00, 0x0000ffff, 0x008000ff,
-		};
-		gc573_user_set_led_zones(ctx.bar0, default_zones);
-		printf("[LED] Multi-zone rainbow wave active\n");
-	} else if (g_led_mode == STREAM_LED_RAINBOW) {
-		gc573_user_set_led_rgb(ctx.bar0, g_led_r, g_led_g, g_led_b);
-		printf("[LED] Rainbow spectrum active\n");
-	} else {
-		gc573_user_set_led_rgb(ctx.bar0, g_led_r, g_led_g, g_led_b);
-		printf("[LED] Active colour #%02x%02x%02x\n",
-		       g_led_r, g_led_g, g_led_b);
-	}
+	apply_led_initial(ctx.bar0);
 
 	/*
 	 * Always run the LED worker: the control socket can switch between static,
 	 * wave and rainbow at runtime, and a static colour change must reach the
 	 * controller without restarting the streamer.
 	 */
-	if (pthread_create(&g_led_thread, NULL, led_worker, &ctx) == 0)
-		g_led_thread_running = true;
+	if (!start_led_worker(&ctx))
+		pr_warn("LED worker thread failed to start");
 
 	/*
 	 * 3. Bring up the IT6664 splitter first.  The source only sees the
@@ -6491,11 +6656,36 @@ int main(int argc, char *argv[])
 				strerror(-tap_ret));
 	}
 
+	if (gc573_camera_start(ctx.pci_addr) == 0)
+		pr_info("Virtual camera frame store: /dev/shm/gc573_v4l2_shm");
+	else
+		pr_warn("Virtual camera frame store unavailable; continuing without it");
+
 	last_stats = now_ms();
 	last_stats_us = now_us();
 	last_status_poll = 0;
 	last_service = 0;
 	g_loop_start_ms = now_ms();
+
+	struct resume_ctx resume_ctl = {
+		.vfio = &ctx,
+		.video = &video,
+		.audio = &audio,
+		.pci_addr = pci_addr,
+		.edid_spec = edid_spec,
+		.video_ready = &video_ready,
+	};
+	struct timespec resume_mono_prev;
+	struct timespec resume_boot_prev;
+	uint64_t last_resume_check_ms;
+	bool resume_pending = false;
+	bool resume_quiesced = false;
+	uint64_t resume_retry_at_ms = 0;
+	unsigned int resume_attempts = 0;
+
+	clock_gettime(CLOCK_MONOTONIC, &resume_mono_prev);
+	clock_gettime(CLOCK_BOOTTIME, &resume_boot_prev);
+	last_resume_check_ms = now_ms();
 
 	while (g_running) {
 		SDL_Event event;
@@ -6617,6 +6807,104 @@ int main(int argc, char *argv[])
 		}
 		if (!g_running)
 			break;
+
+		now = now_ms();
+
+		if (!resume_pending &&
+		    now - last_resume_check_ms >= 250) {
+			struct timespec mono_now;
+			struct timespec boot_now;
+			uint64_t mono_delta;
+			uint64_t boot_delta;
+
+			clock_gettime(CLOCK_MONOTONIC, &mono_now);
+			clock_gettime(CLOCK_BOOTTIME, &boot_now);
+			mono_delta = timespec_delta_ns(&resume_mono_prev,
+						       &mono_now);
+			boot_delta = timespec_delta_ns(&resume_boot_prev,
+						       &boot_now);
+			resume_mono_prev = mono_now;
+			resume_boot_prev = boot_now;
+			last_resume_check_ms = now;
+
+			/*
+			 * CLOCK_MONOTONIC stops during suspend while CLOCK_BOOTTIME
+			 * keeps counting.  A boot delta more than ~2 s larger than
+			 * the monotonic delta means the system slept.
+			 */
+			if (boot_delta > mono_delta + 2000000000ULL) {
+				pr_info("System resume detected (slept ~%llu ms); reinitialising capture",
+					(unsigned long long)((boot_delta - mono_delta) /
+							     1000000ULL));
+				resume_pending = true;
+				resume_quiesced = false;
+				resume_retry_at_ms = 0;
+				resume_attempts = 0;
+			}
+		}
+
+		if (resume_pending) {
+			if (!resume_quiesced) {
+				pr_info("Quiescing capture for resume recovery");
+				resume_quiesce(&resume_ctl);
+				streaming = false;
+				have_signal = false;
+				video_ready = false;
+				signal_lost_hits = 0;
+				rate_probe_after_scdt = false;
+				memset(&current_sig, 0, sizeof(current_sig));
+				memset(&watch, 0, sizeof(watch));
+				output_width = 0;
+				output_height = 0;
+				if (texture) {
+					SDL_DestroyTexture(texture);
+					texture = NULL;
+				}
+				gc573_camera_reset();
+				render_standby(window, renderer,
+					       "EverLive — Recovering after system resume...");
+				resume_quiesced = true;
+				resume_retry_at_ms = now;
+			}
+
+			if (now >= resume_retry_at_ms) {
+				int resume_ret;
+
+				resume_attempts++;
+				pr_info("Resume hardware reinit attempt %u",
+					resume_attempts);
+				resume_ret = resume_reinit(&resume_ctl);
+				if (resume_ret == 0) {
+					pr_info("Resume hardware reinitialised");
+					resume_pending = false;
+					resume_quiesced = false;
+					resume_retry_at_ms = 0;
+					resume_attempts = 0;
+					streaming = false;
+					have_signal = false;
+					video_ready = false;
+					clock_gettime(CLOCK_MONOTONIC,
+						      &resume_mono_prev);
+					clock_gettime(CLOCK_BOOTTIME,
+						      &resume_boot_prev);
+					last_resume_check_ms = now_ms();
+					last_stats = now_ms();
+					last_stats_us = now_us();
+					last_status_poll = 0;
+					last_service = 0;
+				} else {
+					pr_warn("Resume hardware reinit failed (%d); retrying in 5 s",
+						resume_ret);
+					resume_retry_at_ms = now_ms() + 5000U;
+				}
+			}
+
+			if (resume_pending) {
+				standby_tick(window, renderer);
+				SDL_Delay(5);
+				continue;
+			}
+		}
 
 		/*
 		 * Apply remote mutations on the render thread.  SDL, the OSD state and
@@ -7146,9 +7434,12 @@ int main(int argc, char *argv[])
 							 __ATOMIC_RELAXED);
 				}
 
+				bool camera = gc573_camera_active();
+
 				__atomic_store_n(&g_preview_needed,
 						 ((!g_headless && !fg_live) ||
-						  (want_pump && !sink_throttle)) ? 1 : 0,
+						  (want_pump && !sink_throttle) ||
+						  camera) ? 1 : 0,
 						 __ATOMIC_RELAXED);
 				__atomic_store_n(&g_preview_keepalive,
 						 sink_throttle ? 1 : 0,
@@ -7218,15 +7509,6 @@ int main(int argc, char *argv[])
 				if (ph > 0) {
 					have_frame = true;
 					osd_note_dma_age(g_preview.taken_age_us);
-					/*
-					 * Tonemap once, in place, before both consumers read
-					 * the slot: the window and the OBS feed then show the
-					 * same picture.  SDR is a pure pass-through.
-					 */
-					if (gc573_hdr_active())
-						gc573_hdr_tonemap_yuyv(
-							pixels, output_width,
-							output_height);
 					if (v4l2_sink.path[0])
 						v4l2_sink_write_guarded(
 							&v4l2_sink, pixels,
@@ -7297,10 +7579,6 @@ int main(int argc, char *argv[])
 				if (!v4l2_pump_running()) {
 					ph = preview_take(&pixels);
 					if (ph > 0) {
-						if (gc573_hdr_active())
-							gc573_hdr_tonemap_yuyv(
-								pixels, output_width,
-								output_height);
 						if (v4l2_sink.path[0])
 							v4l2_sink_write_guarded(
 								&v4l2_sink, pixels,
@@ -7541,7 +7819,7 @@ int main(int argc, char *argv[])
 	gc573_ipc_stop();
 	gc573_audio_tap_stop();
 
-	if (g_trace_requested) {
+	if (g_trace_requested && ctx.bar0) {
 		v4l2_pump_stop();
 		audio_cleanup(&audio);
 		gc573_user_it6805_audio_disable(ctx.bar0);
@@ -7550,6 +7828,7 @@ int main(int argc, char *argv[])
 		 * the pump must never write into a fd that is being torn down.
 		 */
 		preview_stop();
+		gc573_camera_stop();
 		v4l2_sink_close_guarded(&v4l2_sink);
 		if (standby.texture) {
 			SDL_DestroyTexture(standby.texture);
@@ -7568,12 +7847,21 @@ int main(int argc, char *argv[])
 	 * Start the daemon before stopping the video DMA.  It re-arms the
 	 * selected colour at 20 Hz, so the LED never has to fall back
 	 * to the red blink while we tear the stream down.
+	 *
+	 * A quit during resume recovery may leave ctx.bar0 unmapped.  In that
+	 * case skip the BAR0-dependent teardown and daemon handoff.
 	 */
-	bool daemon_started = start_led_daemon(&ctx, false);
+	bool hardware_live = ctx.bar0 != NULL;
+	bool daemon_started = false;
+
+	if (hardware_live)
+		daemon_started = start_led_daemon(&ctx, false);
 
 	audio_cleanup(&audio);
-	gc573_user_it6805_audio_disable(ctx.bar0);
+	if (hardware_live)
+		gc573_user_it6805_audio_disable(ctx.bar0);
 	preview_stop();
+	gc573_camera_stop();
 	/* The capture thread is joined; the framegen ring is now safe to free. */
 	framegen_teardown();
 	v4l2_sink_close_guarded(&v4l2_sink);
@@ -7588,17 +7876,15 @@ int main(int argc, char *argv[])
 	presentation_destroy(&window, &renderer, &texture);
 	SDL_Quit();
 
-	if (g_led_thread_running) {
-		pthread_join(g_led_thread, NULL);
-		g_led_thread_running = false;
-	}
+	if (g_led_thread_running)
+		stop_led_worker();
 
 	/*
 	 * If the early handoff failed, fall back to the old late handoff.
 	 * Otherwise the daemon already owns the inherited VFIO descriptors;
 	 * closing ours is safe because it holds the last references.
 	 */
-	if (!daemon_started)
+	if (hardware_live && !daemon_started)
 		start_led_daemon(&ctx, true);
 	gc573_vfio_cleanup(&ctx);
 
