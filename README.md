@@ -57,6 +57,32 @@ build, CLI and hotkey details.
 
 ---
 
+## Live Gamer 4K 2.1 (GC575) — experimental UVC path
+
+The GC575 is a PCIe card whose capture function enumerates as a **USB 3.2 UVC
+device** (`07ca:0575`). It is driven by the upstream `uvcvideo` driver, not by
+VFIO. EverLive now detects it on the USB bus and provides an experimental
+userspace path:
+
+* `tools/opengc575-userd/` — UVC capture daemon, NV12→YUY2 conversion, optional
+  MJPEG decode, framestore and `/dev/video64` preload descriptor.
+* `gc575ctl` — private XU/AT diagnostics and runtime descriptor-profile
+  selection (`set-index 1` enables the 4K144 MJPEG profile; no flashing).
+* `everlive_display` — falls back to plain V4L2 when a UVC node has no DV
+  timings.
+
+```sh
+PROFILE=0 MODE=nv12 SIZE=1920x1080 FPS=240 \
+  tools/opengc575-userd/play-gc575.sh
+```
+
+This path is compile-tested and documented, but **not hardware-validated** yet.
+See [`tools/opengc575-userd/README.md`](tools/opengc575-userd/README.md) and
+[`docs/GC575-LINUX-INTEGRATION.md`](docs/GC575-LINUX-INTEGRATION.md) for the
+full analysis.
+
+---
+
 ## 2x Frame Generation (Beta · LSFG-VK)
 
 > [!IMPORTANT]
@@ -393,7 +419,7 @@ Writing clean-room Linux drivers for proprietary capture hardware requires havin
 **All sponsorship funds are used exclusively to purchase second-hand hardware** (via eBay, Kleinanzeigen, and community sales) to expand open-source Linux capture card support.
 
 #### 🎯 Hardware Acquisition Targets:
-* **AVerMedia Live Gamer 4K 2.1 (GC575):** HDMI 2.1 4K144 / 4K120 PCIe capture card.
+* **AVerMedia Live Gamer 4K 2.1 (GC575):** HDMI 2.1 4K144 / 4K120 card. Its capture function enumerates as a USB 3.2 UVC device (`07ca:0575`), so it needs a UVC/V4L2 backend rather than a VFIO/PCIe engine.
 * **Elgato 4K60 Pro (MK.1 & MK.2) / Cam Link Pro:** Widely used PCIe capture cards currently lacking open-source Linux drivers.
 *(Note: AVerMedia Live Gamer DUO GC570D is fully supported starting in v1.4.0 thanks to @PolygonPrincess).*
 

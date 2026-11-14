@@ -36,6 +36,19 @@ extern "C" {
 #define EVERLIVE_CAP_HARDWARE_SPLITTER   (1U << 13)
 #define EVERLIVE_CAP_EDID_PASSTHROUGH    (1U << 14)
 #define EVERLIVE_CAP_4K120               (1U << 15)
+#define EVERLIVE_CAP_4K144               (1U << 16)
+
+/* -------------------------------------------------------------------------
+ * Transport / bus type
+ * -------------------------------------------------------------------------
+ * GC573 and GC570D are native PCIe functions driven through VFIO.  The GC575
+ * is a PCIe card whose capture function enumerates as a USB UVC device, so it
+ * must be discovered on the USB bus and driven through uvcvideo/V4L2.
+ */
+enum everlive_bus {
+	EVERLIVE_BUS_PCI = 0,
+	EVERLIVE_BUS_USB = 1,
+};
 
 /* -------------------------------------------------------------------------
  * Lighting & Visual Feedback Modes
@@ -103,6 +116,7 @@ struct everlive_device_desc {
 	uint16_t vendor_id;
 	uint16_t device_id;
 	uint16_t subsystem_id;      /* 0 = wildcard match */
+	enum everlive_bus bus;      /* 0 = PCI, keeps older initializers valid */
 	const char *model_slug;     /* Short identifier, e.g. "gc573", "gc570d" */
 	const char *name;           /* Friendly name, e.g. "AVerMedia Live Gamer 4K" */
 	uint32_t capabilities;
@@ -158,9 +172,11 @@ struct everlive_card_ops {
  * ------------------------------------------------------------------------- */
 struct everlive_device {
 	const struct everlive_device_desc *desc;
-	char pci_bdf[32];           /* e.g. "0000:03:00.0" */
+	char pci_bdf[32];           /* e.g. "0000:03:00.0", or "usb:1-2.3" */
+	char usb_path[32];          /* USB sysfs port path, e.g. "1-2.3" */
 	int iommu_group;
 	bool is_vfio_bound;
+	enum everlive_bus bus;
 	void *priv;                 /* Backend-specific context */
 };
 
@@ -203,15 +219,25 @@ int everlive_register_card_ops(const char *model_slug,
 const struct everlive_card_ops *
 everlive_card_ops_for(const struct everlive_device_desc *desc);
 
-/* Matches vendor, device, and subsystem IDs to a registered card descriptor */
+/* Matches vendor, device, and subsystem IDs on the PCI bus. */
 const struct everlive_device_desc *everlive_match_card(uint16_t vendor,
 						       uint16_t device,
 						       uint16_t subsystem);
 
-/* Scans sysfs (/sys/bus/pci/devices) and detects installed capture cards */
+/* Matches a descriptor on a specific bus. */
+const struct everlive_device_desc *
+everlive_match_card_bus(enum everlive_bus bus, uint16_t vendor,
+			uint16_t device, uint16_t subsystem);
+
+/* Scans sysfs (/sys/bus/pci/devices) and detects installed PCIe cards. */
 int everlive_detect_installed_cards(struct everlive_device *out_devices,
 				    size_t max_devices,
 				    const char *sysfs_pci_root);
+
+/* Scans sysfs (/sys/bus/usb/devices) and detects installed USB cards. */
+int everlive_detect_installed_usb_cards(struct everlive_device *out_devices,
+					size_t max_devices,
+					const char *sysfs_usb_root);
 
 /* Checks if a given PCI BDF is currently bound to vfio-pci */
 bool everlive_is_pci_vfio_bound(const char *pci_bdf, const char *sysfs_pci_root);

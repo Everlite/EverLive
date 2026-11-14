@@ -14,6 +14,7 @@
 #include <errno.h>
 
 #define DEFAULT_PCI_SYSFS_PATH "/sys/bus/pci/devices"
+#define DEFAULT_USB_SYSFS_PATH "/sys/bus/usb/devices"
 
 /* -------------------------------------------------------------------------
  * Default Hardware Operations
@@ -197,21 +198,32 @@ static const struct everlive_device_desc kEverliveCardRegistry[] = {
 		.ops = &kEverliveDefaultOps,
 	},
 	{
-		.vendor_id = 0x1461,
-		.device_id = 0x0057,
-		.subsystem_id = 0, /* Future expansion: Live Gamer 4K 2.1 */
+		/*
+		 * The GC575 is a PCIe card, but its capture/audio function is a
+		 * USB 3.2 UVC device behind the card's on-board USB controller.
+		 * Linux binds uvcvideo and snd_usb_audio to 07ca:0575; there is no
+		 * native PCIe video function to hand to VFIO.  Keep the USB ID as
+		 * the authoritative capture identity.
+		 */
+		.vendor_id = 0x07ca,
+		.device_id = 0x0575,
+		.subsystem_id = 0,
+		.bus = EVERLIVE_BUS_USB,
 		.model_slug = "gc575",
 		.name = "AVerMedia Live Gamer 4K 2.1 (GC575)",
 		.capabilities = EVERLIVE_CAP_VIDEO_CAPTURE |
 				EVERLIVE_CAP_AUDIO_CAPTURE |
 				EVERLIVE_CAP_PASSTHROUGH |
+				EVERLIVE_CAP_EDID_PASSTHROUGH |
 				EVERLIVE_CAP_1080P60 |
-				EVERLIVE_CAP_4K60 |
+				EVERLIVE_CAP_1080P240 |
 				EVERLIVE_CAP_1440P120 |
+				EVERLIVE_CAP_4K60 |
+				EVERLIVE_CAP_4K120 |
+				EVERLIVE_CAP_4K144 |
 				EVERLIVE_CAP_HDR10 |
 				EVERLIVE_CAP_RGB_LED |
-				EVERLIVE_CAP_BITSTREAM_AUDIO |
-				EVERLIVE_CAP_EDID_PASSTHROUGH,
+				EVERLIVE_CAP_BITSTREAM_AUDIO,
 		.num_input_ports = 1,
 		.ops = &kEverliveDefaultOps,
 	},
@@ -298,23 +310,23 @@ everlive_card_ops_for(const struct everlive_device_desc *desc)
  * so a missing ID file is not silently reported as a specific model.
  */
 static const struct everlive_device_desc *
-everlive_match_card_ex(uint16_t vendor, uint16_t device,
-		       bool subsystem_known, uint16_t subsystem)
+everlive_match_card_ex(enum everlive_bus bus, uint16_t vendor, uint16_t device,
+			       bool subsystem_known, uint16_t subsystem)
 {
-	/* Pass 1: exact match (vendor, device, subsystem) */
+	/* Pass 1: exact match (bus, vendor, device, subsystem) */
 	for (size_t i = 0; i < REGISTRY_COUNT; i++) {
 		const struct everlive_device_desc *d = &kEverliveCardRegistry[i];
-		if (d->vendor_id == vendor && d->device_id == device &&
-		    d->subsystem_id != 0 && subsystem_known &&
-		    d->subsystem_id == subsystem)
+		if (d->bus == bus && d->vendor_id == vendor &&
+		    d->device_id == device && d->subsystem_id != 0 &&
+		    subsystem_known && d->subsystem_id == subsystem)
 			return d;
 	}
 
 	/* Pass 2: wildcard subsystem entries (match any/unknown subsystem) */
 	for (size_t i = 0; i < REGISTRY_COUNT; i++) {
 		const struct everlive_device_desc *d = &kEverliveCardRegistry[i];
-		if (d->vendor_id == vendor && d->device_id == device &&
-		    d->subsystem_id == 0)
+		if (d->bus == bus && d->vendor_id == vendor &&
+		    d->device_id == device && d->subsystem_id == 0)
 			return d;
 	}
 
@@ -327,8 +339,8 @@ everlive_match_card_ex(uint16_t vendor, uint16_t device,
 		for (size_t i = 0; i < REGISTRY_COUNT; i++) {
 			const struct everlive_device_desc *d =
 				&kEverliveCardRegistry[i];
-			if (d->vendor_id == vendor && d->device_id == device &&
-			    d->fallback_match)
+			if (d->bus == bus && d->vendor_id == vendor &&
+			    d->device_id == device && d->fallback_match)
 				return d;
 		}
 	}
@@ -340,7 +352,15 @@ const struct everlive_device_desc *everlive_match_card(uint16_t vendor,
 						       uint16_t device,
 						       uint16_t subsystem)
 {
-	return everlive_match_card_ex(vendor, device, true, subsystem);
+	return everlive_match_card_ex(EVERLIVE_BUS_PCI, vendor, device, true,
+				      subsystem);
+}
+
+const struct everlive_device_desc *
+everlive_match_card_bus(enum everlive_bus bus, uint16_t vendor,
+			uint16_t device, uint16_t subsystem)
+{
+	return everlive_match_card_ex(bus, vendor, device, true, subsystem);
 }
 
 /*
@@ -471,13 +491,14 @@ int everlive_detect_installed_cards(struct everlive_device *out_devices,
 			read_sysfs_hex16(subsystem_path, &subsystem) == 0;
 
 		const struct everlive_device_desc *desc =
-			everlive_match_card_ex(vendor, device,
+			everlive_match_card_ex(EVERLIVE_BUS_PCI, vendor, device,
 					       subsystem_known, subsystem);
 
 		if (desc) {
 			struct everlive_device *dev = &out_devices[found_count];
 			memset(dev, 0, sizeof(*dev));
 			dev->desc = desc;
+			dev->bus = EVERLIVE_BUS_PCI;
 			snprintf(dev->pci_bdf, sizeof(dev->pci_bdf), "%.31s", ent->d_name);
 			dev->iommu_group = read_iommu_group(dev_path);
 			dev->is_vfio_bound = everlive_is_pci_vfio_bound(ent->d_name, root);
@@ -486,6 +507,68 @@ int everlive_detect_installed_cards(struct everlive_device *out_devices,
 			if (found_count >= max_devices)
 				break;
 		}
+	}
+
+	closedir(dir);
+	return (int)found_count;
+}
+
+int everlive_detect_installed_usb_cards(struct everlive_device *out_devices,
+					size_t max_devices,
+					const char *sysfs_usb_root)
+{
+	if (!out_devices || max_devices == 0)
+		return 0;
+
+	const char *root = (sysfs_usb_root && *sysfs_usb_root) ?
+			   sysfs_usb_root : DEFAULT_USB_SYSFS_PATH;
+
+	DIR *dir = opendir(root);
+	if (!dir)
+		return 0;
+
+	size_t found_count = 0;
+	struct dirent *ent;
+
+	while ((ent = readdir(dir)) != NULL) {
+		if (ent->d_name[0] == '.')
+			continue;
+
+		char dev_path[512];
+		snprintf(dev_path, sizeof(dev_path), "%s/%s", root, ent->d_name);
+
+		char vendor_path[PATH_MAX];
+		char product_path[PATH_MAX];
+
+		snprintf(vendor_path, sizeof(vendor_path), "%s/idVendor", dev_path);
+		snprintf(product_path, sizeof(product_path), "%s/idProduct", dev_path);
+
+		uint16_t vendor = 0;
+		uint16_t product = 0;
+
+		if (read_sysfs_hex16(vendor_path, &vendor) < 0 ||
+		    read_sysfs_hex16(product_path, &product) < 0)
+			continue;
+
+		const struct everlive_device_desc *desc =
+			everlive_match_card_ex(EVERLIVE_BUS_USB, vendor, product,
+					       false, 0);
+
+		if (!desc)
+			continue;
+
+		struct everlive_device *dev = &out_devices[found_count];
+		memset(dev, 0, sizeof(*dev));
+		dev->desc = desc;
+		dev->bus = EVERLIVE_BUS_USB;
+		snprintf(dev->usb_path, sizeof(dev->usb_path), "%.31s", ent->d_name);
+		snprintf(dev->pci_bdf, sizeof(dev->pci_bdf), "usb:%.27s",
+			 ent->d_name);
+		dev->iommu_group = -1;
+
+		found_count++;
+		if (found_count >= max_devices)
+			break;
 	}
 
 	closedir(dir);

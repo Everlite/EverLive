@@ -26,6 +26,7 @@ SYSCONFDIR      ?= /etc
 CORE_DIR   := tools/libeverlive-core
 GC573_DIR  := tools/opengc573-userd
 GC570D_DIR := tools/opengc570d-userd
+GC575_DIR  := tools/opengc575-userd
 VIEWER_DIR := tools/everlive
 TESTS_DIR  := tests
 PKG_DIR    := packaging
@@ -40,9 +41,9 @@ GC570D_SED := sed -e 's|/usr/local/libexec/|$(GC570D_RUNDIR)/|g' \
 
 L := $(DESTDIR)$(EVERLIVE_LIBDIR)
 
-.PHONY: all core gc573 gc570d test check asan clean install uninstall
+.PHONY: all core gc573 gc570d gc575 test check asan clean install uninstall
 
-all: core gc573 gc570d
+all: core gc573 gc570d gc575
 
 core:
 	+$(MAKE) -C $(CORE_DIR)
@@ -52,6 +53,9 @@ gc573: core
 
 gc570d: core
 	+$(MAKE) -C $(GC570D_DIR)
+
+gc575: core
+	+$(MAKE) -C $(GC575_DIR)
 
 test: all
 	+$(MAKE) -C $(TESTS_DIR) test
@@ -65,6 +69,7 @@ clean:
 	+$(MAKE) -C $(CORE_DIR) clean
 	+$(MAKE) -C $(GC573_DIR) clean
 	+$(MAKE) -C $(GC570D_DIR) clean
+	+$(MAKE) -C $(GC575_DIR) clean
 	+$(MAKE) -C $(TESTS_DIR) clean
 
 install: all
@@ -72,6 +77,7 @@ install: all
 	+$(MAKE) -C $(CORE_DIR) install PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 	+$(MAKE) -C $(GC573_DIR) install PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 	+$(MAKE) -C $(GC570D_DIR) install-bin PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
+	+$(MAKE) -C $(GC575_DIR) install PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 	# 2. Application runtime tree under $(EVERLIVE_LIBDIR)
 	install -Dm0755 play.sh $(L)/play.sh
 	install -Dm0755 $(VIEWER_DIR)/everlive_viewer.py $(L)/$(VIEWER_DIR)/everlive_viewer.py
@@ -117,6 +123,7 @@ uninstall:
 	+$(MAKE) -C $(CORE_DIR) uninstall PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 	+$(MAKE) -C $(GC573_DIR) uninstall PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 	+$(MAKE) -C $(GC570D_DIR) uninstall-bin PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
+	+$(MAKE) -C $(GC575_DIR) uninstall PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 	rm -f $(DESTDIR)$(LIBDIR)/libgc570d-v4l2.so \
 	      $(DESTDIR)$(LIBDIR)/libgc573-v4l2.so
 	rm -rf $(L)

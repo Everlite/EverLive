@@ -88,12 +88,20 @@ static void test_card_matching(void)
 	assert(strcmp(gc573_alt->model_slug, "gc573") == 0);
 	TEST_PASS("Identified alternative GC573/BOLT PCIe device ID 0x0055");
 
-	/* Future GC575 template (0x0057) */
+	/* GC575 capture function is USB UVC 07ca:0575, not PCIe. */
 	const struct everlive_device_desc *gc575 =
-		everlive_match_card(0x1461, 0x0057, 0x0000);
+		everlive_match_card_bus(EVERLIVE_BUS_USB, 0x07ca, 0x0575, 0x0000);
 	assert(gc575 != NULL);
 	assert(strcmp(gc575->model_slug, "gc575") == 0);
-	TEST_PASS("Identified GC575 device ID 0x0057");
+	assert(gc575->bus == EVERLIVE_BUS_USB);
+	assert(gc575->capabilities & EVERLIVE_CAP_1080P240);
+	assert(gc575->capabilities & EVERLIVE_CAP_4K120);
+	assert(gc575->capabilities & EVERLIVE_CAP_4K144);
+	TEST_PASS("Identified GC575 USB capture function 07ca:0575");
+
+	/* The old speculative PCI placeholder must not match a real PCI ID. */
+	assert(everlive_match_card(0x1461, 0x0057, 0x0000) == NULL);
+	TEST_PASS("GC575 is not misidentified as a native PCIe function");
 
 	/* Unknown card rejected */
 	const struct everlive_device_desc *unknown =
@@ -221,6 +229,44 @@ static void test_mock_sysfs_scan(void)
 
 	/* Cleanup mock directory.  FTW_PHYS keeps nftw from following the
 	 * driver/iommu_group symlinks into the real sysfs tree. */
+	assert(nftw(tmp_root, remove_entry, 16, FTW_DEPTH | FTW_PHYS) == 0);
+}
+
+static void test_mock_usb_sysfs_scan(void)
+{
+	printf("Testing everlive_detect_installed_usb_cards with mock sysfs...\n");
+
+	char tmp_root[] = "/tmp/everlive_usb_sysfs_test_XXXXXX";
+	char *res = mkdtemp(tmp_root);
+	assert(res != NULL);
+
+	char d1[512], d2[512];
+	snprintf(d1, sizeof(d1), "%s/1-2", tmp_root);
+	snprintf(d2, sizeof(d2), "%s/2-1", tmp_root);
+	assert(mkdir(d1, 0755) == 0);
+	assert(mkdir(d2, 0755) == 0);
+
+	char p[PATH_MAX];
+	snprintf(p, sizeof(p), "%s/idVendor", d1);
+	create_file(p, "07ca\n");
+	snprintf(p, sizeof(p), "%s/idProduct", d1);
+	create_file(p, "0575\n");
+
+	snprintf(p, sizeof(p), "%s/idVendor", d2);
+	create_file(p, "1234\n");
+	snprintf(p, sizeof(p), "%s/idProduct", d2);
+	create_file(p, "5678\n");
+
+	struct everlive_device found[8];
+	int count = everlive_detect_installed_usb_cards(found, 8, tmp_root);
+
+	assert(count == 1);
+	assert(strcmp(found[0].desc->model_slug, "gc575") == 0);
+	assert(found[0].bus == EVERLIVE_BUS_USB);
+	assert(strcmp(found[0].usb_path, "1-2") == 0);
+	assert(strcmp(found[0].pci_bdf, "usb:1-2") == 0);
+	TEST_PASS("Discovered GC575 USB UVC function from mock sysfs");
+
 	assert(nftw(tmp_root, remove_entry, 16, FTW_DEPTH | FTW_PHYS) == 0);
 }
 
@@ -386,6 +432,7 @@ int main(void)
 	test_registry_enumeration();
 	test_card_matching();
 	test_mock_sysfs_scan();
+	test_mock_usb_sysfs_scan();
 	test_card_ops_binding();
 	test_resume_detection();
 

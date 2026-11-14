@@ -35,6 +35,7 @@ static void print_capabilities(uint32_t caps)
 	CHECK_CAP(EVERLIVE_CAP_EDID_PASSTHROUGH, "EDID-Passthrough");
 	CHECK_CAP(EVERLIVE_CAP_4K60, "4K60");
 	CHECK_CAP(EVERLIVE_CAP_4K120, "4K120");
+	CHECK_CAP(EVERLIVE_CAP_4K144, "4K144");
 	CHECK_CAP(EVERLIVE_CAP_1440P120, "1440p120");
 	CHECK_CAP(EVERLIVE_CAP_1080P240, "1080p240");
 	CHECK_CAP(EVERLIVE_CAP_1080P60, "1080p60");
@@ -97,11 +98,15 @@ static bool systemctl_unit_active(const char *unit)
 static int cmd_detect(void)
 {
 	struct everlive_device cards[8];
-	int count = everlive_detect_installed_cards(cards, 8, NULL);
+	int pci_count = everlive_detect_installed_cards(cards, 8, NULL);
+	int usb_count = everlive_detect_installed_usb_cards(
+		cards + (pci_count > 0 ? pci_count : 0),
+		8 - (pci_count > 0 ? (size_t)pci_count : 0), NULL);
+	int count = pci_count + usb_count;
 
 	printf("=== EverLive Capture Card Discovery ===\n");
 	if (count <= 0) {
-		printf("No supported EverLive capture cards detected on PCI bus.\n");
+		printf("No supported EverLive capture cards detected on PCI or USB.\n");
 		return 1;
 	}
 
@@ -110,9 +115,17 @@ static int cmd_detect(void)
 		const struct everlive_device *dev = &cards[i];
 		printf("[%d] %s\n", i + 1, dev->desc->name);
 		printf("    Model Slug:   %s\n", dev->desc->model_slug);
-		printf("    PCI BDF:      %s\n", dev->pci_bdf);
+		printf("    Bus:          %s\n",
+		       dev->bus == EVERLIVE_BUS_USB ? "USB (UVC)" : "PCIe");
+		if (dev->bus == EVERLIVE_BUS_USB)
+			printf("    USB Path:     %s\n", dev->usb_path);
+		else
+			printf("    PCI BDF:      %s\n", dev->pci_bdf);
 		printf("    IOMMU Group:  %d\n", dev->iommu_group);
-		printf("    Driver Bound: %s\n", dev->is_vfio_bound ? "vfio-pci (Ready)" : "Kernel driver (Needs bind)");
+		printf("    Driver Bound: %s\n",
+		       dev->bus == EVERLIVE_BUS_USB ? "uvcvideo / snd_usb_audio" :
+		       (dev->is_vfio_bound ? "vfio-pci (Ready)" :
+			"Kernel driver (Needs bind)"));
 		printf("    Input Ports:  %d\n", dev->desc->num_input_ports);
 		print_capabilities(dev->desc->capabilities);
 		printf("\n");
@@ -442,7 +455,8 @@ static int cmd_list_models(void)
 	printf("=== EverLive Supported Card Registry ===\n");
 	for (size_t i = 0; i < count; i++) {
 		printf("- %s (%s)\n", reg[i].name, reg[i].model_slug);
-		printf("  PCI ID: 0x%04x:0x%04x (Subsystem: 0x%04x)\n",
+		printf("  %s ID: 0x%04x:0x%04x (Subsystem: 0x%04x)\n",
+		       reg[i].bus == EVERLIVE_BUS_USB ? "USB" : "PCI",
 		       reg[i].vendor_id, reg[i].device_id, reg[i].subsystem_id);
 		print_capabilities(reg[i].capabilities);
 	}

@@ -139,6 +139,9 @@ static char g_toast_custom[64] = "";
 static uint32_t g_toast_time = 0;
 static uintptr_t g_embed_wid = 0;
 static uint32_t g_preferred_fmt = 0;
+static unsigned int g_requested_width = 0;
+static unsigned int g_requested_height = 0;
+static unsigned int g_requested_fps = 0;
 static int g_hdr_mode = 0; // 0 = SDR Monitor Tone-Map (ACES), 1 = HDR Monitor Passthrough (Native), 2 = SDR Bypass
 static float g_hdr_exposure = 50.0f; // Scale factor for HDR tone mapping
 
@@ -930,10 +933,18 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
 {
     stream_stop(ctx);
 
-    /* Hardware DV-Timings query and synchronization */
+    /*
+     * Two source classes share this renderer:
+     *   1. Native HDMI-receiver nodes (GC573/GC570D) expose DV timings.
+     *   2. UVC devices (GC575) expose a fixed format and reject
+     *      VIDIOC_QUERY_DV_TIMINGS.  For those, negotiate a normal V4L2
+     *      format and, if requested, a frame interval through S_PARM.
+     */
     struct v4l2_dv_timings dv = {};
     bool dv_interlaced = false;
-    if (ioctl(ctx->fd, VIDIOC_QUERY_DV_TIMINGS, &dv) == 0 && dv.bt.width > 0 && dv.bt.height > 0) {
+
+    if (ioctl(ctx->fd, VIDIOC_QUERY_DV_TIMINGS, &dv) == 0 &&
+        dv.bt.width > 0 && dv.bt.height > 0) {
         dv_interlaced = (dv.bt.interlaced == V4L2_DV_INTERLACED);
         ioctl(ctx->fd, VIDIOC_S_DV_TIMINGS, &dv);
         struct v4l2_format sfmt = {};
@@ -944,8 +955,44 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
         sfmt.fmt.pix.field = dv_interlaced ? V4L2_FIELD_INTERLACED : V4L2_FIELD_NONE;
         ioctl(ctx->fd, VIDIOC_S_FMT, &sfmt);
     } else {
-        /* Timings not locked yet - stay in standby, do not attempt streaming with stale format */
-        return false;
+        struct v4l2_format sfmt = {};
+        sfmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        if (ioctl(ctx->fd, VIDIOC_G_FMT, &sfmt) < 0) {
+            fprintf(stderr, "[-] UVC source: VIDIOC_G_FMT failed: %s\n", strerror(errno));
+            return false;
+        }
+
+        if (g_requested_width && g_requested_height) {
+            sfmt.fmt.pix.width = g_requested_width;
+            sfmt.fmt.pix.height = g_requested_height;
+        }
+        if (ctx->preferred_pixelformat)
+            sfmt.fmt.pix.pixelformat = ctx->preferred_pixelformat;
+        sfmt.fmt.pix.field = V4L2_FIELD_NONE;
+
+        if (ioctl(ctx->fd, VIDIOC_S_FMT, &sfmt) < 0) {
+            /* Keep the driver's current format if the request is rejected. */
+            memset(&sfmt, 0, sizeof(sfmt));
+            sfmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            if (ioctl(ctx->fd, VIDIOC_G_FMT, &sfmt) < 0)
+                return false;
+        }
+
+        if (g_requested_fps) {
+            struct v4l2_streamparm parm = {};
+            parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            if (ioctl(ctx->fd, VIDIOC_G_PARM, &parm) == 0) {
+                parm.parm.capture.timeperframe.numerator = 1;
+                parm.parm.capture.timeperframe.denominator = g_requested_fps;
+                if (ioctl(ctx->fd, VIDIOC_S_PARM, &parm) < 0)
+                    fprintf(stderr,
+                            "[*] UVC source: %u fps not accepted (%s); using driver default\n",
+                            g_requested_fps, strerror(errno));
+            }
+        }
+
+        printf("[*] UVC source: no DV timings, using fixed V4L2 format%s\n",
+               g_requested_fps ? " with requested frame interval" : "");
     }
 
     struct v4l2_format fmt = {};
@@ -1097,6 +1144,18 @@ int main(int argc, char *argv[])
             else if (!strcasecmp(f, "rgb32") || !strcasecmp(f, "rgb4") || !strcasecmp(f, "bgrx") || !strcasecmp(f, "rgba"))
                 g_preferred_fmt = V4L2_PIX_FMT_RGB32;
         }
+        else if ((!strcmp(argv[i], "-S") || !strcmp(argv[i], "--size")) && i + 1 < argc) {
+            unsigned int w = 0, h = 0;
+            if (sscanf(argv[++i], "%ux%u", &w, &h) == 2) {
+                g_requested_width = w;
+                g_requested_height = h;
+            }
+        }
+        else if (!strcmp(argv[i], "--fps") && i + 1 < argc) {
+            unsigned long fps = strtoul(argv[++i], NULL, 0);
+            if (fps > 0 && fps <= 1000)
+                g_requested_fps = (unsigned int)fps;
+        }
         else if (!strcmp(argv[i], "--hdr") && i + 1 < argc) {
             const char *h = argv[++i];
             if (!strcasecmp(h, "off") || !strcasecmp(h, "sdr") || !strcasecmp(h, "0"))
@@ -1113,7 +1172,7 @@ int main(int argc, char *argv[])
             }
         }
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
-            printf("Usage: %s [-f|--fullscreen] [--vsync] [-s|--streamer-mode] [--hdr auto|on|off] [--exposure 1.0-40.0] [-F yuyv|nv12|bgr24|rgb32] [-d /dev/videoX] [-a hw:CARD,DEV|none] [--pw-node node_name] [-w wid] [--no-audio]\n", argv[0]);
+            printf("Usage: %s [-f|--fullscreen] [--vsync] [-s|--streamer-mode] [--hdr auto|on|off] [--exposure 1.0-40.0] [-F yuyv|nv12|bgr24|rgb32] [-S WxH] [--fps N] [-d /dev/videoX] [-a hw:CARD,DEV|none] [--pw-node node_name] [-w wid] [--no-audio]\n", argv[0]);
             return 0;
         }
     }

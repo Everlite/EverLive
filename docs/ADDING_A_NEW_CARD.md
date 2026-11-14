@@ -146,22 +146,30 @@ In `tools/libeverlive-core/everlive_card.c`, update the existing placeholder ent
 static const struct everlive_device_desc kEverliveCardRegistry[] = {
     /* ... existing entries (e.g. GC570D, GC573) ... */
     {
-        /* Example: Live Gamer 4K 2.1 (GC575 placeholder) */
-        .vendor_id       = 0x1461,
-        .device_id       = 0x0057,
-        .subsystem_id    = 0, /* Subsystem ID; 0 for wildcard until hardware confirmed */
+        /*
+         * Live Gamer 4K 2.1 (GC575).  The card is PCIe, but its capture
+         * function enumerates as USB UVC 07ca:0575 and is driven by
+         * uvcvideo.  Match it on the USB bus, not with a PCI ID.
+         */
+        .vendor_id       = 0x07ca,
+        .device_id       = 0x0575,
+        .subsystem_id    = 0,
+        .bus             = EVERLIVE_BUS_USB,
         .model_slug      = "gc575",
         .name            = "AVerMedia Live Gamer 4K 2.1 (GC575)",
         .capabilities    = EVERLIVE_CAP_VIDEO_CAPTURE |
                            EVERLIVE_CAP_AUDIO_CAPTURE |
                            EVERLIVE_CAP_PASSTHROUGH |
+                           EVERLIVE_CAP_EDID_PASSTHROUGH |
                            EVERLIVE_CAP_1080P60 |
-                           EVERLIVE_CAP_4K60 |
+                           EVERLIVE_CAP_1080P240 |
                            EVERLIVE_CAP_1440P120 |
+                           EVERLIVE_CAP_4K60 |
+                           EVERLIVE_CAP_4K120 |
+                           EVERLIVE_CAP_4K144 |
                            EVERLIVE_CAP_HDR10 |
                            EVERLIVE_CAP_RGB_LED |
-                           EVERLIVE_CAP_BITSTREAM_AUDIO |
-                           EVERLIVE_CAP_EDID_PASSTHROUGH,
+                           EVERLIVE_CAP_BITSTREAM_AUDIO,
         .num_input_ports = 1,
         .ops             = &kEverliveDefaultOps,
         .fallback_match  = false,
@@ -1001,13 +1009,14 @@ EverLive enforces rigorous test-driven validation.
 Add tests asserting descriptor matching and sysfs detection:
 
 ```c
-/* Test matching logic against template/placeholder */
+/* GC575 capture function is USB UVC, not a native PCIe function. */
 const struct everlive_device_desc *card =
-    everlive_match_card(0x1461, 0x0057, 0x0000);
+    everlive_match_card_bus(EVERLIVE_BUS_USB, 0x07ca, 0x0575, 0x0000);
 assert(card != NULL);
 assert(strcmp(card->model_slug, "gc575") == 0);
-assert(card->capabilities & EVERLIVE_CAP_1440P120);
-TEST_PASS("Identified GC575 device ID 0x0057 with 1440p120 template");
+assert(card->capabilities & EVERLIVE_CAP_1080P240);
+assert(card->capabilities & EVERLIVE_CAP_4K144);
+TEST_PASS("Identified GC575 USB capture function 07ca:0575");
 
 /* Test mock sysfs autodiscovery (using mkdtemp test harness) */
 char tmp_root[] = "/tmp/everlive_sysfs_test_XXXXXX";
