@@ -54,6 +54,7 @@ tests/test_json_rpc
 tests/test_v4l2_shim
 tests/test_handoff
 tests/test_framegen
+tests/test_gc575_uvc
 
 # libeverlive-core build outputs
 tools/libeverlive-core/*.a

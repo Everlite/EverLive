@@ -9,7 +9,7 @@
 // Usage:  ./gc575ctl -d /dev/video0 info
 //         ./gc575ctl -d /dev/video0 get-index
 //         ./gc575ctl -d /dev/video0 set-index 1
-//         ./gc575ctl -d /dev/video0 raw 1 23
+//         ./gc575ctl -U -d /dev/video0 raw 1 23   # arbitrary AT, explicitly unsafe
 //
 // The protocol framing is reconstructed from the GC575 research notes; this
 // tool has not been validated against physical hardware.  It only performs
@@ -344,6 +344,7 @@ static void usage(const char *argv0)
             "  -D PATH   use raw usbfs control transfers (needs permission)\n"
             "  -u N      XU unit/entity id (default 4)\n"
             "  -r        raw output only\n"
+            "  -U        allow arbitrary 'raw' AT commands (unsafe)\n"
             "\n"
             "commands:\n"
             "  info                 AT23 Get_System_Info\n"
@@ -354,12 +355,12 @@ static void usage(const char *argv0)
             "  out-timing           AT44 UVC output timing (12 bytes)\n"
             "  vformat              AT45 UVC video format\n"
             "  vfreq                AT86 HDMI RX vertical frequency\n"
-            "  raw SERVICE CMD [HEXPAYLOAD]\n"
+            "  raw SERVICE CMD [HEXPAYLOAD]  (requires -U)\n"
             "\n"
             "examples:\n"
             "  %s -d /dev/video0 info\n"
             "  %s -d /dev/video0 set-index 1\n"
-            "  %s -d /dev/video0 raw 1 23\n",
+            "  %s -U -d /dev/video0 raw 1 23\n",
             argv0, argv0, argv0, argv0);
 }
 
@@ -369,14 +370,15 @@ int main(int argc, char **argv)
     const char *device = "/dev/video0";
     const char *usbfs_path = NULL;
     uint8_t unit = GC575_UNIT;
-    int opt, raw = 0;
+    int opt, raw = 0, unsafe = 0;
 
-    while ((opt = getopt(argc, argv, "d:D:u:rh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:D:u:rUh")) != -1) {
         switch (opt) {
         case 'd': device = optarg; break;
         case 'D': usbfs_path = optarg; break;
         case 'u': unit = (uint8_t)strtoul(optarg, NULL, 0); break;
         case 'r': raw = 1; break;
+        case 'U': unsafe = 1; break;
         default: usage(prog); return 1;
         }
     }
@@ -415,7 +417,14 @@ int main(int argc, char **argv)
             fprintf(stderr, "set-index needs 0 or 1\n");
             goto out;
         }
-        uint32_t index = (uint32_t)strtoul(argv[1], NULL, 0);
+        char *end = NULL;
+        unsigned long parsed = strtoul(argv[1], &end, 0);
+        if (end == argv[1] || *end != '\0' || parsed > 1) {
+            fprintf(stderr, "refusing profile index %s: only 0 or 1 are known-safe\n",
+                    argv[1]);
+            goto out;
+        }
+        uint32_t index = (uint32_t)parsed;
         uint8_t payload[8] = {
             0x01, 0x00, 0x00, 0x00,
             (uint8_t)(index & 0xff), (uint8_t)((index >> 8) & 0xff),
@@ -433,6 +442,12 @@ int main(int argc, char **argv)
     } else if (!strcmp(cmd, "vfreq")) {
         ret = exchange_and_print(fd, unit, 1, 0x86, NULL, 0, raw);
     } else if (!strcmp(cmd, "raw")) {
+        if (!unsafe) {
+            fprintf(stderr,
+                    "refusing arbitrary AT command without -U; known-safe commands are "
+                    "info, get-index, set-index, timing, stable, out-timing, vformat, vfreq\n");
+            goto out;
+        }
         if (argc < 3) {
             fprintf(stderr, "raw needs SERVICE and CMD\n");
             goto out;

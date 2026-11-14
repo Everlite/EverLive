@@ -418,6 +418,10 @@ try to bind the PCIe function or claim the USB interfaces. Instead:
 - **Do not parse the UVC templates as a contiguous config descriptor.** The
   templates contain placeholders and `0xff` padding; the live configuration is
   the truth.
+- **Keep arbitrary AT commands behind an explicit unsafe switch.** The normal
+  capture path is read-only; `gc575ctl raw` requires `-U`, and `set-index` is
+  restricted to 0/1. Unknown AT commands could change EDID, MCU state or other
+  persistent settings even though they are not a full firmware flash.
 
 ## 7. Open points / limits
 

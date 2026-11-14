@@ -72,6 +72,22 @@ sudo gc575ctl -D /dev/bus/usb/001/013 info
 The raw backend needs write access to the USB device node. Prefer the UVC
 backend (video group) for normal use.
 
+## Safety boundaries
+
+- The normal capture path uses standard V4L2 ioctls and read-only AT queries.
+  It never writes flash, firmware, descriptors or EDID.
+- `set-index` is restricted to `0` and `1`; these are runtime descriptor
+  selections, not a flash operation.
+- `gc575ctl raw ...` requires `-U` and can send arbitrary vendor AT commands.
+  Treat it as unsafe: an unknown command may change EDID, MCU state or other
+  persistent settings even though it is not a full firmware flash.
+- The daemon only sends `AT b0` when `--profile` is explicitly requested.
+- Nothing in this directory binds a PCIe function to VFIO or claims the USB
+  interface away from `uvcvideo`.
+- If the device stops responding during an experiment: stop streaming, unplug
+  and replug the card, then select profile `0`. The Windows firmware updater
+  and its rescue image remain the recovery path.
+
 ## Modes present in the firmware / live descriptors
 
 The GC575 firmware contains two descriptor profiles per USB speed. Profile 0 is
