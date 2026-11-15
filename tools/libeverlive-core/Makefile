@@ -89,6 +89,7 @@ uninstall:
 		$(DESTDIR)$(INCLUDEDIR)/everlive_ctl.h \
 		$(DESTDIR)$(INCLUDEDIR)/everlive_json.h \
 		$(DESTDIR)$(INCLUDEDIR)/everlive_ipc.h \
+		$(DESTDIR)$(INCLUDEDIR)/everlive_handoff.h \
 		$(DESTDIR)$(SYSTEMD_USER_DIR)/everlive.service
 
 clean:

@@ -7,13 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [1.6.0] - 2026-11-15
 
 ### Added
 - **Lock-free shared frame store and reusable V4L2 preload engine:**
   - `libeverlive-core` now provides a triple-buffered POSIX shared-memory frame store (`everlive_framestore`) and a card-descriptor-driven V4L2 virtual-camera engine (`libeverlive-core/v4l2`).
   - GC570D keeps `/dev/video60` and `/dev/video61` through `libgc570d-v4l2.so`, now built from the shared engine.
-  - GC573 gains `libgc573-v4l2.so`, exposing the live post-tonemap capture feed as `/dev/video63` with 4K60, 1440p120 and 1080p240 modes, without `v4l2loopback` or any kernel module.
+  - GC573 gains `libgc573-v4l2.so`, exposing the live post-tonemap capture feed as `/dev/video63` with 4K60, 1440p120 and 1080p240 modes, without `v4l2loopback` or any additional kernel modules.
   - The GC573 streamer publishes tonemapped frames (and the no-signal standby card) to `/dev/shm/gc573_v4l2_shm` from the preview thread; the SDL window, loopback sink and preload feed see the same picture.
 - **Shared `libeverlive-core`:** card registry and subsystem-aware autodiscovery, YUY2 frame conversion, jsmn-backed JSON-RPC helpers, control-socket path resolution, and the `everlive-ctl` CLI.
 - **Unified control plane for the GC570D:** the DUO daemon now serves the same newline-delimited JSON-RPC 2.0 protocol on `everlive.sock` (status, LED, audio, OSD, aspect/scale, input switching, HPD, EDID policy) alongside the legacy `gc570d-ctl` socket.
@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Top-level `Makefile` supports `make install DESTDIR=... PREFIX=/usr`. It installs the app to `$(PREFIX)/lib/everlive` with an `everlive` launcher, plus udev, `vfio-pci`, memlock, PipeWire, desktop, and systemd files in their standard locations.
   - `everlive` and `everlive-git` PKGBUILDs in `packaging/arch/`.
 - **Cross-user card handoff (GC573):** two users on one machine can share the capture card without shutting anything down by hand. Starting capture asks the other user's engine (or idle LED daemon) to release the card; that engine pauses, the Control Hub shows "Capture Paused" with a **Take Back Capture** button, and it resumes by itself when the other session ends. Only users with group access to the card's VFIO node may ask. The protocol lives in `libeverlive-core` (`everlive_handoff.h`); the GC570D engine does not use it yet.
+- **System suspend/resume recovery (GC573):** the capture engine recovers cleanly when the host suspends (S3) and resumes. Hardware registers and DMA rings are quiesced during sleep and re-armed on wake, tolerating temporary device detachment without crashing or requiring a manual restart.
 
 ### Changed
 - **Documentation:** expanded `docs/ADDING_A_NEW_CARD.md` with the shared frame-store and optional module-free V4L2 preload integration contract, and cross-linked it from the root/engine documentation.

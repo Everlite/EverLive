@@ -57,7 +57,7 @@ As of **EverLive v1.0.0**, this userspace engine is the default, primary driver 
 
 ## Building
 
-Sources live in `src/`; the four binaries are written to this directory so
+Sources live in `src/`; the binaries and preload library are written to this directory so
 `play.sh`, `install.sh`, `uninstall.sh` and the systemd units resolve them by
 path.
 
@@ -91,7 +91,7 @@ gc573_user_streamer [PCI_ADDRESS] [OPTIONS]
   --vsync/--no-vsync   Pace presentation to the display refresh (default: off)
   --aspect MODE        auto|16:9|4:3|stretch
   --scale MODE         fit|integer (pixel-perfect integer scaling; alias: --integer-scale)
-  --volume, -v 0..100  Initial playback volume percentage
+  --volume, -v 0.0..1.5 Playback audio gain factor (default: 1.0; 0.0=mute, 1.5=150%)
   --mute               Start with audio muted
   --framegen MODE      off|60to120|30to60 (LSFG-VK 2x frame generation)
   --fg-flow-scale S    Optical flow scale: 0.5|0.75|1.0 (default: 1.0)
@@ -143,7 +143,7 @@ render loop through a seqlock, so remote queries never touch the DMA path.
 ```console
 $ printf '{"jsonrpc":"2.0","id":1,"method":"status.get"}\n' \
     | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/everlive.sock"
-{"jsonrpc":"2.0","id":1,"result":{"proto":1,"version":"1.5.0",...}}
+{"jsonrpc":"2.0","id":1,"result":{"proto":1,"version":"1.6.0",...}}
 ```
 
 ## Sharing the Card Between Users
@@ -287,7 +287,8 @@ Implementation notes:
 
 - A lock-free SPSC ring (64 KiB) connects the audio worker to the PipeWire RT
   thread; the audio path never blocks on the graph.
-- The tap always publishes **S16_LE stereo**. 24-bit HDMI carriers arrive as
+- The tap dynamically publishes S16_LE in stereo (2 ch), 5.1 (6 ch), or 7.1
+  (8 ch) matching the negotiated source layout. 24-bit HDMI carriers arrive as
   left-aligned S32LSB and are re-quantised; the playback path is untouched.
 - The stream is connected only once the HDMI sample rate is known, so a
   44.1 kHz source is never played at 48 kHz pitch.

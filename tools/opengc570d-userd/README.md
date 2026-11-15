@@ -73,7 +73,12 @@ downstream display EDID; without it the internal 4K60 bridge EDID is used.
 | --- | --- |
 | `1` / `2` | Select HDMI IN 1 / HDMI IN 2 |
 | `P` | Toggle picture-in-picture of the other input |
+| `L` | Toggle scaling mode (`fit` bilinear ↔ `integer` nearest-neighbor) |
+| `A` | Cycle aspect ratio (`auto` → `16:9` → `4:3` → `stretch`) |
+| `↑` / `↓` (or `+` / `-`) | Volume up / down (in 5% steps) |
+| `M` | Toggle audio mute |
 | `Tab` / `O` | Toggle the OSD |
+| `C` | Cycle OSD corner position |
 | `F` / `F11` | Toggle fullscreen |
 | `Esc` / `Q` | Quit |
 
@@ -100,8 +105,10 @@ frame store directly and does not replace the v4l2loopback path.
 
 ## Control socket
 
-The daemon listens on `$XDG_RUNTIME_DIR/gc570d/control.sock`. `gc570d-ctl`
-exposes the live controls used by the Console Hub:
+The daemon serves the unified newline-delimited JSON-RPC 2.0 protocol on
+`$XDG_RUNTIME_DIR/everlive.sock` (used by `everlive-ctl` and the Console Hub)
+as well as the legacy text protocol on `$XDG_RUNTIME_DIR/gc570d/control.sock`
+used by `gc570d-ctl`:
 
 ```sh
 gc570d-ctl status

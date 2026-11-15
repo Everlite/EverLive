@@ -24,7 +24,7 @@ except ImportError:  # imported as a module from another working directory
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
                                  paused_state as handoff_paused_state)
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 CONFIG_DIR = os.path.expanduser("~/.config/everlive")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
@@ -3404,14 +3404,13 @@ if HAS_QT:
 
             has_loopback_node = os.path.exists(V4L2_DEFAULT_DEVICE)
             self.chk_v4l2 = QCheckBox(
-                f"Legacy Loopback ({V4L2_DEFAULT_DEVICE})")
+                f"V4L2 Loopback ({V4L2_DEFAULT_DEVICE})")
             self.chk_v4l2.setChecked(bool(self.saved_cfg.get("v4l2_loopback", False) and has_loopback_node))
             self.chk_v4l2.toggled.connect(self.on_v4l2_toggled)
             if self.vfio_mode:
                 tip = (
-                    "Optional fallback: publishes native frames to a v4l2loopback kernel node. "
-                    "Modern OBS and Discord can connect directly via PipeWire (gc570d_hdmi1_video) "
-                    "or libgc570d-v4l2.so without any kernel modules."
+                    "System-wide loopback node: publishes native frames to a v4l2loopback kernel node. "
+                    "Accessible by OBS, Discord, and browsers without custom preload wrappers."
                 )
                 if not has_loopback_node:
                     tip += f"\n(Note: {V4L2_DEFAULT_DEVICE} is not loaded; module-free capture is active)"

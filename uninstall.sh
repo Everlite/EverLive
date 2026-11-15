@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive - Deinstaller (v1.5.0)
+# EverLive - Deinstaller (v1.6.0)
 # ==============================================================================
 set -euo pipefail
 
@@ -59,7 +59,7 @@ rm -f /usr/local/lib/libeverlive_core.so* /usr/local/lib/libeverlive_core.a
 rm -f /usr/local/include/everlive_card.h /usr/local/include/everlive_frame.h \
       /usr/local/include/everlive_framestore.h \
       /usr/local/include/everlive_ctl.h /usr/local/include/everlive_json.h \
-      /usr/local/include/everlive_ipc.h
+      /usr/local/include/everlive_ipc.h /usr/local/include/everlive_handoff.h
 rm -f /usr/local/lib/systemd/user/everlive.service
 rm -f /usr/local/bin/vfio_pci_bind.sh
 
