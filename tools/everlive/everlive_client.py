@@ -36,7 +36,7 @@ SOCKET_NAME = "everlive.sock"
 PROTO_VERSION = 1
 MAX_FRAME = 65536
 
-FRAMEGEN_MODES = ("off", "60to120", "30to60")
+FRAMEGEN_MODES = ("off", "2x", "3x", "4x", "60to120", "30to60", "30to90", "30to120")
 
 # Legacy/alias spellings accepted from older settings files or scripts.
 FRAMEGEN_ALIASES = {
@@ -342,14 +342,20 @@ if QSocketNotifier is not None:
             """mode: ``auto`` | ``16:9`` | ``4:3`` | ``stretch``."""
             return self.request("aspect.set", {"mode": str(mode)})
 
-        def set_mode(self, mode: str) -> bool:
+        def set_mode(self, mode: str,
+                     parent_winid: Optional[int] = None) -> bool:
             """Switch the running engine between ``gaming`` and ``headless``.
 
             The engine swaps only its presentation layer: the DMA ring, the
             V4L2 loopback feed and the audio path keep running, so an OBS
-            recording is never interrupted.
+            recording is never interrupted.  When ``parent_winid`` is given,
+            the engine attaches to that native X11 container window (or pops
+            out to a standalone window when ``parent_winid == 0``).
             """
-            return self.request("mode.set", {"mode": str(mode)})
+            params = {"mode": str(mode)}
+            if parent_winid is not None:
+                params["parent_winid"] = int(parent_winid)
+            return self.request("mode.set", params)
 
         def set_v4l2(self, enabled: bool, device: str = "/dev/video10") -> bool:
             """Attach or detach the v4l2loopback sink on a running engine.
@@ -381,26 +387,34 @@ if QSocketNotifier is not None:
 
         def set_framegen(self, mode: str = "off", flow_scale: float = 1.0,
                          perf_mode: bool = False,
-                         low_latency: bool = True) -> bool:
+                         low_latency: bool = True,
+                         multiplier: Optional[int] = None,
+                         dedup: Optional[bool] = None) -> bool:
             """Toggle lsfg-vk frame generation on a running engine.
 
-            ``mode`` is ``off`` | ``60to120`` | ``30to60`` (``2x`` is accepted
-            as an alias for ``60to120``).  ``flow_scale`` is 0.5 .. 1.0,
-            ``perf_mode`` selects LSFG's performance profile, and
+            ``mode`` is ``off`` | ``2x`` | ``3x`` | ``4x`` | ``60to120`` |
+            ``30to60`` | ``30to90`` | ``30to120``.  ``multiplier`` (2..4) and
+            ``dedup`` (bool) can also be supplied explicitly.  ``flow_scale`` is
+            0.5 .. 1.0, ``perf_mode`` selects LSFG's performance profile, and
             ``low_latency`` keeps the minimal Vulkan swapchain image count
             (``LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT=1``).  The change is
             queued lock-free to the render thread and applies mid-game without
             restarting the stream.
             """
-            mode = FRAMEGEN_ALIASES.get(str(mode), str(mode))
+            mode = FRAMEGEN_ALIASES.get(str(mode).lower(), str(mode).lower())
             if mode not in FRAMEGEN_MODES:
                 mode = "off"
-            return self.request("framegen.set", {
+            params: Dict[str, object] = {
                 "mode": mode,
                 "flow_scale": max(0.5, min(1.0, float(flow_scale))),
                 "perf_mode": bool(perf_mode),
                 "low_latency": bool(low_latency),
-            })
+            }
+            if multiplier is not None:
+                params["multiplier"] = max(2, min(4, int(multiplier)))
+            if dedup is not None:
+                params["dedup"] = bool(dedup)
+            return self.request("framegen.set", params)
 
         # -- wire ------------------------------------------------------
 

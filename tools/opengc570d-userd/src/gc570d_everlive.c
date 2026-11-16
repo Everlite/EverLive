@@ -33,6 +33,13 @@
 
 #ifdef HAVE_SDL2
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_syswm.h>
+#ifdef None
+#undef None
+#endif
+#ifdef Status
+#undef Status
+#endif
 #endif
 
 #define EVERLIVE_FRAME_BYTES (1920U * 1080U * 2U)
@@ -498,6 +505,10 @@ struct everlive_sdl {
 	uint64_t overlay_built_ns;
 	SDL_AudioDeviceID audio_dev;
 	bool fullscreen;
+	unsigned long parent_winid;
+	int embed_last_w;
+	int embed_last_h;
+	uint64_t embed_last_sync_ns;
 };
 
 static void sdl_draw_glyph(uint32_t *pixels, uint32_t stride, int x, int y,
@@ -608,12 +619,169 @@ static void sdl_build_overlay(struct everlive_sdl *sdl, const char *line1,
 			  (int)(width * sizeof(uint32_t)));
 }
 
+#if defined(SDL_VIDEO_DRIVER_X11)
+static int gc570d_x11_ignore_error(Display *dpy, XErrorEvent *ev)
+{
+	(void)dpy;
+	(void)ev;
+	return 0;
+}
+#endif
+
+static void sdl_embed_attach(struct everlive_sdl *sdl)
+{
+#if defined(SDL_VIDEO_DRIVER_X11)
+	SDL_SysWMinfo wminfo;
+	Display *dpy;
+	Window sdl_xwin;
+	Window parent_xwin;
+	XWindowAttributes attr;
+	XWindowAttributes self_attr;
+	int (*old_handler)(Display *, XErrorEvent *);
+
+	if (!sdl->window || !sdl->parent_winid)
+		return;
+
+	SDL_VERSION(&wminfo.version);
+	if (!SDL_GetWindowWMInfo(sdl->window, &wminfo) ||
+	    wminfo.subsystem != SDL_SYSWM_X11)
+		return;
+
+	dpy = wminfo.info.x11.display;
+	sdl_xwin = wminfo.info.x11.window;
+	parent_xwin = (Window)sdl->parent_winid;
+
+	old_handler = XSetErrorHandler(gc570d_x11_ignore_error);
+	memset(&attr, 0, sizeof(attr));
+	if (XGetWindowAttributes(dpy, parent_xwin, &attr) &&
+	    attr.width > 1 && attr.height > 1) {
+		sdl->embed_last_w = attr.width;
+		sdl->embed_last_h = attr.height;
+	} else {
+		sdl->embed_last_w = 1280;
+		sdl->embed_last_h = 720;
+	}
+
+	XAddToSaveSet(dpy, sdl_xwin);
+	XReparentWindow(dpy, sdl_xwin, parent_xwin, 0, 0);
+	XMoveResizeWindow(dpy, sdl_xwin, 0, 0,
+			  (unsigned int)sdl->embed_last_w,
+			  (unsigned int)sdl->embed_last_h);
+	SDL_SetWindowSize(sdl->window, sdl->embed_last_w, sdl->embed_last_h);
+
+	memset(&self_attr, 0, sizeof(self_attr));
+	if (XGetWindowAttributes(dpy, sdl_xwin, &self_attr)) {
+		long mask = self_attr.your_event_mask &
+			    ~(ButtonPressMask | ButtonReleaseMask |
+			      PointerMotionMask);
+		XSelectInput(dpy, sdl_xwin, mask);
+	}
+
+	SDL_ShowWindow(sdl->window);
+	XMoveResizeWindow(dpy, sdl_xwin, 0, 0,
+			  (unsigned int)sdl->embed_last_w,
+			  (unsigned int)sdl->embed_last_h);
+	XMapRaised(dpy, sdl_xwin);
+	XSync(dpy, False);
+	XSetErrorHandler(old_handler);
+	sdl->embed_last_sync_ns = now_ns();
+#else
+	(void)sdl;
+#endif
+}
+
+static void sdl_embed_sync_size(struct everlive_sdl *sdl)
+{
+#if defined(SDL_VIDEO_DRIVER_X11)
+	SDL_SysWMinfo wminfo;
+	Display *dpy;
+	Window sdl_xwin;
+	Window parent_xwin;
+	Window root_ret = 0;
+	Window cur_parent = 0;
+	Window *children = NULL;
+	unsigned int nchildren = 0;
+	XWindowAttributes attr;
+	XWindowAttributes self_attr;
+	int (*old_handler)(Display *, XErrorEvent *);
+	uint64_t now;
+
+	if (!sdl->window || !sdl->parent_winid)
+		return;
+
+	now = now_ns();
+	if (now - sdl->embed_last_sync_ns < 25000000ULL)
+		return;
+	sdl->embed_last_sync_ns = now;
+
+	SDL_VERSION(&wminfo.version);
+	if (!SDL_GetWindowWMInfo(sdl->window, &wminfo) ||
+	    wminfo.subsystem != SDL_SYSWM_X11)
+		return;
+
+	dpy = wminfo.info.x11.display;
+	sdl_xwin = wminfo.info.x11.window;
+	parent_xwin = (Window)sdl->parent_winid;
+
+	old_handler = XSetErrorHandler(gc570d_x11_ignore_error);
+	if (XQueryTree(dpy, sdl_xwin, &root_ret, &cur_parent,
+		       &children, &nchildren)) {
+		if (children)
+			XFree(children);
+		if (cur_parent != parent_xwin) {
+			XReparentWindow(dpy, sdl_xwin, parent_xwin, 0, 0);
+			XMapRaised(dpy, sdl_xwin);
+		}
+	}
+
+	memset(&attr, 0, sizeof(attr));
+	memset(&self_attr, 0, sizeof(self_attr));
+	if (XGetWindowAttributes(dpy, parent_xwin, &attr) &&
+	    attr.width > 1 && attr.height > 1) {
+		bool self_ok = XGetWindowAttributes(dpy, sdl_xwin, &self_attr) != 0;
+		bool geom_mismatch = !self_ok ||
+				     self_attr.x != 0 || self_attr.y != 0 ||
+				     self_attr.width != attr.width ||
+				     self_attr.height != attr.height;
+
+		if (attr.width != sdl->embed_last_w ||
+		    attr.height != sdl->embed_last_h || geom_mismatch) {
+			sdl->embed_last_w = attr.width;
+			sdl->embed_last_h = attr.height;
+			XMoveResizeWindow(dpy, sdl_xwin, 0, 0,
+					  (unsigned int)attr.width,
+					  (unsigned int)attr.height);
+			SDL_SetWindowSize(sdl->window, attr.width, attr.height);
+			if (self_ok && self_attr.map_state != IsViewable)
+				XMapRaised(dpy, sdl_xwin);
+			XFlush(dpy);
+		}
+	}
+	XSetErrorHandler(old_handler);
+#else
+	(void)sdl;
+#endif
+}
+
 static bool sdl_init(struct everlive_state *st, struct everlive_sdl *sdl)
 {
 	Uint32 flags = SDL_INIT_VIDEO | SDL_INIT_EVENTS;
 	Uint32 renderer_flags = SDL_RENDERER_ACCELERATED;
+	Uint32 win_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_SHOWN |
+			   SDL_WINDOW_OPENGL;
+	const char *pwid_env = getenv("EVERLIVE_PARENT_WINID");
 	int window_w = 1280;
 	int window_h = 720;
+
+	if (pwid_env && *pwid_env) {
+		sdl->parent_winid = strtoul(pwid_env, NULL, 0);
+		if (sdl->parent_winid) {
+			SDL_SetHint(SDL_HINT_VIDEODRIVER, "x11");
+			(void)setenv("SDL_VIDEODRIVER", "x11", 1);
+			win_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN |
+				    SDL_WINDOW_BORDERLESS | SDL_WINDOW_OPENGL;
+		}
+	}
 
 	if (st->opt.vsync)
 		renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
@@ -630,12 +798,15 @@ static bool sdl_init(struct everlive_state *st, struct everlive_sdl *sdl)
 
 	sdl->window = SDL_CreateWindow(
 		st->opt.title ? st->opt.title : "EverLive DUO",
-		SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-		window_w, window_h, SDL_WINDOW_RESIZABLE | SDL_WINDOW_SHOWN);
+		sdl->parent_winid ? 0 : SDL_WINDOWPOS_CENTERED,
+		sdl->parent_winid ? 0 : SDL_WINDOWPOS_CENTERED,
+		window_w, window_h, win_flags);
 	if (!sdl->window) {
 		fprintf(stderr, "[gc570d WARN] SDL window failed: %s\n", SDL_GetError());
 		return false;
 	}
+	if (sdl->parent_winid)
+		sdl_embed_attach(sdl);
 
 	sdl->renderer = SDL_CreateRenderer(sdl->window, -1, renderer_flags);
 	if (!sdl->renderer) {
@@ -646,9 +817,11 @@ static bool sdl_init(struct everlive_state *st, struct everlive_sdl *sdl)
 			return false;
 		}
 	}
+	if (sdl->parent_winid)
+		sdl_embed_attach(sdl);
 	SDL_SetRenderDrawBlendMode(sdl->renderer, SDL_BLENDMODE_BLEND);
 
-	if (st->opt.fullscreen) {
+	if (st->opt.fullscreen && !sdl->parent_winid) {
 		SDL_SetWindowFullscreen(sdl->window, SDL_WINDOW_FULLSCREEN_DESKTOP);
 		sdl->fullscreen = true;
 	}
@@ -1130,6 +1303,7 @@ static void *everlive_thread(void *arg)
 				keep_running = false;
 				break;
 			}
+			sdl_embed_sync_size(&sdl);
 			sdl_render_frame(st, &sdl);
 		}
 #else

@@ -95,6 +95,7 @@ struct gc573_fg_cadence {
 
 struct gc573_fg_config {
 	int mode;		/* enum gc573_fg_mode */
+	int multiplier;		/* 2, 3, or 4 (0 defaults to 2) */
 	float flow_scale;	/* 0.50 .. 1.00 (LSFGVK_FLOW_SCALE) */
 	bool perf_mode;		/* LSFGVK_PERFORMANCE_MODE */
 	/*
@@ -116,6 +117,7 @@ struct gc573_fg_probe {
 
 struct gc573_fg_stats {
 	int mode;
+	int multiplier;
 	bool layer_found;
 	bool dll_found;
 	char dll_path[PATH_MAX];
@@ -179,8 +181,15 @@ void gc573_fg_format_scale(float flow_scale, char *buf, size_t len);
 
 /** "off" | "60to120" | "30to60" */
 const char *gc573_fg_mode_name(int mode);
-/** Parses the mode plus the "2x" alias; returns -1 when unknown. */
+/** Parses the mode plus the "2x"/"3x"/"4x" aliases; returns -1 when unknown. */
 int gc573_fg_mode_parse(const char *name);
+/**
+ * Parses a mode/multiplier spec ("off", "2x", "3x", "4x", "60to120", "30to60",
+ * "30to90", "30to120").  Returns true on success.
+ */
+bool gc573_fg_parse_spec(const char *name, int *mode_out, int *mult_out);
+/** Clamps a multiplier to [2, 4] (treating <=1 as 2). */
+int gc573_fg_clamp_multiplier(int multiplier);
 
 /* ------------------------------------------------------------------ */
 /* Phase-locked 2:1 HDMI parity deduplicator                           */

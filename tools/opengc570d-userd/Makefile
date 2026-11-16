@@ -24,12 +24,14 @@ USER_LDFLAGS := $(LDFLAGS) -lm -lrt
 
 SDL_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl2 2>/dev/null)
 SDL_LIBS   := $(shell $(PKG_CONFIG) --libs sdl2 2>/dev/null)
+X11_CFLAGS := $(shell $(PKG_CONFIG) --cflags x11 2>/dev/null)
+X11_LIBS   := $(shell $(PKG_CONFIG) --libs x11 2>/dev/null)
 PW_CFLAGS  := $(shell $(PKG_CONFIG) --cflags libpipewire-0.3 2>/dev/null)
 PW_LIBS    := $(shell $(PKG_CONFIG) --libs libpipewire-0.3 2>/dev/null)
 
 ifneq ($(strip $(SDL_LIBS)),)
-USER_CFLAGS += -DHAVE_SDL2 $(SDL_CFLAGS)
-USER_LDFLAGS += $(SDL_LIBS)
+USER_CFLAGS += -DHAVE_SDL2 $(SDL_CFLAGS) $(X11_CFLAGS)
+USER_LDFLAGS += $(SDL_LIBS) $(X11_LIBS)
 endif
 
 ifneq ($(strip $(PW_LIBS)),)

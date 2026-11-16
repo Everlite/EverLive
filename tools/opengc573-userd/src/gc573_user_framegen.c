@@ -188,20 +188,65 @@ const char *gc573_fg_mode_name(int mode)
 	}
 }
 
+int gc573_fg_clamp_multiplier(int multiplier)
+{
+	if (multiplier <= 1)
+		return 2;
+	if (multiplier > 4)
+		return 4;
+	return multiplier;
+}
+
+bool gc573_fg_parse_spec(const char *name, int *mode_out, int *mult_out)
+{
+	int mode = -1;
+	int mult = 2;
+
+	if (!name || !*name)
+		return false;
+	if (!strcasecmp(name, "off") || !strcasecmp(name, "none") ||
+	    !strcasecmp(name, "native") || !strcmp(name, "0")) {
+		mode = GC573_FG_OFF;
+	} else if (!strcasecmp(name, "60to120") || !strcasecmp(name, "2x") ||
+		   !strcasecmp(name, "60") || !strcasecmp(name, "120")) {
+		mode = GC573_FG_60_TO_120;
+		mult = 2;
+	} else if (!strcasecmp(name, "3x") || !strcasecmp(name, "60to180") ||
+		   !strcasecmp(name, "180")) {
+		mode = GC573_FG_60_TO_120;
+		mult = 3;
+	} else if (!strcasecmp(name, "4x") || !strcasecmp(name, "60to240") ||
+		   !strcasecmp(name, "240")) {
+		mode = GC573_FG_60_TO_120;
+		mult = 4;
+	} else if (!strcasecmp(name, "30to60") || !strcasecmp(name, "30") ||
+		   !strcasecmp(name, "ps5")) {
+		mode = GC573_FG_30_TO_60;
+		mult = 2;
+	} else if (!strcasecmp(name, "30to90") || !strcasecmp(name, "90")) {
+		mode = GC573_FG_30_TO_60;
+		mult = 3;
+	} else if (!strcasecmp(name, "30to120")) {
+		mode = GC573_FG_30_TO_60;
+		mult = 4;
+	} else {
+		return false;
+	}
+
+	if (mode_out)
+		*mode_out = mode;
+	if (mult_out)
+		*mult_out = mult;
+	return true;
+}
+
 int gc573_fg_mode_parse(const char *name)
 {
-	if (!name || !*name)
+	int mode = -1;
+
+	if (!gc573_fg_parse_spec(name, &mode, NULL))
 		return -1;
-	if (!strcasecmp(name, "off") || !strcasecmp(name, "none") ||
-	    !strcasecmp(name, "native") || !strcmp(name, "0"))
-		return GC573_FG_OFF;
-	if (!strcasecmp(name, "60to120") || !strcasecmp(name, "2x") ||
-	    !strcasecmp(name, "60") || !strcasecmp(name, "120"))
-		return GC573_FG_60_TO_120;
-	if (!strcasecmp(name, "30to60") || !strcasecmp(name, "30") ||
-	    !strcasecmp(name, "ps5"))
-		return GC573_FG_30_TO_60;
-	return -1;
+	return mode;
 }
 
 /* ------------------------------------------------------------------ */
@@ -488,6 +533,8 @@ bool gc573_fg_apply_env(const struct gc573_fg_config *cfg,
 {
 	struct gc573_fg_probe local;
 	char scale[16];
+	char mult_str[8];
+	int mult;
 
 	if (!cfg)
 		return false;
@@ -502,8 +549,10 @@ bool gc573_fg_apply_env(const struct gc573_fg_config *cfg,
 	/* FP16 acceleration stays enabled. */
 	unsetenv("LSFGVK_NO_FP16");
 
+	mult = gc573_fg_clamp_multiplier(cfg->multiplier);
+	snprintf(mult_str, sizeof(mult_str), "%d", mult);
 	setenv("LSFGVK_ENV", "1", 1);
-	setenv("LSFGVK_MULTIPLIER", "2", 1);
+	setenv("LSFGVK_MULTIPLIER", mult_str, 1);
 
 	gc573_fg_format_scale(cfg->flow_scale, scale, sizeof(scale));
 	setenv("LSFGVK_FLOW_SCALE", scale, 1);
@@ -520,9 +569,11 @@ bool gc573_fg_apply_env(const struct gc573_fg_config *cfg,
 	/*
 	 * Low-latency swapchain.  With frame generation off no lsfg-vk instance
 	 * exists at all, so leave the variable unset rather than exporting a stale
-	 * value from a previous session.
+	 * value from a previous session.  At 3x/4x lsfg-vk also needs extra
+	 * swapchain images to pace 2-3 synthetic frames per real frame without
+	 * swapchain starvation/artifacts.
 	 */
-	if (cfg->mode == GC573_FG_OFF || !cfg->low_latency)
+	if (cfg->mode == GC573_FG_OFF || !cfg->low_latency || mult >= 3)
 		unsetenv("LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT");
 	else
 		setenv("LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT", "1", 1);
@@ -566,7 +617,7 @@ void gc573_fg_write_toml(const struct gc573_fg_config *cfg,
 	fprintf(f, "\n[[profile]]\n");
 	fprintf(f, "name = \"everlive\"\n");
 	fprintf(f, "active_in = [\"gc573_user_streamer\"]\n");
-	fprintf(f, "multiplier = 2\n");
+	fprintf(f, "multiplier = %d\n", gc573_fg_clamp_multiplier(cfg->multiplier));
 	fprintf(f, "flow_scale = %s\n", scale);
 	fprintf(f, "performance_mode = %s\n",
 		cfg->perf_mode ? "true" : "false");
@@ -912,6 +963,7 @@ struct gc573_framegen *gc573_framegen_create(const struct gc573_fg_config *cfg)
 		return NULL;
 
 	fg->cfg.mode = GC573_FG_OFF;
+	fg->cfg.multiplier = 2;
 	fg->cfg.flow_scale = 1.0f;
 	fg->cfg.perf_mode = false;
 	fg->cfg.low_latency = true;
@@ -922,6 +974,7 @@ struct gc573_framegen *gc573_framegen_create(const struct gc573_fg_config *cfg)
 			mode = GC573_FG_OFF;
 		fg->cfg = *cfg;
 		fg->cfg.mode = mode;
+		fg->cfg.multiplier = gc573_fg_clamp_multiplier(cfg->multiplier);
 		if (fg->cfg.flow_scale < 0.5f)
 			fg->cfg.flow_scale = 0.5f;
 		if (fg->cfg.flow_scale > 1.0f)
@@ -992,6 +1045,7 @@ void gc573_framegen_set_config(struct gc573_framegen *fg,
 	next = *cfg;
 	if (next.mode < GC573_FG_OFF || next.mode > GC573_FG_30_TO_60)
 		next.mode = GC573_FG_OFF;
+	next.multiplier = gc573_fg_clamp_multiplier(next.multiplier);
 	if (next.flow_scale < 0.5f)
 		next.flow_scale = 0.5f;
 	if (next.flow_scale > 1.0f)
@@ -1302,6 +1356,7 @@ void gc573_framegen_get_stats(struct gc573_framegen *fg,
 	pthread_mutex_lock(&fg->lock);
 
 	out->mode = fg->cfg.mode;
+	out->multiplier = gc573_fg_clamp_multiplier(fg->cfg.multiplier);
 	out->layer_found = fg->probe.layer_found;
 	out->dll_found = fg->probe.dll_found;
 	snprintf(out->dll_path, sizeof(out->dll_path), "%s", fg->probe.dll_path);
@@ -1326,7 +1381,7 @@ void gc573_framegen_get_stats(struct gc573_framegen *fg,
 	 * otherwise report the raw present rate so the UI can warn instead of lie.
 	 */
 	if (fg->probe.layer_found && fg->probe.dll_found && fg->vulkan_active)
-		out->output_fps = fg->present_fps * 2.0;
+		out->output_fps = fg->present_fps * (double)out->multiplier;
 	else
 		out->output_fps = fg->present_fps;
 
