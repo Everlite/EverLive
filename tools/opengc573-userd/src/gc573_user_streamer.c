@@ -35,6 +35,13 @@
 #include "gc573_user_font8x8.h"
 #include "everlive_handoff.h"
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_syswm.h>
+#ifdef None
+#undef None
+#endif
+#ifdef Status
+#undef Status
+#endif
 #include <libswscale/swscale.h>
 #include <stdint.h>
 #include <ctype.h>
@@ -252,6 +259,7 @@ static bool g_present_rebuild;
 static pthread_mutex_t g_framegen_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct gc573_fg_config g_fg_config = {
 	.mode = GC573_FG_OFF,
+	.multiplier = 2,
 	.flow_scale = 1.0f,
 	.perf_mode = false,
 	.low_latency = true,
@@ -778,9 +786,9 @@ static void print_usage(const char *prog)
 	printf("                    falls back to an ITU-R BS.775 stereo downmix).\n");
 	printf("  --no-hdr          Disable HDR10/HLG -> SDR tonemapping (bypass).\n");
 	printf("  --hdr-exposure EV Exposure bias for the tonemapper, -2.0 .. +2.0.\n");
-	printf("  --framegen MODE   off|60to120|30to60 (native lsfg-vk 2x).\n");
-	printf("                    60to120: 60 FPS games -> 120 FPS (alias: 2x).\n");
-	printf("                    30to60: PS5 30 FPS games in a 60 Hz container.\n");
+	printf("  --framegen MODE   off|2x|3x|4x|60to120|30to60|30to90|30to120 (native lsfg-vk).\n");
+	printf("  --fg-mult N       Frame generation multiplier: 2, 3, or 4 (default: 2).\n");
+	printf("  --fg-dedup        Enable 30-in-60 HDMI cadence deduplication (PS5/Console).\n");
 	printf("  --fg-flow-scale F Optical flow quality, 0.5 .. 1.0 (default 1.0).\n");
 	printf("  --fg-perf         LSFG performance mode (lower latency, less quality).\n");
 	printf("  --no-fg-perf      Full LSFG quality (default).\n");
@@ -1943,16 +1951,10 @@ static void osd_build(SDL_Renderer *renderer, int scale, const char *text,
 		line_len++;
 	}
 
-	if (out == &g_osd) {
-		/*
-		 * Prevent the stats box from twitching back and forth in width
-		 * as DMA latency, FPS decimals, or mode tags change character count.
-		 * Pad to a generous minimum and snap to 4-character boundaries.
-		 */
-		if (max_len < 48)
-			max_len = 48;
-		max_len = ((max_len + 3) / 4) * 4 + 2;
-	}
+	/*
+	 * Use the exact line width (numeric fields in osd_update use fixed
+	 * widths so the box neither twitches nor wastes space on the right).
+	 */
 
 	width = pad * 2 + (int)max_len * 8 * scale;
 	height = pad * 2 + (int)lines * line_height +
@@ -1968,10 +1970,10 @@ static void osd_build(SDL_Renderer *renderer, int scale, const char *text,
 	if (!surface)
 		return;
 
-	bg = SDL_MapRGBA(surface->format, 12, 16, 22, 210);
+	bg = SDL_MapRGBA(surface->format, 22, 20, 37, 222);
 	SDL_FillRect(surface, NULL, bg);
 
-	border_color = SDL_MapRGBA(surface->format, 255, 255, 255, 30);
+	border_color = SDL_MapRGBA(surface->format, 187, 150, 243, 96);
 	edge.x = 0;
 	edge.y = 0;
 	edge.w = width;
@@ -2045,6 +2047,8 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 	char tail[96] = "";
 	char scale_tag[32] = "";
 	char dma_tag[32] = "";
+	char ar_tag[24] = "";
+	char vsync_tag[24] = "";
 	int win_h = 0;
 	int scale;
 
@@ -2053,39 +2057,34 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 
 	if (hdr_text && *hdr_text)
 		snprintf(tail, sizeof(tail), " %c %s", OSD_BULLET, hdr_text);
+	if (g_aspect != ASPECT_AUTO)
+		snprintf(ar_tag, sizeof(ar_tag), " %c %s",
+			 OSD_BULLET, aspect_label(g_aspect));
 	if (g_integer_factor > 0)
-		snprintf(scale_tag, sizeof(scale_tag), " %c %dx Integer",
+		snprintf(scale_tag, sizeof(scale_tag), " %c %dx",
 			 OSD_BULLET, g_integer_factor);
 	if (g_osd_dma_ms > 0.0)
-		snprintf(dma_tag, sizeof(dma_tag), " %c DMA: %4.1fms",
+		snprintf(dma_tag, sizeof(dma_tag), " %c %4.1fms",
 			 OSD_BULLET, g_osd_dma_ms);
+	if (g_vsync)
+		snprintf(vsync_tag, sizeof(vsync_tag), " %c VSync", OSD_BULLET);
 
 	SDL_GetWindowSize(window, NULL, &win_h);
 	scale = osd_scale_for_height(win_h);
 
-	if (g_vsync)
-		snprintf(line2, sizeof(line2),
-			 "%.1f FPS %c %s%s%s %c VSync %c %s%s",
-			 fps, OSD_BULLET, aspect_label(g_aspect), scale_tag,
-			 dma_tag, OSD_BULLET, OSD_BULLET, audio_text, tail);
-	else
-		snprintf(line2, sizeof(line2),
-			 "%.1f FPS %c %s%s%s %c %s%s",
-			 fps, OSD_BULLET, aspect_label(g_aspect), scale_tag,
-			 dma_tag, OSD_BULLET, audio_text, tail);
+	snprintf(line2, sizeof(line2),
+		 "%ux%u%s %.0fHz %c %5.1f FPS%s%s%s%s %c %s%s",
+		 in_w, in_h, interlaced ? "i" : "p",
+		 (double)rate_x100 / 100.0, OSD_BULLET, fps,
+		 ar_tag, scale_tag, dma_tag, vsync_tag,
+		 OSD_BULLET, audio_text, tail);
 
 	framegen_describe(line3, sizeof(line3));
 
 	if (line3[0])
-		snprintf(text, sizeof(text),
-			 "EVERLIVE %c %ux%u%s @ %.2f Hz\n%s\n%s",
-			 OSD_BULLET, in_w, in_h, interlaced ? "i" : "p",
-			 (double)rate_x100 / 100.0, line2, line3);
+		snprintf(text, sizeof(text), "%s\n%s", line2, line3);
 	else
-		snprintf(text, sizeof(text),
-			 "EVERLIVE %c %ux%u%s @ %.2f Hz\n%s",
-			 OSD_BULLET, in_w, in_h, interlaced ? "i" : "p",
-			 (double)rate_x100 / 100.0, line2);
+		snprintf(text, sizeof(text), "%s", line2);
 
 	if (scale == g_osd.scale && strcmp(text, g_osd.text) == 0)
 		return;
@@ -5459,11 +5458,6 @@ static const char *framegen_mode_name(int mode)
 	return gc573_fg_mode_name(mode);
 }
 
-static int framegen_mode_parse(const char *name)
-{
-	return gc573_fg_mode_parse(name);
-}
-
 static bool framegen_path_wanted(void)
 {
 	return g_fg_config.mode != GC573_FG_OFF;
@@ -5507,22 +5501,23 @@ static void framegen_describe(char *out, size_t len)
 	if (st.mode == GC573_FG_OFF)
 		return;
 
+	int mult = st.multiplier > 1 ? st.multiplier : 2;
 	ready = st.layer_found && st.dll_found && st.vulkan_active;
 	if (!ready) {
 		const char *why = !st.layer_found ? "LAYER" :
 				  (!st.dll_found ? "DLL" : "VULKAN");
 
-		snprintf(out, len, "LSFG 2x [MISSING %s]", why);
+		snprintf(out, len, "LSFG %dx [MISSING %s]", mult, why);
 		return;
 	}
 
 	if (st.mode == GC573_FG_30_TO_60)
-		snprintf(out, len, "LSFG 2x (30p): %.1f -> %.1f FPS | Flow %d%%",
-			 st.present_fps, st.output_fps,
+		snprintf(out, len, "LSFG %dx (30p): %.1f -> %.1f FPS | Flow %d%%",
+			 mult, st.present_fps, st.output_fps,
 			 (int)(st.flow_scale * 100.0f + 0.5f));
 	else
-		snprintf(out, len, "LSFG 2x: %.1f -> %.1f FPS",
-			 st.present_fps, st.output_fps);
+		snprintf(out, len, "LSFG %dx: %.1f -> %.1f FPS",
+			 mult, st.present_fps, st.output_fps);
 }
 
 static void framegen_teardown(void)
@@ -5569,20 +5564,204 @@ static bool framegen_prepare_vulkan(void)
 	return ready;
 }
 
+/*
+ * Native child-window embedding (Veyra videoHost pattern).
+ *
+ * When g_parent_winid is non-zero, the SDL2 presentation window is created
+ * borderless and reparented directly into the Qt host widget's native X11
+ * window.  The GPU presents straight to the child surface without passing
+ * through Qt compositing (0.0 ms added latency).
+ */
+static unsigned long g_parent_winid;
+static int g_embed_last_w;
+static int g_embed_last_h;
+static uint64_t g_embed_last_sync_ms;
+
+#if defined(SDL_VIDEO_DRIVER_X11)
+static int x11_ignore_error(Display *dpy, XErrorEvent *ev)
+{
+	(void)dpy;
+	(void)ev;
+	return 0;
+}
+#endif
+
+static void embed_window_attach(SDL_Window *window)
+{
+#if defined(SDL_VIDEO_DRIVER_X11)
+	SDL_SysWMinfo wminfo;
+	Display *dpy;
+	Window sdl_xwin;
+	Window parent_xwin;
+	XWindowAttributes attr;
+	XWindowAttributes self_attr;
+	int (*old_handler)(Display *, XErrorEvent *);
+
+	if (!window || !g_parent_winid)
+		return;
+
+	SDL_VERSION(&wminfo.version);
+	if (!SDL_GetWindowWMInfo(window, &wminfo) ||
+	    wminfo.subsystem != SDL_SYSWM_X11) {
+		pr_warn("Embedded mode requested (0x%lx), but SDL is not using X11",
+			g_parent_winid);
+		return;
+	}
+
+	dpy = wminfo.info.x11.display;
+	sdl_xwin = wminfo.info.x11.window;
+	parent_xwin = (Window)g_parent_winid;
+
+	old_handler = XSetErrorHandler(x11_ignore_error);
+	memset(&attr, 0, sizeof(attr));
+	if (XGetWindowAttributes(dpy, parent_xwin, &attr) &&
+	    attr.width > 1 && attr.height > 1) {
+		g_embed_last_w = attr.width;
+		g_embed_last_h = attr.height;
+	} else {
+		g_embed_last_w = DEFAULT_WINDOW_WIDTH;
+		g_embed_last_h = DEFAULT_WINDOW_HEIGHT;
+	}
+
+	XAddToSaveSet(dpy, sdl_xwin);
+	XReparentWindow(dpy, sdl_xwin, parent_xwin, 0, 0);
+	XMoveResizeWindow(dpy, sdl_xwin, 0, 0,
+			  (unsigned int)g_embed_last_w,
+			  (unsigned int)g_embed_last_h);
+	SDL_SetWindowSize(window, g_embed_last_w, g_embed_last_h);
+
+	/*
+	 * Let mouse clicks, double-clicks and pointer motion propagate up to
+	 * the hosting Qt widget so UI controls, double-click fullscreen and
+	 * cursor visibility stay owned by the Control Hub.
+	 */
+	memset(&self_attr, 0, sizeof(self_attr));
+	if (XGetWindowAttributes(dpy, sdl_xwin, &self_attr)) {
+		long mask = self_attr.your_event_mask &
+			    ~(ButtonPressMask | ButtonReleaseMask |
+			      PointerMotionMask);
+		XSelectInput(dpy, sdl_xwin, mask);
+	}
+
+	SDL_ShowWindow(window);
+	XMoveResizeWindow(dpy, sdl_xwin, 0, 0,
+			  (unsigned int)g_embed_last_w,
+			  (unsigned int)g_embed_last_h);
+	XMapRaised(dpy, sdl_xwin);
+	XSync(dpy, False);
+	XSetErrorHandler(old_handler);
+
+	g_embed_last_sync_ms = now_ms();
+	pr_info("Embedded SDL viewport (0x%lx) into parent X11 window 0x%lx (%dx%d)",
+		(unsigned long)sdl_xwin, g_parent_winid,
+		g_embed_last_w, g_embed_last_h);
+#else
+	(void)window;
+#endif
+}
+
+static void embed_window_sync_size(SDL_Window *window)
+{
+#if defined(SDL_VIDEO_DRIVER_X11)
+	SDL_SysWMinfo wminfo;
+	Display *dpy;
+	Window sdl_xwin;
+	Window parent_xwin;
+	Window root_ret = 0;
+	Window cur_parent = 0;
+	Window *children = NULL;
+	unsigned int nchildren = 0;
+	XWindowAttributes attr;
+	XWindowAttributes self_attr;
+	int (*old_handler)(Display *, XErrorEvent *);
+	uint64_t now;
+
+	if (!window || !g_parent_winid || g_headless)
+		return;
+
+	now = now_ms();
+	if (now - g_embed_last_sync_ms < 25)
+		return;
+	g_embed_last_sync_ms = now;
+
+	SDL_VERSION(&wminfo.version);
+	if (!SDL_GetWindowWMInfo(window, &wminfo) ||
+	    wminfo.subsystem != SDL_SYSWM_X11)
+		return;
+
+	dpy = wminfo.info.x11.display;
+	sdl_xwin = wminfo.info.x11.window;
+	parent_xwin = (Window)g_parent_winid;
+
+	old_handler = XSetErrorHandler(x11_ignore_error);
+	if (XQueryTree(dpy, sdl_xwin, &root_ret, &cur_parent,
+		       &children, &nchildren)) {
+		if (children)
+			XFree(children);
+		if (cur_parent != parent_xwin) {
+			XReparentWindow(dpy, sdl_xwin, parent_xwin, 0, 0);
+			XMapRaised(dpy, sdl_xwin);
+		}
+	}
+
+	memset(&attr, 0, sizeof(attr));
+	memset(&self_attr, 0, sizeof(self_attr));
+	if (XGetWindowAttributes(dpy, parent_xwin, &attr) &&
+	    attr.width > 1 && attr.height > 1) {
+		bool self_ok = XGetWindowAttributes(dpy, sdl_xwin, &self_attr) != 0;
+		bool geom_mismatch = !self_ok ||
+				     self_attr.x != 0 || self_attr.y != 0 ||
+				     self_attr.width != attr.width ||
+				     self_attr.height != attr.height;
+
+		if (attr.width != g_embed_last_w ||
+		    attr.height != g_embed_last_h || geom_mismatch) {
+			g_embed_last_w = attr.width;
+			g_embed_last_h = attr.height;
+			XMoveResizeWindow(dpy, sdl_xwin, 0, 0,
+					  (unsigned int)attr.width,
+					  (unsigned int)attr.height);
+			SDL_SetWindowSize(window, attr.width, attr.height);
+			if (self_ok && self_attr.map_state != IsViewable)
+				XMapRaised(dpy, sdl_xwin);
+			XFlush(dpy);
+		}
+	}
+	XSetErrorHandler(old_handler);
+#else
+	(void)window;
+#endif
+}
+
 static int framegen_create_window(SDL_Window **window, Uint32 flags)
 {
+	int w = DEFAULT_WINDOW_WIDTH;
+	int h = DEFAULT_WINDOW_HEIGHT;
+
+	if (g_parent_winid) {
+		flags &= ~SDL_WINDOW_SHOWN;
+		flags |= SDL_WINDOW_HIDDEN | SDL_WINDOW_BORDERLESS;
+		if (g_embed_last_w > 1 && g_embed_last_h > 1) {
+			w = g_embed_last_w;
+			h = g_embed_last_h;
+		}
+	}
+
 	*window = SDL_CreateWindow(EVERLIVE_WINDOW_TITLE,
-				   SDL_WINDOWPOS_CENTERED,
-				   SDL_WINDOWPOS_CENTERED,
-				   DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT,
-				   flags);
+				   g_parent_winid ? 0 : SDL_WINDOWPOS_CENTERED,
+				   g_parent_winid ? 0 : SDL_WINDOWPOS_CENTERED,
+				   w, h, flags);
 	if (!*window) {
 		pr_err("SDL_CreateWindow failed: %s", SDL_GetError());
 		return -EIO;
 	}
-	set_window_icon(*window);
-	if (g_fullscreen)
-		SDL_SetWindowFullscreen(*window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+	if (g_parent_winid) {
+		embed_window_attach(*window);
+	} else {
+		set_window_icon(*window);
+		if (g_fullscreen)
+			SDL_SetWindowFullscreen(*window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+	}
 	return 0;
 }
 
@@ -5591,6 +5770,7 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 			     unsigned int tex_w, unsigned int tex_h)
 {
 	const Uint32 base_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
+	const Uint32 gl_flags = base_flags | SDL_WINDOW_OPENGL;
 	bool want_vk = framegen_desired_driver() == PRESENT_DRIVER_VULKAN &&
 		       !g_headless;
 	Uint32 flags = base_flags;
@@ -5608,6 +5788,7 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 	} else {
 		SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
 		SDL_SetHint(SDL_HINT_RENDER_VSYNC, g_vsync ? "1" : "0");
+		flags |= SDL_WINDOW_OPENGL;
 		if (g_vsync)
 			renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
 	}
@@ -5621,7 +5802,7 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 		renderer_flags = SDL_RENDERER_ACCELERATED;
 		if (g_vsync)
 			renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
-		if (framegen_create_window(window, base_flags) < 0)
+		if (framegen_create_window(window, gl_flags) < 0)
 			return -EIO;
 	} else if (!*window) {
 		return -EIO;
@@ -5635,7 +5816,7 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 		SDL_DestroyWindow(*window);
 		*window = NULL;
 		SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
-		if (framegen_create_window(window, base_flags) < 0)
+		if (framegen_create_window(window, gl_flags) < 0)
 			return -EIO;
 		*renderer = SDL_CreateRenderer(*window, -1,
 					       SDL_RENDERER_ACCELERATED);
@@ -5651,6 +5832,13 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 		*window = NULL;
 		return -EIO;
 	}
+
+	/*
+	 * Ensure the final X11 window owned by the renderer is reparented into
+	 * the host container even if SDL_CreateRenderer recreated the window.
+	 */
+	if (g_parent_winid)
+		embed_window_attach(*window);
 
 	if (want_vk && !g_fg_fallback) {
 		SDL_RendererInfo info;
@@ -5683,7 +5871,7 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 						 g_present_driver ==
 						 PRESENT_DRIVER_VULKAN);
 
-	SDL_ShowCursor(g_osd_enabled ? SDL_ENABLE : SDL_DISABLE);
+	SDL_ShowCursor((g_osd_enabled || g_parent_winid) ? SDL_ENABLE : SDL_DISABLE);
 	return 0;
 }
 
@@ -5741,6 +5929,10 @@ static void switch_output_mode(bool want_gaming, SDL_Window **window,
 	 * A process started with --headless never initialised SDL video, so do
 	 * it on demand; the subsystem then stays up for later switches.
 	 */
+	if (g_parent_winid) {
+		SDL_SetHint(SDL_HINT_VIDEODRIVER, "x11");
+		(void)setenv("SDL_VIDEODRIVER", "x11", 1);
+	}
 	if (!SDL_WasInit(SDL_INIT_VIDEO) &&
 	    SDL_InitSubSystem(SDL_INIT_VIDEO) < 0) {
 		pr_warn("Mode switch: SDL video unavailable (%s)",
@@ -5798,6 +5990,9 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 	st.output_height = out_h;
 	st.fps = fps;
 	st.frames = frames;
+	st.preview_dropped = __atomic_load_n(&g_preview.dropped,
+					     __ATOMIC_RELAXED);
+	st.frame_age_us = g_preview.taken_age_us;
 	st.ring_buffers = video->num_buffers;
 	st.ring_channels = video->num_channels;
 	snprintf(st.audio_layout, sizeof(st.audio_layout), "%s",
@@ -5874,6 +6069,9 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 		gc573_framegen_get_stats(g_framegen, &fgst);
 	snprintf(st.framegen_mode, sizeof(st.framegen_mode), "%s",
 		 gc573_fg_mode_name(g_fg_config.mode));
+	st.framegen_multiplier = fgst.multiplier > 1
+		? fgst.multiplier
+		: gc573_fg_clamp_multiplier(g_fg_config.multiplier);
 	st.framegen_present_fps = fgst.present_fps;
 	st.framegen_output_fps = fgst.output_fps;
 	st.framegen_unique_fps = fgst.unique_fps;
@@ -5995,7 +6193,7 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 	case GC573_IPC_CMD_OSD_ENABLE:
 		g_osd_enabled = cmd->a != 0;
 		if (window)
-			SDL_ShowCursor(g_osd_enabled ? SDL_ENABLE : SDL_DISABLE);
+			SDL_ShowCursor((g_osd_enabled || g_parent_winid) ? SDL_ENABLE : SDL_DISABLE);
 		printf("[IPC] OSD overlay: %s\n",
 		       g_osd_enabled ? "on" : "off");
 		break;
@@ -6010,10 +6208,22 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		printf("[IPC] Aspect: %s\n", aspect_name(g_aspect));
 		break;
 	case GC573_IPC_CMD_MODE:
+		if (cmd->path[0]) {
+			unsigned long new_pwid = strtoul(cmd->path, NULL, 0);
+
+			if (new_pwid != g_parent_winid) {
+				g_parent_winid = new_pwid;
+				g_embed_last_w = 0;
+				g_embed_last_h = 0;
+				if (!g_headless && cmd->a == GC573_IPC_MODE_GAMING)
+					g_present_rebuild = true;
+			}
+		}
 		/* Applied by the render loop at the top of the next iteration. */
 		__atomic_store_n(&g_mode_request, cmd->a, __ATOMIC_RELEASE);
-		printf("[IPC] Mode request: %s\n",
-		       cmd->a == GC573_IPC_MODE_GAMING ? "gaming" : "headless");
+		printf("[IPC] Mode request: %s (parent=0x%lx)\n",
+		       cmd->a == GC573_IPC_MODE_GAMING ? "gaming" : "headless",
+		       g_parent_winid);
 		break;
 	case GC573_IPC_CMD_HDR:
 		g_hdr_enabled = cmd->a != 0;
@@ -6059,6 +6269,7 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		break;
 	case GC573_IPC_CMD_FRAMEGEN: {
 		int mode = g_fg_config.mode;
+		int mult = gc573_fg_clamp_multiplier(g_fg_config.multiplier);
 		float flow = g_fg_config.flow_scale;
 		bool perf = g_fg_config.perf_mode;
 		bool low_latency = g_fg_config.low_latency;
@@ -6066,6 +6277,10 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 
 		if (cmd->a >= 0 && cmd->a <= GC573_FG_30_TO_60)
 			mode = cmd->a;
+		if (cmd->d >= 2 && cmd->d <= 4 && cmd->d != mult) {
+			mult = cmd->d;
+			settings_changed = true;
+		}
 		if (cmd->f >= 0.5f && cmd->f <= 1.0f && cmd->f != flow) {
 			flow = cmd->f;
 			settings_changed = true;
@@ -6090,14 +6305,15 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 
 		pthread_mutex_lock(&g_framegen_lock);
 		g_fg_config.mode = mode;
+		g_fg_config.multiplier = mult;
 		g_fg_config.flow_scale = flow;
 		g_fg_config.perf_mode = perf;
 		g_fg_config.low_latency = low_latency;
 		pthread_mutex_unlock(&g_framegen_lock);
 
 		framegen_apply_config();
-		printf("[IPC] Frame generation: %s (flow %d%%, perf %s, low-latency %s)\n",
-		       framegen_mode_name(mode),
+		printf("[IPC] Frame generation: %s %dx (flow %d%%, perf %s, low-latency %s)\n",
+		       framegen_mode_name(mode), mult,
 		       (int)(flow * 100.0f + 0.5f),
 		       perf ? "on" : "off",
 		       low_latency ? "on" : "off");
@@ -6352,21 +6568,36 @@ int main(int argc, char *argv[])
 		} else if (strncmp(argv[i], "--hdr-exposure=", 15) == 0) {
 			g_hdr_exposure_ev = (float)atof(argv[i] + 15);
 		} else if (strcmp(argv[i], "--framegen") == 0 && i + 1 < argc) {
-			int mode = framegen_mode_parse(argv[++i]);
+			int mode = GC573_FG_OFF;
+			int mult = 2;
 
-			if (mode < 0)
+			if (!gc573_fg_parse_spec(argv[++i], &mode, &mult))
 				fprintf(stderr, "[FRAMEGEN] Unknown mode '%s'; using off\n",
 					argv[i]);
-			else
+			else {
 				g_fg_config.mode = mode;
+				if (mode != GC573_FG_OFF)
+					g_fg_config.multiplier = mult;
+			}
 		} else if (strncmp(argv[i], "--framegen=", 11) == 0) {
-			int mode = framegen_mode_parse(argv[i] + 11);
+			int mode = GC573_FG_OFF;
+			int mult = 2;
 
-			if (mode < 0)
+			if (!gc573_fg_parse_spec(argv[i] + 11, &mode, &mult))
 				fprintf(stderr, "[FRAMEGEN] Unknown mode '%s'; using off\n",
 					argv[i] + 11);
-			else
+			else {
 				g_fg_config.mode = mode;
+				if (mode != GC573_FG_OFF)
+					g_fg_config.multiplier = mult;
+			}
+		} else if (strcmp(argv[i], "--fg-mult") == 0 && i + 1 < argc) {
+			g_fg_config.multiplier = gc573_fg_clamp_multiplier(atoi(argv[++i]));
+		} else if (strncmp(argv[i], "--fg-mult=", 10) == 0) {
+			g_fg_config.multiplier = gc573_fg_clamp_multiplier(atoi(argv[i] + 10));
+		} else if (strcmp(argv[i], "--fg-dedup") == 0) {
+			if (g_fg_config.mode == GC573_FG_60_TO_120)
+				g_fg_config.mode = GC573_FG_30_TO_60;
 		} else if (strcmp(argv[i], "--fg-flow-scale") == 0 &&
 			   i + 1 < argc) {
 			float scale = 1.0f;
@@ -6469,6 +6700,11 @@ int main(int argc, char *argv[])
 				fprintf(stderr,
 					"[SCALE] Unknown mode '%s'; using fit\n",
 					scale_spec);
+		} else if (strcmp(argv[i], "--parent-winid") == 0 &&
+			   i + 1 < argc) {
+			g_parent_winid = strtoul(argv[++i], NULL, 0);
+		} else if (strncmp(argv[i], "--parent-winid=", 15) == 0) {
+			g_parent_winid = strtoul(argv[i] + 15, NULL, 0);
 		} else if (strcmp(argv[i], "-h") == 0 ||
 			   strcmp(argv[i], "--help") == 0) {
 			print_usage(argv[0]);
@@ -6706,6 +6942,17 @@ int main(int argc, char *argv[])
 	 */
 	apply_app_identity();
 
+	if (!g_parent_winid) {
+		const char *pwid_env = getenv("EVERLIVE_PARENT_WINID");
+
+		if (pwid_env && *pwid_env)
+			g_parent_winid = strtoul(pwid_env, NULL, 0);
+	}
+	if (g_parent_winid) {
+		SDL_SetHint(SDL_HINT_VIDEODRIVER, "x11");
+		(void)setenv("SDL_VIDEODRIVER", "x11", 1);
+	}
+
 	/* 8. Initialize SDL2 (video only when a window is requested). */
 	if (SDL_Init(g_headless ? SDL_INIT_TIMER :
 		     (SDL_INIT_VIDEO | SDL_INIT_TIMER)) < 0) {
@@ -6821,7 +7068,7 @@ int main(int argc, char *argv[])
 		       framegen_mode_name(g_fg_config.mode),
 		       (int)(g_fg_config.flow_scale * 100.0f + 0.5f),
 		       g_fg_config.perf_mode ? "on" : "off");
-		SDL_ShowCursor(g_osd_enabled ? SDL_ENABLE : SDL_DISABLE);
+		SDL_ShowCursor((g_osd_enabled || g_parent_winid) ? SDL_ENABLE : SDL_DISABLE);
 	}
 	if (v4l2_sink.fd >= 0)
 		printf("[V4L2] Loopback output active on %s\n", v4l2_sink.path);
@@ -6886,6 +7133,9 @@ int main(int argc, char *argv[])
 		SDL_Event event;
 		uint64_t now;
 
+		if (window && g_parent_winid && !g_headless)
+			embed_window_sync_size(window);
+
 		while (SDL_PollEvent(&event)) {
 			if (event.type == SDL_QUIT) {
 				if (g_trace_mode && streaming)
@@ -6897,6 +7147,10 @@ int main(int argc, char *argv[])
 					if (g_help_overlay) {
 						g_help_overlay = false;
 						printf("[OSD] Help overlay: off\n");
+						fflush(stdout);
+					} else if (g_parent_winid != 0) {
+						/* Embedded in Qt host: Esc exits Cinema Fullscreen instead of killing stream. */
+						printf("[HUB] EXIT_FULLSCREEN\n");
 						fflush(stdout);
 					} else {
 						if (g_trace_mode && streaming)
@@ -6913,15 +7167,21 @@ int main(int argc, char *argv[])
 					g_running = 0;
 				} else if (event.key.keysym.sym == SDLK_f ||
 					   event.key.keysym.sym == SDLK_F11) {
-					uint32_t flags = SDL_GetWindowFlags(window);
-					bool enable =
-						!(flags & SDL_WINDOW_FULLSCREEN_DESKTOP);
+					if (g_parent_winid != 0) {
+						/* Embedded in Qt host: let Qt toggle Cinema Fullscreen. */
+						printf("[HUB] TOGGLE_FULLSCREEN\n");
+						fflush(stdout);
+					} else {
+						uint32_t flags = SDL_GetWindowFlags(window);
+						bool enable =
+							!(flags & SDL_WINDOW_FULLSCREEN_DESKTOP);
 
-					SDL_SetWindowFullscreen(window, enable ?
-						SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-					printf("[OSD] Fullscreen: %s\n",
-					       enable ? "on" : "off");
-					fflush(stdout);
+						SDL_SetWindowFullscreen(window, enable ?
+							SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+						printf("[OSD] Fullscreen: %s\n",
+						       enable ? "on" : "off");
+						fflush(stdout);
+					}
 				} else if (event.key.keysym.sym == SDLK_a) {
 					char title[128];
 
@@ -6946,16 +7206,45 @@ int main(int argc, char *argv[])
 					       g_hdr_enabled ? "auto" : "bypass");
 					fflush(stdout);
 				} else if (event.key.keysym.sym == SDLK_g) {
+					static enum gc573_fg_mode last_active_mode =
+						GC573_FG_60_TO_120;
+					enum gc573_fg_mode cur_mode;
+					uint32_t cur_mult;
+					uint32_t next_mult;
+
 					pthread_mutex_lock(&g_framegen_lock);
-					g_fg_config.mode = (g_fg_config.mode + 1) %
-							   (GC573_FG_30_TO_60 + 1);
+					cur_mode = g_fg_config.mode;
+					cur_mult = g_fg_config.multiplier;
+					if (cur_mode != GC573_FG_OFF)
+						last_active_mode = cur_mode;
+
+					if (cur_mode == GC573_FG_OFF) {
+						g_fg_config.mode = last_active_mode;
+						g_fg_config.multiplier = 2;
+						next_mult = 2;
+					} else if (cur_mult < 2) {
+						g_fg_config.multiplier = 2;
+						next_mult = 2;
+					} else if (cur_mult < 4) {
+						g_fg_config.multiplier = cur_mult + 1;
+						next_mult = g_fg_config.multiplier;
+					} else {
+						g_fg_config.mode = GC573_FG_OFF;
+						g_fg_config.multiplier = 2;
+						next_mult = 0;
+					}
+					cur_mode = g_fg_config.mode;
+					cur_mult = g_fg_config.multiplier;
 					pthread_mutex_unlock(&g_framegen_lock);
 					/* Retry Vulkan on an explicit user action. */
 					g_fg_fallback = false;
 					g_present_rebuild = true;
 					framegen_apply_config();
-					printf("[FRAMEGEN] Mode: %s\n",
-					       framegen_mode_name(g_fg_config.mode));
+					printf("[FRAMEGEN] Mode: %s (%ux)\n",
+					       framegen_mode_name(cur_mode),
+					       cur_mode == GC573_FG_OFF ? 1u : cur_mult);
+					if (g_parent_winid != 0)
+						printf("[HUB] FG_MULT %u\n", next_mult);
 					fflush(stdout);
 				} else if (event.key.keysym.sym == SDLK_l ||
 					   event.key.keysym.sym == SDLK_1) {

@@ -17,6 +17,8 @@ override LDFLAGS += -pthread
 
 SDL_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl2 2>/dev/null)
 SDL_LIBS   := $(shell $(PKG_CONFIG) --libs sdl2 2>/dev/null)
+X11_CFLAGS := $(shell $(PKG_CONFIG) --cflags x11 2>/dev/null)
+X11_LIBS   := $(shell $(PKG_CONFIG) --libs x11 2>/dev/null)
 AV_CFLAGS  := $(shell $(PKG_CONFIG) --cflags libavcodec libavutil libswresample libswscale 2>/dev/null)
 AV_LIBS    := $(shell $(PKG_CONFIG) --libs libavcodec libavutil libswresample libswscale 2>/dev/null)
 PW_CFLAGS  := $(shell $(PKG_CONFIG) --cflags libpipewire-0.3 2>/dev/null)
@@ -64,7 +66,7 @@ gc573_user_probe: src/gc573_user_probe.o $(HW_OBJS) $(CORE_LIB)
 	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS)
 
 gc573_user_streamer: src/gc573_user_streamer.o $(HW_OBJS) $(STREAM_OBJS) $(CORE_LIB)
-	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS) $(SDL_LIBS) $(AV_LIBS) $(PW_LIBS) -lm
+	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS) $(SDL_LIBS) $(X11_LIBS) $(AV_LIBS) $(PW_LIBS) -lm
 
 everlive_userd: src/everlive_userd.o $(HW_OBJS) $(CORE_LIB)
 	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -102,7 +104,7 @@ $(STREAM_OBJS): src/%.o: src/%.c
 
 # Only the SDL2 renderer needs SDL headers.
 src/gc573_user_streamer.o: src/gc573_user_streamer.c
-	$(CC) $(BASE_CFLAGS) $(SDL_CFLAGS) $(AV_CFLAGS) $(PW_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+	$(CC) $(BASE_CFLAGS) $(SDL_CFLAGS) $(X11_CFLAGS) $(AV_CFLAGS) $(PW_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 # The framegen cadence test now lives in tests/; forward the legacy target.
 test selftest:

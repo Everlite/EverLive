@@ -1,6 +1,6 @@
 # EverLive - AVerMedia GC573 & GC570D Linux Gaming Suite & Userspace Driver
 
-[![Version](https://img.shields.io/badge/version-v1.6.0-blue.svg)](https://github.com/Everlite/EverLive/releases)
+[![Version](https://img.shields.io/badge/version-v1.7.0-blue.svg)](https://github.com/Everlite/EverLive/releases)
 [![Status](https://img.shields.io/badge/status-1440p120%20%2B%204K60%20%2B%20V4L2%20%2B%20Audio%20(Hardware%20Verified)-brightgreen.svg)](#hardware-verified-capabilities)
 [![Driver](https://img.shields.io/badge/driver-Userspace%20VFIO%20(Blob--Free)-2e7d32.svg)](#architecture--design)
 [![Kernel Modules](https://img.shields.io/badge/DKMS-None%20Required-success.svg)](#architecture--design)
@@ -15,7 +15,7 @@ It is designed to let you play console games (PlayStation 5, Xbox Series X, Nint
 
 The **Live Gamer DUO** additionally exposes both HDMI inputs simultaneously: HDMI 1 supports the full 3000-nit BT.2020 HDR LUT path and native lower resolutions, HDMI 2 is published as a second OBS camera, and validated stereo LPCM capture (with multichannel passthrough to HDMI OUT) is available from both inputs.
 
-> **Quick Navigation:** [Installation & Quickstart](#-installation--quickstart) · [Controls & Hotkeys](#controls--hotkeys) · [OBS Streaming Setup](#-streaming--recording-with-obs) · [IOMMU & BIOS Setup](#-iommu--pcie-group-requirements) · [Live Gamer DUO (GC570D)](#live-gamer-duo-gc570d) · [2x Frame Gen (LSFG-VK)](#2x-frame-generation-beta--lsfg-vk) · [Hardware-Verified Capabilities](#hardware-verified-capabilities) · [Architecture & Diagram](#architecture--design) · [Contributing](#-contributing--adding-new-cards) · [License](#legal-and-licensing)
+> **Quick Navigation:** [Installation & Quickstart](#-installation--quickstart) · [Controls & Hotkeys](#controls--hotkeys) · [OBS Streaming Setup](#-streaming--recording-with-obs) · [IOMMU & BIOS Setup](#-iommu--pcie-group-requirements) · [Live Gamer DUO (GC570D)](#live-gamer-duo-gc570d) · [Frame Gen 2x/3x/4x (LSFG-VK)](#frame-generation-2x--3x--4x--lsfg-vk) · [Hardware-Verified Capabilities](#hardware-verified-capabilities) · [Architecture & Diagram](#architecture--design) · [Contributing](#-contributing--adding-new-cards) · [License](#legal-and-licensing)
 
 ---
 
@@ -88,7 +88,7 @@ sudo make install          # optional system-wide install (PREFIX=/usr/local, in
 | <kbd>1</kbd> or <kbd>l</kbd> *(GC573)* / <kbd>l</kbd> *(GC570D)* | Toggle scaling mode (`fit` bilinear $\to$ `integer` nearest-neighbor) |
 | <kbd>1</kbd> / <kbd>2</kbd> *(GC570D only)* | Select HDMI IN 1 / HDMI IN 2 |
 | <kbd>p</kbd> *(GC570D)* | Toggle Picture-in-Picture (PiP) of the secondary HDMI input |
-| <kbd>g</kbd> *(GC573)* | Cycle 2x Frame Generation mode (Off $\to$ `60 → 120 FPS` $\to$ `30 → 60 FPS`) |
+| <kbd>g</kbd> *(GC573)* | Cycle Frame Generation multiplier (`Off` $\to$ `2×` $\to$ `3×` $\to$ `4×` $\to$ `Off`) |
 | <kbd>h</kbd> *(GC573)* | Toggle real-time HDR10 / HLG $\to$ SDR filmic tonemapping |
 | <kbd>a</kbd> | Cycle Aspect Ratio (`auto` $\to$ `16:9` $\to$ `4:3` $\to$ `stretch`) |
 | <kbd>↑</kbd> / <kbd>↓</kbd> (or <kbd>+</kbd> / <kbd>-</kbd>) | Volume up / down (in 5% steps) |
@@ -97,7 +97,7 @@ sudo make install          # optional system-wide install (PREFIX=/usr/local, in
 | <kbd>p</kbd> *(GC573)* / <kbd>c</kbd> *(GC570D)* | Cycle OSD position (Top-Right $\to$ Bottom-Right $\to$ Bottom-Left $\to$ Top-Left; default Top-Right) |
 | <kbd>o</kbd>, <kbd>i</kbd> or <kbd>Tab</kbd> | Toggle the on-screen stats overlay |
 | <kbd>s</kbd> or <kbd>F10</kbd> *(GC573)* | Toggle overlay and mouse cursor (Streamer Mode toggle; `--streamer-mode` starts with both hidden) |
-| <kbd>Esc</kbd> or <kbd>q</kbd> | Exit the game window (or dismiss the F1 help overlay) |
+| <kbd>Esc</kbd> or <kbd>q</kbd> | Exit Cinema Fullscreen (embedded mode) or exit pop-out window (or dismiss F1 help) |
 
 *VSync is a launch option (`--vsync` / Hub checkbox) and cannot be toggled while streaming. Volume, mute, and scaling can also be controlled through the EverLive Console Hub GUI.*
 
@@ -244,11 +244,11 @@ build, CLI and hotkey details.
 
 ---
 
-## 2x Frame Generation (Beta · LSFG-VK)
+## Frame Generation (2x / 3x / 4x · LSFG-VK)
 
 > [!IMPORTANT]
 > **Optional: LSFG-VK Frame Generation (Vulkan · Beta)**
-> EverLive features 2x AI frame generation (30 → 60 FPS for 30 FPS console titles, 60 → 120 FPS for 60 FPS titles) powered by Vulkan and LSFG-VK with a custom low-latency presentation swapchain and cadence deduplication engine.
+> EverLive supports **2×, 3×, and 4×** AI frame generation (e.g. `60 → 120/180/240 FPS`, `120 → 240 FPS`, or `30 → 60/90/120 FPS` with **30 FPS Dedup** enabled) powered by Vulkan and LSFG-VK with a low-latency presentation swapchain and phase-locked 2:1 cadence deduplicator.
 >
 > * **Standard / Non-LSFG Users:** If you do not have Lossless Scaling installed, EverLive runs in native zero-latency mode as usual. If frame generation is selected without the required components, EverLive gracefully falls back to native presentation without interrupting gameplay or dropping frames.
 > * **Requirements for Frame Generation:**

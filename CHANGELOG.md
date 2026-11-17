@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.7.0] - 2026-11-17
+
+### Added
+- **Embedded Gaming Viewport & Cinema Fullscreen:**
+  - `gc573_user_streamer` and `gc570d_everlive` now support embedding the SDL2/Vulkan video viewport directly inside the Console Hub (`-wid`), with an optional **Pop-out Window** toggle.
+  - Cinema Fullscreen (`F`, `F11`, double-click, or `Esc` to exit) works seamlessly even while the embedded SDL2 viewport holds X11 input focus via `[HUB]` hotkey forwarding.
+- **2× / 3× / 4× LSFG-VK Frame Generation with decoupled 30 FPS Dedup:**
+  - Replaced the fixed `60→120` / `30→60` presets with a general **`Off` / `2×` / `3×` / `4×`** multiplier (`--fg-mult`) plus a separate **`30 FPS Dedup (PS5 / PS4)`** toggle, live over IPC and via hotkey `G`.
+  - Automatically relaxes `LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT` at `3×` / `4×` for smooth multi-frame pacing (verified up to 240 FPS on 240 Hz displays).
+
+### Changed
+- **Console Hub UI Overhaul (`everlive_viewer.py`):**
+  - Reorganized the right inspector into three focused tabs: **`Video & FG`**, **`Audio & Stream`** (with grouped On-Screen Overlay + OSD Position controls), and **`Hardware & App`** (Card RGB LED, window/startup options, and keyboard shortcuts).
+  - Unified the bottom telemetry strip into a single compact row with `STATUS`, prominent FPS readout, non-duplicated GPU/CPU/Budget rings, and a centered capture-card header title with hover status (or `NO CAPTURE CARD` when absent).
+  - Replaced the standby play card with a full-stage `NoSignalCanvas` matching the procedural `NO HDMI SIGNAL` screen.
+- **Compact 1–2 line Studio OSD:**
+  - Trimmed the in-stream OSD to 1 line (or 2 lines with LSFG active), matched its palette to the Hub UI, and stabilized its width with fixed numeric field formatting so it never twitches.
+
+---
+
 ## [1.6.0] - 2026-11-15
 
 ### Added

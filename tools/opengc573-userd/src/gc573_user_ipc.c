@@ -270,6 +270,7 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 		     "\"interlaced\":%s,\"rate_hz\":%.2f,"
 		     "\"pixel_clock_khz\":%u},"
 		     "\"video\":{\"fps\":%.2f,\"frames\":%llu,"
+		     "\"dropped\":%llu,\"latency_ms\":%.2f,"
 		     "\"ring_buffers\":%u,\"ring_channels\":%u,"
 		     "\"output_width\":%u,\"output_height\":%u},"
 		     "\"audio\":{\"state\":\"%s\",\"label\":\"%s\","
@@ -282,7 +283,7 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 		     "\"osd\":{\"enabled\":%s,\"position\":\"%s\"},"
 		     "\"aspect\":\"%s\",\"scale\":\"%s\","
 		     "\"vsync\":%s,\"fullscreen\":%s,"
-		     "\"framegen\":{\"mode\":\"%s\",\"present_fps\":%.2f,"
+		     "\"framegen\":{\"mode\":\"%s\",\"multiplier\":%d,\"present_fps\":%.2f,"
 		     "\"output_fps\":%.2f,\"unique_fps\":%.2f,"
 		     "\"raw_fps\":%.2f,\"flow_scale\":%.2f,"
 		     "\"perf_mode\":%s,\"low_latency\":%s,"
@@ -299,6 +300,8 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 		     st.interlaced ? "true" : "false",
 		     (double)st.rate_x100 / 100.0, st.pixel_clock_khz,
 		     st.fps, (unsigned long long)st.frames,
+		     (unsigned long long)st.preview_dropped,
+		     (double)st.frame_age_us / 1000.0,
 		     st.ring_buffers, st.ring_channels,
 		     st.output_width, st.output_height,
 		     st.audio_state, label_esc,
@@ -313,7 +316,9 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 		     st.osd_enabled ? "true" : "false", pos_esc,
 		     aspect_esc, scale_esc, st.vsync ? "true" : "false",
 		     st.fullscreen ? "true" : "false",
-		     st.framegen_mode, st.framegen_present_fps,
+		     st.framegen_mode,
+		     st.framegen_multiplier > 1 ? st.framegen_multiplier : 2,
+		     st.framegen_present_fps,
 		     st.framegen_output_fps, st.framegen_unique_fps,
 		     st.framegen_raw_fps, (double)st.framegen_flow_scale,
 		     st.framegen_perf_mode ? "true" : "false",
@@ -679,11 +684,13 @@ static void ipc_handle_framegen(struct ipc_client *c, const char *id,
 	char mode[16];
 	bool flag;
 	double scale;
+	double mult;
 
 	/* -1 / negative means "leave unchanged". */
 	cmd.a = -1;
 	cmd.b = -1;
 	cmd.c = -1;
+	cmd.d = -1;
 	cmd.f = -1.0f;
 
 	if (everlive_json_get_string(line, "mode", mode, sizeof(mode))) {
@@ -691,16 +698,50 @@ static void ipc_handle_framegen(struct ipc_client *c, const char *id,
 			cmd.a = GC573_IPC_FG_OFF;
 		else if (!strcasecmp(mode, "60to120") ||
 			 !strcasecmp(mode, "2x") ||
-			 !strcasecmp(mode, "60"))
+			 !strcasecmp(mode, "60") ||
+			 !strcasecmp(mode, "120")) {
 			cmd.a = GC573_IPC_FG_60_TO_120;
-		else if (!strcasecmp(mode, "30to60") ||
-			 !strcasecmp(mode, "30"))
+			cmd.d = 2;
+		} else if (!strcasecmp(mode, "3x") ||
+			   !strcasecmp(mode, "60to180") ||
+			   !strcasecmp(mode, "180")) {
+			cmd.a = GC573_IPC_FG_60_TO_120;
+			cmd.d = 3;
+		} else if (!strcasecmp(mode, "4x") ||
+			   !strcasecmp(mode, "60to240") ||
+			   !strcasecmp(mode, "240")) {
+			cmd.a = GC573_IPC_FG_60_TO_120;
+			cmd.d = 4;
+		} else if (!strcasecmp(mode, "30to60") ||
+			   !strcasecmp(mode, "30") ||
+			   !strcasecmp(mode, "dedup"))
 			cmd.a = GC573_IPC_FG_30_TO_60;
-		else {
+		else if (!strcasecmp(mode, "30to90") ||
+			 !strcasecmp(mode, "90")) {
+			cmd.a = GC573_IPC_FG_30_TO_60;
+			cmd.d = 3;
+		} else if (!strcasecmp(mode, "30to120")) {
+			cmd.a = GC573_IPC_FG_30_TO_60;
+			cmd.d = 4;
+		} else {
 			ipc_error(c, id, -32602,
-				  "unknown mode: off|60to120|30to60");
+				  "unknown mode: off|2x|3x|4x|60to120|30to60");
 			return;
 		}
+	}
+
+	if (everlive_json_get_double(line, "multiplier", &mult)) {
+		int m = (int)(mult + 0.5);
+		if (m < 2)
+			m = 2;
+		if (m > 4)
+			m = 4;
+		cmd.d = m;
+	}
+	if (everlive_json_get_bool(line, "dedup", &flag)) {
+		if (cmd.a != GC573_IPC_FG_OFF)
+			cmd.a = flag ? GC573_IPC_FG_30_TO_60
+				     : GC573_IPC_FG_60_TO_120;
 	}
 
 	if (everlive_json_get_double(line, "flow_scale", &scale)) {
@@ -715,9 +756,9 @@ static void ipc_handle_framegen(struct ipc_client *c, const char *id,
 	if (everlive_json_get_bool(line, "low_latency", &flag))
 		cmd.c = flag ? 1 : 0;
 
-	if (cmd.a < 0 && cmd.b < 0 && cmd.c < 0 && cmd.f < 0.0f) {
+	if (cmd.a < 0 && cmd.b < 0 && cmd.c < 0 && cmd.d < 0 && cmd.f < 0.0f) {
 		ipc_error(c, id, -32602,
-			  "invalid params: mode, flow_scale, perf_mode or low_latency required");
+			  "invalid params: mode, multiplier, dedup, flow_scale, perf_mode or low_latency required");
 		return;
 	}
 
@@ -729,6 +770,7 @@ static void ipc_handle_mode(struct ipc_client *c, const char *id,
 {
 	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_MODE };
 	char mode[24];
+	long pwid = -1;
 
 	if (!everlive_json_get_string(line, "mode", mode, sizeof(mode))) {
 		ipc_error(c, id, -32602, "invalid params: mode required");
@@ -743,6 +785,14 @@ static void ipc_handle_mode(struct ipc_client *c, const char *id,
 	} else {
 		ipc_error(c, id, -32602, "unknown mode: gaming|headless");
 		return;
+	}
+
+	if (everlive_json_get_long(line, "parent_winid", &pwid) && pwid >= 0) {
+		snprintf(cmd.path, sizeof(cmd.path), "%lu",
+			 (unsigned long)pwid);
+	} else {
+		(void)everlive_json_get_string(line, "parent_winid",
+					       cmd.path, sizeof(cmd.path));
 	}
 
 	ipc_push_and_reply(c, id, &cmd);

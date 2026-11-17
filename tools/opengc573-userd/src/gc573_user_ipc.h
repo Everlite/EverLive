@@ -100,6 +100,7 @@ struct gc573_ipc_cmd {
 	int32_t a;
 	int32_t b;
 	int32_t c;
+	int32_t d;
 	float f;
 	/* Optional device path for GC573_IPC_CMD_V4L2 (empty = streamer default). */
 	char path[64];
@@ -130,6 +131,8 @@ struct gc573_stats {
 	uint32_t output_height;
 	double fps;
 	uint64_t frames;
+	uint64_t preview_dropped;
+	uint64_t frame_age_us;
 	unsigned int ring_buffers;
 	unsigned int ring_channels;
 
@@ -167,8 +170,9 @@ struct gc573_stats {
 
 	/* lsfg-vk frame generation */
 	char framegen_mode[12];	/* "off" | "60to120" | "30to60" */
+	int framegen_multiplier;	/* 2 | 3 | 4 */
 	double framegen_present_fps;	/* real SDL_RenderPresent rate */
-	double framegen_output_fps;	/* present_fps * 2 with lsfg-vk */
+	double framegen_output_fps;	/* present_fps * multiplier with lsfg-vk */
 	double framegen_unique_fps;	double framegen_raw_fps;
 	float framegen_flow_scale;
 	bool framegen_perf_mode;
