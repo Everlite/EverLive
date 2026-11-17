@@ -27,7 +27,7 @@ except ImportError:  # imported as a module from another working directory
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
                                  paused_state as handoff_paused_state)
 
-__version__ = "1.7.0 - experimental"
+__version__ = "1.7.0"
 
 CONFIG_DIR = os.path.expanduser("~/.config/everlive")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
@@ -3728,7 +3728,7 @@ if HAS_QT:
 
             self.inspector_tabs.addTab(tab_video, "Video & FG")
             self.inspector_tabs.addTab(tab_stream, "Audio & Stream")
-            self.inspector_tabs.addTab(tab_app, "App & Keys")
+            self.inspector_tabs.addTab(tab_app, "Hardware & App")
 
             # =============================================================
             # TAB 1: VIDEO & FRAME GENERATION
@@ -3982,7 +3982,7 @@ if HAS_QT:
             # =============================================================
             # TAB 2: AUDIO, OVERLAY & STREAM ROUTING
             # =============================================================
-            card_audio, grid_audio = _section("AUDIO & HARDWARE", "#38BDF8")
+            card_audio, grid_audio = _section("AUDIO", "#38BDF8")
             grid_audio.setColumnMinimumWidth(0, 96)
             grid_audio.setColumnStretch(1, 1)
 
@@ -4005,47 +4005,6 @@ if HAS_QT:
                 self.combo_audio_channels.setToolTip(
                     "The Live Gamer DUO engine publishes stereo only.")
             grid_audio.addWidget(self.combo_audio_channels, 0, 1)
-
-            grid_audio.addWidget(_field("Card RGB LED"), 1, 0)
-
-            self.combo_led = QComboBox()
-            self.combo_led.setIconSize(QSize(14, 14))
-            for name, val in LED_MODES.items():
-                icon = create_led_icon(val)
-                if icon:
-                    self.combo_led.addItem(icon, name, val)
-                else:
-                    self.combo_led.addItem(name, val)
-
-            saved_led = self.saved_cfg.get("led_mode", None)
-            if self.vfio_mode:
-                led_mode = saved_led if isinstance(saved_led, int) and 0 <= saved_led <= 9 else 4
-                idx = self.combo_led.findData(led_mode)
-                if idx >= 0:
-                    self.combo_led.setCurrentIndex(idx)
-                will_autostart = self._headless_start or self.saved_cfg.get("autostart", False) or getattr(self.streamer, "_cli_autostart", False)
-                if isinstance(saved_led, int) and 0 <= saved_led <= 9 and not will_autostart:
-                    if self.duo_mode:
-                        if _vfio_streamer_running():
-                            set_gc570d_led(saved_led)
-                    else:
-                        set_vfio_led(saved_led)
-            else:
-                if saved_led is not None and isinstance(saved_led, int) and 0 <= saved_led <= 7:
-                    write_led_mode(saved_led)
-                    idx = self.combo_led.findData(saved_led)
-                    if idx >= 0:
-                        self.combo_led.setCurrentIndex(idx)
-                else:
-                    curr_led = read_led_mode()
-                    if curr_led >= 0:
-                        idx = self.combo_led.findData(curr_led)
-                        if idx >= 0:
-                            self.combo_led.setCurrentIndex(idx)
-                    else:
-                        self.combo_led.setEnabled(False)
-            self.combo_led.currentIndexChanged.connect(self.on_led_changed)
-            grid_audio.addWidget(self.combo_led, 1, 1)
             lay_stream.addWidget(card_audio)
 
             # --- On-Screen Overlay Card (grouped cleanly!) ---
@@ -4134,8 +4093,53 @@ if HAS_QT:
             lay_stream.addStretch(1)
 
             # =============================================================
-            # TAB 3: APP BEHAVIOR & KEYBOARD SHORTCUTS
+            # TAB 3: HARDWARE, APP BEHAVIOR & KEYBOARD SHORTCUTS
             # =============================================================
+            card_hw, grid_hw = _section("HARDWARE · RGB LED", "#F287A7")
+            grid_hw.setColumnMinimumWidth(0, 96)
+            grid_hw.setColumnStretch(1, 1)
+            grid_hw.addWidget(_field("Card RGB LED"), 0, 0)
+
+            self.combo_led = QComboBox()
+            self.combo_led.setIconSize(QSize(14, 14))
+            for name, val in LED_MODES.items():
+                icon = create_led_icon(val)
+                if icon:
+                    self.combo_led.addItem(icon, name, val)
+                else:
+                    self.combo_led.addItem(name, val)
+
+            saved_led = self.saved_cfg.get("led_mode", None)
+            if self.vfio_mode:
+                led_mode = saved_led if isinstance(saved_led, int) and 0 <= saved_led <= 9 else 4
+                idx = self.combo_led.findData(led_mode)
+                if idx >= 0:
+                    self.combo_led.setCurrentIndex(idx)
+                will_autostart = self._headless_start or self.saved_cfg.get("autostart", False) or getattr(self.streamer, "_cli_autostart", False)
+                if isinstance(saved_led, int) and 0 <= saved_led <= 9 and not will_autostart:
+                    if self.duo_mode:
+                        if _vfio_streamer_running():
+                            set_gc570d_led(saved_led)
+                    else:
+                        set_vfio_led(saved_led)
+            else:
+                if saved_led is not None and isinstance(saved_led, int) and 0 <= saved_led <= 7:
+                    write_led_mode(saved_led)
+                    idx = self.combo_led.findData(saved_led)
+                    if idx >= 0:
+                        self.combo_led.setCurrentIndex(idx)
+                else:
+                    curr_led = read_led_mode()
+                    if curr_led >= 0:
+                        idx = self.combo_led.findData(curr_led)
+                        if idx >= 0:
+                            self.combo_led.setCurrentIndex(idx)
+                    else:
+                        self.combo_led.setEnabled(False)
+            self.combo_led.currentIndexChanged.connect(self.on_led_changed)
+            grid_hw.addWidget(self.combo_led, 0, 1)
+            lay_app.addWidget(card_hw)
+
             card_app, grid_app = _section("WINDOW & STARTUP", "#38BDF8")
             grid_app.setColumnStretch(0, 1)
 

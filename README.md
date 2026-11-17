@@ -1,6 +1,6 @@
 # EverLive - AVerMedia GC573 & GC570D Linux Gaming Suite & Userspace Driver
 
-[![Version](https://img.shields.io/badge/version-v1.7.0--experimental-purple.svg)](https://github.com/Everlite/EverLive/releases)
+[![Version](https://img.shields.io/badge/version-v1.7.0-blue.svg)](https://github.com/Everlite/EverLive/releases)
 [![Status](https://img.shields.io/badge/status-1440p120%20%2B%204K60%20%2B%20V4L2%20%2B%20Audio%20(Hardware%20Verified)-brightgreen.svg)](#hardware-verified-capabilities)
 [![Driver](https://img.shields.io/badge/driver-Userspace%20VFIO%20(Blob--Free)-2e7d32.svg)](#architecture--design)
 [![Kernel Modules](https://img.shields.io/badge/DKMS-None%20Required-success.svg)](#architecture--design)
@@ -14,9 +14,6 @@
 It is designed to let you play console games (PlayStation 5, Xbox Series X, Nintendo Switch, retro scalers, or secondary PCs) directly on your Linux desktop (Wayland & X11) with low presentation overhead, real-time **HDR10 / HLG to SDR filmic tonemapping**, synchronized audio (**Linear PCM 2.0 / 5.1 / 7.1** multichannel passthrough as well as **Dolby Digital / DTS 5.1** with standardized **ITU-R BS.775 downmixing** for stereo headsets), a native **V4L2 virtual camera** and **PipeWire virtual audio track** for OBS/Discord, zero-interruption live runtime controls over IPC, **pixel-perfect integer scaling** for retro and 720p/1080p consoles, selectable hardware EDID profiles (switchable live over IPC or on session launch), and custom hardware RGB LED control.
 
 The **Live Gamer DUO** additionally exposes both HDMI inputs simultaneously: HDMI 1 supports the full 3000-nit BT.2020 HDR LUT path and native lower resolutions, HDMI 2 is published as a second OBS camera, and validated stereo LPCM capture (with multichannel passthrough to HDMI OUT) is available from both inputs.
-
-> [!NOTE]
-> **Experimental Branch (`v1.7.0 - experimental`):** This branch previews the embedded SDL2/Vulkan viewport inside the Console Hub, the 3-tab Studio Inspector UI (`Video & FG`, `Audio & Stream`, `App & Keys`), the compact 1–2 line OSD, unified single-row telemetry, and **2× / 3× / 4× LSFG-VK Frame Generation** with decoupled `30 FPS Dedup`.
 
 > **Quick Navigation:** [Installation & Quickstart](#-installation--quickstart) · [Controls & Hotkeys](#controls--hotkeys) · [OBS Streaming Setup](#-streaming--recording-with-obs) · [IOMMU & BIOS Setup](#-iommu--pcie-group-requirements) · [Live Gamer DUO (GC570D)](#live-gamer-duo-gc570d) · [Frame Gen 2x/3x/4x (LSFG-VK)](#frame-generation-2x--3x--4x--lsfg-vk) · [Hardware-Verified Capabilities](#hardware-verified-capabilities) · [Architecture & Diagram](#architecture--design) · [Contributing](#-contributing--adding-new-cards) · [License](#legal-and-licensing)
 
