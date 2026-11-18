@@ -196,6 +196,7 @@ if HAS_QT:
             self._group.setExclusive(True)
             self._buttons = []
             self._data = []
+            self._last_index = -1
             if segments:
                 for label, data in segments:
                     self.add_segment(label, data)
@@ -216,6 +217,7 @@ if HAS_QT:
             self._layout.addWidget(button, 1)
             if index == 0:
                 button.setChecked(True)
+                self._last_index = 0
             return index
 
         # -- QComboBox-like surface used by the viewer ----------------
@@ -253,8 +255,12 @@ if HAS_QT:
         def _select(self, index: int, *, emit: bool):
             if not 0 <= index < len(self._buttons):
                 return
-            changed = self.currentIndex() != index
+            # QButtonGroup checks the clicked button before ``clicked``
+            # reaches us, so currentIndex() is already the new index here.
+            # Compare against the last emitted index instead.
+            changed = self._last_index != index
             self._buttons[index].setChecked(True)
+            self._last_index = index
             if emit and changed:
                 self.currentIndexChanged.emit(index)
                 self.currentDataChanged.emit(self._data[index])

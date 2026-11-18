@@ -52,9 +52,9 @@ PAD = 14
 GAP = 10
 RADIUS = 12
 RADIUS_CSS = "12px"
-HEADER_HEIGHT = 56
-BOTTOM_BAR_HEIGHT = 52
-INSPECTOR_WIDTH = 384
+HEADER_HEIGHT = 50
+BOTTOM_BAR_HEIGHT = 44
+INSPECTOR_WIDTH = 352
 
 FONT_STACK = ('-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, '
               '"Helvetica Neue", Arial, sans-serif')
@@ -119,7 +119,7 @@ QFrame#headerBar {
 QFrame#videoStageFrame {
     background-color: @SURFACE@;
     border: 1px solid @BORDER@;
-    border-radius: 14px;
+    border-radius: 16px;
 }
 QFrame#telemetryCard {
     background-color: @SURFACE@;
@@ -129,7 +129,7 @@ QFrame#telemetryCard {
 QFrame#cardFrame {
     background-color: @SURFACE@;
     border: 1px solid @BORDER@;
-    border-radius: 13px;
+    border-radius: 12px;
 }
 QFrame#handshakeCard {
     background-color: @SURFACE_SUNKEN@;
@@ -187,26 +187,26 @@ QLabel#pillLive {
 }
 QLabel#sectionTitle {
     color: @TEXT_MUTED@;
-    font-size: 10.5px;
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: 0.9px;
+    letter-spacing: 0.8px;
 }
 QLabel#fieldLabel {
     color: @TEXT_MUTED@;
-    font-size: 11.5px;
+    font-size: 12px;
 }
 QLabel#hintText {
     color: @TEXT_DIM@;
-    font-size: 10.5px;
+    font-size: 11px;
 }
 QLabel#kvKey {
     color: @TEXT_DIM@;
-    font-size: 11.5px;
+    font-size: 12px;
 }
 QLabel#kvVal {
     color: @TEXT@;
     font-family: @MONO_STACK@;
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 600;
 }
 QLabel#heroSignal {
@@ -294,9 +294,8 @@ QTabWidget#inspectorTabs::pane {
     margin-top: 6px;
 }
 QTabWidget#inspectorTabs QTabBar {
-    background-color: @SURFACE_RAISED@;
-    border: 1px solid @BORDER@;
-    border-radius: 10px;
+    background: transparent;
+    border: none;
 }
 QTabWidget#inspectorTabs QTabBar::tab {
     background-color: transparent;
@@ -379,7 +378,7 @@ QComboBox {
     border-radius: 8px;
     min-height: 22px;
     padding: 3px 9px;
-    font-size: 11.5px;
+    font-size: 11px;
 }
 QComboBox:hover {
     border-color: @ACCENT@;
@@ -399,7 +398,7 @@ QComboBox QAbstractItemView {
 QDoubleSpinBox {
     min-height: 22px;
     padding: 2px 8px;
-    font-size: 11.5px;
+    font-size: 11px;
     background-color: @SURFACE_RAISED@;
     color: @TEXT@;
     border: 1px solid @BORDER_STRONG@;

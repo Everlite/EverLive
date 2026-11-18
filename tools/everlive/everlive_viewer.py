@@ -3146,8 +3146,8 @@ if HAS_QT:
             central_widget = QWidget()
             self.setCentralWidget(central_widget)
             self.root_layout = QVBoxLayout(central_widget)
-            self.root_layout.setContentsMargins(14, 12, 14, 8)
-            self.root_layout.setSpacing(10)
+            self.root_layout.setContentsMargins(12, 8, 12, 6)
+            self.root_layout.setSpacing(8)
 
             # =============================================================
             # 1. Top Studio Header Bar
@@ -3186,9 +3186,9 @@ if HAS_QT:
                 getattr(self.streamer, "mode", "unknown") != "unknown"
                 or bool(getattr(self.streamer, "hw_info", {}).get("pci"))
             )
-            card_short = ("GC570D · DUO" if self.model == MODEL_GC570D
-                          else "GC573 · 4K")
-            card_title_text = card_short if card_detected else "NO CAPTURE CARD"
+            card_title_text = (
+                MODEL_NAMES.get(self.model, MODEL_NAMES[MODEL_GC573])
+                if card_detected else "NO CAPTURE CARD")
 
             self.lbl_card_title = QLabel(card_title_text)
             self.lbl_card_title.setObjectName("cardChip")
@@ -3267,7 +3267,7 @@ if HAS_QT:
 
             self.seg_mode = SegmentedControl(
                 [("Simple", "simple"), ("Advanced", "advanced")])
-            self.seg_mode.setFixedHeight(32)
+            self.seg_mode.setFixedHeight(30)
             self.seg_mode.setToolTip(
                 "Simple hides the inspector and telemetry deck. Advanced "
                 "exposes the full control surface.")
@@ -3487,7 +3487,7 @@ if HAS_QT:
             # 2B. Right Inspector Sidebar: Tabbed EverLive Studio Controls
             # -------------------------------------------------------------
             self.right_dock = QWidget()
-            self.right_dock.setFixedWidth(384)
+            self.right_dock.setFixedWidth(ui_theme.INSPECTOR_WIDTH)
             dock_layout = QVBoxLayout(self.right_dock)
             dock_layout.setContentsMargins(0, 0, 0, 0)
             dock_layout.setSpacing(6)
@@ -3496,14 +3496,11 @@ if HAS_QT:
                 frame = QFrame()
                 frame.setObjectName("cardFrame")
                 lay = QVBoxLayout(frame)
-                lay.setContentsMargins(14, 11, 14, 12)
+                lay.setContentsMargins(13, 10, 13, 11)
                 lay.setSpacing(8)
                 h_head = QHBoxLayout()
                 h_head.setContentsMargins(0, 0, 0, 0)
                 h_head.setSpacing(6)
-                dot = QLabel("●")
-                dot.setStyleSheet(f"color: {dot_color}; font-size: 10px;")
-                h_head.addWidget(dot, 0, Qt.AlignVCenter)
                 head = QLabel(title)
                 head.setObjectName("sectionTitle")
                 h_head.addWidget(head, 0, Qt.AlignVCenter)
@@ -3530,6 +3527,17 @@ if HAS_QT:
                 lbl.setWordWrap(True)
                 return lbl
 
+            def _shrinkable(combo):
+                """Let a combo follow the inspector width instead of its
+                longest item, which otherwise overflows the card."""
+                combo.setSizeAdjustPolicy(
+                    QComboBox.AdjustToMinimumContentsLengthWithIcon)
+                combo.setMinimumContentsLength(8)
+                combo.setSizePolicy(
+                    QSizePolicy.Ignored, QSizePolicy.Fixed)
+                combo.setMinimumWidth(0)
+                return combo
+
             def _make_tab_page():
                 scroll = QScrollArea()
                 scroll.setObjectName("inspectorScroll")
@@ -3538,7 +3546,9 @@ if HAS_QT:
                 scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                 page = QWidget()
                 page_lay = QVBoxLayout(page)
-                page_lay.setContentsMargins(0, 2, 0, 4)
+                # Leave room for the 8 px scrollbar so card borders are
+                # never painted underneath it.
+                page_lay.setContentsMargins(0, 2, 8, 4)
                 page_lay.setSpacing(10)
                 scroll.setWidget(page)
                 return scroll, page_lay
@@ -3614,7 +3624,7 @@ if HAS_QT:
                 "EDID Profile" if self.vfio_mode else "Format / Preset"),
                 0, 0)
 
-            self.combo_presets = QComboBox()
+            self.combo_presets = _shrinkable(QComboBox())
             if self.vfio_mode:
                 for text, key in EDID_PROFILES:
                     self.combo_presets.addItem(text, key)
@@ -3653,7 +3663,7 @@ if HAS_QT:
                 "Overrides SDL2 presentation. Auto follows the native HDMI "
                 "timing; 16:9 fixes anamorphic RetroTINK/OSSC modes."), 1, 0)
 
-            self.combo_aspect = QComboBox()
+            self.combo_aspect = _shrinkable(QComboBox())
             for text, key in ASPECT_OPTIONS:
                 self.combo_aspect.addItem(text, key)
             saved_aspect = self.saved_cfg.get("aspect_ratio", "auto")
@@ -3673,7 +3683,7 @@ if HAS_QT:
                 "Fit when the monitor is smaller or the content is anamorphic."),
                 2, 0)
 
-            self.combo_scale = QComboBox()
+            self.combo_scale = _shrinkable(QComboBox())
             for text, key in SCALE_OPTIONS:
                 self.combo_scale.addItem(text, key)
             saved_scale = self.saved_cfg.get("scale_mode", "fit")
@@ -3779,7 +3789,7 @@ if HAS_QT:
                 "below when a console outputs a 30 FPS game in a 60 Hz HDMI container."),
                 0, 0)
 
-            self.combo_framegen = QComboBox()
+            self.combo_framegen = _shrinkable(QComboBox())
             for text, key in FRAMEGEN_OPTIONS:
                 self.combo_framegen.addItem(text, key)
             fg_idx = self.combo_framegen.findData(
@@ -3865,7 +3875,7 @@ if HAS_QT:
                 "5.1/7.1 fall back to an ITU-R BS.775 stereo downmix when "
                 "the audio sink cannot open them."), 0, 0)
 
-            self.combo_audio_channels = QComboBox()
+            self.combo_audio_channels = _shrinkable(QComboBox())
             for label, key in AUDIO_CHANNEL_MODES:
                 self.combo_audio_channels.addItem(label, key)
             saved_layout = str(self.saved_cfg.get("audio_channels", "auto"))
@@ -3898,7 +3908,7 @@ if HAS_QT:
                 "Screen corner for the On-Screen Stats overlay (Hotkey: P)."),
                 1, 0)
 
-            self.combo_osd_pos = QComboBox()
+            self.combo_osd_pos = _shrinkable(QComboBox())
             for text, key in OSD_POSITION_OPTIONS:
                 self.combo_osd_pos.addItem(text, key)
             saved_pos = self.saved_cfg.get("osd_position", "tr")
@@ -3973,7 +3983,7 @@ if HAS_QT:
             grid_hw.setColumnStretch(1, 1)
             grid_hw.addWidget(_field("Card RGB LED"), 0, 0)
 
-            self.combo_led = QComboBox()
+            self.combo_led = _shrinkable(QComboBox())
             self.combo_led.setIconSize(QSize(14, 14))
             for name, val in LED_MODES.items():
                 icon = create_led_icon(val)
@@ -4183,7 +4193,7 @@ if HAS_QT:
             self.bottom_box.setObjectName("bottomBar")
             self.bottom_box.setFixedHeight(ui_theme.BOTTOM_BAR_HEIGHT)
             b_layout = QHBoxLayout(self.bottom_box)
-            b_layout.setContentsMargins(12, 0, 12, 0)
+            b_layout.setContentsMargins(10, 0, 10, 0)
             b_layout.setSpacing(10)
 
             initial_vol = int(self.saved_cfg.get("volume", 1.0) * 100)
@@ -4198,7 +4208,7 @@ if HAS_QT:
 
             self.slider_vol = QSlider(Qt.Horizontal)
             self.slider_vol.setRange(0, 150)
-            self.slider_vol.setFixedWidth(150)
+            self.slider_vol.setFixedWidth(130)
             self.slider_vol.setToolTip(
                 "Volume 0-150%. Note: Set console audio to 2-channel Linear "
                 "PCM (Stereo) to avoid buffer underruns.")
@@ -4474,8 +4484,8 @@ if HAS_QT:
                 self.setFocus()
             else:
                 self.showNormal()
-                self.root_layout.setContentsMargins(14, 12, 14, 8)
-                self.root_layout.setSpacing(10)
+                self.root_layout.setContentsMargins(12, 8, 12, 6)
+                self.root_layout.setSpacing(8)
                 self.video_stage_frame.setStyleSheet("")
                 self.video_stage_frame.layout().setContentsMargins(1, 1, 1, 1)
                 self.header_widget.setVisible(True)

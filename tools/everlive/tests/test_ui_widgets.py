@@ -103,6 +103,21 @@ class WidgetTests(unittest.TestCase):
         control.setCurrentIndex(1)
         self.assertEqual(seen, [1])
 
+    def test_segmented_control_click_emits(self):
+        # Regression: QButtonGroup checks the clicked button before the
+        # clicked signal reaches us, so the change must be tracked.
+        control = ui_widgets.SegmentedControl(
+            [("Simple", "simple"), ("Advanced", "advanced")])
+        seen = []
+        control.currentDataChanged.connect(seen.append)
+
+        control._buttons[1].click()
+        self.assertEqual(seen, ["advanced"])
+        control._buttons[1].click()
+        self.assertEqual(seen, ["advanced"])
+        control._buttons[0].click()
+        self.assertEqual(seen, ["advanced", "simple"])
+
     def test_set_enabled_propagates_to_segments(self):
         control = ui_widgets.SegmentedControl([("A", 1), ("B", 2)])
         control.setEnabled(False)
