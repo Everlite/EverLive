@@ -122,6 +122,15 @@ gc570d-ctl action it68051_hpd 1   # pulse HDMI IN 1 hot-plug
 gc570d-ctl action it6802_hpd 1    # pulse HDMI IN 2 hot-plug
 ```
 
+The unified socket also accepts `mode.set`, which swaps only the presentation
+layer.  The Console Hub uses it to dock a headless session into its viewport
+without releasing VFIO, interrupting the DMA rings or pausing OBS audio/video:
+
+```sh
+everlive-ctl runtime mode headless
+everlive-ctl runtime mode gaming "$WINDOW_ID"   # 0 = standalone window
+```
+
 ## Installation
 
 `make install` installs the daemon, `gc570d-ctl`, the optional preload bridge,

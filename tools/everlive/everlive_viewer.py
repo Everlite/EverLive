@@ -485,6 +485,39 @@ def _vfio_streamer_running(any_user: bool = False) -> bool:
             _proc_running("opengc570d-user", any_user))
 
 
+def _duo_service_active() -> bool:
+    """True when the installed GC570D headless user unit is running."""
+    try:
+        out = subprocess.check_output(
+            ["systemctl", "--user", "is-active", "opengc570d-userd"],
+            text=True, stderr=subprocess.DEVNULL, timeout=2.0)
+    except Exception:
+        return False
+    return out.strip() == "active"
+
+
+def _stop_duo_service() -> bool:
+    """Stop the headless GC570D unit; True when it had been active."""
+    if not _duo_service_active():
+        return False
+    try:
+        subprocess.run(["systemctl", "--user", "stop", "opengc570d-userd"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=10.0)
+    except Exception:
+        return False
+    return True
+
+
+def _start_duo_service():
+    try:
+        subprocess.run(["systemctl", "--user", "start", "opengc570d-userd"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=10.0)
+    except Exception:
+        pass
+
+
 def _raise_memlock_limit():
     """Native 4K frames need ~17 MB of pinned VFIO memory.
 
@@ -1174,6 +1207,7 @@ class GameStreamer:
         self._vfio_live = False
         self._vfio_saw_output = False
         self._duo_no_signal = False
+        self._stopped_duo_service = False
         self._pending_hub_actions = []
         # Last audio state parsed from the streamer log; shown in the capsule.
         self._vfio_audio = {"state": "unknown", "detail": "", "kind": ""}
@@ -1698,6 +1732,12 @@ class GameStreamer:
                         volume: float,
                         parent_winid: Optional[int] = None) -> bool:
         """Launch the GC570D (Live Gamer DUO) userspace engine."""
+        # The installed headless unit can outlive a previous session; stop it
+        # before the ownership guard so the Hub can claim the card.
+        if _stop_duo_service():
+            self._stopped_duo_service = True
+            print("[*] Stopped opengc570d-userd.service to start the Hub session.")
+
         if _vfio_streamer_running():
             print("[!] A userspace streamer is already running; refusing to start a second instance.")
             return False
@@ -2763,6 +2803,14 @@ if HAS_QT:
             self._ipc = None
             self._ipc_timer = None
             self._ipc_shutdown = False
+            # A remote engine docked into the Hub viewport over mode.set.
+            self._remote_docked = False
+            self._dock_pending_until = 0.0
+            # The headless DUO unit was running and we stopped it; restart it
+            # when the Hub exits.
+            self._service_was_active = False
+            self._takeover_pending = False
+            self._takeover_tries = 0
             self._vfio_notice_until = 0.0
             self._vfio_volume_applies = 0
             self._launch_mode: Optional[str] = None
@@ -4368,7 +4416,7 @@ if HAS_QT:
         def _is_embedded_gaming_active(self) -> bool:
             return (
                 self._launch_mode == "gaming"
-                and self.streamer.is_running
+                and (self.streamer.is_running or self._remote_docked)
                 and not (hasattr(self, "chk_popout") and self.chk_popout.isChecked())
                 and self._get_video_host_winid() > 0
             )
@@ -4392,7 +4440,7 @@ if HAS_QT:
             elif self._remote:
                 self.video_standby_overlay.set_messages(
                     "REMOTE SESSION ATTACHED",
-                    "Click 'Take Back Capture' in the top bar to dock video here")
+                    "Click 'Dock Video Here' to view the running engine in this viewport")
             else:
                 self.video_standby_overlay.set_messages(
                     "NO HDMI SIGNAL",
@@ -4608,11 +4656,13 @@ if HAS_QT:
                     "Userspace Engine Missing",
                     f"Build it with: make -C tools/{folder}")
                 return False
+            if self._takeover_pending:
+                return True
             if self._remote or ipc_probe() is not None:
                 self._set_vfio_notice(
                     "Remote Session",
-                    "Another streamer owns the capture card; close it to start "
-                    "a session from here",
+                    "Another streamer owns the capture card. Use 'Dock Video "
+                    "Here' to attach its preview, or take over capture.",
                     seconds=8.0)
                 return False
             if _vfio_streamer_running():
@@ -4642,6 +4692,7 @@ if HAS_QT:
                 QTimer.singleShot(2500, self, self._ipc_try_attach)
 
         def _on_remote_connection(self, connected: bool):
+            was_remote = self._remote
             is_local = self.streamer.is_running or bool(getattr(self, "_launch_mode", None))
             self._remote = bool(connected and not is_local)
             if connected:
@@ -4654,7 +4705,7 @@ if HAS_QT:
             else:
                 self._ipc_timer.stop()
                 self._remote_status = {}
-                if self._remote:
+                if was_remote:
                     self._set_remote_ui(False)
                 self._remote = False
                 # The streamer may come back; keep watching quietly.
@@ -4668,17 +4719,17 @@ if HAS_QT:
                     self.lbl_pill.setText("● Remote Session")
                     self.lbl_pill.setStyleSheet(
                         "background-color: #122B26; color: #5ED4B2; border: 1px solid #24584B;")
-                self.btn_launch.setText("Remote Session Active")
+                self.btn_launch.setText("Dock Video Here")
                 self.btn_launch.setObjectName("btnLaunchStart")
-                self.btn_launch.setEnabled(False)
+                self.btn_launch.setEnabled(True)
                 self.btn_launch.setToolTip(
-                    "A userspace streamer started outside this window owns "
-                    "the capture card.")
-                self.btn_studio.setText("Start Studio / Headless (OBS)")
+                    "Attach the running capture engine to the Hub viewport "
+                    "without interrupting DMA, OBS or audio.")
+                self.btn_studio.setText("Studio / Headless (external)")
                 self.btn_studio.setObjectName("btnStudioStart")
                 self.btn_studio.setEnabled(False)
                 self.btn_studio.setToolTip(
-                    "Stop the external streamer to start a session from here.")
+                    "The external engine already owns the capture card.")
                 for button in (self.btn_launch, self.btn_studio):
                     button.setStyle(button.style())
                 # The LED, volume and aspect controls stay live: they now talk
@@ -4687,10 +4738,124 @@ if HAS_QT:
                     self.combo_led.setEnabled(True)
                 self._set_vfio_notice(
                     "Remote Session",
-                    "Attached to the userspace streamer that owns the card",
+                    "Attached to the userspace streamer that owns the card — "
+                    "click 'Dock Video Here' for the preview",
                     seconds=6.0)
             else:
+                self._remote_docked = False
+                self._dock_pending_until = 0.0
                 self._set_launch_running(False)
+
+        def _remote_dock(self):
+            """Attach the external engine's SDL window to the Hub viewport."""
+            if self._ipc is None or not self._ipc.connected:
+                return
+            parent_wid = self._target_parent_winid()
+            if parent_wid < 0:
+                parent_wid = 0
+            self._dock_pending_until = time.time() + 3.0
+            if not self._ipc.set_mode_async("gaming", parent_wid,
+                                            self._on_dock_reply):
+                self._dock_pending_until = 0.0
+                self._remote_takeover("Control socket closed while docking")
+                return
+            self._set_vfio_notice(
+                "Docking Video",
+                "Attaching the running capture engine to the Hub viewport…",
+                seconds=3.0)
+
+        def _on_dock_reply(self, message: Dict):
+            if not isinstance(message, dict):
+                return
+            error = message.get("error")
+            result = message.get("result") or {}
+            ok = isinstance(result, dict) and bool(result.get("ok"))
+            if isinstance(error, dict) or not ok:
+                reason = (error.get("message") if isinstance(error, dict)
+                          else "engine rejected the docking request")
+                print(f"[!] mode.set failed: {reason}")
+                self._dock_pending_until = 0.0
+                self._remote_takeover(reason)
+                return
+            self._dock_pending_until = 0.0
+            self._remote_docked = True
+            self._launch_mode = "gaming"
+            self._last_launch_mode = "gaming"
+            if hasattr(self, "video_standby_overlay"):
+                self.video_standby_overlay.setVisible(False)
+            if hasattr(self, "btn_launch"):
+                self.btn_launch.setText("Close Preview")
+                self.btn_launch.setToolTip(
+                    "Detach the preview and keep the engine capturing headless.")
+            self._set_vfio_notice(
+                "Video Docked",
+                "Capture kept running — DMA, OBS and audio are uninterrupted",
+                seconds=5.0)
+            print("[*] Remote engine docked into the Hub viewport")
+
+        def _remote_undock(self):
+            """Return a docked external engine to headless capture."""
+            if self._ipc is not None and self._ipc.connected:
+                self._ipc.set_mode("headless")
+            self._remote_docked = False
+            self._launch_mode = "studio"
+            self._last_launch_mode = "studio"
+            if hasattr(self, "btn_launch"):
+                self.btn_launch.setText("Dock Video Here")
+                self.btn_launch.setToolTip(
+                    "Attach the running capture engine to the Hub viewport "
+                    "without interrupting DMA, OBS or audio.")
+            self._refresh_stage_overlay()
+            self._set_vfio_notice(
+                "Preview Closed",
+                "The external engine keeps capturing headless for OBS",
+                seconds=5.0)
+
+        def _remote_takeover(self, reason: str = ""):
+            """Stop the external engine and restart capture inside the Hub."""
+            if self._takeover_pending:
+                return
+            self._takeover_pending = True
+            self._takeover_tries = 0
+            self._dock_pending_until = 0.0
+            self._set_vfio_notice(
+                "Taking Over Capture",
+                ((reason + ". ") if reason else "") +
+                "Restarting the engine in the Hub…",
+                seconds=6.0)
+            print(f"[*] Taking over capture: {reason or 'dock unavailable'}")
+            QTimer.singleShot(50, self._stop_remote_engine)
+
+        def _stop_remote_engine(self):
+            if self.duo_mode and _duo_service_active():
+                self._service_was_active = True
+                _stop_duo_service()
+            self._takeover_tries = 0
+            QTimer.singleShot(200, self._finish_takeover)
+
+        def _finish_takeover(self):
+            # Wait for systemd/VFIO teardown without blocking the GUI thread.
+            if _vfio_streamer_running() and self._takeover_tries < 40:
+                self._takeover_tries += 1
+                if self._takeover_tries == 8:
+                    # A manually-started engine: ask it to release the card.
+                    _stop_vfio_daemon(wait_s=0.0)
+                QTimer.singleShot(125, self._finish_takeover)
+                return
+
+            self._takeover_tries = 0
+            self._takeover_pending = False
+            self._remote_docked = False
+            self._launch_mode = None
+            if self._ipc is not None:
+                self._ipc.close()
+            if _vfio_streamer_running():
+                self._set_vfio_notice(
+                    "Handover Failed",
+                    "The external engine still owns the VFIO device",
+                    seconds=8.0)
+                return
+            self.start_gaming_screen()
 
         def _poll_remote_status(self):
             if self._ipc is not None and self._ipc.connected:
@@ -4699,8 +4864,23 @@ if HAS_QT:
         def _on_remote_status(self, status: Dict):
             """Render a snapshot published by the remote streamer."""
             self._remote_status = status
+            remote_headless = bool(status.get("headless"))
+            if self._remote and not self.streamer.is_running:
+                if (self._dock_pending_until and
+                        time.time() > self._dock_pending_until):
+                    self._dock_pending_until = 0.0
+                    if remote_headless:
+                        self._remote_takeover(
+                            "Engine could not open a preview window")
+                        return
+                if self._remote_docked and remote_headless:
+                    self._remote_docked = False
+                    self._launch_mode = "studio"
+                    if hasattr(self, "btn_launch"):
+                        self.btn_launch.setText("Dock Video Here")
+                    self._refresh_stage_overlay()
             self._update_framegen_status(status.get("framegen") or {},
-                                         bool(status.get("headless")))
+                                         remote_headless)
             signal_info = status.get("signal") or {}
             video = status.get("video") or {}
             audio = status.get("audio") or {}
@@ -4932,12 +5112,10 @@ if HAS_QT:
                 self._handoff_take_back()
                 return
             if self._remote and self._ipc is not None and self._ipc.connected:
-                target_wid = self._target_parent_winid()
-                if self._ipc.set_mode("gaming", parent_winid=target_wid):
-                    self._launch_mode = "gaming"
-                    if hasattr(self, "video_standby_overlay") and target_wid > 0:
-                        self.video_standby_overlay.setVisible(False)
-                    print(f"[*] Docked remote session into Hub viewport (0x{target_wid:x})")
+                if self._remote_docked or self._launch_mode == "gaming":
+                    self._remote_undock()
+                else:
+                    self._remote_dock()
                 return
             if self._launch_mode == "studio":
                 # Studio is capturing: hand the card over to the SDL window.
@@ -4972,6 +5150,15 @@ if HAS_QT:
             if self._launch_mode == target or self._switch_pending:
                 return
             if target == "studio" and not self.vfio_mode:
+                return
+
+            # A remote engine owns the card: swap only its presentation layer.
+            if (self._remote and self._ipc is not None and
+                    self._ipc.connected):
+                if target == "gaming":
+                    self._remote_dock()
+                else:
+                    self._remote_undock()
                 return
 
             # Fast path: the engine swaps its presentation layer in place, so
@@ -5074,6 +5261,9 @@ if HAS_QT:
         def start_gaming_screen(self):
             if self.streamer.is_running:
                 return
+            if self._remote and not self._takeover_pending:
+                self._remote_dock()
+                return
 
             if self.vfio_mode:
                 if not self._vfio_preflight():
@@ -5151,6 +5341,9 @@ if HAS_QT:
                     parent_winid=parent_wid)
                 if success:
                     self._set_launch_running(True, "gaming")
+                    if getattr(self.streamer, "_stopped_duo_service", False):
+                        self._service_was_active = True
+                        self.streamer._stopped_duo_service = False
                     if want_fullscreen and parent_wid > 0:
                         self._set_cinema_fullscreen(True)
                     self._vfio_notice_until = 0.0
@@ -5163,6 +5356,7 @@ if HAS_QT:
                     self._set_vfio_notice(
                         "Userspace Engine Failed",
                         "See ~/.config/everlive/streamer.log for the hardware error")
+                    self._restore_service_after_failed_start()
                     QTimer.singleShot(300, self._restore_led_after_stream)
                 return
 
@@ -5244,6 +5438,9 @@ if HAS_QT:
                 fg_low_latency=fg_cfg["fg_low_latency"])
             if success:
                 self._set_launch_running(True, "studio")
+                if getattr(self.streamer, "_stopped_duo_service", False):
+                    self._service_was_active = True
+                    self.streamer._stopped_duo_service = False
                 self._vfio_notice_until = 0.0
                 self._vfio_volume_applies = 0
                 self._retry_audio_props()
@@ -5264,6 +5461,7 @@ if HAS_QT:
                 self._set_vfio_notice(
                     "Studio Engine Failed",
                     "See ~/.config/everlive/streamer.log for the hardware error")
+                self._restore_service_after_failed_start()
                 QTimer.singleShot(300, self._restore_led_after_stream)
 
         def _duo_edid_action(self, bridge: bool):
@@ -6493,13 +6691,59 @@ if HAS_QT:
                 else:
                     self._restore_from_tray()
 
+        def _release_remote_preview(self):
+            """Return a docked external engine to headless before teardown."""
+            if not (self._remote and self._remote_docked):
+                return
+            if self._ipc is None or not self._ipc.connected:
+                return
+            done = {"ok": False}
+            self._ipc.set_mode_async("headless", None,
+                                     lambda _msg: done.update(ok=True))
+            # Let the socket notifier deliver the reply while the Qt parent
+            # still exists.  The engine also returns to headless by itself if
+            # the embedding window disappears.
+            deadline = time.time() + 1.0
+            while time.time() < deadline and not done["ok"]:
+                QApplication.processEvents()
+                if self._ipc is None or not self._ipc.connected:
+                    break
+                time.sleep(0.02)
+            self._remote_docked = False
+
+        def _restore_headless_service(self):
+            """Restart the DUO unit if this Hub session stopped it."""
+            if not self._service_was_active:
+                return
+            self._service_was_active = False
+            print("[*] Restarting opengc570d-userd.service for headless capture.")
+            _start_duo_service()
+
+        def _restore_service_after_failed_start(self):
+            """Undo a service stop when the local engine could not start."""
+            if not getattr(self.streamer, "_stopped_duo_service", False):
+                return
+            self.streamer._stopped_duo_service = False
+            self._service_was_active = True
+
+            def _try():
+                if _vfio_streamer_running():
+                    QTimer.singleShot(500, _try)
+                    return
+                self._service_was_active = False
+                _start_duo_service()
+
+            QTimer.singleShot(500, _try)
+
         def _force_quit(self):
             self._switch_pending = None
+            self._release_remote_preview()
             self._ipc_shutdown = True
             if self._ipc is not None:
                 self._ipc.close()
             was_running = self.streamer.is_running
             self.streamer.stop()
+            self._restore_headless_service()
             if self.vfio_mode and was_running:
                 self._restore_led_after_stream()
             if hasattr(self, "tray_icon") and self.tray_icon:
@@ -6525,9 +6769,11 @@ if HAS_QT:
                 return
 
             self._ipc_shutdown = True
+            self._release_remote_preview()
             if self._ipc is not None:
                 self._ipc.close()
             self.streamer.stop()
+            self._restore_headless_service()
             if self.vfio_mode and was_running:
                 self._restore_led_after_stream()
             if hasattr(self, "tray_icon") and self.tray_icon:

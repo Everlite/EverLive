@@ -139,7 +139,8 @@ static void print_usage(const char *prog)
 	       "  runtime toast <text>\n"
 	       "  runtime volume <0..150>\n"
 	       "  runtime mute <0|1>\n"
-	       "  runtime osd <0|1>\n\n"
+	       "  runtime osd <0|1>\n"
+	       "  runtime mode <gaming|headless> [winid]\n\n"
 	       "Service & Bringup:\n"
 	       "  init                    Initialize capture card in background (passthrough/audio)\n"
 	       "  service status          Show systemd user service status\n"
@@ -603,7 +604,9 @@ static int cmd_runtime(int argc, char **argv)
 			"  toast <text>               Show an on-screen notification\n"
 			"  volume <0..150>            Set desktop audio volume %%\n"
 			"  mute <0|1>                 Mute/unmute desktop audio\n"
-			"  osd <0|1>                  Toggle the on-screen overlay\n");
+			"  osd <0|1>                  Toggle the on-screen overlay\n"
+			"  mode <gaming|headless> [winid]\n"
+			"                             Open/dock or close the preview window\n");
 		return 1;
 	}
 
@@ -736,6 +739,33 @@ static int cmd_runtime(int argc, char **argv)
 		snprintf(params, sizeof(params),
 			 "{\"enabled\":%s}", on ? "true" : "false");
 		return ctl_call("osd.set", params);
+	}
+
+	if (strcmp(topic, "mode") == 0) {
+		const char *mode = argc >= 4 ? argv[3] : NULL;
+		unsigned long winid = 0;
+		char *end = NULL;
+
+		if (!mode ||
+		    (strcasecmp(mode, "gaming") != 0 &&
+		     strcasecmp(mode, "window") != 0 &&
+		     strcasecmp(mode, "headless") != 0 &&
+		     strcasecmp(mode, "studio") != 0)) {
+			fprintf(stderr, "runtime mode needs gaming or headless\n");
+			return 1;
+		}
+		if (argc >= 5) {
+			winid = strtoul(argv[4], &end, 0);
+			if (!end || *end) {
+				fprintf(stderr,
+					"runtime mode winid must be a number\n");
+				return 1;
+			}
+		}
+		snprintf(params, sizeof(params),
+			 "{\"mode\":\"%s\",\"parent_winid\":%lu}",
+			 mode, winid);
+		return ctl_call("mode.set", params);
 	}
 
 	fprintf(stderr, "Unknown runtime topic: %s\n", topic);
