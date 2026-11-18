@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Fullscreen OSD card (engine):**
+  - The GC573 and GC570D engines now draw a three-line card in fullscreen: card and HDMI input identity, source→output route with chroma and audio rate, and a row of hotkey chips (`A` Aspect, `L` Scale, `M` Mute, `Tab` Hide; DUO adds input and PiP).
+  - Windowed and embedded sessions keep the compact readout so the Hub viewport stays unobstructed. The card follows the existing OSD position setting and is toggled by the same OSD hotkey.
 - **Optional LD_PRELOAD app launchers in the installer:** `install.sh --with-preload` (or the interactive prompt) creates reversible `<App> (EverLive Camera)` menu entries for native Discord, OBS, Chrome, Chromium, Brave, Firefox and Zoom installs. Each entry launches that process with the card-specific `LD_PRELOAD` library and the shared `X-EverLive-Preload` marker, so the Console Hub recognizes the shortcut and `uninstall.sh` removes it. Existing launchers, user overrides and Flatpak/Snap sandboxes are left untouched.
 - **Console Hub shell refresh (Simple / Advanced):**
   - Fresh installs open in **Simple** mode: a full-width video stage with no inspector or telemetry deck, a `Local Capture Active` status chip in the bottom bar while running, and a full-width bottom audio/status bar. The choice persists as `ui_mode`.

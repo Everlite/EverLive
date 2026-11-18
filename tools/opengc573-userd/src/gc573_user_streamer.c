@@ -1095,6 +1095,22 @@ static void stop_led_worker(void)
 	g_led_thread_running = false;
 }
 
+static const char *colorspace_short(uint8_t colorspace)
+{
+	switch (colorspace) {
+	case GC573_USER_COLORSPACE_RGB:
+		return "RGB";
+	case GC573_USER_COLORSPACE_YCBCR422:
+		return "YUV";
+	case GC573_USER_COLORSPACE_YCBCR444:
+		return "YUV 4:4:4";
+	case GC573_USER_COLORSPACE_YCBCR420:
+		return "YUV 4:2:0";
+	default:
+		return "YUV";
+	}
+}
+
 static const char *colorspace_name(uint8_t colorspace)
 {
 	switch (colorspace) {
@@ -1799,6 +1815,10 @@ struct osd_overlay {
 };
 
 static struct osd_overlay g_osd;
+/* Fullscreen identity card; windowed mode keeps g_osd. */
+static struct osd_overlay g_card;
+static bool g_osd_was_fullscreen;
+
 /* Centred F1 help card; separate texture so the stats OSD stays intact. */
 static struct osd_overlay g_help;
 static bool g_help_overlay;
@@ -1836,6 +1856,14 @@ static void osd_destroy(void)
 	g_osd.height = 0;
 	g_osd.scale = 0;
 	g_osd.text[0] = '\0';
+	if (g_card.texture) {
+		SDL_DestroyTexture(g_card.texture);
+		g_card.texture = NULL;
+	}
+	g_card.width = 0;
+	g_card.height = 0;
+	g_card.scale = 0;
+	g_card.text[0] = '\0';
 	toast_destroy();
 }
 
@@ -1868,21 +1896,20 @@ static int osd_border_for_scale(int scale)
 	return scale > 1 ? 2 : 1;
 }
 
-static void osd_draw_text(SDL_Surface *surface, const char *text, int scale)
+static void osd_draw_text_at(SDL_Surface *surface, int x0, int y0,
+			     const char *text, int scale, Uint32 fg)
 {
-	const int pad = osd_pad_for_scale(scale);
 	const int line_height = 8 * scale;
 	const int line_gap = osd_gap_for_scale(scale);
-	Uint32 fg = SDL_MapRGBA(surface->format, 235, 242, 255, 255);
-	int x = pad;
-	int y = pad;
+	int x = x0;
+	int y = y0;
 
 	for (const char *p = text; *p; p++) {
 		const uint8_t *bitmap;
 		unsigned char glyph;
 
 		if (*p == '\n') {
-			x = pad;
+			x = x0;
 			y += line_height + line_gap;
 			continue;
 		}
@@ -1915,6 +1942,284 @@ static void osd_draw_text(SDL_Surface *surface, const char *text, int scale)
 		}
 		x += 8 * scale;
 	}
+}
+
+static void osd_draw_text(SDL_Surface *surface, const char *text, int scale)
+{
+	const int pad = osd_pad_for_scale(scale);
+	Uint32 fg = SDL_MapRGBA(surface->format, 235, 242, 255, 255);
+
+	osd_draw_text_at(surface, pad, pad, text, scale, fg);
+}
+
+/* ------------------------------------------------------------------ *
+ * Fullscreen OSD card
+ *
+ * Fullscreen gets a three-line card: identity, signal route and a row of
+ * hotkey chips.  Windowed mode keeps the compact one-line readout so the
+ * embedded Hub viewport stays unobstructed.
+ * ------------------------------------------------------------------ */
+static int osd_scale_for_height(int win_h);
+
+static int osd_text_width(const char *text, int scale)
+{
+	return (int)strlen(text) * 8 * scale;
+}
+
+static void osd_fill_rounded(SDL_Surface *surface, int x, int y,
+			     int w, int h, int radius, Uint32 color)
+{
+	SDL_Rect mid;
+	int dy;
+
+	if (radius <= 0) {
+		SDL_Rect rect = { x, y, w, h };
+
+		SDL_FillRect(surface, &rect, color);
+		return;
+	}
+
+	mid.x = x;
+	mid.y = y + radius;
+	mid.w = w;
+	mid.h = h - 2 * radius;
+	SDL_FillRect(surface, &mid, color);
+
+	for (dy = 0; dy < radius; dy++) {
+		int rem = radius - dy;
+		int dx = (int)(sqrt((double)(radius * radius - rem * rem)) + 0.5);
+		int inset = radius - dx;
+		SDL_Rect row = { x + inset, y + dy, w - 2 * inset, 1 };
+
+		SDL_FillRect(surface, &row, color);
+		row.y = y + h - 1 - dy;
+		SDL_FillRect(surface, &row, color);
+	}
+}
+
+static void osd_fill_circle(SDL_Surface *surface, int cx, int cy, int r,
+			    Uint32 color)
+{
+	int dy;
+
+	for (dy = -r; dy <= r; dy++) {
+		int dx = (int)(sqrt((double)(r * r - dy * dy)) + 0.5);
+		SDL_Rect row = { cx - dx, cy + dy, dx * 2 + 1, 1 };
+
+		SDL_FillRect(surface, &row, color);
+	}
+}
+
+static bool osd_window_is_fullscreen(SDL_Window *window)
+{
+	Uint32 flags;
+
+	if (!window)
+		return false;
+	flags = SDL_GetWindowFlags(window);
+	return (flags & (SDL_WINDOW_FULLSCREEN |
+			 SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0;
+}
+
+static void osd_output_label(char *out, size_t n, int w, int h,
+			     uint32_t rate_x100)
+{
+	double rate = (double)rate_x100 / 100.0;
+
+	switch (h) {
+	case 2160:
+		snprintf(out, n, "2160p%.0f", rate);
+		break;
+	case 1440:
+		snprintf(out, n, "1440p%.0f", rate);
+		break;
+	case 1080:
+		snprintf(out, n, "1080p%.0f", rate);
+		break;
+	case 720:
+		snprintf(out, n, "720p%.0f", rate);
+		break;
+	default:
+		snprintf(out, n, "%dx%d", w, h);
+		break;
+	}
+}
+
+static void osd_audio_label(const char *audio_text, char *out, size_t n)
+{
+	const char *khz;
+	const char *start;
+
+	if (!audio_text || !*audio_text) {
+		snprintf(out, n, "audio");
+		return;
+	}
+
+	khz = strstr(audio_text, "kHz");
+	if (!khz) {
+		snprintf(out, n, "%s", audio_text);
+		return;
+	}
+	start = khz;
+	while (start > audio_text &&
+	       (isdigit((unsigned char)start[-1]) || start[-1] == '.'))
+		start--;
+	snprintf(out, n, "%.*s", (int)(khz - start) + 3, start);
+	if (strstr(audio_text, "Muted") && strlen(out) + 7 < n)
+		strncat(out, " Muted", n - strlen(out) - 1);
+}
+
+struct osd_hotkey_chip {
+	const char *key;
+	const char *label;
+};
+
+static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
+			    uint32_t in_w, uint32_t in_h,
+			    uint32_t rate_x100, const char *chroma_text,
+			    const char *audio_text)
+{
+	static const struct osd_hotkey_chip chips[] = {
+		{ "A", "Aspect" },
+		{ "L", "Scale" },
+		{ "M", "Mute" },
+		{ "Tab", "Hide" },
+	};
+	char line1[128];
+	char line2[224];
+	char output[32];
+	char audio[48];
+	char key[512];
+	int win_w = 0;
+	int win_h = 0;
+	int scale;
+	int pad;
+	int gap;
+	int line_h;
+	int chip_h;
+	int dot_d;
+	int line1_w;
+	int line2_w;
+	int chips_w = 0;
+	int content_w;
+	int width;
+	int height;
+	int x;
+	int y;
+	SDL_Surface *surface;
+	SDL_Texture *texture;
+	Uint32 bg;
+	Uint32 border;
+	Uint32 fg;
+	Uint32 muted;
+	Uint32 green;
+	Uint32 chip_bg;
+	Uint32 chip_border;
+	size_t i;
+
+	if (!renderer || !window || !g_osd_enabled)
+		return;
+
+	SDL_GetWindowSize(window, &win_w, &win_h);
+	if (win_w <= 0 || win_h <= 0)
+		return;
+	scale = osd_scale_for_height(win_h);
+
+	osd_output_label(output, sizeof(output), win_w, win_h, rate_x100);
+	osd_audio_label(audio_text, audio, sizeof(audio));
+
+	snprintf(line1, sizeof(line1), "GC573 %c HDMI (Auto)", OSD_BULLET);
+	snprintf(line2, sizeof(line2), "%ux%u -> %s %s %c %s",
+		 in_w, in_h, output,
+		 chroma_text && *chroma_text ? chroma_text : "YUV",
+		 OSD_BULLET, audio);
+
+	snprintf(key, sizeof(key), "%s|%s|%d|%d|%d",
+		 line1, line2, scale, win_w, win_h);
+	if (scale == g_card.scale && strcmp(key, g_card.text) == 0)
+		return;
+	snprintf(g_card.text, sizeof(g_card.text), "%s", key);
+
+	pad = 12 * scale;
+	gap = 5 * scale;
+	line_h = 8 * scale;
+	dot_d = 6 * scale;
+	chip_h = line_h + 4 * scale;
+
+	line1_w = dot_d + gap + osd_text_width(line1, scale);
+	line2_w = osd_text_width(line2, scale);
+	for (i = 0; i < SDL_arraysize(chips); i++) {
+		int chip_w = 6 * scale + osd_text_width(chips[i].key, scale);
+
+		chips_w += chip_w + 4 * scale +
+			   osd_text_width(chips[i].label, scale);
+		if (i + 1 < SDL_arraysize(chips))
+			chips_w += 12 * scale;
+	}
+
+	content_w = line1_w;
+	if (line2_w > content_w)
+		content_w = line2_w;
+	if (chips_w > content_w)
+		content_w = chips_w;
+
+	width = pad * 2 + content_w;
+	height = pad * 2 + line_h + gap + line_h + gap + chip_h;
+
+	surface = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32,
+						 SDL_PIXELFORMAT_RGBA32);
+	if (!surface)
+		return;
+
+	bg = SDL_MapRGBA(surface->format, 30, 34, 48, 235);
+	border = SDL_MapRGBA(surface->format, 90, 98, 120, 170);
+	fg = SDL_MapRGBA(surface->format, 235, 242, 255, 255);
+	muted = SDL_MapRGBA(surface->format, 154, 160, 176, 255);
+	green = SDL_MapRGBA(surface->format, 80, 220, 140, 255);
+	chip_bg = SDL_MapRGBA(surface->format, 22, 25, 36, 230);
+	chip_border = SDL_MapRGBA(surface->format, 60, 66, 82, 220);
+
+	osd_fill_rounded(surface, 0, 0, width, height, 9 * scale, border);
+	osd_fill_rounded(surface, 1, 1, width - 2, height - 2,
+			 (9 * scale) - 1, bg);
+
+	y = pad;
+	osd_fill_circle(surface, pad + dot_d / 2, y + line_h / 2,
+			dot_d / 2, green);
+	osd_draw_text_at(surface, pad + dot_d + gap, y, line1, scale, fg);
+
+	y += line_h + gap;
+	osd_draw_text_at(surface, pad, y, line2, scale, muted);
+
+	y += line_h + gap;
+	x = pad;
+	for (i = 0; i < SDL_arraysize(chips); i++) {
+		int chip_w = 6 * scale + osd_text_width(chips[i].key, scale);
+		int label_w = osd_text_width(chips[i].label, scale);
+
+		osd_fill_rounded(surface, x, y, chip_w, chip_h, 4 * scale,
+				 chip_border);
+		osd_fill_rounded(surface, x + 1, y + 1, chip_w - 2,
+				 chip_h - 2, (4 * scale) - 1, chip_bg);
+		osd_draw_text_at(surface, x + 3 * scale, y + 2 * scale,
+				 chips[i].key, scale, fg);
+		x += chip_w + 4 * scale;
+		osd_draw_text_at(surface, x, y + 2 * scale,
+				 chips[i].label, scale, muted);
+		x += label_w + 12 * scale;
+	}
+
+	texture = SDL_CreateTextureFromSurface(renderer, surface);
+	SDL_FreeSurface(surface);
+	if (!texture)
+		return;
+	SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+	if (g_card.texture)
+		SDL_DestroyTexture(g_card.texture);
+	g_card.texture = texture;
+	g_card.width = width;
+	g_card.height = height;
+	g_card.scale = scale;
 }
 
 static void osd_build(SDL_Renderer *renderer, int scale, const char *text,
@@ -2039,7 +2344,7 @@ static void osd_note_dma_age(uint64_t age_us)
 static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 		       uint32_t in_w, uint32_t in_h, bool interlaced,
 		       uint32_t rate_x100, double fps, const char *audio_text,
-		       const char *hdr_text)
+		       const char *hdr_text, const char *chroma_text)
 {
 	char line2[384];
 	char line3[128];
@@ -2054,6 +2359,20 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 
 	if (!g_osd_enabled || !window)
 		return;
+
+	if (osd_window_is_fullscreen(window)) {
+		osd_card_update(renderer, window, in_w, in_h, rate_x100,
+				chroma_text, audio_text);
+		g_osd_was_fullscreen = true;
+		return;
+	}
+
+	/* Force the compact texture to refresh after leaving fullscreen. */
+	if (g_osd_was_fullscreen) {
+		g_osd.scale = -1;
+		g_osd.text[0] = '\0';
+		g_osd_was_fullscreen = false;
+	}
 
 	if (hdr_text && *hdr_text)
 		snprintf(tail, sizeof(tail), " %c %s", OSD_BULLET, hdr_text);
@@ -2092,14 +2411,16 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 	osd_rebuild(renderer, scale, text);
 }
 
-static void osd_destination(SDL_Rect *dst, int win_w, int win_h)
+static void osd_destination(SDL_Rect *dst, const struct osd_overlay *overlay,
+			    int win_w, int win_h)
 {
-	int margin = g_osd.scale >= 3 ? 24 : (g_osd.scale == 2 ? 16 : 10);
+	int margin = overlay->scale >= 3 ? 24
+		: (overlay->scale == 2 ? 16 : 10);
 	bool right = g_osd_pos == OSD_POS_TR || g_osd_pos == OSD_POS_BR;
 	bool bottom = g_osd_pos == OSD_POS_BR || g_osd_pos == OSD_POS_BL;
 
-	dst->w = g_osd.width;
-	dst->h = g_osd.height;
+	dst->w = overlay->width;
+	dst->h = overlay->height;
 	dst->x = right ? win_w - margin - dst->w : margin;
 	dst->y = bottom ? win_h - margin - dst->h : margin;
 	if (dst->x < 0)
@@ -2110,16 +2431,22 @@ static void osd_destination(SDL_Rect *dst, int win_w, int win_h)
 
 static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
 {
+	const struct osd_overlay *overlay;
 	int win_w = 0;
 	int win_h = 0;
 	SDL_Rect dst;
 
-	if (!g_osd_enabled || !g_osd.texture)
+	if (!g_osd_enabled)
+		return;
+
+	overlay = (osd_window_is_fullscreen(window) && g_card.texture)
+		? &g_card : &g_osd;
+	if (!overlay->texture)
 		return;
 
 	SDL_GetWindowSize(window, &win_w, &win_h);
-	osd_destination(&dst, win_w, win_h);
-	SDL_RenderCopy(renderer, g_osd.texture, NULL, &dst);
+	osd_destination(&dst, overlay, win_w, win_h);
+	SDL_RenderCopy(renderer, overlay->texture, NULL, &dst);
 }
 
 /* F1 help card.  Built lazily, re-rasterised only on scale or text change. */
@@ -7968,7 +8295,9 @@ int main(int argc, char *argv[])
 								audio_desc,
 								gc573_hdr_active() ?
 								gc573_hdr_label() :
-								NULL);
+								NULL,
+								colorspace_short(
+									current_sig.colorspace));
 						}
 						render_frame(
 							window, renderer, texture,
@@ -8039,7 +8368,9 @@ int main(int argc, char *argv[])
 						   input_rate_x100,
 						   displayed_fps, audio_desc,
 						   gc573_hdr_active() ?
-						   gc573_hdr_label() : NULL);
+						   gc573_hdr_label() : NULL,
+						   colorspace_short(
+							   current_sig.colorspace));
 					render_frame(window, renderer, texture,
 						     aspect_ratio(g_aspect, video_aspect),
 						     (int)output_width,

@@ -563,6 +563,199 @@ static void sdl_draw_text(uint32_t *pixels, uint32_t stride, int x, int y,
 	}
 }
 
+static int sdl_sqrt_int(int value)
+{
+	int root = 0;
+
+	if (value <= 0)
+		return 0;
+	while ((root + 1) * (root + 1) <= value)
+		root++;
+	return root;
+}
+
+static void sdl_fill_rounded(uint32_t *pixels, int stride, int height,
+			     int x, int y, int w, int h, int radius,
+			     uint32_t color)
+{
+	int row;
+
+	if (!pixels || w <= 0 || h <= 0)
+		return;
+
+	for (row = 0; row < h; row++) {
+		int inset = 0;
+		int py = y + row;
+		int x0;
+		int x1;
+
+		if (row < radius) {
+			int rem = radius - row;
+
+			inset = radius -
+				sdl_sqrt_int(radius * radius - rem * rem);
+		} else if (row >= h - radius) {
+			int rem = radius - (h - 1 - row);
+
+			inset = radius -
+				sdl_sqrt_int(radius * radius - rem * rem);
+		}
+		if (py < 0 || py >= height)
+			continue;
+		x0 = x + inset;
+		x1 = x + w - inset;
+		if (x0 < 0)
+			x0 = 0;
+		if (x1 > stride)
+			x1 = stride;
+		for (int px = x0; px < x1; px++)
+			pixels[(size_t)py * stride + px] = color;
+	}
+}
+
+static void sdl_fill_circle(uint32_t *pixels, int stride, int height,
+			    int cx, int cy, int radius, uint32_t color)
+{
+	int dy;
+
+	for (dy = -radius; dy <= radius; dy++) {
+		int dx = sdl_sqrt_int(radius * radius - dy * dy);
+		int py = cy + dy;
+
+		if (py < 0 || py >= height)
+			continue;
+		for (int px = cx - dx; px <= cx + dx; px++) {
+			if (px >= 0 && px < stride)
+				pixels[(size_t)py * stride + px] = color;
+		}
+	}
+}
+
+struct sdl_chip {
+	const char *key;
+	const char *label;
+};
+
+static void sdl_build_card(struct everlive_sdl *sdl, const char *identity,
+			   const char *route, int scale)
+{
+	static const struct sdl_chip chips[] = {
+		{ "1/2", "Input" },
+		{ "P", "PiP" },
+		{ "A", "Aspect" },
+		{ "L", "Scale" },
+		{ "M", "Mute" },
+		{ "Tab", "OSD" },
+	};
+	const uint32_t bg = 0xeb1e2230U;
+	const uint32_t border = 0xaa5a6278U;
+	const uint32_t fg = 0xffebf2ffU;
+	const uint32_t muted = 0xff9aa0b0U;
+	const uint32_t green = 0xff50dc8cU;
+	const uint32_t chip_bg = 0xe6161924U;
+	const uint32_t chip_border = 0xdc3c4252U;
+	const int pad = 12 * scale;
+	const int gap = 5 * scale;
+	const int line_h = 8 * scale;
+	const int dot_d = 6 * scale;
+	const int chip_h = line_h + 4 * scale;
+	int line1_w;
+	int line2_w;
+	int chips_w = 0;
+	int content_w;
+	int width;
+	int height;
+	int x;
+	int y;
+	size_t i;
+	uint32_t yrow;
+
+	if (!sdl->renderer)
+		return;
+
+	line1_w = dot_d + gap + (int)strlen(identity) * 8 * scale;
+	line2_w = (int)strlen(route) * 8 * scale;
+	for (i = 0; i < SDL_arraysize(chips); i++) {
+		int chip_w = 6 * scale + (int)strlen(chips[i].key) * 8 * scale;
+
+		chips_w += chip_w + 4 * scale +
+			   (int)strlen(chips[i].label) * 8 * scale;
+		if (i + 1 < SDL_arraysize(chips))
+			chips_w += 12 * scale;
+	}
+
+	content_w = line1_w;
+	if (line2_w > content_w)
+		content_w = line2_w;
+	if (chips_w > content_w)
+		content_w = chips_w;
+
+	width = pad * 2 + content_w;
+	height = pad * 2 + line_h + gap + line_h + gap + chip_h;
+
+	if (sdl->overlay_w != (uint32_t)width ||
+	    sdl->overlay_h != (uint32_t)height || !sdl->overlay_pixels) {
+		free(sdl->overlay_pixels);
+		sdl->overlay_pixels = calloc((size_t)width * height,
+					     sizeof(uint32_t));
+		if (!sdl->overlay_pixels)
+			return;
+		sdl->overlay_w = (uint32_t)width;
+		sdl->overlay_h = (uint32_t)height;
+		if (sdl->overlay)
+			SDL_DestroyTexture(sdl->overlay);
+		sdl->overlay = SDL_CreateTexture(sdl->renderer,
+						 SDL_PIXELFORMAT_ARGB8888,
+						 SDL_TEXTUREACCESS_STREAMING,
+						 width, height);
+		if (sdl->overlay)
+			SDL_SetTextureBlendMode(sdl->overlay,
+						SDL_BLENDMODE_BLEND);
+	}
+	if (!sdl->overlay_pixels || !sdl->overlay)
+		return;
+
+	for (yrow = 0; yrow < (uint32_t)height; yrow++)
+		memset(sdl->overlay_pixels + (size_t)yrow * width, 0,
+		       (size_t)width * sizeof(uint32_t));
+
+	sdl_fill_rounded(sdl->overlay_pixels, width, height, 0, 0,
+			 width, height, 9 * scale, border);
+	sdl_fill_rounded(sdl->overlay_pixels, width, height, 1, 1,
+			 width - 2, height - 2, (9 * scale) - 1, bg);
+
+	y = pad;
+	sdl_fill_circle(sdl->overlay_pixels, width, height,
+			pad + dot_d / 2, y + line_h / 2, dot_d / 2, green);
+	sdl_draw_text(sdl->overlay_pixels, width, pad + dot_d + gap, y,
+		      identity, scale, fg);
+
+	y += line_h + gap;
+	sdl_draw_text(sdl->overlay_pixels, width, pad, y, route, scale, muted);
+
+	y += line_h + gap;
+	x = pad;
+	for (i = 0; i < SDL_arraysize(chips); i++) {
+		int chip_w = 6 * scale + (int)strlen(chips[i].key) * 8 * scale;
+		int label_w = (int)strlen(chips[i].label) * 8 * scale;
+
+		sdl_fill_rounded(sdl->overlay_pixels, width, height, x, y,
+				 chip_w, chip_h, 4 * scale, chip_border);
+		sdl_fill_rounded(sdl->overlay_pixels, width, height, x + 1,
+				 y + 1, chip_w - 2, chip_h - 2,
+				 (4 * scale) - 1, chip_bg);
+		sdl_draw_text(sdl->overlay_pixels, width, x + 3 * scale,
+			      y + 2 * scale, chips[i].key, scale, fg);
+		x += chip_w + 4 * scale;
+		sdl_draw_text(sdl->overlay_pixels, width, x, y + 2 * scale,
+			      chips[i].label, scale, muted);
+		x += label_w + 12 * scale;
+	}
+
+	SDL_UpdateTexture(sdl->overlay, NULL, sdl->overlay_pixels,
+			  (int)((size_t)width * sizeof(uint32_t)));
+}
+
 static void sdl_build_overlay(struct everlive_sdl *sdl, const char *line1,
 			      const char *line2, const char *line3)
 {
@@ -1486,28 +1679,63 @@ static void *everlive_thread(void *arg)
 							       __ATOMIC_RELAXED);
 				bool muted = atomic_load_explicit(&st->muted,
 								  __ATOMIC_RELAXED);
-				char line1[96];
-				char line2[96];
-				char line3[96];
+				char line1[160];
+				char line2[160];
+				char line3[160];
+				Uint32 win_flags = SDL_GetWindowFlags(sdl.window);
+				bool fullscreen =
+					sdl.fullscreen ||
+					(win_flags &
+					 SDL_WINDOW_FULLSCREEN_DESKTOP);
+				int out_w = st->frame[port].width ?
+					(int)st->frame[port].width : 1920;
+				int out_h = st->frame[port].height ?
+					(int)st->frame[port].height : 1080;
 
-				snprintf(line1, sizeof(line1),
-					 "EverLive DUO - %s  (%s%s)",
-					 shm_port_name(port),
-					 aspect_mode_label(aspect),
-					 scale == EVERLIVE_SCALE_INTEGER ?
-					 " Integer" : "");
-				snprintf(line2, sizeof(line2),
-					 "%ux%u -> %ux%u YUYV  |  %u Hz %u ch LPCM  |  Vol %s%d%%",
-					 shm_port_source_width(st, port),
-					 shm_port_source_height(st, port),
-					 st->frame[port].width ? st->frame[port].width : 1920,
-					 st->frame[port].height ? st->frame[port].height : 1080,
-					 shm_port_rate(st, port),
-					 shm_port_channels(st, port),
-					 muted ? "Muted/" : "", vol);
-				snprintf(line3, sizeof(line3),
-					 "1/2 Input  P PiP  A Aspect  L Scale  M Mute  Tab OSD  F Full");
-				sdl_build_overlay(&sdl, line1, line2, line3);
+				if (fullscreen) {
+					int win_w = 0;
+					int win_h = 0;
+					int card_scale;
+
+					SDL_GetWindowSize(sdl.window,
+							  &win_w, &win_h);
+					card_scale = win_h >= 1600 ? 3 :
+						(win_h >= 900 ? 2 : 1);
+					snprintf(line1, sizeof(line1),
+						 "%s | %s (%s)",
+						 "GC570D",
+						 shm_port_name(port),
+						 aspect_mode_label(aspect));
+					snprintf(line2, sizeof(line2),
+						 "%ux%u -> %dx%d YUYV | %u ch %u kHz%s",
+						 shm_port_source_width(st, port),
+						 shm_port_source_height(st, port),
+						 out_w, out_h,
+						 shm_port_channels(st, port),
+						 shm_port_rate(st, port),
+						 muted ? " | Muted" : "");
+					sdl_build_card(&sdl, line1, line2,
+						       card_scale);
+				} else {
+					snprintf(line1, sizeof(line1),
+						 "EverLive DUO - %s  (%s%s)",
+						 shm_port_name(port),
+						 aspect_mode_label(aspect),
+						 scale == EVERLIVE_SCALE_INTEGER ?
+						 " Integer" : "");
+					snprintf(line2, sizeof(line2),
+						 "%ux%u -> %ux%u YUYV  |  %u Hz %u ch LPCM  |  Vol %s%d%%",
+						 shm_port_source_width(st, port),
+						 shm_port_source_height(st, port),
+						 out_w, out_h,
+						 shm_port_rate(st, port),
+						 shm_port_channels(st, port),
+						 muted ? "Muted/" : "", vol);
+					snprintf(line3, sizeof(line3),
+						 "1/2 Input  P PiP  A Aspect  L Scale  M Mute  Tab OSD  F Full");
+					sdl_build_overlay(&sdl, line1, line2,
+							  line3);
+				}
 				sdl.overlay_built_ns = now;
 			}
 
