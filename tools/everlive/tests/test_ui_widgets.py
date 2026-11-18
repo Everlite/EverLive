@@ -63,6 +63,8 @@ class WidgetTests(unittest.TestCase):
         from PySide6.QtWidgets import QCheckBox
         checkbox = QCheckBox("Legacy")
         row = ui_widgets.ToggleRow("Legacy", checkbox=checkbox)
+        checkbox.show()
+        row.show()
         checkbox.setVisible(False)
         self.assertTrue(row.isHidden())
 

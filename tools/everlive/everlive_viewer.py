@@ -27,7 +27,8 @@ try:
     import ui_theme
     import ui_widgets
     from card_profile import detect_card_profile
-    from ui_widgets import IconButton, SegmentedControl, StatusChip
+    from ui_widgets import (IconButton, SegmentedControl, StatusChip,
+                            ToggleRow)
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
                                  paused_state as handoff_paused_state)
 except ImportError:  # imported as a module from another working directory
@@ -38,7 +39,8 @@ except ImportError:  # imported as a module from another working directory
     import ui_theme
     import ui_widgets
     from card_profile import detect_card_profile
-    from ui_widgets import IconButton, SegmentedControl, StatusChip
+    from ui_widgets import (IconButton, SegmentedControl, StatusChip,
+                            ToggleRow)
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
                                  paused_state as handoff_paused_state)
 
@@ -2804,38 +2806,7 @@ if HAS_QT:
     class CameraLauncherDialog(QDialog):
         """Create reversible per-app desktop shortcuts with LD_PRELOAD."""
 
-        DIALOG_QSS = """
-            QDialog { background-color: #15131F; color: #F7F4FC; }
-            QLabel { color: #F7F4FC; }
-            QLabel#fieldLabel { color: #A8A1BC; font-size: 11px; }
-            QLabel#hintText { color: #8B93A7; font-size: 11px; }
-            QFrame#cardFrame {
-                background-color: #1D1A2D;
-                border: 1px solid #322C4D;
-                border-radius: 8px;
-            }
-            QPushButton {
-                background-color: #221E35;
-                color: #F7F4FC;
-                border: 1px solid #3A325C;
-                border-radius: 6px;
-                padding: 4px 10px;
-                min-height: 22px;
-            }
-            QPushButton:hover {
-                background-color: #2D2746;
-                border-color: #F287A7;
-            }
-            QPushButton:disabled { color: #635C78; border-color: #25203A; }
-            QScrollArea { background: transparent; border: none; }
-            QTextEdit {
-                background-color: #1D1A2E;
-                color: #F7F4FC;
-                border: 1px solid #322C4D;
-                border-radius: 6px;
-                padding: 6px;
-            }
-        """
+        DIALOG_QSS = ui_theme.build_stylesheet()
 
         def __init__(self, profile, parent=None):
             super().__init__(parent)
@@ -3580,6 +3551,15 @@ if HAS_QT:
                 scroll.setWidget(page)
                 return scroll, page_lay
 
+            self._toggle_rows = {}
+
+            def _toggle(checkbox, text: str = "", hint: str = ""):
+                """Wrap a QCheckBox in a ToggleRow without changing behavior."""
+                row = ToggleRow(
+                    text or checkbox.text(), hint, checkbox=checkbox)
+                self._toggle_rows[checkbox] = row
+                return row
+
             self.inspector_tabs = QTabWidget()
             self.inspector_tabs.setObjectName("inspectorTabs")
             self.inspector_tabs.setDocumentMode(True)
@@ -3589,23 +3569,27 @@ if HAS_QT:
             tab_stream, lay_stream = _make_tab_page()
             tab_app, lay_app = _make_tab_page()
 
-            self.inspector_tabs.addTab(tab_video, "Video & FG")
-            self.inspector_tabs.addTab(tab_stream, "Audio & Stream")
-            self.inspector_tabs.addTab(tab_app, "Hardware & App")
+            self.inspector_tabs.addTab(tab_video, "Video EQ")
+            self.inspector_tabs.addTab(tab_stream, "Audio && Stream")
+            self.inspector_tabs.addTab(tab_app, "System")
             # --- Pinned EDID & Handshake footer (always visible) ---
+            card_edid, grid_edid = _section("EDID & HANDSHAKE", "#38BDF8")
+            grid_edid.setColumnStretch(0, 1)
+            grid_edid.setColumnStretch(1, 0)
+
             if self.duo_mode:
-                card_edid, grid_edid = _section(
-                    "EDID & HANDSHAKE", "#38BDF8")
-                grid_edid.setColumnStretch(0, 1)
-                grid_edid.setColumnStretch(1, 0)
-                self.lbl_edid_mode = QLabel(
+                edid_mode_text = (
                     "Mode: built-in bridge"
                     if load_settings().get("duo_edid_bridge", True)
                     else "Mode: downstream copy")
-                self.lbl_edid_mode.setObjectName("hintText")
-                self.lbl_edid_mode.setWordWrap(True)
-                grid_edid.addWidget(self.lbl_edid_mode, 0, 0, 1, 2)
+            else:
+                edid_mode_text = f"Mode: {self._edid_profile_label()}"
+            self.lbl_edid_mode = QLabel(edid_mode_text)
+            self.lbl_edid_mode.setObjectName("hintText")
+            self.lbl_edid_mode.setWordWrap(True)
+            grid_edid.addWidget(self.lbl_edid_mode, 0, 0, 1, 2)
 
+            if self.duo_mode:
                 btn_bridge = QPushButton("Bridge EDID")
                 btn_bridge.setObjectName("btnGhost")
                 btn_bridge.setCursor(Qt.PointingHandCursor)
@@ -3628,17 +3612,23 @@ if HAS_QT:
                 grid_edid.addWidget(btn_copy, 2, 0, 1, 2)
                 self.btn_edid_copy = btn_copy
 
-                btn_hpd = QPushButton("Pulse HPD")
-                btn_hpd.setObjectName("btnGhost")
-                btn_hpd.setCursor(Qt.PointingHandCursor)
-                btn_hpd.setFixedHeight(26)
+            btn_hpd = QPushButton("Pulse HPD")
+            btn_hpd.setObjectName("btnGhost")
+            btn_hpd.setCursor(Qt.PointingHandCursor)
+            btn_hpd.setFixedHeight(26)
+            if self.duo_mode:
                 btn_hpd.setToolTip(
                     "Re-trigger the HDMI hot-plug handshake on the selected input.")
                 btn_hpd.clicked.connect(self._duo_hpd_action)
                 grid_edid.addWidget(btn_hpd, 3, 0, 1, 2)
-                self.btn_edid_hpd = btn_hpd
+            else:
+                btn_hpd.setToolTip(
+                    "Trigger a hardware HDMI handshake (HPD pulse).")
+                btn_hpd.clicked.connect(self.force_resync)
+                grid_edid.addWidget(btn_hpd, 1, 0, 1, 2)
+            self.btn_edid_hpd = btn_hpd
 
-                dock_layout.addWidget(card_edid)
+            dock_layout.addWidget(card_edid)
 
             # =============================================================
             # TAB 1: VIDEO & FRAME GENERATION
@@ -3731,58 +3721,67 @@ if HAS_QT:
                 "Maps BT.2020 PQ/HLG signals to BT.709 SDR for both the "
                 "gaming window and OBS (Hotkey: H).")
             self.chk_hdr.toggled.connect(self.on_hdr_toggled)
-            grid_video.addWidget(self.chk_hdr, 3, 0, 1, 2)
+            grid_video.addWidget(_toggle(self.chk_hdr), 3, 0, 1, 2)
 
             grid_video.addWidget(_field(
                 "Exposure Bias",
                 "Linear exposure bias for the tonemapper (-2.0 .. +2.0 EV)."),
                 4, 0)
 
-            h_hdr_row = QHBoxLayout()
-            h_hdr_row.setContentsMargins(0, 0, 0, 0)
-            h_hdr_row.setSpacing(6)
-
-            self.spin_hdr_exposure = QDoubleSpinBox()
+            # Hidden state holder; the IPC and settings paths keep using it.
+            self.spin_hdr_exposure = QDoubleSpinBox(card_video)
+            self.spin_hdr_exposure.setVisible(False)
             self.spin_hdr_exposure.setButtonSymbols(QAbstractSpinBox.NoButtons)
-            self.spin_hdr_exposure.setFixedHeight(26)
             self.spin_hdr_exposure.setRange(-2.0, 2.0)
             self.spin_hdr_exposure.setSingleStep(0.1)
             self.spin_hdr_exposure.setDecimals(1)
-            self.spin_hdr_exposure.setSuffix(" EV")
             self.spin_hdr_exposure.setValue(
                 float(self.saved_cfg.get("hdr_exposure", 0.0)))
-            self.spin_hdr_exposure.setAlignment(Qt.AlignCenter)
-            self.spin_hdr_exposure.setToolTip(
-                "Linear exposure bias for the tonemapper (-2.0 .. +2.0 EV).")
             self.spin_hdr_exposure.setEnabled(self.chk_hdr.isChecked())
             self.spin_hdr_exposure.valueChanged.connect(
                 self.on_hdr_exposure_changed)
-            h_hdr_row.addWidget(self.spin_hdr_exposure, 1)
 
-            self.btn_hdr_exp_minus = QPushButton("−")
-            self.btn_hdr_exp_minus.setObjectName("btnStepper")
-            self.btn_hdr_exp_minus.setFixedSize(28, 26)
-            self.btn_hdr_exp_minus.setCursor(Qt.PointingHandCursor)
-            self.btn_hdr_exp_minus.setFocusPolicy(Qt.NoFocus)
-            self.btn_hdr_exp_minus.setAutoRepeat(True)
-            self.btn_hdr_exp_minus.setToolTip("Decrease HDR exposure (-0.1 EV)")
-            self.btn_hdr_exp_minus.setEnabled(self.chk_hdr.isChecked())
-            self.btn_hdr_exp_minus.clicked.connect(
-                self.spin_hdr_exposure.stepDown)
-            h_hdr_row.addWidget(self.btn_hdr_exp_minus)
+            h_hdr_row = QHBoxLayout()
+            h_hdr_row.setContentsMargins(0, 0, 0, 0)
+            h_hdr_row.setSpacing(8)
 
-            self.btn_hdr_exp_plus = QPushButton("+")
-            self.btn_hdr_exp_plus.setObjectName("btnStepper")
-            self.btn_hdr_exp_plus.setFixedSize(28, 26)
-            self.btn_hdr_exp_plus.setCursor(Qt.PointingHandCursor)
-            self.btn_hdr_exp_plus.setFocusPolicy(Qt.NoFocus)
-            self.btn_hdr_exp_plus.setAutoRepeat(True)
-            self.btn_hdr_exp_plus.setToolTip("Increase HDR exposure (+0.1 EV)")
-            self.btn_hdr_exp_plus.setEnabled(self.chk_hdr.isChecked())
-            self.btn_hdr_exp_plus.clicked.connect(
-                self.spin_hdr_exposure.stepUp)
-            h_hdr_row.addWidget(self.btn_hdr_exp_plus)
+            self.slider_hdr_exposure = QSlider(Qt.Horizontal)
+            self.slider_hdr_exposure.setRange(-20, 20)
+            self.slider_hdr_exposure.setValue(
+                int(round(self.spin_hdr_exposure.value() * 10)))
+            self.slider_hdr_exposure.setEnabled(self.chk_hdr.isChecked())
+            self.slider_hdr_exposure.setToolTip(
+                "Linear exposure bias for the tonemapper (-2.0 .. +2.0 EV).")
+            h_hdr_row.addWidget(self.slider_hdr_exposure, 1)
 
+            self.lbl_hdr_exposure = QLabel(
+                f"{self.spin_hdr_exposure.value():+.1f} EV")
+            self.lbl_hdr_exposure.setObjectName("fieldLabel")
+            self.lbl_hdr_exposure.setFixedWidth(54)
+            self.lbl_hdr_exposure.setAlignment(Qt.AlignCenter)
+            h_hdr_row.addWidget(self.lbl_hdr_exposure, 0, Qt.AlignVCenter)
+
+            self.btn_hdr_exp_reset = QPushButton("Reset")
+            self.btn_hdr_exp_reset.setObjectName("btnGhost")
+            self.btn_hdr_exp_reset.setFixedHeight(24)
+            self.btn_hdr_exp_reset.setEnabled(self.chk_hdr.isChecked())
+            self.btn_hdr_exp_reset.setToolTip("Reset exposure bias to 0.0 EV")
+            self.btn_hdr_exp_reset.clicked.connect(
+                lambda: self.spin_hdr_exposure.setValue(0.0))
+            h_hdr_row.addWidget(self.btn_hdr_exp_reset, 0, Qt.AlignVCenter)
+
+            def _on_exposure_slider(value: int):
+                self.spin_hdr_exposure.setValue(value / 10.0)
+
+            def _on_exposure_value(value: float):
+                if not self.slider_hdr_exposure.isSliderDown():
+                    self.slider_hdr_exposure.blockSignals(True)
+                    self.slider_hdr_exposure.setValue(int(round(value * 10)))
+                    self.slider_hdr_exposure.blockSignals(False)
+                self.lbl_hdr_exposure.setText(f"{value:+.1f} EV")
+
+            self.slider_hdr_exposure.valueChanged.connect(_on_exposure_slider)
+            self.spin_hdr_exposure.valueChanged.connect(_on_exposure_value)
             grid_video.addLayout(h_hdr_row, 4, 1)
             lay_video.addWidget(card_video)
 
@@ -3865,7 +3864,7 @@ if HAS_QT:
                 "Phase-locked 2:1 HDMI deduplicator for 30 FPS console games "
                 "wrapped in a 60 Hz signal (e.g. 30→60/90/120 FPS).")
             self.chk_fg_dedup.toggled.connect(self.on_fg_dedup_toggled)
-            grid_fg.addWidget(self.chk_fg_dedup, 2, 0, 1, 2)
+            grid_fg.addWidget(_toggle(self.chk_fg_dedup), 2, 0, 1, 2)
 
             self.chk_fg_perf = QCheckBox("Performance Mode")
             self.chk_fg_perf.setChecked(
@@ -3874,7 +3873,7 @@ if HAS_QT:
                 "LSFGVK_PERFORMANCE_MODE: less GPU load, at the cost of "
                 "interpolation quality (disable for cleaner 3×/4×).")
             self.chk_fg_perf.toggled.connect(self.on_fg_perf_toggled)
-            grid_fg.addWidget(self.chk_fg_perf, 3, 0, 1, 2)
+            grid_fg.addWidget(_toggle(self.chk_fg_perf), 3, 0, 1, 2)
 
             self.chk_fg_ll = QCheckBox("Low-Latency Swapchain (2×)")
             self.chk_fg_ll.setChecked(
@@ -3883,7 +3882,7 @@ if HAS_QT:
                 "Sets LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT=1 at 2× so lsfg-vk "
                 "keeps minimal queue depth. Automatically relaxed at 3×/4×.")
             self.chk_fg_ll.toggled.connect(self.on_fg_low_latency_toggled)
-            grid_fg.addWidget(self.chk_fg_ll, 4, 0, 1, 2)
+            grid_fg.addWidget(_toggle(self.chk_fg_ll), 4, 0, 1, 2)
 
             self._refresh_idle_fg_status()
             if self.duo_mode:
@@ -3930,7 +3929,7 @@ if HAS_QT:
                 "itself (Hotkeys: Tab / O toggle, P cycles corner).")
             self.chk_osd.setChecked(bool(self.saved_cfg.get("osd_enabled", True)))
             self.chk_osd.toggled.connect(self.on_osd_changed)
-            grid_osd.addWidget(self.chk_osd, 0, 0, 1, 2)
+            grid_osd.addWidget(_toggle(self.chk_osd), 0, 0, 1, 2)
 
             grid_osd.addWidget(_field(
                 "OSD Position",
@@ -3956,7 +3955,7 @@ if HAS_QT:
                 "Hides mouse cursor, HUD and overlays for clean recordings.")
             self.chk_streamer.setChecked(self.saved_cfg.get("streamer_mode", False))
             self.chk_streamer.toggled.connect(lambda val: save_settings({"streamer_mode": val}))
-            grid_osd.addWidget(self.chk_streamer, 2, 0, 1, 2)
+            grid_osd.addWidget(_toggle(self.chk_streamer), 2, 0, 1, 2)
             lay_stream.addWidget(card_osd)
 
             # --- OBS & Capture Routing Card ---
@@ -3974,7 +3973,7 @@ if HAS_QT:
             if not self.vfio_mode:
                 self.chk_audio_tap.setChecked(False)
                 self.chk_audio_tap.setEnabled(False)
-            grid_obs.addWidget(self.chk_audio_tap, 0, 0)
+            grid_obs.addWidget(_toggle(self.chk_audio_tap), 0, 0)
 
             has_loopback_node = os.path.exists(V4L2_DEFAULT_DEVICE)
             self.chk_v4l2 = QCheckBox(
@@ -3997,7 +3996,19 @@ if HAS_QT:
                 self.chk_v4l2.setEnabled(False)
                 self.chk_v4l2.setToolTip(
                     "Virtual camera output requires the userspace VFIO engine.")
-            grid_obs.addWidget(self.chk_v4l2, 1, 0)
+            row_v4l2 = _toggle(self.chk_v4l2)
+            v4l2_row = QHBoxLayout()
+            v4l2_row.setContentsMargins(0, 0, 0, 0)
+            v4l2_row.setSpacing(6)
+            v4l2_row.addWidget(row_v4l2, 1)
+            lbl_v4l2_obsolete = QLabel("OBSOLETE")
+            lbl_v4l2_obsolete.setObjectName("obsoleteBadge")
+            lbl_v4l2_obsolete.setFixedHeight(18)
+            lbl_v4l2_obsolete.setToolTip(
+                "PipeWire and the LD_PRELOAD shim cover OBS, Discord and "
+                "browsers without a kernel module.")
+            v4l2_row.addWidget(lbl_v4l2_obsolete, 0, Qt.AlignVCenter)
+            grid_obs.addLayout(v4l2_row, 1, 0)
             grid_obs.addWidget(_hint(
                 "PipeWire video & SHM (libgc573-v4l2.so) are always active without kernel modules."),
                 2, 0)
@@ -4007,7 +4018,7 @@ if HAS_QT:
             # =============================================================
             # TAB 3: HARDWARE, APP BEHAVIOR & KEYBOARD SHORTCUTS
             # =============================================================
-            card_hw, grid_hw = _section("HARDWARE · RGB LED", "#F287A7")
+            card_hw, grid_hw = _section("HARDWARE RGB LED", "#F287A7")
             grid_hw.setColumnMinimumWidth(0, 96)
             grid_hw.setColumnStretch(1, 1)
             grid_hw.addWidget(_field("Card RGB LED"), 0, 0)
@@ -4052,6 +4063,43 @@ if HAS_QT:
             grid_hw.addWidget(self.combo_led, 0, 1)
             lay_app.addWidget(card_hw)
 
+
+            card_app, grid_app = _section("WINDOW & STARTUP", "#38BDF8")
+            grid_app.setColumnStretch(0, 1)
+
+            self.chk_vsync = QCheckBox("VSync (Display Pacing)")
+            self.chk_vsync.setChecked(self.saved_cfg.get("vsync", self.enable_vsync))
+            self.chk_vsync.toggled.connect(lambda val: save_settings({"vsync": val}))
+            grid_app.addWidget(_toggle(self.chk_vsync), 0, 0)
+
+            self.chk_fullscreen = QCheckBox("Fullscreen on Launch")
+            self.chk_fullscreen.setChecked(self.saved_cfg.get("fullscreen", False))
+            self.chk_fullscreen.toggled.connect(lambda val: save_settings({"fullscreen": val}))
+            grid_app.addWidget(_toggle(self.chk_fullscreen), 1, 0)
+
+            self.chk_autostart = QCheckBox("Auto-start Stream on Launch")
+            self.chk_autostart.setChecked(self.saved_cfg.get("autostart", False))
+            self.chk_autostart.toggled.connect(lambda val: save_settings({"autostart": val}))
+            grid_app.addWidget(_toggle(self.chk_autostart), 2, 0)
+
+            self.chk_tray = QCheckBox("Close to System Tray")
+            self.chk_tray.setToolTip(
+                "Closing with [X] hides the Console Hub window into the system "
+                "tray so it does not clutter Alt-Tab.")
+            self.chk_tray.setChecked(bool(self.saved_cfg.get("minimize_to_tray", True)))
+            self.chk_tray.toggled.connect(lambda val: save_settings({"minimize_to_tray": val}))
+            grid_app.addWidget(_toggle(self.chk_tray), 3, 0)
+
+            if self.vfio_mode:
+                self.chk_fullscreen.setToolTip(
+                    "Starts in Cinema Fullscreen (embedded) or SDL Fullscreen (pop-out). "
+                    "Press F / F11 or double-click the video stage to toggle at runtime.")
+                self.chk_vsync.setToolTip(
+                    "Paces SDL2 presentation to the display refresh rate.")
+                self.chk_streamer.setToolTip(
+                    "Clean feed: hides the on-screen stats overlay and the "
+                    "mouse cursor in the game window (Tab/'o' toggles at runtime).")
+            lay_app.addWidget(card_app)
             # --- Background capture service & per-app camera shortcuts ---
             card_integrations, grid_int = _section(
                 "BACKGROUND SERVICE & APP CAMERA", "#5ED4B2")
@@ -4119,16 +4167,17 @@ if HAS_QT:
             self.chk_service_v4l2.setToolTip(
                 "Pass --v4l2 to the background engine when the v4l2loopback "
                 "node is available.")
-            grid_int.addWidget(self.chk_service_v4l2, 2, 0, 1, 2)
+            grid_int.addWidget(_toggle(self.chk_service_v4l2), 2, 0, 1, 2)
 
             self.chk_service_audio_tap = QCheckBox(
                 "Service: virtual audio track")
             self.chk_service_audio_tap.setToolTip(
                 f"Publish clean HDMI audio to the '{AUDIO_TAP_NODE}' "
                 "PipeWire source for OBS.")
-            grid_int.addWidget(self.chk_service_audio_tap, 3, 0, 1, 2)
+            grid_int.addWidget(_toggle(self.chk_service_audio_tap), 3, 0, 1, 2)
             if self.card_profile.model != MODEL_GC573:
                 self.chk_service_audio_tap.setVisible(False)
+                self._toggle_rows[self.chk_service_audio_tap].setVisible(False)
 
             self.chk_service_v4l2.toggled.connect(
                 lambda _checked: self._service_config_changed())
@@ -4151,64 +4200,26 @@ if HAS_QT:
                 5, 0, 1, 2)
             lay_app.addWidget(card_integrations)
 
-            card_app, grid_app = _section("WINDOW & STARTUP", "#38BDF8")
-            grid_app.setColumnStretch(0, 1)
+            card_diag, grid_diag = _section("DIAGNOSTICS & HELP", "#BB96F3")
+            grid_diag.setColumnStretch(0, 1)
 
-            self.chk_vsync = QCheckBox("VSync (Display Pacing)")
-            self.chk_vsync.setChecked(self.saved_cfg.get("vsync", self.enable_vsync))
-            self.chk_vsync.toggled.connect(lambda val: save_settings({"vsync": val}))
-            grid_app.addWidget(self.chk_vsync, 0, 0)
+            self.btn_shortcuts = QPushButton("Keyboard Shortcuts")
+            self.btn_shortcuts.setObjectName("btnGhost")
+            self.btn_shortcuts.setFixedHeight(28)
+            self.btn_shortcuts.setCursor(Qt.PointingHandCursor)
+            self.btn_shortcuts.clicked.connect(self._open_shortcuts_dialog)
+            grid_diag.addWidget(self.btn_shortcuts, 0, 0)
 
-            self.chk_fullscreen = QCheckBox("Fullscreen on Launch")
-            self.chk_fullscreen.setChecked(self.saved_cfg.get("fullscreen", False))
-            self.chk_fullscreen.toggled.connect(lambda val: save_settings({"fullscreen": val}))
-            grid_app.addWidget(self.chk_fullscreen, 1, 0)
-
-            self.chk_autostart = QCheckBox("Auto-start Stream on Launch")
-            self.chk_autostart.setChecked(self.saved_cfg.get("autostart", False))
-            self.chk_autostart.toggled.connect(lambda val: save_settings({"autostart": val}))
-            grid_app.addWidget(self.chk_autostart, 2, 0)
-
-            self.chk_tray = QCheckBox("Close to System Tray")
-            self.chk_tray.setToolTip(
-                "Closing with [X] hides the Console Hub window into the system "
-                "tray so it does not clutter Alt-Tab.")
-            self.chk_tray.setChecked(bool(self.saved_cfg.get("minimize_to_tray", True)))
-            self.chk_tray.toggled.connect(lambda val: save_settings({"minimize_to_tray": val}))
-            grid_app.addWidget(self.chk_tray, 3, 0)
-
-            if self.vfio_mode:
-                self.chk_fullscreen.setToolTip(
-                    "Starts in Cinema Fullscreen (embedded) or SDL Fullscreen (pop-out). "
-                    "Press F / F11 or double-click the video stage to toggle at runtime.")
-                self.chk_vsync.setToolTip(
-                    "Paces SDL2 presentation to the display refresh rate.")
-                self.chk_streamer.setToolTip(
-                    "Clean feed: hides the on-screen stats overlay and the "
-                    "mouse cursor in the game window (Tab/'o' toggles at runtime).")
-            lay_app.addWidget(card_app)
-
-            card_keys, grid_keys = _section("KEYBOARD SHORTCUTS", "#BB96F3")
-            grid_keys.setColumnMinimumWidth(0, 118)
-            grid_keys.setColumnStretch(1, 1)
-            shortcut_rows = [
-                ("F / F11 / DblClick", "Toggle Cinema Fullscreen"),
-                ("Esc", "Exit Fullscreen (or Pop-out)"),
-                ("G", "Cycle Frame Gen (Off/2×/3×/4×)"),
-                ("Tab / O", "Toggle On-Screen Stats"),
-                ("P", "Cycle OSD Corner"),
-                ("H", "Toggle HDR → SDR"),
-                ("L", "Cycle Scaling Mode"),
-                ("M", "Mute / Unmute Audio"),
-            ]
-            for r_idx, (k_txt, desc_txt) in enumerate(shortcut_rows):
-                k_lbl = QLabel(k_txt)
-                k_lbl.setObjectName("kvVal")
-                d_lbl = QLabel(desc_txt)
-                d_lbl.setObjectName("fieldLabel")
-                grid_keys.addWidget(k_lbl, r_idx, 0)
-                grid_keys.addWidget(d_lbl, r_idx, 1)
-            lay_app.addWidget(card_keys)
+            self.btn_diag_report = QPushButton("Copy Diagnostic Report")
+            self.btn_diag_report.setObjectName("btnGhost")
+            self.btn_diag_report.setFixedHeight(28)
+            self.btn_diag_report.setCursor(Qt.PointingHandCursor)
+            self.btn_diag_report.setToolTip(
+                "Copy engine, signal, routing and service details to the "
+                "clipboard for a bug report.")
+            self.btn_diag_report.clicked.connect(self._copy_diagnostic_report)
+            grid_diag.addWidget(self.btn_diag_report, 1, 0)
+            lay_app.addWidget(card_diag)
             lay_app.addStretch(1)
 
             workspace_layout.addWidget(self.right_dock, 0)
@@ -4409,8 +4420,7 @@ if HAS_QT:
             self._apply_ui_mode(str(mode))
 
         def on_help_clicked(self):
-            QDesktopServices.openUrl(QUrl(
-                "https://github.com/PolygonPrincess/EverLive#readme"))
+            self._open_shortcuts_dialog()
 
         def _apply_ui_mode(self, mode: str, persist: bool = True):
             mode = "advanced" if str(mode).lower() == "advanced" else "simple"
@@ -4990,6 +5000,116 @@ if HAS_QT:
         def _open_app_shortcuts(self):
             dialog = CameraLauncherDialog(self.card_profile, self)
             dialog.exec()
+
+        SHORTCUT_ROWS = (
+            ("F / F11 / Double-click", "Toggle Cinema Fullscreen"),
+            ("Esc", "Exit fullscreen or pop-out"),
+            ("G", "Cycle frame generation (Off / 2x / 3x / 4x)"),
+            ("Tab / O", "Toggle the on-screen stats overlay"),
+            ("P", "Cycle the OSD corner"),
+            ("H", "Toggle HDR to SDR tonemapping"),
+            ("L", "Cycle the scaling mode"),
+            ("M", "Mute or unmute HDMI audio"),
+        )
+
+        def _open_shortcuts_dialog(self):
+            dialog = QDialog(self)
+            dialog.setWindowTitle("EverLive Keyboard Shortcuts")
+            dialog.resize(480, 420)
+            dialog.setStyleSheet(CameraLauncherDialog.DIALOG_QSS)
+
+            lay = QVBoxLayout(dialog)
+            lay.setContentsMargins(18, 16, 18, 16)
+            lay.setSpacing(10)
+
+            title = QLabel("Keyboard Shortcuts")
+            title.setStyleSheet(
+                "color: #E7EBF2; font-size: 15px; font-weight: 700;")
+            lay.addWidget(title)
+
+            subtitle = QLabel(
+                "Shortcuts work while the Console Hub has focus. The engine "
+                "window accepts the same keys.")
+            subtitle.setObjectName("hintText")
+            subtitle.setWordWrap(True)
+            lay.addWidget(subtitle)
+
+            grid = QGridLayout()
+            grid.setColumnMinimumWidth(0, 168)
+            grid.setHorizontalSpacing(12)
+            grid.setVerticalSpacing(7)
+            for row, (keys, description) in enumerate(self.SHORTCUT_ROWS):
+                key_label = QLabel(keys)
+                key_label.setObjectName("kvVal")
+                desc_label = QLabel(description)
+                desc_label.setObjectName("fieldLabel")
+                grid.addWidget(key_label, row, 0)
+                grid.addWidget(desc_label, row, 1)
+            lay.addLayout(grid)
+            lay.addStretch(1)
+
+            close = QPushButton("Close")
+            close.clicked.connect(dialog.accept)
+            lay.addWidget(close, 0, Qt.AlignRight)
+            dialog.exec()
+
+        def _build_diagnostic_report(self) -> str:
+            """Plain-text snapshot for bug reports; safe with partial state."""
+            def _value(value, default="—"):
+                if value in (None, "", {}):
+                    return default
+                return str(value)
+
+            live = getattr(self, "_live", None) or {}
+            service = getattr(self, "_background_service_status", None)
+            signal = "locked" if live.get("locked") else "no signal"
+            resolution = live.get("resolution") or "—"
+            framerate = live.get("framerate") or "—"
+            hdr = live.get("hdr") or "SDR"
+            chroma = live.get("chroma") or "—"
+            audio = live.get("audio") or "No Audio"
+            ipc_state = (
+                "connected"
+                if self._ipc is not None and self._ipc.connected
+                else "disconnected")
+            service_state = getattr(service, "label", "unknown")
+            unit_path = getattr(service, "unit_path", "") or "—"
+
+            lines = [
+                "EverLive Diagnostic Report",
+                f"Version: {__version__}",
+                f"Card: {getattr(self.streamer, 'model_label', self.model)}",
+                f"Engine: {'userspace VFIO' if self.vfio_mode else 'kernel driver'}",
+                f"Launch mode: {self._launch_mode or 'idle'}",
+                f"Attachment: {'remote session' if self._remote else 'local'}",
+                f"IPC: {ipc_state}",
+                f"Signal: {signal}",
+                f"Format: {resolution} @ {framerate}",
+                f"Color: {chroma} · HDR: {hdr}",
+                f"Audio: {audio}",
+                f"Frame generation: {_value(self.saved_cfg.get('framegen_mode'), 'off')}",
+                f"Scaling: {_value(self.saved_cfg.get('scale_mode'), 'fit')}",
+                f"HDR tonemap: {'on' if self.chk_hdr.isChecked() else 'off'}",
+                f"Exposure: {self.spin_hdr_exposure.value():+.1f} EV",
+                f"OSD: {'on' if self.chk_osd.isChecked() else 'off'}"
+                f" ({_value(self.saved_cfg.get('osd_position'), 'tr')})",
+                f"Background service: {service_state}",
+                f"Service unit: {unit_path}",
+                f"Video node: {_value(getattr(self.streamer, 'vdev', None))}",
+                f"PipeWire node: {_value(getattr(self.streamer, 'pw_node', None))}",
+                f"V4L2 loopback: {V4L2_DEFAULT_DEVICE}",
+                f"Virtual audio: {AUDIO_TAP_NODE}",
+            ]
+            return "\n".join(lines)
+
+        def _copy_diagnostic_report(self):
+            report = self._build_diagnostic_report()
+            QApplication.clipboard().setText(report)
+            self._set_vfio_notice(
+                "Diagnostic Report",
+                "Copied to the clipboard. Paste it into your bug report.",
+                seconds=4.0)
+            return report
 
         def _background_service_blocks_local_start(self) -> bool:
             if not self._background_service_active:
@@ -5981,10 +6101,10 @@ if HAS_QT:
             self.saved_cfg["hdr_tonemap"] = bool(enabled)
             if hasattr(self, "spin_hdr_exposure"):
                 self.spin_hdr_exposure.setEnabled(bool(enabled))
-            if hasattr(self, "btn_hdr_exp_minus"):
-                self.btn_hdr_exp_minus.setEnabled(bool(enabled))
-            if hasattr(self, "btn_hdr_exp_plus"):
-                self.btn_hdr_exp_plus.setEnabled(bool(enabled))
+            if hasattr(self, "slider_hdr_exposure"):
+                self.slider_hdr_exposure.setEnabled(bool(enabled))
+            if hasattr(self, "btn_hdr_exp_reset"):
+                self.btn_hdr_exp_reset.setEnabled(bool(enabled))
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_hdr(bool(enabled),
                                   float(self.spin_hdr_exposure.value()))

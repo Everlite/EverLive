@@ -170,7 +170,7 @@ if HAS_QT:
             self.setChecked(checkbox.isChecked())
             self.setEnabled(checkbox.isEnabled())
             self.setToolTip(checkbox.toolTip())
-            self.setVisible(not checkbox.isHidden())
+            self.setVisible(True)
             return self
 
         def eventFilter(self, obj, event):  # noqa: N802 (Qt casing)

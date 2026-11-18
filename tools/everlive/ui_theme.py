@@ -102,6 +102,10 @@ _QSS = """
 QMainWindow {
     background-color: @BG@;
 }
+QDialog {
+    background-color: @BG@;
+    color: @TEXT@;
+}
 QWidget {
     color: @TEXT@;
     font-family: @FONT_STACK@;
@@ -313,6 +317,16 @@ QLabel#statusChip {
     font-weight: 700;
     letter-spacing: 0.3px;
 }
+QLabel#obsoleteBadge {
+    color: @WARN@;
+    background-color: @WARN_BG@;
+    border: 1px solid @WARN_BORDER@;
+    border-radius: 7px;
+    padding: 1px 7px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+}
 
 /* Inspector tabs */
 QTabWidget#inspectorTabs::pane {
@@ -446,6 +460,13 @@ QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
     subcontrol-origin: border;
     width: 0px;
     border: none;
+}
+QTextEdit {
+    background-color: @SURFACE_SUNKEN@;
+    color: @TEXT@;
+    border: 1px solid @BORDER@;
+    border-radius: 6px;
+    padding: 6px;
 }
 
 /* Buttons */
@@ -591,6 +612,26 @@ QCheckBox::indicator:checked {
 }
 
 /* Sliders */
+QScrollBar:vertical {
+    background: transparent;
+    width: 8px;
+    margin: 0px;
+}
+QScrollBar::handle:vertical {
+    background: @BORDER_STRONG@;
+    border-radius: 4px;
+    min-height: 26px;
+}
+QScrollBar::handle:vertical:hover {
+    background: @TEXT_DIM@;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+    background: transparent;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: transparent;
+}
 QSlider::groove:horizontal {
     height: 5px;
     background: @SURFACE_HOVER@;
