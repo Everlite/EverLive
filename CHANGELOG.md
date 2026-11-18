@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Advanced** restores the inspector and telemetry strip. The header now carries a compound capture-source group (card name plus DUO HDMI 1/2 input), a passive capture chip, larger Studio/Restart actions and mode switch, and Font Awesome Discord, GitHub and Help buttons.
   - The bottom bar uses Font Awesome volume, pop-out and fullscreen controls, shows the live capture resolution, and keeps device routing in its tooltip.
   - Added `ui_theme.py` (palette, spacing and application QSS), `ui_widgets.py` (`ToggleSwitch`, `ToggleRow`, `SegmentedControl`, `StatusChip`, `IconButton`) and `fa_icons.py` with bundled Font Awesome Free 6 solid/brand fonts. All three modules and the fonts install with the viewer, and Python tests cover them.
-  - The header (64 px) and bottom bar (56 px) are now full-bleed, with the capture source left-aligned beside the version and all runtime actions right-aligned. Segmented controls use square inner edges, the type scale is larger, and text buttons share 36 px (header) and 32 px (standard) heights across the header, inspector, dialogs and bottom bar.
+  - The header (72 px) and bottom bar (64 px) are now full-bleed, with the capture source left-aligned beside the version and all runtime actions right-aligned. Segmented controls use square inner edges inside a visible group outline, the type scale is larger, and text buttons share 40 px (header) and 36 px (standard) heights across the header, inspector, dialogs and bottom bar. Every standalone text button carries a border; icon-only buttons stay borderless.
 - **Inspector reorganisation (Advanced mode):**
   - The inspector tabs are now the same segmented control as Simple/Advanced, driving a stacked page view.
   - The three tabs are now **Video EQ**, **Audio & Stream** and **System**.
@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **EDID & Handshake** is pinned below the tabs on every card; Legacy V4L2 is marked **Obsolete**.
   - Background Service & App Camera moved into the System tab below Window & Startup.
 - **Telemetry Deck:**
+  - The pinned EDID card is compact, with Bridge/Copy on one row and Pulse HPD beneath, freeing vertical space in the System tab.
   - The deck sits below the video stage in the centre column (not under the inspector) and follows the mockup layout: status and lock state, frame-rate sparkline, PCIe DMA/latency bars and DMA/GPU/CPU orbs.
   - A centred collapsible `Telemetry Deck` header shows a compact FPS/signal summary when collapsed and persists `telemetry_collapsed`.
   - Simple mode hides the deck entirely; expanding Advanced restores the last collapse state.

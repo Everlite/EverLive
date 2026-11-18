@@ -2457,7 +2457,7 @@ if HAS_QT:
 
             # Center value
             val_font = QFont("JetBrains Mono", 8)
-            val_font.setPixelSize(10 if len(self.value_text) > 4 else 11)
+            val_font.setPixelSize(11 if len(self.value_text) > 4 else 12)
             val_font.setBold(True)
             p.setFont(val_font)
             p.setPen(QColor("#F7F4FC") if self.known else QColor("#6E6882"))
@@ -2465,7 +2465,7 @@ if HAS_QT:
 
             # Label underneath
             lbl_font = QFont(self.font())
-            lbl_font.setPixelSize(10)
+            lbl_font.setPixelSize(11)
             lbl_font.setWeight(QFont.Medium)
             p.setFont(lbl_font)
             p.setPen(QColor("#9E97B0"))
@@ -2483,7 +2483,7 @@ if HAS_QT:
             self.fraction = 0.0
             self.value_text = "—"
             self.known = False
-            self.setFixedHeight(20)
+            self.setFixedHeight(24)
 
         def set_metric(self, fraction: float, value_text: str,
                        known: bool = True, tip: str = ""):
@@ -2499,12 +2499,12 @@ if HAS_QT:
             p.setRenderHint(QPainter.Antialiasing, True)
             w = float(self.width())
             h = float(self.height())
-            lbl_w = 68.0
-            val_w = 114.0
+            lbl_w = 80.0
+            val_w = 132.0
 
             # Left label
             lbl_font = QFont(self.font())
-            lbl_font.setPixelSize(11)
+            lbl_font.setPixelSize(12)
             p.setFont(lbl_font)
             p.setPen(QColor("#ACA5C0"))
             p.drawText(QRectF(0, 0, lbl_w, h),
@@ -2536,7 +2536,7 @@ if HAS_QT:
 
             # Right monospace value
             val_font = QFont("JetBrains Mono", 8)
-            val_font.setPixelSize(11)
+            val_font.setPixelSize(12)
             val_font.setBold(True)
             p.setFont(val_font)
             p.setPen(QColor("#F7F4FC") if self.known else QColor("#6E6882"))
@@ -2629,7 +2629,7 @@ if HAS_QT:
             super().__init__(parent)
             self.level = "idle"
             self.text = "Standby · Ready"
-            self.setFixedHeight(18)
+            self.setFixedHeight(22)
 
         def set_status(self, level: str, text: str):
             if self.level != level or self.text != text:
@@ -2655,7 +2655,7 @@ if HAS_QT:
                 tone = QColor(255, 255, 255, 75)
 
             font = QFont(self.font())
-            font.setPixelSize(11)
+            font.setPixelSize(12)
             font.setWeight(QFont.Medium)
             p.setFont(font)
             fm = p.fontMetrics()
@@ -3135,7 +3135,7 @@ if HAS_QT:
             self.header_widget.setObjectName("headerBar")
             self.header_widget.setFixedHeight(ui_theme.HEADER_HEIGHT)
             top_bar = QHBoxLayout(self.header_widget)
-            top_bar.setContentsMargins(20, 0, 20, 0)
+            top_bar.setContentsMargins(24, 0, 24, 0)
             top_bar.setSpacing(10)
             self.top_bar = top_bar
 
@@ -3176,14 +3176,14 @@ if HAS_QT:
             self.source_group = QFrame()
             self.source_group.setObjectName("sourceGroup")
             source_layout = QHBoxLayout(self.source_group)
-            source_layout.setContentsMargins(12, 4, 4, 4)
+            source_layout.setContentsMargins(14, 5, 5, 5)
             source_layout.setSpacing(8)
 
             self.lbl_card_title = QLabel(
                 self._card_full_label if card_detected else "NO CAPTURE CARD")
             self.lbl_card_title.setObjectName("sourceName")
             self.lbl_card_title.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-            self.lbl_card_title.setFixedHeight(36)
+            self.lbl_card_title.setFixedHeight(ui_theme.CONTROL_H)
             self.lbl_card_title.setToolTip("Status: Standby")
             if not card_detected:
                 self.lbl_card_title.setStyleSheet(
@@ -3195,8 +3195,8 @@ if HAS_QT:
                 saved_input = load_settings().get("duo_input", 0)
                 self.combo_duo_input = SegmentedControl(
                     [("HDMI 1", 0), ("HDMI 2", 1)],
-                    button_height=32, object_name="sourceSegments")
-                self.combo_duo_input.setFixedHeight(36)
+                    button_height=36, object_name="sourceSegments")
+                self.combo_duo_input.setFixedHeight(ui_theme.CONTROL_H)
                 self.combo_duo_input.setCurrentData(
                     1 if saved_input == 1 else 0)
                 self.combo_duo_input.setToolTip(
@@ -3269,7 +3269,7 @@ if HAS_QT:
 
             self.seg_mode = SegmentedControl(
                 [("Simple", "simple"), ("Advanced", "advanced")],
-                button_height=32)
+                button_height=36)
             self.seg_mode.setFixedHeight(ui_theme.CONTROL_H)
             self.seg_mode.setToolTip(
                 "Simple hides the inspector and telemetry deck. Advanced "
@@ -3281,14 +3281,15 @@ if HAS_QT:
 
             self.btn_discord = IconButton(
                 "discord", "Join the EverLive Discord community",
-                size=36, icon_size=19)
+                size=ui_theme.CONTROL_H, icon_size=21)
             self.btn_discord.clicked.connect(
                 lambda: QDesktopServices.openUrl(
                     QUrl("https://discord.com/invite/D2XFhkPMmc")))
             top_bar.addWidget(self.btn_discord, 0, Qt.AlignVCenter)
 
             self.btn_github = IconButton(
-                "github", "EverLive on GitHub", size=36, icon_size=19)
+                "github", "EverLive on GitHub",
+                size=ui_theme.CONTROL_H, icon_size=21)
             self.btn_github.clicked.connect(
                 lambda: QDesktopServices.openUrl(
                     QUrl("https://github.com/PolygonPrincess/EverLive")))
@@ -3296,7 +3297,7 @@ if HAS_QT:
 
             self.btn_help = IconButton(
                 "help", "Help and keyboard shortcuts",
-                size=36, icon_size=19)
+                size=ui_theme.CONTROL_H, icon_size=21)
             self.btn_help.clicked.connect(self.on_help_clicked)
             top_bar.addWidget(self.btn_help, 0, Qt.AlignVCenter)
 
@@ -3364,7 +3365,7 @@ if HAS_QT:
                 "Telemetry Deck",
                 collapsed=bool(
                     self.saved_cfg.get("telemetry_collapsed", False)))
-            self.telemetry_strip.set_expanded_height(108)
+            self.telemetry_strip.set_expanded_height(132)
             self.telemetry_strip.collapsedChanged.connect(
                 self._on_telemetry_collapsed)
             self.telemetry_deck = self.telemetry_strip
@@ -3440,7 +3441,7 @@ if HAS_QT:
             self.lbl_drops_counter = QLabel("0 drops · 0 underrun")
             self.lbl_drops_counter.setStyleSheet(
                 "color: #ACA5C0; font-family: 'JetBrains Mono', monospace; "
-                "font-size: 11.5px;")
+                "font-size: 12.5px;")
             fps_row.addWidget(
                 self.lbl_drops_counter, 1,
                 Qt.AlignRight | Qt.AlignBaseline)
@@ -3467,7 +3468,7 @@ if HAS_QT:
             self.lbl_budget_note = QLabel("Budget 16.7 ms / frame")
             self.lbl_budget_note.setStyleSheet(
                 "color: #7D7694; font-family: 'JetBrains Mono', monospace; "
-                "font-size: 11.5px;")
+                "font-size: 12.5px;")
             seg3.addWidget(self.lbl_budget_note)
 
             self.lbl_fg_status = QLabel("VRAM: — / — GB")
@@ -3513,8 +3514,8 @@ if HAS_QT:
                 frame = QFrame()
                 frame.setObjectName("cardFrame")
                 lay = QVBoxLayout(frame)
-                lay.setContentsMargins(15, 11, 15, 12)
-                lay.setSpacing(9)
+                lay.setContentsMargins(16, 12, 16, 13)
+                lay.setSpacing(10)
                 h_head = QHBoxLayout()
                 h_head.setContentsMargins(0, 0, 0, 0)
                 h_head.setSpacing(6)
@@ -3581,7 +3582,7 @@ if HAS_QT:
 
             self.inspector_tabbar = SegmentedControl(
                 [("Video EQ", 0), ("Audio && Stream", 1), ("System", 2)],
-                button_height=32)
+                button_height=36)
             self.inspector_tabbar.setFixedHeight(ui_theme.CONTROL_H)
             dock_layout.addWidget(self.inspector_tabbar)
 
@@ -3601,7 +3602,7 @@ if HAS_QT:
             # --- Pinned EDID & Handshake footer (always visible) ---
             card_edid, grid_edid = _section("EDID & HANDSHAKE", "#38BDF8")
             grid_edid.setColumnStretch(0, 1)
-            grid_edid.setColumnStretch(1, 0)
+            grid_edid.setColumnStretch(1, 1)
 
             if self.duo_mode:
                 edid_mode_text = (
@@ -3624,7 +3625,7 @@ if HAS_QT:
                     "Advertise the internal 4K60 bridge EDID to HDMI IN 1.")
                 btn_bridge.clicked.connect(
                     lambda: self._duo_edid_action(True))
-                grid_edid.addWidget(btn_bridge, 1, 0, 1, 2)
+                grid_edid.addWidget(btn_bridge, 1, 0)
                 self.btn_edid_bridge = btn_bridge
 
                 btn_copy = QPushButton("Copy Downstream EDID")
@@ -3635,7 +3636,7 @@ if HAS_QT:
                     "Copy the EDID of the display/AVR connected to HDMI OUT.")
                 btn_copy.clicked.connect(
                     lambda: self._duo_edid_action(False))
-                grid_edid.addWidget(btn_copy, 2, 0, 1, 2)
+                grid_edid.addWidget(btn_copy, 1, 1)
                 self.btn_edid_copy = btn_copy
 
             btn_hpd = QPushButton("Pulse HPD")
@@ -3646,7 +3647,7 @@ if HAS_QT:
                 btn_hpd.setToolTip(
                     "Re-trigger the HDMI hot-plug handshake on the selected input.")
                 btn_hpd.clicked.connect(self._duo_hpd_action)
-                grid_edid.addWidget(btn_hpd, 3, 0, 1, 2)
+                grid_edid.addWidget(btn_hpd, 2, 0, 1, 2)
             else:
                 btn_hpd.setToolTip(
                     "Trigger a hardware HDMI handshake (HPD pulse).")
@@ -4258,14 +4259,14 @@ if HAS_QT:
             self.bottom_box.setObjectName("bottomBar")
             self.bottom_box.setFixedHeight(ui_theme.BOTTOM_BAR_HEIGHT)
             b_layout = QHBoxLayout(self.bottom_box)
-            b_layout.setContentsMargins(12, 0, 12, 0)
+            b_layout.setContentsMargins(24, 0, 24, 0)
             b_layout.setSpacing(10)
 
             initial_vol = int(self.saved_cfg.get("volume", 1.0) * 100)
 
             self.btn_mute = IconButton(
-                "volume", "Mute the HDMI audio stream", size=32,
-                icon_size=19)
+                "volume", "Mute the HDMI audio stream",
+                size=ui_theme.BUTTON_H, icon_size=21)
             self.btn_mute.clicked.connect(self.toggle_mute)
             b_layout.addWidget(self.btn_mute, 0, Qt.AlignVCenter)
 
@@ -4490,10 +4491,10 @@ if HAS_QT:
                     12 if narrow else 20, 0, 12 if narrow else 20, 0)
             if hasattr(self, "lbl_hints"):
                 self.lbl_hints.setVisible(False)
-            self._compact_labels = self.width() < 1200
+            self._compact_labels = self.width() < 1500
             # The deck drops secondary readouts before they start clipping.
             for attr in ("lbl_hero_signal", "lbl_drops_counter",
-                         "lbl_fg_status"):
+                         "lbl_fg_status", "status_light"):
                 widget = getattr(self, attr, None)
                 if widget is not None:
                     widget.setVisible(not narrow)
@@ -4578,6 +4579,16 @@ if HAS_QT:
             show_header_chip = (
                 active and not (
                     self.width() < 1200 and ui_mode == "advanced"))
+            # The running state adds the status chip and Stop action; use the
+            # compact card name so the right-hand group still fits.
+            if hasattr(self, "lbl_card_title"):
+                short = (self.width() < 1340
+                         or (active and self.width() < 1600))
+                card_label = (getattr(self, "_card_short_label", "")
+                              if short
+                              else getattr(self, "_card_full_label", ""))
+                if card_label:
+                    self.lbl_card_title.setText(card_label)
             state = (label, active, show_launch, ui_mode, remote,
                      show_header_chip)
             if getattr(self, "_capture_ui_state", None) == state:
@@ -6543,19 +6554,19 @@ if HAS_QT:
                     self.lbl_sig_tag.setStyleSheet(
                         "color: #7FD8C0; background: transparent; "
                         "border: none; padding: 0px; "
-                        "font-size: 11.5px; font-weight: 800;")
+                        "font-size: 12.5px; font-weight: 800;")
                 elif active_stream:
                     self.lbl_sig_tag.setText("● NO SIGNAL")
                     self.lbl_sig_tag.setStyleSheet(
                         "color: #E8B36B; background: transparent; "
                         "border: none; padding: 0px; "
-                        "font-size: 11.5px; font-weight: 800;")
+                        "font-size: 12.5px; font-weight: 800;")
                 else:
                     self.lbl_sig_tag.setText("● STANDBY")
                     self.lbl_sig_tag.setStyleSheet(
                         "color: #9AA0B0; background: transparent; "
                         "border: none; padding: 0px; "
-                        "font-size: 11.5px; font-weight: 800;")
+                        "font-size: 12.5px; font-weight: 800;")
             if hasattr(self, "lbl_kv_route"):
                 want_v4l2 = hasattr(self, "chk_v4l2") and self.chk_v4l2.isChecked()
                 want_tap = hasattr(self, "chk_audio_tap") and self.chk_audio_tap.isChecked()

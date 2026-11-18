@@ -19,6 +19,7 @@ SURFACE_SUNKEN = "#161927"
 SURFACE_HOVER = "#262A3C"
 BORDER = "#2A2D3E"
 BORDER_STRONG = "#3A3E54"
+GROUP_BORDER = "#3F455C"
 
 TEXT = "#E7EBF2"
 TEXT_MUTED = "#9AA0B0"
@@ -52,14 +53,14 @@ PAD = 14
 GAP = 10
 RADIUS = 12
 RADIUS_CSS = "12px"
-HEADER_HEIGHT = 64
-BOTTOM_BAR_HEIGHT = 56
-INSPECTOR_WIDTH = 352
+HEADER_HEIGHT = 72
+BOTTOM_BAR_HEIGHT = 64
+INSPECTOR_WIDTH = 372
 
 # One control rhythm across the header, inspector, dialogs and bottom bar.
-CONTROL_H = 36
-BUTTON_H = 32
-INPUT_H = 32
+CONTROL_H = 40
+BUTTON_H = 36
+INPUT_H = 36
 
 FONT_STACK = ('-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, '
               '"Helvetica Neue", Arial, sans-serif')
@@ -73,6 +74,7 @@ TOKENS = {
     "SURFACE_HOVER": SURFACE_HOVER,
     "BORDER": BORDER,
     "BORDER_STRONG": BORDER_STRONG,
+    "GROUP_BORDER": GROUP_BORDER,
     "TEXT": TEXT,
     "TEXT_MUTED": TEXT_MUTED,
     "TEXT_DIM": TEXT_DIM,
@@ -114,11 +116,11 @@ QDialog {
 QWidget {
     color: @TEXT@;
     font-family: @FONT_STACK@;
-    font-size: 13.5px;
+    font-size: 15px;
 }
 QLabel {
     color: @TEXT@;
-    font-size: 13.5px;
+    font-size: 15px;
 }
 QFrame#headerBar {
     background-color: @SURFACE_RAISED@;
@@ -163,16 +165,16 @@ QFrame#bottomBar QLabel {
 }
 QPushButton#btnBar {
     background: transparent;
-    border: 1px solid transparent;
+    border: 1px solid @GROUP_BORDER@;
     color: @TEXT_MUTED@;
     border-radius: 8px;
-    padding: 4px 12px;
-    font-size: 13px;
+    padding: 4px 14px;
+    font-size: 14px;
     font-weight: 600;
 }
 QPushButton#btnBar:hover {
     background-color: @SURFACE_HOVER@;
-    border-color: @BORDER@;
+    border-color: @BORDER_STRONG@;
     color: @TEXT@;
 }
 QPushButton#btnBar:checked {
@@ -185,7 +187,7 @@ QPushButton#deckHeader {
     background: transparent;
     border: none;
     color: @TEXT@;
-    font-size: 12.5px;
+    font-size: 13.5px;
     font-weight: 700;
     letter-spacing: 0.9px;
     text-align: center;
@@ -198,14 +200,14 @@ QPushButton#deckHeader:checked {
     color: @TEXT@;
 }
 QLabel#logoTitle {
-    font-size: 17px;
+    font-size: 18.5px;
     font-weight: 800;
     letter-spacing: 1.0px;
     color: @TEXT@;
 }
 QLabel#logoVersion {
     color: @TEXT_DIM@;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
 }
 QLabel#connDot {
@@ -214,14 +216,14 @@ QLabel#connDot {
 }
 QFrame#sourceGroup {
     background-color: @SURFACE@;
-    border: 1px solid @BORDER_STRONG@;
+    border: 1px solid @GROUP_BORDER@;
     border-radius: 11px;
 }
 QLabel#sourceName {
     color: @TEXT@;
     background: transparent;
     padding: 0px 2px;
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 800;
     letter-spacing: 0.6px;
 }
@@ -248,32 +250,32 @@ QLabel#pillLive {
 }
 QLabel#sectionTitle {
     color: @TEXT_MUTED@;
-    font-size: 12.5px;
+    font-size: 13.5px;
     font-weight: 700;
     letter-spacing: 0.8px;
 }
 QLabel#fieldLabel {
     color: @TEXT_MUTED@;
-    font-size: 13px;
+    font-size: 14px;
 }
 QLabel#hintText {
     color: @TEXT_DIM@;
-    font-size: 12px;
+    font-size: 13px;
 }
 QLabel#kvKey {
     color: @TEXT_DIM@;
-    font-size: 12.5px;
+    font-size: 13.5px;
 }
 QLabel#kvVal {
     color: @TEXT@;
     font-family: @MONO_STACK@;
-    font-size: 12.5px;
+    font-size: 13.5px;
     font-weight: 600;
 }
 QLabel#heroSignal {
     color: @TEXT@;
     font-family: @MONO_STACK@;
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 700;
 }
 QLabel#heroMeta {
@@ -283,22 +285,22 @@ QLabel#heroMeta {
 QLabel#fpsHero {
     color: @MINT@;
     font-family: @MONO_STACK@;
-    font-size: 23px;
+    font-size: 26px;
     font-weight: 800;
 }
 QLabel#fpsUnit {
     color: @TEXT_MUTED@;
-    font-size: 11px;
+    font-size: 12.5px;
     font-weight: 600;
 }
 QLabel#teleValue {
     color: @TEXT@;
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 700;
 }
 QLabel#teleSub {
     color: @TEXT_MUTED@;
-    font-size: 11px;
+    font-size: 12.5px;
 }
 QLabel#stageBadge {
     color: @ACCENT@;
@@ -323,27 +325,27 @@ QLabel#audioFormat {
     color: @ACCENT_SOFT@;
     background-color: #211B36;
     border: 1px solid #382E5C;
-    border-radius: 6px;
-    padding: 0px 9px;
-    font-size: 11px;
+    border-radius: 8px;
+    padding: 0px 12px;
+    font-size: 12.5px;
     font-weight: 600;
 }
 QLabel#footerText {
     color: @TEXT_DIM@;
-    font-size: 11px;
+    font-size: 12.5px;
 }
 QLabel#toggleLabel {
     color: @TEXT@;
-    font-size: 11.5px;
+    font-size: 13px;
 }
 QLabel#toggleHint {
     color: @TEXT_DIM@;
-    font-size: 10.5px;
+    font-size: 12px;
 }
 QLabel#statusChip {
     border-radius: 14px;
     padding: 0px 12px;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 700;
     letter-spacing: 0.3px;
 }
@@ -393,18 +395,23 @@ QScrollArea#inspectorScroll, QScrollArea#inspectorScroll > QWidget > QWidget {
 }
 
 /* Segmented control */
-QWidget#segmentedControl, QWidget#sourceSegments {
+QWidget#segmentedControl {
+    background-color: @SURFACE@;
+    border: 1px solid @GROUP_BORDER@;
+    border-radius: 11px;
+}
+QWidget#sourceSegments {
     background-color: @SURFACE_SUNKEN@;
-    border: 1px solid @BORDER@;
-    border-radius: 10px;
+    border: 1px solid @GROUP_BORDER@;
+    border-radius: 9px;
 }
 QPushButton#segmentButton {
     background-color: transparent;
     color: @TEXT_MUTED@;
     border: none;
     border-radius: 0px;
-    padding: 0px 16px;
-    font-size: 13px;
+    padding: 0px 18px;
+    font-size: 14px;
     font-weight: 600;
 }
 QPushButton#segmentButton[segmentPos="first"] {
@@ -453,9 +460,9 @@ QComboBox {
     color: @TEXT@;
     border: 1px solid @BORDER_STRONG@;
     border-radius: 8px;
-    min-height: 24px;
+    min-height: 26px;
     padding: 4px 10px;
-    font-size: 13px;
+    font-size: 14px;
 }
 QComboBox:hover {
     border-color: @ACCENT@;
@@ -509,13 +516,13 @@ QTextEdit {
 
 /* Buttons */
 QPushButton {
-    padding: 6px 14px;
-    font-size: 13px;
+    padding: 7px 16px;
+    font-size: 14px;
     font-weight: 600;
     border-radius: 8px;
     background-color: @SURFACE_RAISED@;
     color: @TEXT@;
-    border: 1px solid @BORDER_STRONG@;
+    border: 1px solid @GROUP_BORDER@;
 }
 QPushButton:hover {
     background-color: @SURFACE_HOVER@;
@@ -525,11 +532,11 @@ QPushButton:pressed { background-color: @SURFACE_SUNKEN@; }
 QPushButton:disabled { color: @TEXT_DIM@; border-color: @BORDER@; }
 QPushButton#btnStepper {
     padding: 0px;
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 600;
     background-color: @SURFACE_RAISED@;
     color: @TEXT@;
-    border: 1px solid @BORDER_STRONG@;
+    border: 1px solid @GROUP_BORDER@;
     border-radius: 6px;
 }
 QPushButton#btnStepper:hover {
@@ -546,7 +553,7 @@ QPushButton#btnStepper:disabled {
 QPushButton#btnGhost {
     background-color: transparent;
     color: @TEXT_MUTED@;
-    border: 1px solid @BORDER_STRONG@;
+    border: 1px solid @GROUP_BORDER@;
     font-weight: 500;
 }
 QPushButton#btnGhost:hover {
@@ -562,7 +569,7 @@ QPushButton#btnGhost:checked {
 QPushButton#btnMute {
     background-color: @SURFACE_RAISED@;
     color: @TEXT@;
-    border: 1px solid @BORDER_STRONG@;
+    border: 1px solid @GROUP_BORDER@;
     border-radius: 7px;
     padding: 3px 8px;
     font-size: 11px;
@@ -597,7 +604,7 @@ QPushButton#btnLaunchStop:hover { background-color: #B53B4C; }
 QPushButton#btnStudioStart,
 QPushButton#btnStudioSwitch {
     background-color: transparent;
-    border: 1px solid @BORDER_STRONG@;
+    border: 1px solid @GROUP_BORDER@;
     color: @TEXT_MUTED@;
     font-size: 12px;
     font-weight: 600;
@@ -631,7 +638,7 @@ QPushButton#btnStudioStop:hover { background-color: #B53B4C; }
 /* Checkboxes (legacy rows not yet using ToggleSwitch) */
 QCheckBox {
     color: @TEXT_MUTED@;
-    font-size: 11.5px;
+    font-size: 13px;
     spacing: 7px;
 }
 QCheckBox:hover { color: @TEXT@; }
