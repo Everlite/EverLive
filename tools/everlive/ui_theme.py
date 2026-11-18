@@ -133,27 +133,27 @@ QFrame#headerBar {
 QFrame#videoStageFrame {
     background-color: @SURFACE@;
     border: 1px solid @BORDER@;
-    border-radius: 16px;
+    border-radius: @RADIUS@;
 }
 QFrame#telemetryCard {
     background-color: @SURFACE@;
     border: 1px solid @BORDER@;
-    border-radius: 14px;
+    border-radius: @RADIUS@;
 }
 QFrame#telemetryDeck {
     background-color: @SURFACE@;
     border: 1px solid @BORDER@;
-    border-radius: 14px;
+    border-radius: @RADIUS@;
 }
 QFrame#cardFrame {
     background-color: @SURFACE@;
     border: 1px solid @BORDER@;
-    border-radius: 12px;
+    border-radius: @RADIUS@;
 }
 QFrame#handshakeCard {
     background-color: @SURFACE_SUNKEN@;
     border: 1px solid @BORDER_STRONG@;
-    border-radius: 11px;
+    border-radius: @RADIUS@;
 }
 QFrame#bottomBar {
     background-color: @SURFACE_RAISED@;
@@ -168,7 +168,7 @@ QPushButton#btnBar {
     background: transparent;
     border: 1px solid @GROUP_BORDER@;
     color: @TEXT_MUTED@;
-    border-radius: 8px;
+    border-radius: @RADIUS@;
     padding: 4px 14px;
     font-size: 14px;
     font-weight: 600;
@@ -218,7 +218,7 @@ QLabel#connDot {
 QFrame#sourceGroup {
     background-color: @SURFACE@;
     border: 1px solid @GROUP_BORDER@;
-    border-radius: 11px;
+    border-radius: @RADIUS@;
 }
 QLabel#sourceName {
     color: @TEXT@;
@@ -231,20 +231,20 @@ QLabel#sourceName {
 QWidget#sourceSegments {
     background-color: @SURFACE_SUNKEN@;
     border: 1px solid @BORDER@;
-    border-radius: 8px;
+    border-radius: @RADIUS@;
 }
 QLabel#badgeModel {
     color: @TEXT@;
     background-color: @CHIP_BG@;
     border: 1px solid @CHIP_BORDER@;
-    border-radius: 6px;
+    border-radius: @RADIUS@;
     padding: 0px 9px;
     font-size: 10.5px;
     font-weight: 700;
     letter-spacing: 0.5px;
 }
 QLabel#pillLive {
-    border-radius: 12px;
+    border-radius: @RADIUS@;
     padding: 0px 11px;
     font-size: 11px;
     font-weight: 600;
@@ -307,7 +307,7 @@ QLabel#stageBadge {
     color: @ACCENT@;
     background-color: #261628;
     border: 1px solid #4A2444;
-    border-radius: 11px;
+    border-radius: @RADIUS@;
     padding: 3px 12px;
     font-size: 10px;
     font-weight: 700;
@@ -326,7 +326,7 @@ QLabel#audioFormat {
     color: @ACCENT_SOFT@;
     background-color: #211B36;
     border: 1px solid #382E5C;
-    border-radius: 8px;
+    border-radius: @RADIUS@;
     padding: 0px 12px;
     font-size: 12.5px;
     font-weight: 600;
@@ -344,7 +344,7 @@ QLabel#toggleHint {
     font-size: 12px;
 }
 QLabel#statusChip {
-    border-radius: 14px;
+    border-radius: @RADIUS@;
     padding: 0px 12px;
     font-size: 12px;
     font-weight: 700;
@@ -354,7 +354,7 @@ QLabel#obsoleteBadge {
     color: @WARN@;
     background-color: @WARN_BG@;
     border: 1px solid @WARN_BORDER@;
-    border-radius: 7px;
+    border-radius: @RADIUS@;
     padding: 1px 7px;
     font-size: 9px;
     font-weight: 700;
@@ -375,7 +375,7 @@ QTabWidget#inspectorTabs QTabBar::tab {
     background-color: transparent;
     color: @TEXT_MUTED@;
     border: none;
-    border-radius: 8px;
+    border-radius: @RADIUS@;
     padding: 8px 12px;
     margin: 3px;
     font-size: 12px;
@@ -399,12 +399,12 @@ QScrollArea#inspectorScroll, QScrollArea#inspectorScroll > QWidget > QWidget {
 QWidget#segmentedControl {
     background-color: @SURFACE@;
     border: 1px solid @GROUP_BORDER@;
-    border-radius: 11px;
+    border-radius: @RADIUS@;
 }
 QWidget#sourceSegments {
     background-color: @SURFACE_SUNKEN@;
     border: 1px solid @GROUP_BORDER@;
-    border-radius: 9px;
+    border-radius: @RADIUS@;
 }
 QPushButton#segmentButton {
     background-color: transparent;
@@ -416,12 +416,12 @@ QPushButton#segmentButton {
     font-weight: 600;
 }
 QPushButton#segmentButton[segmentPos="first"] {
-    border-top-left-radius: 8px;
-    border-bottom-left-radius: 8px;
+    border-top-left-radius: @RADIUS@;
+    border-bottom-left-radius: @RADIUS@;
 }
 QPushButton#segmentButton[segmentPos="last"] {
-    border-top-right-radius: 8px;
-    border-bottom-right-radius: 8px;
+    border-top-right-radius: @RADIUS@;
+    border-bottom-right-radius: @RADIUS@;
 }
 QPushButton#segmentButton:hover:!checked {
     color: @TEXT@;
@@ -441,7 +441,7 @@ QPushButton#iconButton {
     background-color: transparent;
     color: @TEXT_MUTED@;
     border: 1px solid transparent;
-    border-radius: 9px;
+    border-radius: @RADIUS@;
     padding: 0px;
 }
 QPushButton#iconButton:hover {
@@ -460,7 +460,7 @@ QComboBox {
     background-color: @SURFACE_RAISED@;
     color: @TEXT@;
     border: 1px solid @BORDER_STRONG@;
-    border-radius: 8px;
+    border-radius: @RADIUS@;
     min-height: 26px;
     padding: 4px 10px;
     font-size: 14px;
@@ -487,7 +487,7 @@ QDoubleSpinBox {
     background-color: @SURFACE_RAISED@;
     color: @TEXT@;
     border: 1px solid @BORDER_STRONG@;
-    border-radius: 8px;
+    border-radius: @RADIUS@;
 }
 QDoubleSpinBox QLineEdit {
     padding-left: 6px;
@@ -511,7 +511,7 @@ QTextEdit {
     background-color: @SURFACE_SUNKEN@;
     color: @TEXT@;
     border: 1px solid @BORDER@;
-    border-radius: 6px;
+    border-radius: @RADIUS@;
     padding: 6px;
 }
 
@@ -520,7 +520,7 @@ QPushButton {
     padding: 7px 16px;
     font-size: 14px;
     font-weight: 600;
-    border-radius: 8px;
+    border-radius: @RADIUS@;
     background-color: @SURFACE_RAISED@;
     color: @TEXT@;
     border: 1px solid @GROUP_BORDER@;
@@ -538,7 +538,7 @@ QPushButton#btnStepper {
     background-color: @SURFACE_RAISED@;
     color: @TEXT@;
     border: 1px solid @GROUP_BORDER@;
-    border-radius: 6px;
+    border-radius: @RADIUS@;
 }
 QPushButton#btnStepper:hover {
     background-color: @SURFACE_HOVER@;
@@ -571,7 +571,7 @@ QPushButton#btnMute {
     background-color: @SURFACE_RAISED@;
     color: @TEXT@;
     border: 1px solid @GROUP_BORDER@;
-    border-radius: 7px;
+    border-radius: @RADIUS@;
     padding: 3px 8px;
     font-size: 11px;
     font-weight: 600;
@@ -647,7 +647,7 @@ QCheckBox:disabled { color: @TEXT_DIM@; }
 QCheckBox::indicator {
     width: 16px;
     height: 16px;
-    border-radius: 4px;
+    border-radius: @RADIUS@;
     border: 1px solid @BORDER_STRONG@;
     background-color: @SURFACE_SUNKEN@;
 }
@@ -665,7 +665,7 @@ QScrollBar:vertical {
 }
 QScrollBar::handle:vertical {
     background: @BORDER_STRONG@;
-    border-radius: 4px;
+    border-radius: @RADIUS@;
     min-height: 26px;
 }
 QScrollBar::handle:vertical:hover {
@@ -681,12 +681,12 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
 QSlider::groove:horizontal {
     height: 5px;
     background: @SURFACE_HOVER@;
-    border-radius: 2px;
+    border-radius: @RADIUS@;
 }
 QSlider::sub-page:horizontal {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
         stop:0 @ACCENT_SOFT@, stop:0.55 @ACCENT@, stop:1 @WARN@);
-    border-radius: 2px;
+    border-radius: @RADIUS@;
 }
 QSlider::handle:horizontal {
     background: #FFFFFF;
@@ -694,7 +694,7 @@ QSlider::handle:horizontal {
     width: 14px;
     margin-top: -5px;
     margin-bottom: -5px;
-    border-radius: 7px;
+    border-radius: @RADIUS@;
 }
 QSlider::handle:horizontal:hover { background: #FFFFFF; }
 """

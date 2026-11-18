@@ -7191,7 +7191,7 @@ if HAS_QT:
                 }
                 QMenu::item {
                     padding: 6px 20px;
-                    border-radius: 4px;
+                    border-radius: 12px;
                 }
                 QMenu::item:selected {
                     background-color: #2563eb;

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 try:
     import fa_icons
+    import ui_theme
     from PySide6.QtCore import (
         Property, QEasingCurve, QEvent, QPropertyAnimation, QSize, Qt, Signal,
     )
@@ -322,7 +323,7 @@ if HAS_QT:
                 f"background-color: {background};"
                 f"color: {foreground};"
                 f"border: 1px solid {border};"
-                "border-radius: 14px;"
+                f"border-radius: {ui_theme.RADIUS_CSS};"
                 "padding: 0px 12px;"
                 "font-size: 11px;"
                 "font-weight: 700;"

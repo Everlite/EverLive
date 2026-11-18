@@ -40,6 +40,36 @@ class TokenTests(unittest.TestCase):
         self.assertEqual(ui_theme.ACCENT.lower(), "#d93b86")
         self.assertEqual(ui_theme.BLUE.lower(), "#39598a")
 
+    def test_primary_radius_is_uniform(self):
+        stylesheet = ui_theme.build_stylesheet()
+        for needle in ("QFrame#videoStageFrame",
+                       "QFrame#telemetryDeck",
+                       "QFrame#cardFrame",
+                       "QFrame#sourceGroup",
+                       "QWidget#segmentedControl",
+                       "QWidget#sourceSegments",
+                       "\nQPushButton {",
+                       "\nQComboBox {"):
+            start = stylesheet.index(needle)
+            block = stylesheet[start:stylesheet.index("}", start)]
+            self.assertIn("border-radius: 12px", block, needle)
+
+    def test_no_stray_pixel_radii(self):
+        import re
+        stylesheet = ui_theme.build_stylesheet()
+        values = set(re.findall(r"border-radius:\s*([^;]+);", stylesheet))
+        self.assertLessEqual(values, {"0px", "12px"}, values)
+
+    def test_segment_inner_edges_stay_square(self):
+        stylesheet = ui_theme.build_stylesheet()
+        base = stylesheet.index("QPushButton#segmentButton {")
+        block = stylesheet[base:stylesheet.index("}", base)]
+        self.assertIn("border-radius: 0px", block)
+        first = stylesheet.index('QPushButton#segmentButton[segmentPos="first"]')
+        block = stylesheet[first:stylesheet.index("}", first)]
+        self.assertIn("border-top-left-radius: 12px", block)
+        self.assertIn("border-bottom-left-radius: 12px", block)
+
     def test_missing_tokens_reports_typos(self):
         found = ui_theme.missing_tokens("color: @NOT_A_TOKEN@;")
         self.assertEqual(found, ["@NOT_A_TOKEN@"])
