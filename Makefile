@@ -37,7 +37,7 @@ ICON_SIZES  := 16 32 48 64 128 256 512
 
 # Python modules imported by everlive_viewer.py.
 VIEWER_PY := everlive_client.py card_profile.py service_manager.py \
-             app_integrations.py
+             app_integrations.py ui_theme.py ui_widgets.py
 
 GC570D_RUNDIR := $(EVERLIVE_LIBDIR)/$(GC570D_DIR)
 GC570D_SED := sed -e 's|/usr/local/libexec/|$(GC570D_RUNDIR)/|g' \
