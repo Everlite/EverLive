@@ -470,6 +470,7 @@ Writing clean-room Linux drivers for proprietary capture hardware requires havin
 | **Shared Core Library** | `tools/libeverlive-core/` | **GPL-2.0-only** | Card registry and autodiscovery, POSIX shared memory frame store (`everlive_framestore`), V4L2 virtual camera preload engine, cross-user handoff protocol (`everlive_handoff`), YUY2 frame conversion, jsmn JSON-RPC helpers, `everlive-ctl`, and systemd service. Copyright © 2026 Everlite. |
 | **Live Gamer DUO Engine** | `tools/opengc570d-userd/` | **GPL-2.0-only** | Derived from [`neoyagami/OpenGC570D`](https://github.com/neoyagami/OpenGC570D) with userspace VFIO-PCI + PipeWire port by [@PolygonPrincess](https://github.com/PolygonPrincess). Upstream base `4673bb9`, splitter PR #6 `484aa8d`, userspace import `afbb06e`. EverLive integration and frontend © 2026 Everlite & PolygonPrincess. |
 | **EverLive Console Hub** | `tools/everlive/`, `play.sh`, `install.sh` | **GPL-2.0-only** | Python/Qt hub and launcher scripts. Copyright © 2026 Everlite. |
+| **Font Awesome Free 6** | `tools/everlive/fonts/` | **CC BY 4.0 / SIL OFL 1.1** | Bundled interface icons (CC BY 4.0) and icon fonts (SIL OFL 1.1). Copyright © Fonticons, Inc. Full text in `fonts/LICENSE.txt`. |
 | **Legacy Kernel Module** | `legacy/open_gc573-kernel/` | **GPL-2.0-only** | Historical kernel module based on work by ostrich, extended by Everlite. |
 
 ### Disclaimers & Trademark Notice

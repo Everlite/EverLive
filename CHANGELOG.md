@@ -12,8 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Console Hub shell refresh (Simple / Advanced):**
   - Fresh installs open in **Simple** mode: a full-width video stage with no inspector or telemetry deck, a passive `Local Capture Active` chip while running, and a full-width bottom audio/status bar. The choice persists as `ui_mode`.
-  - **Advanced** restores the inspector and telemetry strip. The header now carries the card identity chip, a DUO HDMI 1/2 segmented input, compact Studio/Restart actions, and Discord, GitHub and Help buttons.
-  - Added `ui_theme.py` (palette, spacing and application QSS) and `ui_widgets.py` (`ToggleSwitch`, `ToggleRow`, `SegmentedControl`, `StatusChip`, `IconButton`) with Python unit tests. Both modules install with the viewer.
+  - **Advanced** restores the inspector and telemetry strip. The header now carries a compound capture-source group (card name plus DUO HDMI 1/2 input), a passive capture chip, larger Studio/Restart actions and mode switch, and Font Awesome Discord, GitHub and Help buttons.
+  - The bottom bar uses Font Awesome volume, pop-out and fullscreen controls, shows the live capture resolution, and keeps device routing in its tooltip.
+  - Added `ui_theme.py` (palette, spacing and application QSS), `ui_widgets.py` (`ToggleSwitch`, `ToggleRow`, `SegmentedControl`, `StatusChip`, `IconButton`) and `fa_icons.py` with bundled Font Awesome Free 6 solid/brand fonts. All three modules and the fonts install with the viewer, and Python tests cover them.
 - **Live GC570D presentation switching (`mode.set`):**
   - The Live Gamer DUO engine now implements the unified `mode.set` JSON-RPC method. The Console Hub can dock a headless capture session into its viewport, or return it to headless, without releasing VFIO or interrupting the DMA rings, the V4L2/SHM outputs or HDMI audio.
   - `everlive-ctl runtime mode <gaming|headless> [winid]` exposes the same switch from the CLI.

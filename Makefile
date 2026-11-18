@@ -37,7 +37,9 @@ ICON_SIZES  := 16 32 48 64 128 256 512
 
 # Python modules imported by everlive_viewer.py.
 VIEWER_PY := everlive_client.py card_profile.py service_manager.py \
-             app_integrations.py ui_theme.py ui_widgets.py
+             app_integrations.py ui_theme.py ui_widgets.py fa_icons.py
+VIEWER_ASSETS := fonts/fa-solid-900.ttf fonts/fa-brands-400.ttf \
+                 fonts/LICENSE.txt
 
 GC570D_RUNDIR := $(EVERLIVE_LIBDIR)/$(GC570D_DIR)
 GC570D_SED := sed -e 's|/usr/local/libexec/|$(GC570D_RUNDIR)/|g' \
@@ -82,6 +84,8 @@ install: all
 	install -Dm0755 play.sh $(L)/play.sh
 	install -Dm0755 $(VIEWER_DIR)/everlive_viewer.py $(L)/$(VIEWER_DIR)/everlive_viewer.py
 	install -m0644 $(addprefix $(VIEWER_DIR)/,$(VIEWER_PY)) $(L)/$(VIEWER_DIR)/
+	install -d $(L)/$(VIEWER_DIR)/fonts
+	install -m0644 $(addprefix $(VIEWER_DIR)/,$(VIEWER_ASSETS)) $(L)/$(VIEWER_DIR)/fonts/
 	install -Dm0644 $(VIEWER_DIR)/everlive.png $(L)/$(VIEWER_DIR)/everlive.png
 	install -d $(L)/$(GC573_DIR) $(L)/$(GC570D_DIR) $(L)/$(CORE_DIR)
 	install -m0755 $(addprefix $(GC573_DIR)/,$(GC573_BINS)) $(GC573_DIR)/vfio_pci_bind.sh $(L)/$(GC573_DIR)/

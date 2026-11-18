@@ -47,8 +47,11 @@ jobs:
           test -x "$RUNNER_TEMP/stage/usr/bin/everlive-ctl"
           test -x "$RUNNER_TEMP/stage/usr/lib/everlive/tools/opengc573-userd/gc573_user_streamer"
           test -x "$RUNNER_TEMP/stage/usr/lib/everlive/tools/opengc570d-userd/opengc570d-userd"
-          for module in everlive_client.py card_profile.py service_manager.py app_integrations.py ui_theme.py ui_widgets.py; do
+          for module in everlive_client.py card_profile.py service_manager.py app_integrations.py ui_theme.py ui_widgets.py fa_icons.py; do
             test -f "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive/$module"
+          done
+          for asset in fonts/fa-solid-900.ttf fonts/fa-brands-400.ttf fonts/LICENSE.txt; do
+            test -f "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive/$asset"
           done
           make uninstall DESTDIR="$RUNNER_TEMP/stage" PREFIX=/usr
 
@@ -76,6 +79,7 @@ jobs:
           python3 -m py_compile tools/everlive/app_integrations.py
           python3 -m py_compile tools/everlive/ui_theme.py
           python3 -m py_compile tools/everlive/ui_widgets.py
+          python3 -m py_compile tools/everlive/fa_icons.py
 
       - name: Verify shell script syntax
         run: |

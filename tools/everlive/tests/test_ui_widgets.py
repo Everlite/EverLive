@@ -138,11 +138,24 @@ class WidgetTests(unittest.TestCase):
         self.assertTrue(chip.text().startswith("●"))
 
     def test_icon_button_geometry(self):
-        button = ui_widgets.IconButton("?", "Help", size=30)
+        button = ui_widgets.IconButton("help", "Help", size=30)
         self.assertEqual(button.width(), 30)
         self.assertEqual(button.height(), 30)
         self.assertEqual(button.toolTip(), "Help")
         self.assertEqual(button.objectName(), "iconButton")
+
+    def test_icon_button_renders_font_awesome(self):
+        button = ui_widgets.IconButton("github", "GitHub")
+        self.assertFalse(button.icon().isNull())
+        self.assertEqual(button.icon_name(), "github")
+        self.assertEqual(button.text(), "")
+
+    def test_icon_button_can_swap_icon(self):
+        button = ui_widgets.IconButton("volume", "Mute")
+        button.set_icon("mute")
+        self.assertEqual(button.icon_name(), "mute")
+        button.set_icon_name("volume")
+        self.assertEqual(button.icon_name(), "volume")
 
     def test_icon_button_checkable(self):
         button = ui_widgets.IconButton("⧉", "Pop-out", checkable=True)

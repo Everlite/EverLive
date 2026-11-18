@@ -32,7 +32,7 @@ class TokenTests(unittest.TestCase):
                          "QFrame#cardFrame", "QFrame#bottomBar",
                          "QTabWidget#inspectorTabs", "QWidget#segmentedControl",
                          "QPushButton#segmentButton", "QPushButton#iconButton",
-                         "QLabel#cardChip", "QLabel#statusChip"):
+                         "QFrame#sourceGroup", "QLabel#statusChip"):
             self.assertIn(selector, stylesheet)
 
     def test_palette_matches_mockup_tokens(self):

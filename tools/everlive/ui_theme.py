@@ -52,8 +52,8 @@ PAD = 14
 GAP = 10
 RADIUS = 12
 RADIUS_CSS = "12px"
-HEADER_HEIGHT = 50
-BOTTOM_BAR_HEIGHT = 44
+HEADER_HEIGHT = 54
+BOTTOM_BAR_HEIGHT = 48
 INSPECTOR_WIDTH = 352
 
 FONT_STACK = ('-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, '
@@ -105,11 +105,11 @@ QMainWindow {
 QWidget {
     color: @TEXT@;
     font-family: @FONT_STACK@;
-    font-size: 12px;
+    font-size: 12.5px;
 }
 QLabel {
     color: @TEXT@;
-    font-size: 12px;
+    font-size: 12.5px;
 }
 QFrame#headerBar {
     background-color: @SURFACE_RAISED@;
@@ -144,8 +144,27 @@ QFrame#bottomBar {
 QFrame#bottomBar QLabel {
     color: @TEXT_MUTED@;
 }
+QPushButton#btnBar {
+    background: transparent;
+    border: 1px solid transparent;
+    color: @TEXT_MUTED@;
+    border-radius: 8px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPushButton#btnBar:hover {
+    background-color: @SURFACE_HOVER@;
+    border-color: @BORDER@;
+    color: @TEXT@;
+}
+QPushButton#btnBar:checked {
+    background-color: @BLUE@;
+    border-color: @BLUE_HOVER@;
+    color: @BLUE_TEXT@;
+}
 QLabel#logoTitle {
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 800;
     letter-spacing: 1.0px;
     color: @TEXT@;
@@ -159,15 +178,23 @@ QLabel#connDot {
     color: @MINT@;
     font-size: 11px;
 }
-QLabel#cardChip {
+QFrame#sourceGroup {
+    background-color: @SURFACE_RAISED@;
+    border: 1px solid @BORDER@;
+    border-radius: 10px;
+}
+QLabel#sourceName {
     color: @TEXT@;
-    background-color: @CHIP_BG@;
-    border: 1px solid @CHIP_BORDER@;
-    border-radius: 8px;
-    padding: 0px 14px;
-    font-size: 12px;
+    background: transparent;
+    padding: 0px 2px;
+    font-size: 12.5px;
     font-weight: 800;
-    letter-spacing: 0.7px;
+    letter-spacing: 0.6px;
+}
+QWidget#sourceSegments {
+    background-color: @SURFACE_SUNKEN@;
+    border: 1px solid @BORDER@;
+    border-radius: 8px;
 }
 QLabel#badgeModel {
     color: @TEXT@;
@@ -187,17 +214,17 @@ QLabel#pillLive {
 }
 QLabel#sectionTitle {
     color: @TEXT_MUTED@;
-    font-size: 11px;
+    font-size: 11.5px;
     font-weight: 700;
     letter-spacing: 0.8px;
 }
 QLabel#fieldLabel {
     color: @TEXT_MUTED@;
-    font-size: 12px;
+    font-size: 12.5px;
 }
 QLabel#hintText {
     color: @TEXT_DIM@;
-    font-size: 11px;
+    font-size: 11.5px;
 }
 QLabel#kvKey {
     color: @TEXT_DIM@;
@@ -302,9 +329,9 @@ QTabWidget#inspectorTabs QTabBar::tab {
     color: @TEXT_MUTED@;
     border: none;
     border-radius: 8px;
-    padding: 7px 10px;
+    padding: 8px 12px;
     margin: 3px;
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 600;
 }
 QTabWidget#inspectorTabs QTabBar::tab:hover:!selected {
@@ -332,8 +359,8 @@ QPushButton#segmentButton {
     color: @TEXT_MUTED@;
     border: none;
     border-radius: 7px;
-    padding: 5px 12px;
-    font-size: 11.5px;
+    padding: 5px 14px;
+    font-size: 12px;
     font-weight: 600;
 }
 QPushButton#segmentButton:hover:!checked {
@@ -354,10 +381,8 @@ QPushButton#iconButton {
     background-color: transparent;
     color: @TEXT_MUTED@;
     border: 1px solid transparent;
-    border-radius: 8px;
+    border-radius: 9px;
     padding: 0px;
-    font-size: 15px;
-    font-weight: 600;
 }
 QPushButton#iconButton:hover {
     background-color: @SURFACE_HOVER@;
@@ -376,9 +401,9 @@ QComboBox {
     color: @TEXT@;
     border: 1px solid @BORDER_STRONG@;
     border-radius: 8px;
-    min-height: 22px;
-    padding: 3px 9px;
-    font-size: 11px;
+    min-height: 26px;
+    padding: 4px 10px;
+    font-size: 12px;
 }
 QComboBox:hover {
     border-color: @ACCENT@;
@@ -425,8 +450,8 @@ QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
 
 /* Buttons */
 QPushButton {
-    padding: 5px 12px;
-    font-size: 12px;
+    padding: 6px 14px;
+    font-size: 12.5px;
     font-weight: 600;
     border-radius: 8px;
     background-color: @SURFACE_RAISED@;
@@ -553,8 +578,8 @@ QCheckBox {
 QCheckBox:hover { color: @TEXT@; }
 QCheckBox:disabled { color: @TEXT_DIM@; }
 QCheckBox::indicator {
-    width: 14px;
-    height: 14px;
+    width: 16px;
+    height: 16px;
     border-radius: 4px;
     border: 1px solid @BORDER_STRONG@;
     background-color: @SURFACE_SUNKEN@;
@@ -579,10 +604,10 @@ QSlider::sub-page:horizontal {
 QSlider::handle:horizontal {
     background: #FFFFFF;
     border: 1px solid @ACCENT@;
-    width: 13px;
+    width: 14px;
     margin-top: -5px;
     margin-bottom: -5px;
-    border-radius: 6px;
+    border-radius: 7px;
 }
 QSlider::handle:horizontal:hover { background: #FFFFFF; }
 """

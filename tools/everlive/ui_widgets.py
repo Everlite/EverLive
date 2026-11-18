@@ -10,10 +10,11 @@ viewer can adopt them incrementally without rewriting its signal wiring.
 from __future__ import annotations
 
 try:
+    import fa_icons
     from PySide6.QtCore import (
         Property, QEasingCurve, QEvent, QPropertyAnimation, QSize, Qt, Signal,
     )
-    from PySide6.QtGui import QColor, QPainter, QPen
+    from PySide6.QtGui import QColor, QIcon, QPainter, QPen
     from PySide6.QtWidgets import (
         QAbstractButton, QButtonGroup, QHBoxLayout, QLabel, QPushButton,
         QSizePolicy, QVBoxLayout, QWidget,
@@ -34,7 +35,7 @@ if HAS_QT:
         KNOB = QColor("#FFFFFF")
         KNOB_DISABLED = QColor("#7A7E8C")
 
-        def __init__(self, parent=None, *, width: int = 38, height: int = 20):
+        def __init__(self, parent=None, *, width: int = 40, height: int = 22):
             super().__init__(parent)
             self._w = int(width)
             self._h = int(height)
@@ -208,7 +209,7 @@ if HAS_QT:
             button.setCheckable(True)
             button.setCursor(Qt.PointingHandCursor)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            button.setFixedHeight(26)
+            button.setFixedHeight(28)
             button.clicked.connect(
                 lambda _checked=False, i=index: self._select(i, emit=True))
             self._group.addButton(button, index)
@@ -282,7 +283,7 @@ if HAS_QT:
             super().__init__(parent)
             self.setObjectName("statusChip")
             self.setAlignment(Qt.AlignCenter)
-            self.setFixedHeight(28)
+            self.setFixedHeight(30)
             self._dot = dot
             self._tone = "idle"
             self.set_state(text, tone)
@@ -313,15 +314,44 @@ if HAS_QT:
             return self._text
 
     class IconButton(QPushButton):
-        """Square, borderless icon button for the header and bottom bar."""
+        """Square, borderless Font Awesome icon button."""
 
-        def __init__(self, glyph: str, tooltip: str = "", parent=None,
-                     *, checkable: bool = False, size: int = 30):
-            super().__init__(str(glyph), parent)
+        def __init__(self, icon_name: str, tooltip: str = "", parent=None,
+                     *, checkable: bool = False, size: int = 34,
+                     icon_size: int = 18, color: str = "#9AA0B0",
+                     active_color: str = "#E7EBF2"):
+            super().__init__(parent)
             self.setObjectName("iconButton")
             self.setFixedSize(int(size), int(size))
             self.setCursor(Qt.PointingHandCursor)
             self.setFocusPolicy(Qt.StrongFocus)
             self.setCheckable(bool(checkable))
+            self._icon_size = int(icon_size)
+            self._icon_color = color
+            self._icon_active = active_color
+            self._icon_name = ""
+            self.set_icon(icon_name)
             if tooltip:
                 self.setToolTip(tooltip)
+
+        def set_icon(self, icon_name: str):
+            """Swap the glyph (normal/mute/fullscreen state changes)."""
+            self._icon_name = str(icon_name)
+            if fa_icons is not None and fa_icons.available():
+                self.setIcon(fa_icons.icon(
+                    self._icon_name, self._icon_color, self._icon_size,
+                    self._icon_active))
+                self.setIconSize(QSize(self._icon_size, self._icon_size))
+                self.setText("")
+            else:
+                self.setIcon(QIcon())
+                self.setText(
+                    fa_icons.fallback_text(self._icon_name)
+                    if fa_icons is not None else "?")
+
+        # Compatibility with earlier call sites.
+        def set_icon_name(self, icon_name: str):
+            self.set_icon(icon_name)
+
+        def icon_name(self) -> str:
+            return self._icon_name
