@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Diagnostics & Help** now hosts the Keyboard Shortcuts dialog and a **Copy Diagnostic Report** action.
   - **EDID & Handshake** is pinned below the tabs on every card; Legacy V4L2 is marked **Obsolete**.
   - Background Service & App Camera moved into the System tab below Window & Startup.
+- **Full-width Telemetry Deck:**
+  - The telemetry strip now sits below the workspace and spans the full window in Advanced mode.
+  - A collapsible `Telemetry Deck` header shows a compact FPS/signal summary and persists `telemetry_collapsed`.
+  - Simple mode hides the deck entirely; expanding Advanced restores the last collapse state.
 - **Live GC570D presentation switching (`mode.set`):**
   - The Live Gamer DUO engine now implements the unified `mode.set` JSON-RPC method. The Console Hub can dock a headless capture session into its viewport, or return it to headless, without releasing VFIO or interrupting the DMA rings, the V4L2/SHM outputs or HDMI audio.
   - `everlive-ctl runtime mode <gaming|headless> [winid]` exposes the same switch from the CLI.

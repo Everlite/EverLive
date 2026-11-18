@@ -167,6 +167,23 @@ QPushButton#btnBar:checked {
     border-color: @BLUE_HOVER@;
     color: @BLUE_TEXT@;
 }
+
+QPushButton#deckHeader {
+    background: transparent;
+    border: none;
+    color: @TEXT@;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.9px;
+    text-align: left;
+    padding: 4px 0px;
+}
+QPushButton#deckHeader:hover {
+    color: @ACCENT@;
+}
+QPushButton#deckHeader:checked {
+    color: @TEXT@;
+}
 QLabel#logoTitle {
     font-size: 15px;
     font-weight: 800;

@@ -27,8 +27,8 @@ try:
     import ui_theme
     import ui_widgets
     from card_profile import detect_card_profile
-    from ui_widgets import (IconButton, SegmentedControl, StatusChip,
-                            ToggleRow)
+    from ui_widgets import (CollapsibleCard, IconButton, SegmentedControl,
+                            StatusChip, ToggleRow)
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
                                  paused_state as handoff_paused_state)
 except ImportError:  # imported as a module from another working directory
@@ -39,8 +39,8 @@ except ImportError:  # imported as a module from another working directory
     import ui_theme
     import ui_widgets
     from card_profile import detect_card_profile
-    from ui_widgets import (IconButton, SegmentedControl, StatusChip,
-                            ToggleRow)
+    from ui_widgets import (CollapsibleCard, IconButton, SegmentedControl,
+                            StatusChip, ToggleRow)
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
                                  paused_state as handoff_paused_state)
 
@@ -136,6 +136,7 @@ DEFAULT_SETTINGS = {
     "duo_edid_bridge": True,
     "popout_window": False,
     "ui_mode": "simple",
+    "telemetry_collapsed": False,
 }
 
 
@@ -211,6 +212,8 @@ def load_settings() -> dict:
         settings["popout_window"] = False
     if settings.get("ui_mode") not in ("simple", "advanced"):
         settings["ui_mode"] = "simple"
+    if not isinstance(settings.get("telemetry_collapsed"), bool):
+        settings["telemetry_collapsed"] = False
     # "bitstream" used to be a separate EDID profile.  Every built-in profile
     # now advertises AC-3/DTS, so old settings migrate to the unified default.
     if settings.get("edid_profile") == "bitstream":
@@ -3345,11 +3348,17 @@ if HAS_QT:
             # =============================================================
             # 2A-Bottom. Compact Unified EverLive Telemetry Strip
             # =============================================================
-            self.telemetry_strip = QFrame()
-            self.telemetry_strip.setObjectName("telemetryCard")
-            self.telemetry_strip.setFixedHeight(102)
-            tele_row = QHBoxLayout(self.telemetry_strip)
-            tele_row.setContentsMargins(14, 8, 14, 8)
+            self.telemetry_strip = CollapsibleCard(
+                "TELEMETRY DECK",
+                collapsed=bool(
+                    self.saved_cfg.get("telemetry_collapsed", False)))
+            self.telemetry_strip.set_expanded_height(
+                ui_theme.HEADER_HEIGHT + 96)
+            self.telemetry_strip.collapsedChanged.connect(
+                self._on_telemetry_collapsed)
+            self.telemetry_deck = self.telemetry_strip
+            tele_row = QHBoxLayout()
+            tele_row.setContentsMargins(0, 0, 0, 0)
             tele_row.setSpacing(14)
 
             def _vsep():
@@ -3478,7 +3487,7 @@ if HAS_QT:
             self.lbl_fg_status.setVisible(False)
             tele_row.addLayout(seg4, 0)
 
-            stage_col.addWidget(self.telemetry_strip, 0)
+            self.telemetry_strip.body_layout.addLayout(tele_row)
             workspace_layout.addWidget(self.center_stage_widget, 1)
 
             # -------------------------------------------------------------
@@ -4225,6 +4234,9 @@ if HAS_QT:
             workspace_layout.addWidget(self.right_dock, 0)
             self.root_layout.addWidget(self.workspace_widget, 1)
 
+            # The telemetry deck spans the full window below the workspace.
+            self.root_layout.addWidget(self.telemetry_strip, 0)
+
             # =============================================================
             # 3. Bottom Audio & Capture Bar
             # =============================================================
@@ -4421,6 +4433,10 @@ if HAS_QT:
 
         def on_help_clicked(self):
             self._open_shortcuts_dialog()
+
+        def _on_telemetry_collapsed(self, collapsed: bool):
+            self.saved_cfg["telemetry_collapsed"] = bool(collapsed)
+            save_settings({"telemetry_collapsed": bool(collapsed)})
 
         def _apply_ui_mode(self, mode: str, persist: bool = True):
             mode = "advanced" if str(mode).lower() == "advanced" else "simple"
@@ -6714,6 +6730,13 @@ if HAS_QT:
                     text += f" @ {live['framerate']}"
                 if self.chip_bar_capture.state_text() != text:
                     self.chip_bar_capture.set_state(text, "active")
+
+            if hasattr(self, "telemetry_deck"):
+                fps_txt = (self.lbl_fps_hero.text()
+                           if hasattr(self, "lbl_fps_hero") else "0.0")
+                state = (self.lbl_sig_tag.text()
+                         if hasattr(self, "lbl_sig_tag") else "")
+                self.telemetry_deck.set_summary(f"{fps_txt} FPS · {state}")
 
         def on_preset_changed(self, *_):
             if self.vfio_mode:

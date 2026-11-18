@@ -165,6 +165,51 @@ class WidgetTests(unittest.TestCase):
         button.setChecked(True)
         self.assertTrue(button.isChecked())
 
+    def test_collapsible_card_starts_expanded(self):
+        card = ui_widgets.CollapsibleCard("TELEMETRY DECK")
+        self.assertFalse(card.isCollapsed())
+        self.assertFalse(card.body.isHidden())
+        self.assertIn("TELEMETRY DECK", card.btn_header.text())
+        self.assertTrue(card.btn_header.text().startswith("▾"))
+
+    def test_collapsible_card_round_trip(self):
+        card = ui_widgets.CollapsibleCard("DECK")
+        seen = []
+        card.collapsedChanged.connect(seen.append)
+
+        card.setCollapsed(True)
+        self.assertTrue(card.isCollapsed())
+        self.assertTrue(card.body.isHidden())
+        self.assertFalse(card.btn_header.isChecked())
+        self.assertTrue(card.btn_header.text().startswith("▸"))
+
+        card.setCollapsed(False)
+        self.assertFalse(card.isCollapsed())
+        self.assertFalse(card.body.isHidden())
+        self.assertTrue(card.btn_header.isChecked())
+        self.assertEqual(seen, [True, False])
+
+    def test_collapsible_card_same_state_does_not_emit(self):
+        card = ui_widgets.CollapsibleCard("DECK")
+        seen = []
+        card.collapsedChanged.connect(seen.append)
+        card.setCollapsed(False)
+        self.assertEqual(seen, [])
+
+    def test_collapsible_card_heights(self):
+        card = ui_widgets.CollapsibleCard("DECK")
+        card.set_expanded_height(120)
+        self.assertEqual(card.height(), 120)
+        card.setCollapsed(True)
+        self.assertEqual(card.height(), card.HEADER_HEIGHT)
+        card.setCollapsed(False)
+        self.assertEqual(card.height(), 120)
+
+    def test_collapsible_card_summary(self):
+        card = ui_widgets.CollapsibleCard("DECK")
+        card.set_summary("60.0 FPS · LOCKED")
+        self.assertEqual(card.lbl_summary.text(), "60.0 FPS · LOCKED")
+
 
 if __name__ == "__main__":
     unittest.main()

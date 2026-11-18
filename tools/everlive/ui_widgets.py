@@ -16,8 +16,8 @@ try:
     )
     from PySide6.QtGui import QColor, QIcon, QPainter, QPen
     from PySide6.QtWidgets import (
-        QAbstractButton, QButtonGroup, QHBoxLayout, QLabel, QPushButton,
-        QSizePolicy, QVBoxLayout, QWidget,
+        QAbstractButton, QButtonGroup, QFrame, QHBoxLayout, QLabel,
+        QPushButton, QSizePolicy, QVBoxLayout, QWidget,
     )
     HAS_QT = True
 except ImportError:  # allows --cli and CI runs without PySide6 installed
@@ -355,3 +355,78 @@ if HAS_QT:
 
         def icon_name(self) -> str:
             return self._icon_name
+
+    class CollapsibleCard(QFrame):
+        """Card with a clickable header that collapses its body."""
+
+        collapsedChanged = Signal(bool)
+        HEADER_HEIGHT = 34
+
+        def __init__(self, title: str, parent=None, *, collapsed: bool = False):
+            super().__init__(parent)
+            self.setObjectName("telemetryCard")
+            self._title = str(title)
+            self._expanded_height = 102
+            self._collapsed = bool(collapsed)
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(0)
+
+            header = QHBoxLayout()
+            header.setContentsMargins(14, 4, 14, 4)
+            header.setSpacing(8)
+
+            self.btn_header = QPushButton(self)
+            self.btn_header.setObjectName("deckHeader")
+            self.btn_header.setCheckable(True)
+            self.btn_header.setCursor(Qt.PointingHandCursor)
+            self.btn_header.setChecked(not self._collapsed)
+            self.btn_header.toggled.connect(self._on_toggled)
+            header.addWidget(self.btn_header, 1)
+
+            self.lbl_summary = QLabel("")
+            self.lbl_summary.setObjectName("hintText")
+            header.addWidget(self.lbl_summary, 0, Qt.AlignVCenter)
+            layout.addLayout(header)
+
+            self.body = QWidget(self)
+            self.body_layout = QVBoxLayout(self.body)
+            self.body_layout.setContentsMargins(14, 5, 14, 9)
+            self.body_layout.setSpacing(8)
+            layout.addWidget(self.body)
+
+            self._sync()
+
+        def _on_toggled(self, expanded: bool):
+            self._collapsed = not expanded
+            self._sync()
+            self.collapsedChanged.emit(self._collapsed)
+
+        def _sync(self):
+            expanded = not self._collapsed
+            self.body.setVisible(expanded)
+            arrow = "▾" if expanded else "▸"
+            self.btn_header.setText(f"{arrow}  {self._title}")
+            self.btn_header.setToolTip(
+                "Collapse the telemetry deck" if expanded
+                else "Expand the telemetry deck")
+            self.setFixedHeight(
+                self._expanded_height if expanded else self.HEADER_HEIGHT)
+
+        def isCollapsed(self) -> bool:  # noqa: N802 (Qt casing)
+            return self._collapsed
+
+        def setCollapsed(self, collapsed: bool):  # noqa: N802 (Qt casing)
+            collapsed = bool(collapsed)
+            if collapsed == self._collapsed:
+                return
+            self.btn_header.setChecked(not collapsed)
+            # The toggled signal performs the actual sync.
+
+        def set_expanded_height(self, height: int):
+            self._expanded_height = max(self.HEADER_HEIGHT, int(height))
+            self._sync()
+
+        def set_summary(self, text: str):
+            self.lbl_summary.setText(str(text))
