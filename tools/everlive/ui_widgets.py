@@ -187,12 +187,16 @@ if HAS_QT:
         currentIndexChanged = Signal(int)
         currentDataChanged = Signal(object)
 
-        def __init__(self, segments=None, parent=None):
+        def __init__(self, segments=None, parent=None, *,
+                     button_height: int = 32, object_name: str = "segmentedControl"):
             super().__init__(parent)
-            self.setObjectName("segmentedControl")
+            self.setObjectName(object_name)
+            self._button_height = int(button_height)
             self._layout = QHBoxLayout(self)
+            # No gutter between segments: adjacent edges stay square so the
+            # selected slot fills its half of the control like the mockup.
             self._layout.setContentsMargins(2, 2, 2, 2)
-            self._layout.setSpacing(2)
+            self._layout.setSpacing(0)
             self._group = QButtonGroup(self)
             self._group.setExclusive(True)
             self._buttons = []
@@ -209,17 +213,33 @@ if HAS_QT:
             button.setCheckable(True)
             button.setCursor(Qt.PointingHandCursor)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            button.setFixedHeight(28)
+            button.setFixedHeight(self._button_height)
             button.clicked.connect(
                 lambda _checked=False, i=index: self._select(i, emit=True))
             self._group.addButton(button, index)
             self._buttons.append(button)
             self._data.append(data)
             self._layout.addWidget(button, 1)
+            self._update_segment_positions()
             if index == 0:
                 button.setChecked(True)
                 self._last_index = 0
             return index
+
+        def _update_segment_positions(self):
+            """Tag the first/last segment so only the outer corners round."""
+            last = len(self._buttons) - 1
+            for i, button in enumerate(self._buttons):
+                if i == 0:
+                    pos = "first"
+                elif i == last:
+                    pos = "last"
+                else:
+                    pos = "middle"
+                if button.property("segmentPos") != pos:
+                    button.setProperty("segmentPos", pos)
+                    button.style().unpolish(button)
+                    button.style().polish(button)
 
         # -- QComboBox-like surface used by the viewer ----------------
         def count(self) -> int:
@@ -360,11 +380,11 @@ if HAS_QT:
         """Card with a clickable header that collapses its body."""
 
         collapsedChanged = Signal(bool)
-        HEADER_HEIGHT = 34
+        HEADER_HEIGHT = 28
 
         def __init__(self, title: str, parent=None, *, collapsed: bool = False):
             super().__init__(parent)
-            self.setObjectName("telemetryCard")
+            self.setObjectName("telemetryDeck")
             self._title = str(title)
             self._expanded_height = 102
             self._collapsed = bool(collapsed)
@@ -374,7 +394,7 @@ if HAS_QT:
             layout.setSpacing(0)
 
             header = QHBoxLayout()
-            header.setContentsMargins(14, 4, 14, 4)
+            header.setContentsMargins(14, 2, 14, 2)
             header.setSpacing(8)
 
             self.btn_header = QPushButton(self)
@@ -392,7 +412,7 @@ if HAS_QT:
 
             self.body = QWidget(self)
             self.body_layout = QVBoxLayout(self.body)
-            self.body_layout.setContentsMargins(14, 5, 14, 9)
+            self.body_layout.setContentsMargins(14, 4, 14, 8)
             self.body_layout.setSpacing(8)
             layout.addWidget(self.body)
 
@@ -411,6 +431,7 @@ if HAS_QT:
             self.btn_header.setToolTip(
                 "Collapse the telemetry deck" if expanded
                 else "Expand the telemetry deck")
+            self.lbl_summary.setVisible(not expanded)
             self.setFixedHeight(
                 self._expanded_height if expanded else self.HEADER_HEIGHT)
 

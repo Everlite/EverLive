@@ -126,6 +126,19 @@ class WidgetTests(unittest.TestCase):
         self.assertFalse(control._buttons[0].isEnabled())
         self.assertFalse(control._buttons[1].isEnabled())
 
+    def test_segment_corner_positions(self):
+        control = ui_widgets.SegmentedControl(
+            [("A", 1), ("B", 2), ("C", 3)])
+        self.assertEqual(control._buttons[0].property("segmentPos"), "first")
+        self.assertEqual(control._buttons[1].property("segmentPos"), "middle")
+        self.assertEqual(control._buttons[2].property("segmentPos"), "last")
+
+    def test_segment_button_height(self):
+        control = ui_widgets.SegmentedControl(
+            [("A", 1), ("B", 2)], button_height=32)
+        self.assertEqual(control._buttons[0].height(), 32)
+        self.assertEqual(control._buttons[1].height(), 32)
+
     def test_status_chip_tones(self):
         chip = ui_widgets.StatusChip("Standby", "idle")
         self.assertEqual(chip.state_text(), "Standby")
@@ -209,6 +222,9 @@ class WidgetTests(unittest.TestCase):
         card = ui_widgets.CollapsibleCard("DECK")
         card.set_summary("60.0 FPS · LOCKED")
         self.assertEqual(card.lbl_summary.text(), "60.0 FPS · LOCKED")
+        self.assertTrue(card.lbl_summary.isHidden())
+        card.setCollapsed(True)
+        self.assertFalse(card.lbl_summary.isHidden())
 
 
 if __name__ == "__main__":
