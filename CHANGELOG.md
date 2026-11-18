@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Console Hub remote-session docking:**
   - A remote session now offers **Dock Video Here** instead of a disabled Start button, with an automatic fallback that stops the headless user unit and restarts capture locally when the running engine predates `mode.set`. A stopped unit is restarted when the Hub exits.
   - `everlive-ctl runtime status` reports the real splitter pixel clock instead of a placeholder value.
+- **Console Hub background service & app camera integration:**
+  - The **Hardware & App** tab can install, enable, start, stop, disable and uninstall the per-user EverLive capture service, with service logs and optional `--v4l2`/`--audio-tap` engine arguments.
+  - **App Camera Shortcuts** creates reversible OBS/Discord/Chrome/Zoom launchers that set `LD_PRELOAD` for one process. Flatpak/Snap sandboxes are detected and Chrome's renderer sandbox is flagged.
+  - The service keeps the shared frame store and optional virtual camera alive for OBS while the Hub is closed.
 
 ---
 

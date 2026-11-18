@@ -14,16 +14,23 @@ import argparse
 import re
 import json
 import shutil
+from pathlib import Path
 from typing import Optional, Tuple, Dict
 
 if os.environ.get("DISPLAY") and "--cli" not in sys.argv:
     os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
 try:
+    import app_integrations
+    import service_manager
+    from card_profile import detect_card_profile
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
                                  paused_state as handoff_paused_state)
 except ImportError:  # imported as a module from another working directory
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import app_integrations
+    import service_manager
+    from card_profile import detect_card_profile
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
                                  paused_state as handoff_paused_state)
 
@@ -550,7 +557,7 @@ try:
         QGridLayout, QLabel, QPushButton, QComboBox, QCheckBox, QSlider, QFrame,
         QGroupBox, QMessageBox, QStackedLayout, QSizePolicy, QFileDialog,
         QSystemTrayIcon, QMenu, QDoubleSpinBox, QAbstractSpinBox,
-        QTabWidget, QScrollArea
+        QTabWidget, QScrollArea, QDialog, QTextEdit
     )
     from PySide6.QtCore import Qt, QTimer, QThread, Signal, QEvent, QUrl, QSize, QRectF, QPointF
     from PySide6.QtGui import (
@@ -2783,6 +2790,231 @@ if HAS_QT:
             p.setPen(QColor(51, 65, 85, 230))
             p.drawText(QRectF(0, h - 32.0 * s, w, 22 * s), Qt.AlignHCenter | Qt.AlignTop, self._footer)
 
+    class CameraLauncherDialog(QDialog):
+        """Create reversible per-app desktop shortcuts with LD_PRELOAD."""
+
+        DIALOG_QSS = """
+            QDialog { background-color: #15131F; color: #F7F4FC; }
+            QLabel { color: #F7F4FC; }
+            QLabel#fieldLabel { color: #A8A1BC; font-size: 11px; }
+            QLabel#hintText { color: #8B93A7; font-size: 11px; }
+            QFrame#cardFrame {
+                background-color: #1D1A2D;
+                border: 1px solid #322C4D;
+                border-radius: 8px;
+            }
+            QPushButton {
+                background-color: #221E35;
+                color: #F7F4FC;
+                border: 1px solid #3A325C;
+                border-radius: 6px;
+                padding: 4px 10px;
+                min-height: 22px;
+            }
+            QPushButton:hover {
+                background-color: #2D2746;
+                border-color: #F287A7;
+            }
+            QPushButton:disabled { color: #635C78; border-color: #25203A; }
+            QScrollArea { background: transparent; border: none; }
+            QTextEdit {
+                background-color: #1D1A2E;
+                color: #F7F4FC;
+                border: 1px solid #322C4D;
+                border-radius: 6px;
+                padding: 6px;
+            }
+        """
+
+        def __init__(self, profile, parent=None):
+            super().__init__(parent)
+            self.profile = profile
+            self.library = app_integrations.find_preload_library(profile)
+            self.setWindowTitle("EverLive App Camera Shortcuts")
+            self.setMinimumSize(680, 460)
+            self.setStyleSheet(self.DIALOG_QSS)
+
+            root = QVBoxLayout(self)
+            root.setContentsMargins(18, 16, 18, 16)
+            root.setSpacing(10)
+
+            title = QLabel("Launch apps with the EverLive camera")
+            title.setStyleSheet(
+                "color: #FFF6FB; font-size: 14px; font-weight: 700;")
+            root.addWidget(title)
+
+            nodes = ", ".join(profile.preload_nodes) or "no nodes"
+            desc = QLabel(
+                "Creates separate application-menu shortcuts that set "
+                f"LD_PRELOAD for one app. Exposed nodes: {nodes}. "
+                "Session-wide LD_PRELOAD is never set.")
+            desc.setWordWrap(True)
+            desc.setObjectName("fieldLabel")
+            root.addWidget(desc)
+
+            lib_label = QLabel(
+                f"Library: {self.library}" if self.library
+                else "Preload library not found. Install EverLive first.")
+            lib_label.setObjectName("fieldLabel")
+            lib_label.setWordWrap(True)
+            root.addWidget(lib_label)
+
+            self.scroll = QScrollArea()
+            self.scroll.setWidgetResizable(True)
+            self.scroll.setFrameShape(QFrame.NoFrame)
+            self.scroll.viewport().setStyleSheet("background: transparent;")
+            self.body = QWidget()
+            self.body.setStyleSheet("background: transparent;")
+            self.body_layout = QVBoxLayout(self.body)
+            self.body_layout.setContentsMargins(0, 0, 0, 0)
+            self.body_layout.setSpacing(8)
+            self.scroll.setWidget(self.body)
+            root.addWidget(self.scroll, 1)
+
+            self.lbl_status = QLabel("")
+            self.lbl_status.setObjectName("hintText")
+            self.lbl_status.setWordWrap(True)
+            root.addWidget(self.lbl_status)
+
+            footer = QHBoxLayout()
+            btn_refresh = QPushButton("Refresh")
+            btn_refresh.clicked.connect(self._populate)
+            footer.addWidget(btn_refresh)
+            footer.addStretch(1)
+            btn_close = QPushButton("Close")
+            btn_close.clicked.connect(self.accept)
+            footer.addWidget(btn_close)
+            root.addLayout(footer)
+
+            self._populate()
+
+        def _clear(self):
+            while self.body_layout.count():
+                item = self.body_layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+
+        def _populate(self):
+            self._clear()
+            apps = app_integrations.find_camera_apps()
+            if not apps:
+                empty = QLabel(
+                    "No supported apps detected. Install OBS Studio, Discord, "
+                    "Chrome/Chromium or Zoom, then refresh.")
+                empty.setWordWrap(True)
+                empty.setObjectName("fieldLabel")
+                self.body_layout.addWidget(empty)
+                self.body_layout.addStretch(1)
+                return
+
+            for app in apps:
+                row = QFrame()
+                row.setObjectName("cardFrame")
+                lay = QHBoxLayout(row)
+                lay.setContentsMargins(10, 8, 10, 8)
+                lay.setSpacing(8)
+
+                text = QVBoxLayout()
+                name = QLabel(f"{app.name}  ·  {app.badge}")
+                name.setStyleSheet("color: #F7F4FC; font-weight: 600;")
+                text.addWidget(name)
+                state = QLabel(
+                    "Shortcut installed" if app_integrations.launcher_exists(app)
+                    else ("Sandboxed — use v4l2loopback" if app.sandboxed
+                          else "No EverLive shortcut"))
+                state.setObjectName("fieldLabel")
+                text.addWidget(state)
+                if ("chrome" in app.desktop_id.lower() or
+                        "chromium" in app.desktop_id.lower()):
+                    warn = QLabel(
+                        "Experimental: Chrome's renderer sandbox may block "
+                        "the virtual camera.")
+                    warn.setObjectName("fieldLabel")
+                    warn.setStyleSheet("color: #F0B17B;")
+                    warn.setWordWrap(True)
+                    text.addWidget(warn)
+                lay.addLayout(text, 1)
+
+                if not app.sandboxed:
+                    btn_create = QPushButton(
+                        "Create" if not app_integrations.launcher_exists(app)
+                        else "Recreate")
+                    btn_create.clicked.connect(
+                        lambda _=False, a=app: self._create(a))
+                    lay.addWidget(btn_create)
+
+                    btn_remove = QPushButton("Remove")
+                    btn_remove.setEnabled(app_integrations.launcher_exists(app))
+                    btn_remove.clicked.connect(
+                        lambda _=False, a=app: self._remove(a))
+                    lay.addWidget(btn_remove)
+
+                    btn_copy = QPushButton("Copy Command")
+                    btn_copy.clicked.connect(
+                        lambda _=False, a=app: self._copy(a))
+                    lay.addWidget(btn_copy)
+                else:
+                    warn = QLabel("LD_PRELOAD cannot cross this sandbox.")
+                    warn.setObjectName("fieldLabel")
+                    warn.setStyleSheet("color: #F0B17B;")
+                    lay.addWidget(warn)
+
+                self.body_layout.addWidget(row)
+
+            test_row = QHBoxLayout()
+            test_row.addStretch(1)
+            btn_test = QPushButton("Test Camera")
+            btn_test.setEnabled(bool(self.library and self.profile.preload_nodes))
+            btn_test.clicked.connect(self._test_camera)
+            test_row.addWidget(btn_test)
+            self.body_layout.addLayout(test_row)
+            self.body_layout.addStretch(1)
+
+        def _create(self, app):
+            if not self.library:
+                self._notify("Preload library not found.")
+                return
+            _ok, message = app_integrations.create_launcher(app, self.library)
+            self._notify(message)
+            self._populate()
+
+        def _remove(self, app):
+            _ok, message = app_integrations.remove_launcher(app)
+            self._notify(message)
+            self._populate()
+
+        def _copy(self, app):
+            if not self.library:
+                self._notify("Preload library not found.")
+                return
+            QApplication.clipboard().setText(
+                app_integrations.launch_command(app, self.library))
+            self._notify("Launch command copied to the clipboard.")
+
+        def _test_camera(self):
+            if not self.library or not self.profile.preload_nodes:
+                return
+            node = self.profile.preload_nodes[0]
+            ok, output = app_integrations.test_camera(self.library, node)
+            box = QMessageBox(self)
+            box.setWindowTitle("EverLive Camera Test")
+            box.setIcon(QMessageBox.Information if ok else QMessageBox.Warning)
+            box.setText(
+                f"{node}: {'opened successfully' if ok else 'could not be opened'}")
+            box.setDetailedText(output[:4000])
+            box.exec()
+
+        def _notify(self, message: str):
+            self.lbl_status.setText(message)
+            parent = self.parent()
+            if parent is not None and hasattr(parent, "_set_vfio_notice"):
+                try:
+                    parent._set_vfio_notice(
+                        "App Camera", message, seconds=5.0)
+                except Exception:
+                    pass
+
     class MainWindow(QMainWindow):
         def __init__(self, streamer: GameStreamer, vsync: bool = True, streamer_mode: bool = False,
                      headless_start: bool = False, v4l2_device: Optional[str] = None):
@@ -2791,6 +3023,7 @@ if HAS_QT:
             self.vfio_mode = streamer.vfio_mode
             self.duo_mode = getattr(streamer, "duo_mode", False)
             self.model = getattr(streamer, "model", MODEL_GC573)
+            self.card_profile = detect_card_profile(self.model)
             self.enable_vsync = vsync
             self.muted = False
             self.saved_cfg = load_settings()
@@ -2809,6 +3042,10 @@ if HAS_QT:
             # The headless DUO unit was running and we stopped it; restart it
             # when the Hub exits.
             self._service_was_active = False
+            # EverLive universal background service (separate from the legacy
+            # DUO unit above).
+            self._background_service_active = False
+            self._background_service_status = None
             self._takeover_pending = False
             self._takeover_tries = 0
             self._vfio_notice_until = 0.0
@@ -2826,6 +3063,8 @@ if HAS_QT:
                 self.streamer.force_mpv = True
 
             self.init_ui()
+            self._refresh_service_config()
+            self._refresh_service_status()
 
             if v4l2_device:
                 self.chk_v4l2.setChecked(True)
@@ -2840,6 +3079,12 @@ if HAS_QT:
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.update_status)
             self.timer.start(1000)
+
+            # Background capture service state (10s polling).
+            self._service_timer = QTimer(self)
+            self._service_timer.setInterval(10000)
+            self._service_timer.timeout.connect(self._refresh_service_status)
+            self._service_timer.start()
 
             # Fast 100 ms poll for embedded SDL2 hotkey forwarders ([HUB] ...)
             self._hub_action_timer = QTimer(self)
@@ -4188,6 +4433,105 @@ if HAS_QT:
             grid_hw.addWidget(self.combo_led, 0, 1)
             lay_app.addWidget(card_hw)
 
+            # --- Background capture service & per-app camera shortcuts ---
+            card_integrations, grid_int = _section(
+                "BACKGROUND SERVICE & APP CAMERA", "#5ED4B2")
+            grid_int.setColumnStretch(0, 1)
+
+            self.lbl_background_service = QLabel(
+                "Checking background service…")
+            self.lbl_background_service.setObjectName("hintText")
+            self.lbl_background_service.setWordWrap(True)
+            grid_int.addWidget(self.lbl_background_service, 0, 0, 1, 2)
+
+            service_grid = QGridLayout()
+            service_grid.setHorizontalSpacing(6)
+            service_grid.setVerticalSpacing(6)
+
+            def _service_button(text):
+                button = QPushButton(text)
+                button.setObjectName("btnGhost")
+                button.setCursor(Qt.PointingHandCursor)
+                button.setFixedHeight(26)
+                button.setSizePolicy(
+                    QSizePolicy.Expanding, QSizePolicy.Fixed)
+                return button
+
+            self.btn_service_install = _service_button("Install")
+            self.btn_service_install.setToolTip(
+                "Install a per-user systemd unit when the package did not "
+                "provide one.")
+            self.btn_service_install.clicked.connect(self._service_install)
+            service_grid.addWidget(self.btn_service_install, 0, 0)
+
+            self.btn_service_enable = _service_button("Enable at Login")
+            self.btn_service_enable.setToolTip(
+                "Enable the background capture service and start it now.")
+            self.btn_service_enable.clicked.connect(self._service_enable)
+            service_grid.addWidget(self.btn_service_enable, 0, 1)
+
+            self.btn_service_start = _service_button("Start")
+            self.btn_service_start.clicked.connect(self._service_start)
+            service_grid.addWidget(self.btn_service_start, 1, 0)
+
+            self.btn_service_stop = _service_button("Stop")
+            self.btn_service_stop.clicked.connect(self._service_stop)
+            service_grid.addWidget(self.btn_service_stop, 1, 1)
+
+            self.btn_service_disable = _service_button("Disable")
+            self.btn_service_disable.clicked.connect(self._service_disable)
+            service_grid.addWidget(self.btn_service_disable, 2, 0)
+
+            self.btn_service_uninstall = _service_button("Uninstall")
+            self.btn_service_uninstall.setToolTip(
+                "Remove a user-installed unit. Package-owned units are left "
+                "to the package manager.")
+            self.btn_service_uninstall.clicked.connect(
+                self._service_uninstall)
+            service_grid.addWidget(self.btn_service_uninstall, 2, 1)
+
+            self.btn_service_logs = _service_button("View Service Logs")
+            self.btn_service_logs.clicked.connect(self._service_logs)
+            service_grid.addWidget(self.btn_service_logs, 3, 0, 1, 2)
+            grid_int.addLayout(service_grid, 1, 0, 1, 2)
+
+            self.chk_service_v4l2 = QCheckBox(
+                f"Service: publish to {V4L2_DEFAULT_DEVICE}")
+            self.chk_service_v4l2.setToolTip(
+                "Pass --v4l2 to the background engine when the v4l2loopback "
+                "node is available.")
+            grid_int.addWidget(self.chk_service_v4l2, 2, 0, 1, 2)
+
+            self.chk_service_audio_tap = QCheckBox(
+                "Service: virtual audio track")
+            self.chk_service_audio_tap.setToolTip(
+                f"Publish clean HDMI audio to the '{AUDIO_TAP_NODE}' "
+                "PipeWire source for OBS.")
+            grid_int.addWidget(self.chk_service_audio_tap, 3, 0, 1, 2)
+            if self.card_profile.model != MODEL_GC573:
+                self.chk_service_audio_tap.setVisible(False)
+
+            self.chk_service_v4l2.toggled.connect(
+                lambda _checked: self._service_config_changed())
+            self.chk_service_audio_tap.toggled.connect(
+                lambda _checked: self._service_config_changed())
+
+            self.btn_app_shortcuts = _service_button(
+                "App Camera Shortcuts…")
+            self.btn_app_shortcuts.setToolTip(
+                "Create reversible OBS/Discord/Chrome launchers that use the "
+                "module-free virtual camera.")
+            self.btn_app_shortcuts.clicked.connect(
+                self._open_app_shortcuts)
+            grid_int.addWidget(self.btn_app_shortcuts, 4, 0, 1, 2)
+
+            grid_int.addWidget(_hint(
+                "Keep the capture card available to OBS without the Hub "
+                "open. The App Camera shortcuts are separate per-app "
+                "launchers, never a session-wide LD_PRELOAD."),
+                5, 0, 1, 2)
+            lay_app.addWidget(card_integrations)
+
             card_app, grid_app = _section("WINDOW & STARTUP", "#38BDF8")
             grid_app.setColumnStretch(0, 1)
 
@@ -4641,6 +4985,174 @@ if HAS_QT:
                     "Audio Muted",
                     hint.capitalize() + " — unmute the system output",
                     seconds=4.0)
+
+        # -----------------------------------------------------------------
+        # Background capture service & app camera shortcuts
+        # -----------------------------------------------------------------
+        def _refresh_service_config(self):
+            args = service_manager.read_service_args()
+            v4l2 = "--v4l2" in args
+            tap = "--audio-tap" in args
+            self.chk_service_v4l2.blockSignals(True)
+            self.chk_service_audio_tap.blockSignals(True)
+            self.chk_service_v4l2.setChecked(v4l2)
+            self.chk_service_audio_tap.setChecked(tap)
+            self.chk_service_v4l2.blockSignals(False)
+            self.chk_service_audio_tap.blockSignals(False)
+            has_node = os.path.exists(V4L2_DEFAULT_DEVICE)
+            self.chk_service_v4l2.setEnabled(has_node)
+            if not has_node:
+                self.chk_service_v4l2.setToolTip(
+                    f"{V4L2_DEFAULT_DEVICE} is not present. Use the "
+                    "module-free App Camera shortcuts instead.")
+
+        def _service_config_changed(self):
+            v4l2 = (V4L2_DEFAULT_DEVICE
+                    if self.chk_service_v4l2.isChecked() else "")
+            tap = bool(self.chk_service_audio_tap.isChecked() and
+                       self.card_profile.model == MODEL_GC573)
+            args = service_manager.write_service_args(v4l2, tap)
+            message = ("Service engine arguments updated"
+                       + (f": {args}" if args else ": defaults"))
+            if self._background_service_active:
+                message += " · restart the service to apply"
+            self._set_vfio_notice(
+                "Background Service", message, seconds=6.0)
+
+        def _refresh_service_status(self):
+            status = service_manager.status()
+            self._background_service_status = status
+            self._background_service_active = status.active
+            text = status.label
+            if status.detail:
+                text += f"\n{status.detail}"
+            self.lbl_background_service.setText(text)
+            if status.active:
+                self.lbl_background_service.setStyleSheet(
+                    "color: #5ED4B2; font-size: 11px;")
+                self.lbl_card_title.setToolTip(
+                    f"Status: {status.label}")
+            elif status.installed:
+                self.lbl_background_service.setStyleSheet(
+                    "color: #A8A1BC; font-size: 11px;")
+                if self.lbl_card_title.toolTip().startswith(
+                        "Status: Background service"):
+                    self.lbl_card_title.setToolTip("Status: Standby")
+            else:
+                self.lbl_background_service.setStyleSheet(
+                    "color: #F0B17B; font-size: 11px;")
+                if self.lbl_card_title.toolTip().startswith(
+                        "Status: Background service"):
+                    self.lbl_card_title.setToolTip("Status: Standby")
+
+            self.btn_service_install.setEnabled(
+                bool(not status.installed and
+                     service_manager.systemd_available()))
+            self.btn_service_enable.setEnabled(
+                bool(status.installed and not status.enabled))
+            self.btn_service_disable.setEnabled(
+                bool(status.installed and status.enabled))
+            self.btn_service_start.setEnabled(
+                bool(status.installed and not status.active))
+            self.btn_service_stop.setEnabled(bool(status.active))
+            user_unit = bool(
+                status.unit_path and
+                Path(status.unit_path).parent ==
+                Path(os.path.expanduser("~/.config/systemd/user")))
+            self.btn_service_uninstall.setEnabled(user_unit)
+            self.btn_service_uninstall.setToolTip(
+                "Remove the user-installed unit." if user_unit else
+                "This unit is owned by the package; use Disable or your "
+                "package manager.")
+
+        def _apply_service_action(self, title: str, action):
+            ok, message = action()
+            self._set_vfio_notice(title, message, seconds=6.0)
+            self._refresh_service_status()
+            return ok
+
+        def _service_install(self):
+            self._apply_service_action(
+                "Background Service", service_manager.install_unit)
+
+        def _service_enable(self):
+            if self.streamer.is_running and not self._background_service_active:
+                self._set_vfio_notice(
+                    "Stop the Local Engine First",
+                    "The background service needs exclusive access to the card.")
+                return
+            if self._apply_service_action(
+                    "Background Service", service_manager.enable):
+                QTimer.singleShot(1200, self._ipc_try_attach)
+
+        def _service_start(self):
+            if self.streamer.is_running and not self._background_service_active:
+                self._set_vfio_notice(
+                    "Stop the Local Engine First",
+                    "The background service needs exclusive access to the card.")
+                return
+            if self._apply_service_action(
+                    "Background Service", service_manager.start):
+                QTimer.singleShot(1200, self._ipc_try_attach)
+
+        def _service_stop(self):
+            if self._apply_service_action(
+                    "Background Service", service_manager.stop):
+                self._background_service_active = False
+                self._refresh_service_status()
+
+        def _service_disable(self):
+            if self._apply_service_action(
+                    "Background Service", service_manager.disable):
+                self._background_service_active = False
+                self._refresh_service_status()
+
+        def _service_uninstall(self):
+            answer = QMessageBox.question(
+                self,
+                "Remove Background Service",
+                "Remove the user-installed EverLive service unit?\n"
+                "The capture engine will no longer start at login.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                return
+            self._background_service_active = False
+            self._apply_service_action(
+                "Background Service", service_manager.uninstall_unit)
+
+        def _service_logs(self):
+            dialog = QDialog(self)
+            dialog.setWindowTitle("EverLive Background Service Logs")
+            dialog.resize(760, 520)
+            dialog.setStyleSheet(CameraLauncherDialog.DIALOG_QSS)
+            lay = QVBoxLayout(dialog)
+            text = QTextEdit()
+            text.setReadOnly(True)
+            text.setPlainText(service_manager.logs())
+            lay.addWidget(text)
+            close = QPushButton("Close")
+            close.clicked.connect(dialog.accept)
+            lay.addWidget(close, 0, Qt.AlignRight)
+            dialog.exec()
+
+        def _open_app_shortcuts(self):
+            dialog = CameraLauncherDialog(self.card_profile, self)
+            dialog.exec()
+
+        def _background_service_blocks_local_start(self) -> bool:
+            if not self._background_service_active:
+                return False
+            if self._remote or (self._ipc is not None and self._ipc.connected):
+                return False
+            if ipc_probe() is not None:
+                return False
+            self._set_vfio_notice(
+                "Background Service Active",
+                "Stop or disable the service in Hardware & App before "
+                "starting a local engine.",
+                seconds=8.0)
+            return True
 
         def _vfio_preflight(self) -> bool:
             if not self.vfio_mode:
@@ -5261,6 +5773,8 @@ if HAS_QT:
         def start_gaming_screen(self):
             if self.streamer.is_running:
                 return
+            if self._background_service_blocks_local_start():
+                return
             if self._remote and not self._takeover_pending:
                 self._remote_dock()
                 return
@@ -5384,6 +5898,8 @@ if HAS_QT:
 
         def start_studio(self):
             if self.streamer.is_running:
+                return
+            if self._background_service_blocks_local_start():
                 return
             if not self._vfio_preflight():
                 return
