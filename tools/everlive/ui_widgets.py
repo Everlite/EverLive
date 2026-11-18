@@ -126,6 +126,10 @@ if HAS_QT:
             layout.setContentsMargins(0, 2, 0, 2)
             layout.setSpacing(10)
 
+            self.switch = ToggleSwitch(self)
+            self.switch.toggled.connect(self.toggled)
+            layout.addWidget(self.switch, 0, Qt.AlignVCenter)
+
             text_col = QVBoxLayout()
             text_col.setContentsMargins(0, 0, 0, 0)
             text_col.setSpacing(1)
@@ -139,10 +143,6 @@ if HAS_QT:
             self.hint.setVisible(bool(hint))
             text_col.addWidget(self.hint)
             layout.addLayout(text_col, 1)
-
-            self.switch = ToggleSwitch(self)
-            self.switch.toggled.connect(self.toggled)
-            layout.addWidget(self.switch, 0, Qt.AlignVCenter)
 
             if checkbox is not None:
                 self.bind(checkbox)
@@ -191,6 +191,9 @@ if HAS_QT:
                      button_height: int = 32, object_name: str = "segmentedControl"):
             super().__init__(parent)
             self.setObjectName(object_name)
+            # A bare QWidget needs this before QSS paints its background
+            # and group outline.
+            self.setAttribute(Qt.WA_StyledBackground, True)
             self._button_height = int(button_height)
             self._layout = QHBoxLayout(self)
             # No gutter between segments: adjacent edges stay square so the

@@ -2457,7 +2457,7 @@ if HAS_QT:
 
             # Center value
             val_font = QFont("JetBrains Mono", 8)
-            val_font.setPixelSize(11 if len(self.value_text) > 4 else 12)
+            val_font.setPixelSize(12 if len(self.value_text) > 4 else 13)
             val_font.setBold(True)
             p.setFont(val_font)
             p.setPen(QColor("#F7F4FC") if self.known else QColor("#6E6882"))
@@ -2465,7 +2465,7 @@ if HAS_QT:
 
             # Label underneath
             lbl_font = QFont(self.font())
-            lbl_font.setPixelSize(11)
+            lbl_font.setPixelSize(12)
             lbl_font.setWeight(QFont.Medium)
             p.setFont(lbl_font)
             p.setPen(QColor("#9E97B0"))
@@ -2504,7 +2504,7 @@ if HAS_QT:
 
             # Left label
             lbl_font = QFont(self.font())
-            lbl_font.setPixelSize(12)
+            lbl_font.setPixelSize(13)
             p.setFont(lbl_font)
             p.setPen(QColor("#ACA5C0"))
             p.drawText(QRectF(0, 0, lbl_w, h),
@@ -2536,7 +2536,7 @@ if HAS_QT:
 
             # Right monospace value
             val_font = QFont("JetBrains Mono", 8)
-            val_font.setPixelSize(12)
+            val_font.setPixelSize(13)
             val_font.setBold(True)
             p.setFont(val_font)
             p.setPen(QColor("#F7F4FC") if self.known else QColor("#6E6882"))
@@ -2655,7 +2655,7 @@ if HAS_QT:
                 tone = QColor(255, 255, 255, 75)
 
             font = QFont(self.font())
-            font.setPixelSize(12)
+            font.setPixelSize(13)
             font.setWeight(QFont.Medium)
             p.setFont(font)
             fm = p.fontMetrics()
@@ -3441,7 +3441,7 @@ if HAS_QT:
             self.lbl_drops_counter = QLabel("0 drops · 0 underrun")
             self.lbl_drops_counter.setStyleSheet(
                 "color: #ACA5C0; font-family: 'JetBrains Mono', monospace; "
-                "font-size: 12.5px;")
+                "font-size: 13px;")
             fps_row.addWidget(
                 self.lbl_drops_counter, 1,
                 Qt.AlignRight | Qt.AlignBaseline)
@@ -3468,7 +3468,7 @@ if HAS_QT:
             self.lbl_budget_note = QLabel("Budget 16.7 ms / frame")
             self.lbl_budget_note.setStyleSheet(
                 "color: #7D7694; font-family: 'JetBrains Mono', monospace; "
-                "font-size: 12.5px;")
+                "font-size: 13px;")
             seg3.addWidget(self.lbl_budget_note)
 
             self.lbl_fg_status = QLabel("VRAM: — / — GB")
@@ -3528,7 +3528,7 @@ if HAS_QT:
                 lay.addLayout(h_head)
                 grid = QGridLayout()
                 grid.setHorizontalSpacing(10)
-                grid.setVerticalSpacing(8)
+                grid.setVerticalSpacing(10)
                 lay.addLayout(grid)
                 return frame, grid
 
@@ -3544,6 +3544,16 @@ if HAS_QT:
                 lbl.setObjectName("hintText")
                 lbl.setWordWrap(True)
                 return lbl
+
+            def _stacked_field(text, control, tip=""):
+                """Label above its input, per the mockup form layout."""
+                box = QWidget()
+                lay = QVBoxLayout(box)
+                lay.setContentsMargins(0, 0, 0, 0)
+                lay.setSpacing(6)
+                lay.addWidget(_field(text, tip))
+                lay.addWidget(control)
+                return box
 
             def _shrinkable(combo):
                 """Let a combo follow the inspector width instead of its
@@ -3661,12 +3671,7 @@ if HAS_QT:
             # TAB 1: VIDEO & FRAME GENERATION
             # =============================================================
             card_video, grid_video = _section("PICTURE & HDR", "#F287A7")
-            grid_video.setColumnMinimumWidth(0, 96)
-            grid_video.setColumnStretch(1, 1)
-
-            grid_video.addWidget(_field(
-                "EDID Profile" if self.vfio_mode else "Format / Preset"),
-                0, 0)
+            grid_video.setColumnStretch(0, 1)
 
             self.combo_presets = _shrinkable(QComboBox())
             if self.vfio_mode:
@@ -3702,12 +3707,9 @@ if HAS_QT:
                 self.combo_presets.setToolTip(
                     "The Live Gamer DUO selects the EDID policy with the "
                     "EDID: Bridge / Copy buttons in the transport bar.")
-            grid_video.addWidget(self.combo_presets, 0, 1)
-
-            grid_video.addWidget(_field(
-                "Aspect Ratio",
-                "Overrides SDL2 presentation. Auto follows the native HDMI "
-                "timing; 16:9 fixes anamorphic RetroTINK/OSSC modes."), 1, 0)
+            grid_video.addWidget(_stacked_field(
+                "EDID Profile" if self.vfio_mode else "Format / Preset",
+                self.combo_presets), 0, 0, 1, 2)
 
             self.combo_aspect = _shrinkable(QComboBox())
             for text, key in ASPECT_OPTIONS:
@@ -3720,14 +3722,11 @@ if HAS_QT:
                 "Forwarded as --aspect to gc573_user_streamer unless "
                 "'Auto (Native HDMI)' is selected.")
             self.combo_aspect.currentIndexChanged.connect(self.on_aspect_changed)
-            grid_video.addWidget(self.combo_aspect, 1, 1)
-
-            grid_video.addWidget(_field(
-                "Scaling Mode",
-                "Integer Scale picks the largest whole multiple of the "
-                "source (crisp pixels for retro/720p). Falls back to Aspect "
-                "Fit when the monitor is smaller or the content is anamorphic."),
-                2, 0)
+            grid_video.addWidget(_stacked_field(
+                "Aspect Ratio", self.combo_aspect,
+                "Overrides SDL2 presentation. Auto follows the native HDMI "
+                "timing; 16:9 fixes anamorphic RetroTINK/OSSC modes."),
+                1, 0, 1, 2)
 
             self.combo_scale = _shrinkable(QComboBox())
             for text, key in SCALE_OPTIONS:
@@ -3740,7 +3739,12 @@ if HAS_QT:
                 "Forwarded as --scale. Applies live over IPC while the "
                 "engine runs. Hotkey 'L' in the gaming window cycles it.")
             self.combo_scale.currentIndexChanged.connect(self.on_scale_changed)
-            grid_video.addWidget(self.combo_scale, 2, 1)
+            grid_video.addWidget(_stacked_field(
+                "Scaling Mode", self.combo_scale,
+                "Integer Scale picks the largest whole multiple of the "
+                "source (crisp pixels for retro/720p). Falls back to Aspect "
+                "Fit when the monitor is smaller or the content is anamorphic."),
+                2, 0, 1, 2)
 
             self.chk_hdr = QCheckBox("HDR → SDR Tonemapping")
             self.chk_hdr.setChecked(bool(self.saved_cfg.get("hdr_tonemap", True)))
@@ -3749,11 +3753,6 @@ if HAS_QT:
                 "gaming window and OBS (Hotkey: H).")
             self.chk_hdr.toggled.connect(self.on_hdr_toggled)
             grid_video.addWidget(_toggle(self.chk_hdr), 3, 0, 1, 2)
-
-            grid_video.addWidget(_field(
-                "Exposure Bias",
-                "Linear exposure bias for the tonemapper (-2.0 .. +2.0 EV)."),
-                4, 0)
 
             # Hidden state holder; the IPC and settings paths keep using it.
             self.spin_hdr_exposure = QDoubleSpinBox(card_video)
@@ -3768,10 +3767,6 @@ if HAS_QT:
             self.spin_hdr_exposure.valueChanged.connect(
                 self.on_hdr_exposure_changed)
 
-            h_hdr_row = QHBoxLayout()
-            h_hdr_row.setContentsMargins(0, 0, 0, 0)
-            h_hdr_row.setSpacing(8)
-
             self.slider_hdr_exposure = QSlider(Qt.Horizontal)
             self.slider_hdr_exposure.setRange(-20, 20)
             self.slider_hdr_exposure.setValue(
@@ -3779,14 +3774,12 @@ if HAS_QT:
             self.slider_hdr_exposure.setEnabled(self.chk_hdr.isChecked())
             self.slider_hdr_exposure.setToolTip(
                 "Linear exposure bias for the tonemapper (-2.0 .. +2.0 EV).")
-            h_hdr_row.addWidget(self.slider_hdr_exposure, 1)
 
             self.lbl_hdr_exposure = QLabel(
                 f"{self.spin_hdr_exposure.value():+.1f} EV")
             self.lbl_hdr_exposure.setObjectName("fieldLabel")
             self.lbl_hdr_exposure.setFixedWidth(54)
             self.lbl_hdr_exposure.setAlignment(Qt.AlignCenter)
-            h_hdr_row.addWidget(self.lbl_hdr_exposure, 0, Qt.AlignVCenter)
 
             self.btn_hdr_exp_reset = QPushButton("Reset")
             self.btn_hdr_exp_reset.setObjectName("btnGhost")
@@ -3795,7 +3788,22 @@ if HAS_QT:
             self.btn_hdr_exp_reset.setToolTip("Reset exposure bias to 0.0 EV")
             self.btn_hdr_exp_reset.clicked.connect(
                 lambda: self.spin_hdr_exposure.setValue(0.0))
-            h_hdr_row.addWidget(self.btn_hdr_exp_reset, 0, Qt.AlignVCenter)
+
+            exposure_box = QWidget()
+            exposure_lay = QVBoxLayout(exposure_box)
+            exposure_lay.setContentsMargins(0, 0, 0, 0)
+            exposure_lay.setSpacing(6)
+            exposure_lay.addWidget(_field(
+                "Exposure Bias",
+                "Linear exposure bias for the tonemapper (-2.0 .. +2.0 EV)."))
+            exposure_lay.addWidget(self.slider_hdr_exposure)
+            value_row = QHBoxLayout()
+            value_row.setContentsMargins(0, 0, 0, 0)
+            value_row.setSpacing(8)
+            value_row.addWidget(self.lbl_hdr_exposure)
+            value_row.addStretch(1)
+            value_row.addWidget(self.btn_hdr_exp_reset)
+            exposure_lay.addLayout(value_row)
 
             def _on_exposure_slider(value: int):
                 self.spin_hdr_exposure.setValue(value / 10.0)
@@ -3809,7 +3817,7 @@ if HAS_QT:
 
             self.slider_hdr_exposure.valueChanged.connect(_on_exposure_slider)
             self.spin_hdr_exposure.valueChanged.connect(_on_exposure_value)
-            grid_video.addLayout(h_hdr_row, 4, 1)
+            grid_video.addWidget(exposure_box, 4, 0, 1, 2)
             lay_video.addWidget(card_video)
 
             # --- Frame Generation Card ---
@@ -3832,17 +3840,10 @@ if HAS_QT:
 
             card_fg, grid_fg = _section(
                 "FRAME GENERATION · LSFG", "#BB96F3", fg_head_right)
-            grid_fg.setColumnMinimumWidth(0, 96)
-            grid_fg.setColumnStretch(1, 1)
+            grid_fg.setColumnStretch(0, 1)
 
             self._fg_ready_ok = False
             self._refresh_fg_readiness()
-
-            grid_fg.addWidget(_field(
-                "Multiplier",
-                "lsfg-vk frame generation (2× / 3× / 4×). Enable '30 FPS Dedup' "
-                "below when a console outputs a 30 FPS game in a 60 Hz HDMI container."),
-                0, 0)
 
             self.combo_framegen = _shrinkable(QComboBox())
             for text, key in FRAMEGEN_OPTIONS:
@@ -3856,13 +3857,11 @@ if HAS_QT:
                 "engine runs (hotkey 'g' cycles it).")
             self.combo_framegen.currentIndexChanged.connect(
                 self.on_framegen_changed)
-            grid_fg.addWidget(self.combo_framegen, 0, 1)
-
-            grid_fg.addWidget(_field(
-                "Flow Scale",
-                "Optical-flow resolution used by LSFG. 100% is full quality; "
-                "50-70% is recommended for 4K captures."),
-                1, 0)
+            grid_fg.addWidget(_stacked_field(
+                "Multiplier", self.combo_framegen,
+                "lsfg-vk frame generation (2× / 3× / 4×). Enable '30 FPS Dedup' "
+                "below when a console outputs a 30 FPS game in a 60 Hz HDMI container."),
+                0, 0, 1, 2)
 
             h_flow = QHBoxLayout()
             h_flow.setContentsMargins(0, 0, 0, 0)
@@ -3882,7 +3881,17 @@ if HAS_QT:
             self.lbl_flow.setObjectName("fieldLabel")
             self.lbl_flow.setFixedWidth(36)
             h_flow.addWidget(self.lbl_flow, 0, Qt.AlignVCenter)
-            grid_fg.addLayout(h_flow, 1, 1)
+
+            flow_box = QWidget()
+            flow_lay = QVBoxLayout(flow_box)
+            flow_lay.setContentsMargins(0, 0, 0, 0)
+            flow_lay.setSpacing(6)
+            flow_lay.addWidget(_field(
+                "Flow Scale",
+                "Optical-flow resolution used by LSFG. 100% is full quality; "
+                "50-70% is recommended for 4K captures."))
+            flow_lay.addLayout(h_flow)
+            grid_fg.addWidget(flow_box, 1, 0, 1, 2)
 
             self.chk_fg_dedup = QCheckBox("30 FPS Dedup (PS5 / PS4)")
             self.chk_fg_dedup.setChecked(
@@ -3921,14 +3930,7 @@ if HAS_QT:
             # TAB 2: AUDIO, OVERLAY & STREAM ROUTING
             # =============================================================
             card_audio, grid_audio = _section("AUDIO", "#38BDF8")
-            grid_audio.setColumnMinimumWidth(0, 96)
-            grid_audio.setColumnStretch(1, 1)
-
-            grid_audio.addWidget(_field(
-                "Audio Layout",
-                "Playback channel layout. Auto follows the HDMI source; "
-                "5.1/7.1 fall back to an ITU-R BS.775 stereo downmix when "
-                "the audio sink cannot open them."), 0, 0)
+            grid_audio.setColumnStretch(0, 1)
 
             self.combo_audio_channels = _shrinkable(QComboBox())
             for label, key in AUDIO_CHANNEL_MODES:
@@ -3942,13 +3944,16 @@ if HAS_QT:
                 self.combo_audio_channels.setEnabled(False)
                 self.combo_audio_channels.setToolTip(
                     "The Live Gamer DUO engine publishes stereo only.")
-            grid_audio.addWidget(self.combo_audio_channels, 0, 1)
+            grid_audio.addWidget(_stacked_field(
+                "Audio Layout", self.combo_audio_channels,
+                "Playback channel layout. Auto follows the HDMI source; "
+                "5.1/7.1 fall back to an ITU-R BS.775 stereo downmix when "
+                "the audio sink cannot open them."), 0, 0, 1, 2)
             lay_stream.addWidget(card_audio)
 
             # --- On-Screen Overlay Card (grouped cleanly!) ---
             card_osd, grid_osd = _section("ON-SCREEN OVERLAY", "#F287A7")
-            grid_osd.setColumnMinimumWidth(0, 96)
-            grid_osd.setColumnStretch(1, 1)
+            grid_osd.setColumnStretch(0, 1)
 
             self.chk_osd = QCheckBox("Show On-Screen Stats")
             self.chk_osd.setToolTip(
@@ -3957,11 +3962,6 @@ if HAS_QT:
             self.chk_osd.setChecked(bool(self.saved_cfg.get("osd_enabled", True)))
             self.chk_osd.toggled.connect(self.on_osd_changed)
             grid_osd.addWidget(_toggle(self.chk_osd), 0, 0, 1, 2)
-
-            grid_osd.addWidget(_field(
-                "OSD Position",
-                "Screen corner for the On-Screen Stats overlay (Hotkey: P)."),
-                1, 0)
 
             self.combo_osd_pos = _shrinkable(QComboBox())
             for text, key in OSD_POSITION_OPTIONS:
@@ -3975,7 +3975,10 @@ if HAS_QT:
                 "overlay never covers console navigation.")
             self.combo_osd_pos.setEnabled(self.chk_osd.isChecked())
             self.combo_osd_pos.currentIndexChanged.connect(self.on_osd_pos_changed)
-            grid_osd.addWidget(self.combo_osd_pos, 1, 1)
+            grid_osd.addWidget(_stacked_field(
+                "OSD Position", self.combo_osd_pos,
+                "Screen corner for the On-Screen Stats overlay (Hotkey: P)."),
+                1, 0, 1, 2)
 
             self.chk_streamer = QCheckBox("Clean Feed (Hide All Overlays)")
             self.chk_streamer.setToolTip(
@@ -4003,9 +4006,7 @@ if HAS_QT:
             grid_obs.addWidget(_toggle(self.chk_audio_tap), 0, 0)
 
             has_loopback_node = os.path.exists(V4L2_DEFAULT_DEVICE)
-            self.chk_v4l2 = QCheckBox(
-                f"Legacy V4L2 Loopback ({V4L2_DEFAULT_DEVICE})"
-                if has_loopback_node else "Legacy V4L2 Loopback (Absent)")
+            self.chk_v4l2 = QCheckBox("Legacy V4L2 Loopback")
             self.chk_v4l2.setChecked(bool(self.saved_cfg.get("v4l2_loopback", False) and has_loopback_node))
             self.chk_v4l2.toggled.connect(self.on_v4l2_toggled)
             if self.vfio_mode:
@@ -4046,9 +4047,7 @@ if HAS_QT:
             # TAB 3: HARDWARE, APP BEHAVIOR & KEYBOARD SHORTCUTS
             # =============================================================
             card_hw, grid_hw = _section("HARDWARE RGB LED", "#F287A7")
-            grid_hw.setColumnMinimumWidth(0, 96)
-            grid_hw.setColumnStretch(1, 1)
-            grid_hw.addWidget(_field("Card RGB LED"), 0, 0)
+            grid_hw.setColumnStretch(0, 1)
 
             self.combo_led = _shrinkable(QComboBox())
             self.combo_led.setIconSize(QSize(14, 14))
@@ -4087,7 +4086,8 @@ if HAS_QT:
                     else:
                         self.combo_led.setEnabled(False)
             self.combo_led.currentIndexChanged.connect(self.on_led_changed)
-            grid_hw.addWidget(self.combo_led, 0, 1)
+            grid_hw.addWidget(_stacked_field(
+                "Card RGB LED", self.combo_led), 0, 0, 1, 2)
             lay_app.addWidget(card_hw)
 
 
@@ -6554,19 +6554,19 @@ if HAS_QT:
                     self.lbl_sig_tag.setStyleSheet(
                         "color: #7FD8C0; background: transparent; "
                         "border: none; padding: 0px; "
-                        "font-size: 12.5px; font-weight: 800;")
+                        "font-size: 13px; font-weight: 800;")
                 elif active_stream:
                     self.lbl_sig_tag.setText("● NO SIGNAL")
                     self.lbl_sig_tag.setStyleSheet(
                         "color: #E8B36B; background: transparent; "
                         "border: none; padding: 0px; "
-                        "font-size: 12.5px; font-weight: 800;")
+                        "font-size: 13px; font-weight: 800;")
                 else:
                     self.lbl_sig_tag.setText("● STANDBY")
                     self.lbl_sig_tag.setStyleSheet(
                         "color: #9AA0B0; background: transparent; "
                         "border: none; padding: 0px; "
-                        "font-size: 12.5px; font-weight: 800;")
+                        "font-size: 13px; font-weight: 800;")
             if hasattr(self, "lbl_kv_route"):
                 want_v4l2 = hasattr(self, "chk_v4l2") and self.chk_v4l2.isChecked()
                 want_tap = hasattr(self, "chk_audio_tap") and self.chk_audio_tap.isChecked()

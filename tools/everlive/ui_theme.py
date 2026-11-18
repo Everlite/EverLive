@@ -20,6 +20,7 @@ SURFACE_HOVER = "#262A3C"
 BORDER = "#2A2D3E"
 BORDER_STRONG = "#3A3E54"
 GROUP_BORDER = "#3F455C"
+LABEL = "#AEB4C4"
 
 TEXT = "#E7EBF2"
 TEXT_MUTED = "#9AA0B0"
@@ -75,6 +76,7 @@ TOKENS = {
     "BORDER": BORDER,
     "BORDER_STRONG": BORDER_STRONG,
     "GROUP_BORDER": GROUP_BORDER,
+    "LABEL": LABEL,
     "TEXT": TEXT,
     "TEXT_MUTED": TEXT_MUTED,
     "TEXT_DIM": TEXT_DIM,
@@ -139,10 +141,9 @@ QFrame#telemetryCard {
     border-radius: 14px;
 }
 QFrame#telemetryDeck {
-    background-color: @SURFACE_SUNKEN@;
-    border: none;
-    border-top: 1px solid @BORDER@;
-    border-radius: 0px;
+    background-color: @SURFACE@;
+    border: 1px solid @BORDER@;
+    border-radius: 14px;
 }
 QFrame#cardFrame {
     background-color: @SURFACE@;
@@ -255,7 +256,7 @@ QLabel#sectionTitle {
     letter-spacing: 0.8px;
 }
 QLabel#fieldLabel {
-    color: @TEXT_MUTED@;
+    color: @LABEL@;
     font-size: 14px;
 }
 QLabel#hintText {
@@ -335,8 +336,8 @@ QLabel#footerText {
     font-size: 12.5px;
 }
 QLabel#toggleLabel {
-    color: @TEXT@;
-    font-size: 13px;
+    color: @LABEL@;
+    font-size: 14px;
 }
 QLabel#toggleHint {
     color: @TEXT_DIM@;

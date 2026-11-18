@@ -42,6 +42,14 @@ class WidgetTests(unittest.TestCase):
         switch.setChecked(False)
         self.assertAlmostEqual(switch.get_knob_position(), 0.0)
 
+    def test_toggle_row_switch_is_first(self):
+        from PySide6.QtWidgets import QCheckBox
+        checkbox = QCheckBox("HDR")
+        row = ui_widgets.ToggleRow("HDR", checkbox=checkbox)
+        first = row.layout().itemAt(0).widget()
+        self.assertIs(first, row.switch)
+        self.assertIsNot(first, row.label)
+
     def test_toggle_row_mirrors_checkbox(self):
         from PySide6.QtWidgets import QCheckBox
         checkbox = QCheckBox("HDR")
@@ -132,6 +140,11 @@ class WidgetTests(unittest.TestCase):
         self.assertEqual(control._buttons[0].property("segmentPos"), "first")
         self.assertEqual(control._buttons[1].property("segmentPos"), "middle")
         self.assertEqual(control._buttons[2].property("segmentPos"), "last")
+
+    def test_segmented_control_paints_group_background(self):
+        from PySide6.QtCore import Qt
+        control = ui_widgets.SegmentedControl([("A", 1), ("B", 2)])
+        self.assertTrue(control.testAttribute(Qt.WA_StyledBackground))
 
     def test_segment_button_height(self):
         control = ui_widgets.SegmentedControl(

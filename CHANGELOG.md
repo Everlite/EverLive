@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The bottom bar uses Font Awesome volume, pop-out and fullscreen controls, shows the live capture resolution, and keeps device routing in its tooltip.
   - Added `ui_theme.py` (palette, spacing and application QSS), `ui_widgets.py` (`ToggleSwitch`, `ToggleRow`, `SegmentedControl`, `StatusChip`, `IconButton`) and `fa_icons.py` with bundled Font Awesome Free 6 solid/brand fonts. All three modules and the fonts install with the viewer, and Python tests cover them.
   - The header (72 px) and bottom bar (64 px) are now full-bleed, with the capture source left-aligned beside the version and all runtime actions right-aligned. Segmented controls use square inner edges inside a visible group outline, the type scale is larger, and text buttons share 40 px (header) and 36 px (standard) heights across the header, inspector, dialogs and bottom bar. Every standalone text button carries a border; icon-only buttons stay borderless.
+  - Inspector inputs use stacked labels above their control, toggles put the switch first with the label beside it, and input/toggle labels share one muted colour and size. The segmented groups now paint their outer border correctly, and the telemetry deck is a rounded card with a full outline.
 - **Inspector reorganisation (Advanced mode):**
   - The inspector tabs are now the same segmented control as Simple/Advanced, driving a stacked page view.
   - The three tabs are now **Video EQ**, **Audio & Stream** and **System**.
