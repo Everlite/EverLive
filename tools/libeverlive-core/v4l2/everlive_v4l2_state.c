@@ -33,6 +33,8 @@ static struct everlive_v4l2_handle g_handles[EVERLIVE_V4L2_MAX_FDS];
 static _Atomic int g_open_handle_count;
 static const struct everlive_v4l2_card *g_card;
 static struct everlive_framestore *g_framestore;
+static uint8_t *g_yuyv_scratch;
+static size_t g_yuyv_scratch_cap;
 
 static const struct everlive_v4l2_card *state_card(void)
 {
@@ -303,17 +305,52 @@ static void shm_convert_port(unsigned int port, uint8_t *dst, size_t dst_max,
 
 	for (tries = 0; tries < 8; tries++) {
 		struct everlive_framestore_frame frame;
+		size_t raw_bytes;
 
 		if (!everlive_framestore_read_begin(fs, port, &frame)) {
 			usleep(100);
 			continue;
 		}
 
-		convert_yuy2_frame(frame.data, frame.width, frame.height,
-				   dst, dst_max, dst_w, dst_h, pixfmt);
+		/* Fast-path: YUYV same-size can copy directly inside the seqlock. */
+		if (pixfmt == V4L2_PIX_FMT_YUYV &&
+		    frame.width == dst_w && frame.height == dst_h) {
+			convert_yuy2_frame(frame.data, frame.width, frame.height,
+					   dst, dst_max, dst_w, dst_h, pixfmt);
+			if (everlive_framestore_read_validate(fs, port, &frame))
+				return;
+			usleep(100);
+			continue;
+		}
 
-		if (everlive_framestore_read_validate(fs, port, &frame))
-			return;
+		/*
+		 * For BGR3/NV12/scaled formats, snapshot raw YUYV (~0.5 ms) inside
+		 * the seqlock and convert outside so a slow CPU conversion never
+		 * gets lapped by the 60 Hz producer and causes black-frame flicker.
+		 */
+		raw_bytes = (size_t)frame.width * frame.height * 2U;
+		if (raw_bytes > g_yuyv_scratch_cap) {
+			uint8_t *nb = realloc(g_yuyv_scratch, raw_bytes);
+			if (nb) {
+				g_yuyv_scratch = nb;
+				g_yuyv_scratch_cap = raw_bytes;
+			}
+		}
+		if (g_yuyv_scratch && raw_bytes <= g_yuyv_scratch_cap) {
+			memcpy(g_yuyv_scratch, frame.data, raw_bytes);
+			if (everlive_framestore_read_validate(fs, port, &frame)) {
+				convert_yuy2_frame(g_yuyv_scratch,
+						   frame.width, frame.height,
+						   dst, dst_max,
+						   dst_w, dst_h, pixfmt);
+				return;
+			}
+		} else {
+			convert_yuy2_frame(frame.data, frame.width, frame.height,
+					   dst, dst_max, dst_w, dst_h, pixfmt);
+			if (everlive_framestore_read_validate(fs, port, &frame))
+				return;
+		}
 
 		usleep(100);
 	}
