@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Live GC570D presentation switching (`mode.set`):**
+  - The Live Gamer DUO engine now implements the unified `mode.set` JSON-RPC method. The Console Hub can dock a headless capture session into its viewport, or return it to headless, without releasing VFIO or interrupting the DMA rings, the V4L2/SHM outputs or HDMI audio.
+  - `everlive-ctl runtime mode <gaming|headless> [winid]` exposes the same switch from the CLI.
+- **Console Hub remote-session docking:**
+  - A remote session now offers **Dock Video Here** instead of a disabled Start button, with an automatic fallback that stops the headless user unit and restarts capture locally when the running engine predates `mode.set`. A stopped unit is restarted when the Hub exits.
+  - `everlive-ctl runtime status` reports the real splitter pixel clock instead of a placeholder value.
+
+---
+
 ## [1.7.0] - 2026-11-17
 
 ### Added

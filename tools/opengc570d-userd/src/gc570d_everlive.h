@@ -52,6 +52,14 @@ void gc570d_everlive_set_volume(int volume_pct);
 void gc570d_everlive_set_mute(bool muted);
 void gc570d_everlive_push_audio(int port, const uint8_t *pcm, size_t bytes);
 
+/*
+ * Swap the presentation layer between a window (optionally reparented into
+ * parent_winid) and headless without touching the DMA ring, V4L2 sinks, the
+ * shared-memory frame store or the audio path.  Applied on the frontend thread.
+ */
+int gc570d_everlive_request_mode(bool want_gaming, unsigned long parent_winid);
+unsigned int gc570d_everlive_pixel_clock(void);
+
 /* Read-only accessors for the control plane (safe before start). */
 bool gc570d_everlive_running(void);
 bool gc570d_everlive_headless(void);

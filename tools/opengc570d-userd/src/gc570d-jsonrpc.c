@@ -219,7 +219,7 @@ static void rpc_status(int fd, const char *id)
 		     "\"headless\":%s,\"streaming\":%s,"
 		     "\"signal\":{\"locked\":%s,\"width\":%u,\"height\":%u,"
 		     "\"interlaced\":%s,\"rate_hz\":%.2f,"
-		     "\"pixel_clock_khz\":0},"
+		     "\"pixel_clock_khz\":%u},"
 		     "\"video\":{\"fps\":%.2f,\"frames\":%llu,"
 		     "\"ring_buffers\":4,\"ring_channels\":4,"
 		     "\"output_width\":%u,\"output_height\":%u},"
@@ -247,7 +247,7 @@ static void rpc_status(int fd, const char *id)
 		     streaming ? "true" : "false",
 		     (streaming && !no_signal) ? "true" : "false",
 		     src_w, src_h, interlaced ? "true" : "false",
-		     (double)rate,
+		     (double)rate, gc570d_everlive_pixel_clock(),
 		     fps, (unsigned long long)st.video_seq[port],
 		     out_w, out_h,
 		     audio_rate, audio_ch, audio_ch,
@@ -300,7 +300,7 @@ static void rpc_hello(int fd, const char *id)
 		     "\"audio.mute.set\",\"audio.channels.set\","
 		     "\"osd.set\",\"osd.position.set\",\"aspect.set\","
 		     "\"scale.set\",\"input.set\",\"pip.set\","
-		     "\"hotplug\",\"edid.set\"]}",
+		     "\"mode.set\",\"hotplug\",\"edid.set\"]}",
 		     g_version, (long)getpid(), path_esc);
 	if (n > 0 && (size_t)n < sizeof(result))
 		rpc_reply(fd, id, result);
@@ -580,10 +580,49 @@ static void rpc_edid(int fd, const char *id, const char *line)
 	rpc_ok(fd, id);
 }
 
+static void rpc_mode(int fd, const char *id, const char *line)
+{
+	char mode[24];
+	long pwid = -1;
+	bool gaming;
+	int ret;
+
+	if (!everlive_json_get_string(line, "mode", mode, sizeof(mode))) {
+		rpc_error(fd, id, -32602, "invalid params: mode required");
+		return;
+	}
+
+	if (!strcasecmp(mode, "gaming") || !strcasecmp(mode, "window"))
+		gaming = true;
+	else if (!strcasecmp(mode, "headless") ||
+		 !strcasecmp(mode, "studio"))
+		gaming = false;
+	else {
+		rpc_error(fd, id, -32602, "unknown mode: gaming|headless");
+		return;
+	}
+
+	if (!everlive_json_get_long(line, "parent_winid", &pwid) || pwid < 0)
+		pwid = 0;
+
+	ret = gc570d_everlive_request_mode(gaming, (unsigned long)pwid);
+	if (ret < 0) {
+		rpc_error(fd, id, -32603,
+			  ret == -EOPNOTSUPP ?
+			  "mode.set unavailable: engine built without SDL2" :
+			  "mode.set unavailable: frontend not running");
+		return;
+	}
+
+	rpc_reply(fd, id, gaming ?
+		  "{\"ok\":true,\"mode\":\"gaming\"}" :
+		  "{\"ok\":true,\"mode\":\"headless\"}");
+}
+
 static bool rpc_is_unsupported(const char *method)
 {
 	static const char *const unsupported[] = {
-		"mode.set", "v4l2.set", "hdr.set", "hdr.passthrough",
+		"v4l2.set", "hdr.set", "hdr.passthrough",
 		"hdr.exposure", "framegen.set", "toast.show",
 	};
 
@@ -629,6 +668,8 @@ static void rpc_dispatch(int fd, const char *id, const char *method,
 		rpc_hotplug(fd, id, line);
 	else if (strcmp(method, "edid.set") == 0)
 		rpc_edid(fd, id, line);
+	else if (strcmp(method, "mode.set") == 0)
+		rpc_mode(fd, id, line);
 	else if (rpc_is_unsupported(method))
 		rpc_error(fd, id, -32601,
 			  "method not supported on the GC570D engine");

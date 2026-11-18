@@ -186,6 +186,7 @@ if QSocketNotifier is not None:
             self._pending = {}
             self._methods = {}
             self._version = ""
+            self._supported = set()
 
         # -- state -----------------------------------------------------
 
@@ -196,6 +197,10 @@ if QSocketNotifier is not None:
         @property
         def version(self) -> str:
             return self._version
+
+        def supports(self, method: str) -> bool:
+            """True when the attached engine advertised ``method`` in hello."""
+            return method in self._supported
 
         # -- lifecycle -------------------------------------------------
 
@@ -356,6 +361,19 @@ if QSocketNotifier is not None:
             if parent_winid is not None:
                 params["parent_winid"] = int(parent_winid)
             return self.request("mode.set", params)
+
+        def set_mode_async(self, mode: str,
+                           parent_winid: Optional[int] = None,
+                           callback=None) -> bool:
+            """Like :meth:`set_mode` but delivers the JSON-RPC reply.
+
+            ``callback`` receives the raw reply dict, so the Hub can offer a
+            takeover fallback when an older engine rejects ``mode.set``.
+            """
+            params = {"mode": str(mode)}
+            if parent_winid is not None:
+                params["parent_winid"] = int(parent_winid)
+            return self.request("mode.set", params, callback)
 
         def set_v4l2(self, enabled: bool, device: str = "/dev/video10") -> bool:
             """Attach or detach the v4l2loopback sink on a running engine.
@@ -535,6 +553,9 @@ if QSocketNotifier is not None:
             result = message.get("result")
             if isinstance(result, dict):
                 self._version = str(result.get("version", ""))
+                methods = result.get("methods")
+                if isinstance(methods, list):
+                    self._supported = {str(m) for m in methods}
                 self.helloReceived.emit(result)
 
 else:  # pragma: no cover - PySide6 is a hard dependency of the hub

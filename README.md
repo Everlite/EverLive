@@ -235,7 +235,8 @@ this engine for `0x5700`; all other `1461:0054` cards keep the GC573 engine.
 * **Audio:** validated stereo LPCM capture from both inputs (multichannel passthrough preserved on HDMI OUT), based
   on upstream commit `4673bb9` and splitter PR #6 (`484aa8d`).
 * **Console Hub controls:** HDMI 1 / HDMI 2 input selection, Studio/headless
-  mode, internal-bridge vs downstream EDID policy, HPD pulses, and RGB effects
+  mode, live viewport docking (`mode.set`) without releasing VFIO,
+  internal-bridge vs downstream EDID policy, HPD pulses, and RGB effects
   (`colorful`, `breathing`, `static`, `off`) through the unified JSON-RPC control socket (`everlive.sock` / `everlive-ctl`) and `gc570d-ctl`.
 * **Flexible V4L2 output:** write raw YUYV frames to `v4l2loopback` (`/dev/video10` & `/dev/video11`), or use the module-free preload library (`libgc570d-v4l2.so` for `/dev/video60` & `/dev/video61`) reading from the shared POSIX frame store.
 

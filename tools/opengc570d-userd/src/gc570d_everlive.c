@@ -105,6 +105,9 @@ struct everlive_state {
 	atomic_int scale;
 	atomic_int volume_pct;
 	atomic_bool muted;
+	atomic_bool headless;
+	atomic_int pending_mode;          /* 0 = none, 1 = gaming, 2 = headless */
+	atomic_ulong pending_parent_winid;
 #ifdef HAVE_SDL2
 	atomic_uint audio_dev;
 #endif
@@ -129,6 +132,9 @@ static struct everlive_state g_everlive = {
 	.scale = ATOMIC_VAR_INIT(EVERLIVE_SCALE_FIT),
 	.volume_pct = ATOMIC_VAR_INIT(100),
 	.muted = ATOMIC_VAR_INIT(false),
+	.headless = ATOMIC_VAR_INIT(true),
+	.pending_mode = ATOMIC_VAR_INIT(0),
+	.pending_parent_winid = ATOMIC_VAR_INIT(0),
 #ifdef HAVE_SDL2
 	.audio_dev = ATOMIC_VAR_INIT(0),
 #endif
@@ -506,6 +512,7 @@ struct everlive_sdl {
 	SDL_AudioDeviceID audio_dev;
 	bool fullscreen;
 	unsigned long parent_winid;
+	bool parent_lost;
 	int embed_last_w;
 	int embed_last_h;
 	uint64_t embed_last_sync_ns;
@@ -620,11 +627,40 @@ static void sdl_build_overlay(struct everlive_sdl *sdl, const char *line1,
 }
 
 #if defined(SDL_VIDEO_DRIVER_X11)
+static int (*g_prev_x_error_handler)(Display *, XErrorEvent *);
+
 static int gc570d_x11_ignore_error(Display *dpy, XErrorEvent *ev)
 {
 	(void)dpy;
 	(void)ev;
 	return 0;
+}
+
+/*
+ * Permanent process-wide handler for the X11 embedding path.  When the Hub
+ * window disappears (clean close or crash) the SDL child and its renderer are
+ * torn down while X may still report BadWindow/BadDrawable for in-flight
+ * requests.  Those are expected here; everything else is forwarded to the
+ * handler SDL installed.
+ */
+static int gc570d_x11_tolerant_error(Display *dpy, XErrorEvent *ev)
+{
+	if (ev && (ev->error_code == BadWindow ||
+		   ev->error_code == BadDrawable ||
+		   ev->error_code == BadMatch))
+		return 0;
+	if (g_prev_x_error_handler)
+		return g_prev_x_error_handler(dpy, ev);
+	return 0;
+}
+
+static void sdl_x11_install_tolerant_handler(void)
+{
+	g_prev_x_error_handler = XSetErrorHandler(gc570d_x11_tolerant_error);
+}
+#else
+static void sdl_x11_install_tolerant_handler(void)
+{
 }
 #endif
 
@@ -641,6 +677,8 @@ static void sdl_embed_attach(struct everlive_sdl *sdl)
 
 	if (!sdl->window || !sdl->parent_winid)
 		return;
+
+	sdl->parent_lost = false;
 
 	SDL_VERSION(&wminfo.version);
 	if (!SDL_GetWindowWMInfo(sdl->window, &wminfo) ||
@@ -690,7 +728,8 @@ static void sdl_embed_attach(struct everlive_sdl *sdl)
 #endif
 }
 
-static void sdl_embed_sync_size(struct everlive_sdl *sdl)
+static bool sdl_embed_sync_size(struct everlive_state *st,
+				struct everlive_sdl *sdl)
 {
 #if defined(SDL_VIDEO_DRIVER_X11)
 	SDL_SysWMinfo wminfo;
@@ -706,18 +745,22 @@ static void sdl_embed_sync_size(struct everlive_sdl *sdl)
 	int (*old_handler)(Display *, XErrorEvent *);
 	uint64_t now;
 
-	if (!sdl->window || !sdl->parent_winid)
-		return;
+	if (!sdl->window)
+		return true;
+	if (sdl->parent_lost)
+		return false;
+	if (!sdl->parent_winid)
+		return true;
 
 	now = now_ns();
 	if (now - sdl->embed_last_sync_ns < 25000000ULL)
-		return;
+		return true;
 	sdl->embed_last_sync_ns = now;
 
 	SDL_VERSION(&wminfo.version);
 	if (!SDL_GetWindowWMInfo(sdl->window, &wminfo) ||
 	    wminfo.subsystem != SDL_SYSWM_X11)
-		return;
+		return true;
 
 	dpy = wminfo.info.x11.display;
 	sdl_xwin = wminfo.info.x11.window;
@@ -736,8 +779,27 @@ static void sdl_embed_sync_size(struct everlive_sdl *sdl)
 
 	memset(&attr, 0, sizeof(attr));
 	memset(&self_attr, 0, sizeof(self_attr));
-	if (XGetWindowAttributes(dpy, parent_xwin, &attr) &&
-	    attr.width > 1 && attr.height > 1) {
+	if (!XGetWindowAttributes(dpy, parent_xwin, &attr) ||
+	    attr.width <= 1 || attr.height <= 1) {
+		/*
+		 * The Hub container window disappeared (closed or crashed).
+		 * Keep the SDL window alive but hidden and stop rendering; a
+		 * later mode.set can reparent it into a fresh container.  Do
+		 * not destroy it here: the renderer may still be waiting on a
+		 * present for the dead parent.
+		 */
+		XSync(dpy, False);
+		XSetErrorHandler(old_handler);
+		sdl->parent_lost = true;
+		/* Asynchronous unmap: never block on the dead parent's renderer. */
+		XUnmapWindow(dpy, sdl_xwin);
+		XFlush(dpy);
+		printf("[MODE] Embedded parent window lost; preview suspended\n");
+		fflush(stdout);
+		atomic_store_explicit(&st->headless, true, __ATOMIC_RELEASE);
+		return false;
+	}
+	{
 		bool self_ok = XGetWindowAttributes(dpy, sdl_xwin, &self_attr) != 0;
 		bool geom_mismatch = !self_ok ||
 				     self_attr.x != 0 || self_attr.y != 0 ||
@@ -757,30 +819,153 @@ static void sdl_embed_sync_size(struct everlive_sdl *sdl)
 			XFlush(dpy);
 		}
 	}
+	XSync(dpy, False);
 	XSetErrorHandler(old_handler);
+	return true;
+#else
+	(void)st;
+	(void)sdl;
+	return true;
+#endif
+}
+
+static void sdl_embed_detach(struct everlive_sdl *sdl)
+{
+#if defined(SDL_VIDEO_DRIVER_X11)
+	SDL_SysWMinfo wminfo;
+	Display *dpy;
+	Window sdl_xwin;
+	Window root;
+	int (*old_handler)(Display *, XErrorEvent *);
+
+	if (!sdl->window)
+		return;
+
+	SDL_VERSION(&wminfo.version);
+	if (!SDL_GetWindowWMInfo(sdl->window, &wminfo) ||
+	    wminfo.subsystem != SDL_SYSWM_X11)
+		return;
+
+	dpy = wminfo.info.x11.display;
+	sdl_xwin = wminfo.info.x11.window;
+	root = DefaultRootWindow(dpy);
+
+	old_handler = XSetErrorHandler(gc570d_x11_ignore_error);
+	XReparentWindow(dpy, sdl_xwin, root, 100, 100);
+	XMoveResizeWindow(dpy, sdl_xwin, 100, 100, 1280, 720);
+	SDL_SetWindowSize(sdl->window, 1280, 720);
+	XMapRaised(dpy, sdl_xwin);
+	XSync(dpy, False);
+	XSetErrorHandler(old_handler);
+
+	sdl->embed_last_w = 0;
+	sdl->embed_last_h = 0;
+	sdl->embed_last_sync_ns = 0;
+	sdl->parent_lost = false;
 #else
 	(void)sdl;
 #endif
 }
 
-static bool sdl_init(struct everlive_state *st, struct everlive_sdl *sdl)
+static void sdl_audio_open(struct everlive_state *st, struct everlive_sdl *sdl)
 {
-	Uint32 flags = SDL_INIT_VIDEO | SDL_INIT_EVENTS;
+	SDL_AudioSpec want, have;
+
+	if (sdl->audio_dev > 0)
+		return;
+
+	SDL_SetHint(SDL_HINT_APP_NAME, "EverLive");
+	SDL_SetHint(SDL_HINT_AUDIO_DEVICE_APP_NAME, "EverLive");
+	SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_NAME, "HDMI Game Audio");
+	SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_ROLE, "game");
+
+	if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+		fprintf(stderr,
+			"[gc570d WARN] SDL audio unavailable (%s); PipeWire capture nodes remain active\n",
+			SDL_GetError());
+		return;
+	}
+
+	memset(&want, 0, sizeof(want));
+	want.freq = 48000;
+	want.format = AUDIO_S16LSB;
+	want.channels = 2;
+	want.samples = 1024;
+	sdl->audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+	if (sdl->audio_dev > 0) {
+		SDL_PauseAudioDevice(sdl->audio_dev, 0);
+		atomic_store_explicit(&st->audio_dev,
+				      (unsigned int)sdl->audio_dev,
+				      __ATOMIC_RELEASE);
+		printf("SDL audio: opened %d Hz, %d ch, 16-bit\n",
+		       have.freq, have.channels);
+		fflush(stdout);
+	} else {
+		fprintf(stderr,
+			"[gc570d WARN] SDL audio unavailable (%s); PipeWire capture nodes remain active\n",
+			SDL_GetError());
+	}
+}
+
+static void sdl_audio_close(struct everlive_state *st, struct everlive_sdl *sdl)
+{
+	atomic_store_explicit(&st->audio_dev, 0, __ATOMIC_RELEASE);
+	if (sdl->audio_dev > 0) {
+		SDL_CloseAudioDevice(sdl->audio_dev);
+		sdl->audio_dev = 0;
+	}
+}
+
+static void sdl_presentation_close(struct everlive_sdl *sdl)
+{
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		if (sdl->texture[i])
+			SDL_DestroyTexture(sdl->texture[i]);
+		sdl->texture[i] = NULL;
+		sdl->texture_w[i] = 0;
+		sdl->texture_h[i] = 0;
+		sdl->texture_scale_mode[i] = 0;
+	}
+	if (sdl->overlay)
+		SDL_DestroyTexture(sdl->overlay);
+	sdl->overlay = NULL;
+	free(sdl->overlay_pixels);
+	sdl->overlay_pixels = NULL;
+	sdl->overlay_w = 0;
+	sdl->overlay_h = 0;
+	sdl->overlay_built_ns = 0;
+	if (sdl->renderer)
+		SDL_DestroyRenderer(sdl->renderer);
+	if (sdl->window)
+		SDL_DestroyWindow(sdl->window);
+	sdl->renderer = NULL;
+	sdl->window = NULL;
+	sdl->parent_winid = 0;
+	sdl->parent_lost = false;
+	sdl->embed_last_w = 0;
+	sdl->embed_last_h = 0;
+	sdl->embed_last_sync_ns = 0;
+	sdl->fullscreen = false;
+}
+
+static bool sdl_presentation_open(struct everlive_state *st,
+				  struct everlive_sdl *sdl,
+				  unsigned long parent_winid)
+{
 	Uint32 renderer_flags = SDL_RENDERER_ACCELERATED;
 	Uint32 win_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_SHOWN |
 			   SDL_WINDOW_OPENGL;
-	const char *pwid_env = getenv("EVERLIVE_PARENT_WINID");
 	int window_w = 1280;
 	int window_h = 720;
 
-	if (pwid_env && *pwid_env) {
-		sdl->parent_winid = strtoul(pwid_env, NULL, 0);
-		if (sdl->parent_winid) {
-			SDL_SetHint(SDL_HINT_VIDEODRIVER, "x11");
-			(void)setenv("SDL_VIDEODRIVER", "x11", 1);
-			win_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN |
-				    SDL_WINDOW_BORDERLESS | SDL_WINDOW_OPENGL;
-		}
+	sdl->parent_winid = parent_winid;
+	if (parent_winid) {
+		SDL_SetHint(SDL_HINT_VIDEODRIVER, "x11");
+		(void)setenv("SDL_VIDEODRIVER", "x11", 1);
+		win_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN |
+			    SDL_WINDOW_BORDERLESS | SDL_WINDOW_OPENGL;
 	}
 
 	if (st->opt.vsync)
@@ -791,8 +976,9 @@ static bool sdl_init(struct everlive_state *st, struct everlive_sdl *sdl)
 	SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_NAME, "HDMI Game Audio");
 	SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_ROLE, "game");
 
-	if (SDL_Init(flags) < 0) {
-		fprintf(stderr, "[gc570d WARN] SDL init failed: %s\n", SDL_GetError());
+	if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
+		fprintf(stderr, "[gc570d WARN] SDL video unavailable: %s\n",
+			SDL_GetError());
 		return false;
 	}
 
@@ -814,6 +1000,8 @@ static bool sdl_init(struct everlive_state *st, struct everlive_sdl *sdl)
 		if (!sdl->renderer) {
 			fprintf(stderr, "[gc570d WARN] SDL renderer failed: %s\n",
 				SDL_GetError());
+			SDL_DestroyWindow(sdl->window);
+			sdl->window = NULL;
 			return false;
 		}
 	}
@@ -826,59 +1014,28 @@ static bool sdl_init(struct everlive_state *st, struct everlive_sdl *sdl)
 		sdl->fullscreen = true;
 	}
 
-	/* Open low-latency SDL2 desktop audio monitoring for the active HDMI input */
-	if (SDL_InitSubSystem(SDL_INIT_AUDIO) == 0) {
-		SDL_AudioSpec want, have;
+	sdl_x11_install_tolerant_handler();
+	return true;
+}
 
-		memset(&want, 0, sizeof(want));
-		want.freq = 48000;
-		want.format = AUDIO_S16LSB;
-		want.channels = 2;
-		want.samples = 1024;
-		sdl->audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-		if (sdl->audio_dev > 0) {
-			SDL_PauseAudioDevice(sdl->audio_dev, 0);
-			atomic_store_explicit(&st->audio_dev,
-					      (unsigned int)sdl->audio_dev,
-					      __ATOMIC_RELEASE);
-			printf("SDL audio: opened %d Hz, %d ch, 16-bit\n",
-			       have.freq, have.channels);
-			fflush(stdout);
-		} else {
-			fprintf(stderr,
-				"[gc570d WARN] SDL audio unavailable (%s); PipeWire capture nodes remain active\n",
-				SDL_GetError());
-		}
-	}
+static bool sdl_init(struct everlive_state *st, struct everlive_sdl *sdl)
+{
+	const char *pwid_env = getenv("EVERLIVE_PARENT_WINID");
+	unsigned long parent_winid = 0;
 
+	if (pwid_env && *pwid_env)
+		parent_winid = strtoul(pwid_env, NULL, 0);
+
+	if (!sdl_presentation_open(st, sdl, parent_winid))
+		return false;
+	sdl_audio_open(st, sdl);
 	return true;
 }
 
 static void sdl_destroy(struct everlive_state *st, struct everlive_sdl *sdl)
 {
-	int i;
-
-	atomic_store_explicit(&st->audio_dev, 0, __ATOMIC_RELEASE);
-	if (sdl->audio_dev > 0) {
-		SDL_CloseAudioDevice(sdl->audio_dev);
-		sdl->audio_dev = 0;
-	}
-	for (i = 0; i < 2; i++) {
-		if (sdl->texture[i])
-			SDL_DestroyTexture(sdl->texture[i]);
-		sdl->texture[i] = NULL;
-	}
-	if (sdl->overlay)
-		SDL_DestroyTexture(sdl->overlay);
-	sdl->overlay = NULL;
-	free(sdl->overlay_pixels);
-	sdl->overlay_pixels = NULL;
-	if (sdl->renderer)
-		SDL_DestroyRenderer(sdl->renderer);
-	if (sdl->window)
-		SDL_DestroyWindow(sdl->window);
-	sdl->renderer = NULL;
-	sdl->window = NULL;
+	sdl_audio_close(st, sdl);
+	sdl_presentation_close(sdl);
 	SDL_Quit();
 }
 
@@ -1164,6 +1321,7 @@ static void everlive_log_status(struct everlive_state *st, uint64_t now)
 	unsigned int channels = shm_port_channels(st, port);
 	unsigned int rate = shm_port_rate(st, port);
 	unsigned int profile = shm_port_profile(st, port);
+	unsigned int pclk = gc ? gc->splitter_pclk[port == 0 ? 1 : 2] : 0;
 	double fps = 0.0;
 	uint64_t frames;
 
@@ -1176,9 +1334,9 @@ static void everlive_log_status(struct everlive_state *st, uint64_t now)
 	st->last_fps_frames = st->last_seen[port];
 
 	frames = st->last_seen[port];
-	printf("[VIDEO] Capturing %ux%up @ %u.%02u Hz (VIP %u Hz, %s, pclk 0 kHz) -> %ux%u\n",
+	printf("[VIDEO] Capturing %ux%up @ %u.%02u Hz (VIP %u Hz, %s, pclk %u kHz) -> %ux%u\n",
 	       src_w, src_h, src_fps, 0U, src_fps,
-	       shm_profile_name(profile), out_w, out_h);
+	       shm_profile_name(profile), pclk, out_w, out_h);
 	printf("[STREAM] %ux%up @ %u.%02u Hz -> %ux%u | FPS: %.1f | Frames: %llu\n",
 	       src_w, src_h, src_fps, 0U, out_w, out_h, fps,
 	       (unsigned long long)frames);
@@ -1192,6 +1350,59 @@ static void everlive_log_status(struct everlive_state *st, uint64_t now)
 		printf("[EVERLIVE DUO] HDMI IN 2 has no signal; showing the built-in placeholder\n");
 	fflush(stdout);
 }
+
+#ifdef HAVE_SDL2
+/*
+ * Apply a mode.set request on the frontend thread.  Only the presentation
+ * layer is touched: the capture thread, DMA rings, V4L2 sinks, the shared
+ * frame store and the audio device keep running in both directions.
+ */
+static void everlive_switch_mode(struct everlive_state *st,
+				 struct everlive_sdl *sdl, bool *sdl_ready,
+				 bool want_gaming, unsigned long parent_winid)
+{
+	bool headless = atomic_load_explicit(&st->headless, __ATOMIC_RELAXED);
+
+	if (want_gaming) {
+		if (!*sdl_ready) {
+			if (!sdl_presentation_open(st, sdl, parent_winid)) {
+				fprintf(stderr,
+					"[gc570d WARN] mode.set: video presentation unavailable; staying headless\n");
+				fflush(stdout);
+				return;
+			}
+			*sdl_ready = true;
+		} else if (sdl->parent_lost ||
+			   parent_winid != sdl->parent_winid) {
+			sdl->parent_winid = parent_winid;
+			sdl->parent_lost = false;
+			sdl->embed_last_w = 0;
+			sdl->embed_last_h = 0;
+			sdl->embed_last_sync_ns = 0;
+			if (parent_winid) {
+				SDL_ShowWindow(sdl->window);
+				sdl_embed_attach(sdl);
+			} else {
+				sdl_embed_detach(sdl);
+			}
+		}
+		if (headless)
+			printf("[MODE] Gaming window opened; DMA, V4L2, SHM and audio untouched\n");
+		if (sdl->audio_dev <= 0)
+			sdl_audio_open(st, sdl);
+		atomic_store_explicit(&st->headless, false, __ATOMIC_RELEASE);
+	} else {
+		if (*sdl_ready && !sdl->parent_lost) {
+			sdl_presentation_close(sdl);
+			*sdl_ready = false;
+		}
+		if (!headless)
+			printf("[MODE] Headless: DMA, V4L2, SHM and audio keep running\n");
+		atomic_store_explicit(&st->headless, true, __ATOMIC_RELEASE);
+	}
+	fflush(stdout);
+}
+#endif
 
 static void *everlive_thread(void *arg)
 {
@@ -1217,34 +1428,35 @@ static void *everlive_thread(void *arg)
 		if (!sdl_ready)
 			fprintf(stderr,
 				"[gc570d WARN] EverLive SDL window unavailable; continuing without a preview\n");
-	} else if (st->opt.enable_sdl || st->opt.headless) {
-		/* Open low-latency desktop audio playback even in headless/UI-player mode */
-		SDL_SetHint(SDL_HINT_APP_NAME, "EverLive");
-		SDL_SetHint(SDL_HINT_AUDIO_DEVICE_APP_NAME, "EverLive");
-		SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_NAME, "HDMI Game Audio");
-		SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_ROLE, "game");
-		if (SDL_Init(SDL_INIT_AUDIO) == 0) {
-			SDL_AudioSpec want, have;
-			memset(&want, 0, sizeof(want));
-			want.freq = 48000;
-			want.format = AUDIO_S16LSB;
-			want.channels = 2;
-			want.samples = 1024;
-			sdl.audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-			if (sdl.audio_dev > 0) {
-				SDL_PauseAudioDevice(sdl.audio_dev, 0);
-				atomic_store_explicit(&st->audio_dev,
-						      (unsigned int)sdl.audio_dev,
-						      __ATOMIC_RELEASE);
-			}
-		}
 	}
+	/*
+	 * Desktop audio runs in both modes, including a headless start that is
+	 * later docked into the Console Hub through mode.set.
+	 */
+	if (st->opt.enable_sdl || st->opt.headless)
+		sdl_audio_open(st, &sdl);
 #endif
 
 	while (!atomic_load_explicit(&st->quit, __ATOMIC_RELAXED)) {
 		uint64_t now = now_ns();
 		int active_port = atomic_load_explicit(&st->port, __ATOMIC_RELAXED);
 		bool updated[2] = { false, false };
+
+#ifdef HAVE_SDL2
+		{
+			int pending = atomic_exchange_explicit(
+				&st->pending_mode, 0, __ATOMIC_ACQ_REL);
+
+			if (pending == 1 || pending == 2) {
+				unsigned long pwid = atomic_load_explicit(
+					&st->pending_parent_winid,
+					__ATOMIC_RELAXED);
+
+				everlive_switch_mode(st, &sdl, &sdl_ready,
+						     pending == 1, pwid);
+			}
+		}
+#endif
 
 		for (i = 0; i < 2; i++) {
 			if (everlive_snapshot(st, i))
@@ -1303,8 +1515,8 @@ static void *everlive_thread(void *arg)
 				keep_running = false;
 				break;
 			}
-			sdl_embed_sync_size(&sdl);
-			sdl_render_frame(st, &sdl);
+			if (sdl_embed_sync_size(st, &sdl))
+				sdl_render_frame(st, &sdl);
 		}
 #else
 		(void)keep_running;
@@ -1368,6 +1580,9 @@ int gc570d_everlive_start(struct everlive_framestore *framestore,
 	atomic_init(&g_everlive.scale, parse_scale_mode(options->scale));
 	atomic_init(&g_everlive.volume_pct, vol);
 	atomic_init(&g_everlive.muted, options->muted);
+	atomic_init(&g_everlive.headless, options->headless);
+	atomic_init(&g_everlive.pending_mode, 0);
+	atomic_init(&g_everlive.pending_parent_winid, 0);
 #ifdef HAVE_SDL2
 	atomic_init(&g_everlive.audio_dev, 0);
 #endif
@@ -1407,13 +1622,29 @@ int gc570d_everlive_start(struct everlive_framestore *framestore,
 
 void gc570d_everlive_stop(void)
 {
+	struct timespec deadline;
 	int i;
+	bool joined;
 
 	if (!atomic_load_explicit(&g_everlive.started, __ATOMIC_ACQUIRE))
 		return;
 
 	atomic_store_explicit(&g_everlive.quit, true, __ATOMIC_RELAXED);
-	pthread_join(g_everlive.thread, NULL);
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_sec += 2;
+	joined = pthread_timedjoin_np(g_everlive.thread, NULL, &deadline) == 0;
+	if (!joined) {
+		/*
+		 * A dead embedded container can leave the SDL/X11 thread blocked
+		 * in the GPU or Xlib.  The capture side has already been asked to
+		 * quit, and the kernel releases VFIO on exit, so do not let a
+		 * wedged preview thread hang `systemctl stop` forever.
+		 */
+		fprintf(stderr,
+			"[gc570d WARN] frontend thread did not stop within 2 s; forcing exit\n");
+		fflush(stderr);
+		_exit(0);
+	}
 	atomic_store_explicit(&g_everlive.started, false, __ATOMIC_RELEASE);
 	atomic_store_explicit(&g_everlive.running, false, __ATOMIC_RELEASE);
 
@@ -1624,7 +1855,34 @@ bool gc570d_everlive_headless(void)
 {
 	if (!atomic_load_explicit(&g_everlive.started, __ATOMIC_RELAXED))
 		return true;
-	return READ_ONCE(g_everlive.opt.headless);
+	return atomic_load_explicit(&g_everlive.headless, __ATOMIC_RELAXED);
+}
+
+int gc570d_everlive_request_mode(bool want_gaming, unsigned long parent_winid)
+{
+	if (!atomic_load_explicit(&g_everlive.started, __ATOMIC_ACQUIRE))
+		return -ENODEV;
+#ifndef HAVE_SDL2
+	(void)want_gaming;
+	(void)parent_winid;
+	return -EOPNOTSUPP;
+#else
+	atomic_store_explicit(&g_everlive.pending_parent_winid, parent_winid,
+			      __ATOMIC_RELAXED);
+	atomic_store_explicit(&g_everlive.pending_mode,
+			      want_gaming ? 1 : 2, __ATOMIC_RELEASE);
+	return 0;
+#endif
+}
+
+unsigned int gc570d_everlive_pixel_clock(void)
+{
+	struct gc570d_dev *gc = READ_ONCE(g_everlive.gc);
+	int port = atomic_load_explicit(&g_everlive.port, __ATOMIC_RELAXED);
+
+	if (!gc)
+		return 0;
+	return gc->splitter_pclk[port == 0 ? 1 : 2];
 }
 
 int gc570d_everlive_port(void)
