@@ -27,8 +27,8 @@ try:
     import ui_theme
     import ui_widgets
     from card_profile import detect_card_profile
-    from ui_widgets import (CollapsibleCard, IconButton, SegmentedControl,
-                            StatusChip, ToggleRow)
+    from ui_widgets import (IconButton, SegmentedControl, StatusChip,
+                            ToggleRow)
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
                                  paused_state as handoff_paused_state)
 except ImportError:  # imported as a module from another working directory
@@ -39,8 +39,8 @@ except ImportError:  # imported as a module from another working directory
     import ui_theme
     import ui_widgets
     from card_profile import detect_card_profile
-    from ui_widgets import (CollapsibleCard, IconButton, SegmentedControl,
-                            StatusChip, ToggleRow)
+    from ui_widgets import (IconButton, SegmentedControl, StatusChip,
+                            ToggleRow)
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
                                  paused_state as handoff_paused_state)
 
@@ -136,7 +136,6 @@ DEFAULT_SETTINGS = {
     "duo_edid_bridge": True,
     "popout_window": False,
     "ui_mode": "simple",
-    "telemetry_collapsed": False,
 }
 
 
@@ -212,8 +211,6 @@ def load_settings() -> dict:
         settings["popout_window"] = False
     if settings.get("ui_mode") not in ("simple", "advanced"):
         settings["ui_mode"] = "simple"
-    if not isinstance(settings.get("telemetry_collapsed"), bool):
-        settings["telemetry_collapsed"] = False
     # "bitstream" used to be a separate EDID profile.  Every built-in profile
     # now advertises AC-3/DTS, so old settings migrate to the unified default.
     if settings.get("edid_profile") == "bitstream":
@@ -3211,18 +3208,12 @@ if HAS_QT:
 
             top_bar.addStretch(1)
 
-            # Passive capture state. Simple mode swaps the idle Start button
-            # for this chip once the engine is delivering frames.
-            self.chip_capture = StatusChip("Local Capture Active", "active")
-            self.chip_capture.setVisible(False)
-            top_bar.addWidget(self.chip_capture, 0, Qt.AlignVCenter)
-
             # Hidden compatibility carrier; existing update paths still write
             # the compact status text here and to the card-chip tooltip.
             self.lbl_pill = QLabel("○ Standby")
             self.lbl_pill.setVisible(False)
 
-            # Primary runtime actions
+            # Primary runtime actions (right-aligned with the mode switch).
             self.btn_launch = QPushButton("Start Gaming")
             self.btn_launch.setObjectName("btnLaunchStart")
             self.btn_launch.setCursor(Qt.PointingHandCursor)
@@ -3265,7 +3256,7 @@ if HAS_QT:
             self.btn_resync.clicked.connect(self.force_resync)
             top_bar.addWidget(self.btn_resync, 0, Qt.AlignVCenter)
 
-            top_bar.addStretch(1)
+            top_bar.addSpacing(6)
 
             self.seg_mode = SegmentedControl(
                 [("Simple", "simple"), ("Advanced", "advanced")],
@@ -3361,14 +3352,16 @@ if HAS_QT:
             # =============================================================
             # 2A-Bottom. Compact Unified EverLive Telemetry Strip
             # =============================================================
-            self.telemetry_strip = CollapsibleCard(
-                "Telemetry Deck",
-                collapsed=bool(
-                    self.saved_cfg.get("telemetry_collapsed", False)))
-            self.telemetry_strip.set_expanded_height(132)
-            self.telemetry_strip.collapsedChanged.connect(
-                self._on_telemetry_collapsed)
-            self.telemetry_deck = self.telemetry_strip
+            self.telemetry_strip = QFrame()
+            self.telemetry_strip.setObjectName("telemetryDeck")
+            self.telemetry_strip.setFixedHeight(132)
+            deck_layout = QVBoxLayout(self.telemetry_strip)
+            deck_layout.setContentsMargins(16, 6, 16, 10)
+            deck_layout.setSpacing(4)
+            deck_title = QLabel("Telemetry Deck")
+            deck_title.setObjectName("deckTitle")
+            deck_title.setAlignment(Qt.AlignCenter)
+            deck_layout.addWidget(deck_title)
             tele_row = QHBoxLayout()
             tele_row.setContentsMargins(0, 0, 0, 0)
             tele_row.setSpacing(14)
@@ -3497,7 +3490,7 @@ if HAS_QT:
 
             self.lbl_tele_cadence = QLabel("CPU: —% · GPU: —%")
             self.lbl_tele_cadence.setVisible(False)
-            self.telemetry_strip.body_layout.addLayout(tele_row)
+            deck_layout.addLayout(tele_row)
             stage_col.addWidget(self.telemetry_strip, 0)
             workspace_layout.addWidget(self.center_stage_widget, 1)
 
@@ -4449,10 +4442,6 @@ if HAS_QT:
         def on_help_clicked(self):
             self._open_shortcuts_dialog()
 
-        def _on_telemetry_collapsed(self, collapsed: bool):
-            self.saved_cfg["telemetry_collapsed"] = bool(collapsed)
-            save_settings({"telemetry_collapsed": bool(collapsed)})
-
         def _apply_ui_mode(self, mode: str, persist: bool = True):
             mode = "advanced" if str(mode).lower() == "advanced" else "simple"
             self.ui_mode = mode
@@ -4570,37 +4559,24 @@ if HAS_QT:
                 label = "Standby"
 
             ui_mode = getattr(self, "ui_mode", "simple")
-            # Simple mode swaps the idle Start button for the passive chip;
-            # Advanced always keeps the explicit Stop button available.
+            # Simple mode hides the explicit Start/Stop action while running;
+            # Advanced always keeps Stop available.
             show_launch = (
                 ui_mode == "advanced"
                 or not active
                 or mode == "studio")
-            show_header_chip = (
-                active and not (
-                    self.width() < 1200 and ui_mode == "advanced"))
-            # The running state adds the status chip and Stop action; use the
-            # compact card name so the right-hand group still fits.
             if hasattr(self, "lbl_card_title"):
-                short = (self.width() < 1340
-                         or (active and self.width() < 1600))
+                short = self.width() < 1340
                 card_label = (getattr(self, "_card_short_label", "")
                               if short
                               else getattr(self, "_card_full_label", ""))
                 if card_label:
                     self.lbl_card_title.setText(card_label)
-            state = (label, active, show_launch, ui_mode, remote,
-                     show_header_chip)
+            state = (label, active, show_launch, ui_mode, remote)
             if getattr(self, "_capture_ui_state", None) == state:
                 return
             self._capture_ui_state = state
 
-            if hasattr(self, "chip_capture"):
-                self.chip_capture.set_state(
-                    label, "active" if active else "idle")
-                # Advanced keeps the explicit Stop action at narrow widths;
-                # the bottom bar already carries the capture status there.
-                self.chip_capture.setVisible(show_header_chip)
             if hasattr(self, "chip_bar_capture"):
                 self.chip_bar_capture.set_state(
                     label.upper(), "active" if active else "idle")
@@ -6765,13 +6741,6 @@ if HAS_QT:
                     text += f" @ {live['framerate']}"
                 if self.chip_bar_capture.state_text() != text:
                     self.chip_bar_capture.set_state(text, "active")
-
-            if hasattr(self, "telemetry_deck"):
-                fps_txt = (self.lbl_fps_hero.text()
-                           if hasattr(self, "lbl_fps_hero") else "0.0")
-                state = (self.lbl_sig_tag.text()
-                         if hasattr(self, "lbl_sig_tag") else "")
-                self.telemetry_deck.set_summary(f"{fps_txt} FPS · {state}")
 
         def on_preset_changed(self, *_):
             if self.vfio_mode:

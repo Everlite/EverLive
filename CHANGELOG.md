@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Console Hub shell refresh (Simple / Advanced):**
-  - Fresh installs open in **Simple** mode: a full-width video stage with no inspector or telemetry deck, a passive `Local Capture Active` chip while running, and a full-width bottom audio/status bar. The choice persists as `ui_mode`.
-  - **Advanced** restores the inspector and telemetry strip. The header now carries a compound capture-source group (card name plus DUO HDMI 1/2 input), a passive capture chip, larger Studio/Restart actions and mode switch, and Font Awesome Discord, GitHub and Help buttons.
+  - Fresh installs open in **Simple** mode: a full-width video stage with no inspector or telemetry deck, a `Local Capture Active` status chip in the bottom bar while running, and a full-width bottom audio/status bar. The choice persists as `ui_mode`.
+  - **Advanced** restores the inspector and telemetry deck. The header now carries a compound capture-source group (card name plus DUO HDMI 1/2 input), right-aligned Start/Stop, Studio and Restart actions, the mode switch, and Font Awesome Discord, GitHub and Help buttons.
   - The bottom bar uses Font Awesome volume, pop-out and fullscreen controls, shows the live capture resolution, and keeps device routing in its tooltip.
   - Added `ui_theme.py` (palette, spacing and application QSS), `ui_widgets.py` (`ToggleSwitch`, `ToggleRow`, `SegmentedControl`, `StatusChip`, `IconButton`) and `fa_icons.py` with bundled Font Awesome Free 6 solid/brand fonts. All three modules and the fonts install with the viewer, and Python tests cover them.
   - The header (72 px) and bottom bar (64 px) are now full-bleed, with the capture source left-aligned beside the version and all runtime actions right-aligned. Segmented controls use square inner edges inside a visible group outline, the type scale is larger, and text buttons share 40 px (header) and 36 px (standard) heights across the header, inspector, dialogs and bottom bar. Every standalone text button carries a border; icon-only buttons stay borderless.
@@ -28,8 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Telemetry Deck:**
   - The pinned EDID card is compact, with Bridge/Copy on one row and Pulse HPD beneath, freeing vertical space in the System tab.
   - The deck sits below the video stage in the centre column (not under the inspector) and follows the mockup layout: status and lock state, frame-rate sparkline, PCIe DMA/latency bars and DMA/GPU/CPU orbs.
-  - A centred collapsible `Telemetry Deck` header shows a compact FPS/signal summary when collapsed and persists `telemetry_collapsed`.
-  - Simple mode hides the deck entirely; expanding Advanced restores the last collapse state.
+  - A centred `Telemetry Deck` title sits above the metrics; the deck is always expanded and has no collapse control.
+  - Simple mode hides the deck entirely.
 - **Live GC570D presentation switching (`mode.set`):**
   - The Live Gamer DUO engine now implements the unified `mode.set` JSON-RPC method. The Console Hub can dock a headless capture session into its viewport, or return it to headless, without releasing VFIO or interrupting the DMA rings, the V4L2/SHM outputs or HDMI audio.
   - `everlive-ctl runtime mode <gaming|headless> [winid]` exposes the same switch from the CLI.
