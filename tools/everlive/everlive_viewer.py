@@ -27,8 +27,8 @@ try:
     import ui_theme
     import ui_widgets
     from card_profile import detect_card_profile
-    from ui_widgets import (IconButton, SegmentedControl, StatusChip,
-                            ToggleRow)
+    from ui_widgets import (IconButton, IconTextButton, SegmentedControl,
+                            StatusChip, SwatchComboBox, ToggleRow)
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
                                  paused_state as handoff_paused_state)
 except ImportError:  # imported as a module from another working directory
@@ -39,8 +39,8 @@ except ImportError:  # imported as a module from another working directory
     import ui_theme
     import ui_widgets
     from card_profile import detect_card_profile
-    from ui_widgets import (IconButton, SegmentedControl, StatusChip,
-                            ToggleRow)
+    from ui_widgets import (IconButton, IconTextButton, SegmentedControl,
+                            StatusChip, SwatchComboBox, ToggleRow)
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
                                  paused_state as handoff_paused_state)
 
@@ -3138,7 +3138,7 @@ if HAS_QT:
             self.header_widget.setObjectName("headerBar")
             self.header_widget.setFixedHeight(ui_theme.HEADER_HEIGHT)
             top_bar = QHBoxLayout(self.header_widget)
-            top_bar.setContentsMargins(16, 0, 16, 0)
+            top_bar.setContentsMargins(12, 8, 12, 8)
             top_bar.setSpacing(8)
             self.top_bar = top_bar
 
@@ -3194,7 +3194,7 @@ if HAS_QT:
                 saved_input = load_settings().get("duo_input", 0)
                 self.combo_duo_input = SegmentedControl(
                     [("HDMI 1", 0), ("HDMI 2", 1)],
-                    button_height=26, object_name="sourceSegments")
+                    button_height=28, object_name="sourceSegments")
                 self.combo_duo_input.setFixedHeight(30)
                 self.combo_duo_input.setCurrentData(
                     1 if saved_input == 1 else 0)
@@ -3216,23 +3216,20 @@ if HAS_QT:
             self.lbl_pill.setVisible(False)
 
             # Primary runtime actions (right-aligned with the mode switch).
-            self.btn_launch = QPushButton("Start Gaming")
+            self.btn_launch = IconTextButton(
+                "Start Gaming", "play", text_color="#FFFFFF",
+                divider_color="#3FA98E")
             self.btn_launch.setObjectName("btnLaunchStart")
             self.btn_launch.setCursor(Qt.PointingHandCursor)
             self.btn_launch.setFixedHeight(ui_theme.CONTROL_H)
-            self.btn_launch.setIconSize(QSize(14, 14))
-            self.btn_launch.setIcon(
-                fa_icons.icon("play", "#FFFFFF", 14))
             self.btn_launch.clicked.connect(self.toggle_stream)
             top_bar.addWidget(self.btn_launch, 0, Qt.AlignVCenter)
 
-            self.btn_studio = QPushButton("Studio")
+            self.btn_studio = IconTextButton(
+                "Studio", "tower-broadcast", text_color="#E7EBF2")
             self.btn_studio.setObjectName("btnStudioStart")
             self.btn_studio.setCursor(Qt.PointingHandCursor)
             self.btn_studio.setFixedHeight(ui_theme.CONTROL_H)
-            self.btn_studio.setIconSize(QSize(14, 14))
-            self.btn_studio.setIcon(
-                fa_icons.icon("tower-broadcast", "#E7EBF2", 14))
             self.btn_studio.setToolTip(
                 "Runs the userspace engine headless and publishes native video & audio "
                 "to PipeWire, Userspace SHM (libgc570d-v4l2.so), and optional V4L2 for OBS/Discord.")
@@ -3243,14 +3240,12 @@ if HAS_QT:
                     "Studio / headless mode requires the userspace VFIO engine.")
             top_bar.addWidget(self.btn_studio, 0, Qt.AlignVCenter)
 
-            self.btn_resync = QPushButton(
-                "Restart" if self.vfio_mode else "Re-sync")
+            self.btn_resync = IconTextButton(
+                "Restart" if self.vfio_mode else "Re-sync",
+                "rotate", text_color="#E7EBF2")
             self.btn_resync.setObjectName("btnGhost")
             self.btn_resync.setCursor(Qt.PointingHandCursor)
             self.btn_resync.setFixedHeight(ui_theme.CONTROL_H)
-            self.btn_resync.setIconSize(QSize(14, 14))
-            self.btn_resync.setIcon(
-                fa_icons.icon("rotate", "#E7EBF2", 14))
             self.btn_resync.setToolTip(
                 "Restart the userspace VFIO engine. HDMI hot-switching is automatic."
                 if self.vfio_mode else
@@ -3262,7 +3257,7 @@ if HAS_QT:
 
             self.seg_mode = SegmentedControl(
                 [("Simple", "simple"), ("Advanced", "advanced")],
-                button_height=26)
+                button_height=28)
             self.seg_mode.setFixedHeight(ui_theme.CONTROL_H)
             self.seg_mode.setToolTip(
                 "Simple hides the inspector and telemetry deck. Advanced "
@@ -3497,12 +3492,12 @@ if HAS_QT:
 
             self.lbl_budget_note = QLabel("Budget 16.7 ms / frame")
             self.lbl_budget_note.setStyleSheet(
-                "color: #7D7694; font-family: 'JetBrains Mono', monospace; "
+                "color: #94A3B8; font-family: 'JetBrains Mono', monospace; "
                 "font-size: 13px;")
             seg3.addWidget(self.lbl_budget_note)
 
             self.lbl_fg_status = QLabel("VRAM: — / — GB")
-            self.lbl_fg_status.setObjectName("hintText")
+            self.lbl_fg_status.setObjectName("telemetryMeta")
             seg3.addWidget(self.lbl_fg_status)
 
             self.lbl_tele_pipeline = QLabel(
@@ -3630,7 +3625,7 @@ if HAS_QT:
 
             self.inspector_tabbar = SegmentedControl(
                 [("Video", 0), ("Audio && Stream", 1), ("System", 2)],
-                button_height=26)
+                button_height=28)
             self.inspector_tabbar.setFixedHeight(ui_theme.CONTROL_H)
             dock_layout.addWidget(self.inspector_tabbar)
 
@@ -3649,15 +3644,18 @@ if HAS_QT:
                 self.inspector_tabs.setCurrentIndex)
             # --- Pinned EDID & Handshake footer (always visible) ---
             card_edid, grid_edid = _section("EDID & HANDSHAKE", "#38BDF8")
+            card_edid.setObjectName("edidCard")
             grid_edid.setColumnStretch(0, 1)
             grid_edid.setColumnStretch(1, 1)
 
             if self.duo_mode:
-                edid_mode_text = "Mode: Downstream Copy"
+                edid_mode_text = "Downstream Copy"
             else:
-                edid_mode_text = f"Mode: {self._edid_profile_label()}"
-            self.lbl_edid_mode = QLabel(edid_mode_text)
+                edid_mode_text = self._edid_profile_label()
+            self.lbl_edid_mode = QLabel()
             self.lbl_edid_mode.setObjectName("hintText")
+            self.lbl_edid_mode.setTextFormat(Qt.RichText)
+            self._set_edid_mode_text(edid_mode_text)
             self.lbl_edid_mode.setWordWrap(True)
             grid_edid.addWidget(self.lbl_edid_mode, 0, 0, 1, 2)
 
@@ -4102,7 +4100,7 @@ if HAS_QT:
             card_hw, grid_hw = _section("HARDWARE RGB LED", "#F287A7")
             grid_hw.setColumnStretch(0, 1)
 
-            self.combo_led = _shrinkable(QComboBox())
+            self.combo_led = _shrinkable(SwatchComboBox())
             self.combo_led.setIconSize(QSize(14, 14))
             for name, val in LED_MODES.items():
                 icon = create_led_icon(val)
@@ -4316,19 +4314,17 @@ if HAS_QT:
             self.bottom_box.setObjectName("bottomBar")
             self.bottom_box.setFixedHeight(ui_theme.BOTTOM_BAR_HEIGHT)
             b_layout = QHBoxLayout(self.bottom_box)
-            b_layout.setContentsMargins(24, 0, 24, 0)
+            b_layout.setContentsMargins(12, 8, 12, 8)
             b_layout.setSpacing(10)
 
             initial_vol = int(self.saved_cfg.get("volume", 1.0) * 100)
 
-            self.btn_mute = QPushButton(" Mute")
+            self.btn_mute = IconTextButton(
+                "Mute", "volume", text_color="#E7EBF2")
             self.btn_mute.setObjectName("btnBar")
             self.btn_mute.setFixedHeight(ui_theme.BUTTON_H)
-            self.btn_mute.setFixedWidth(92)
+            self.btn_mute.setFixedWidth(112)
             self.btn_mute.setCursor(Qt.PointingHandCursor)
-            self.btn_mute.setIconSize(QSize(14, 14))
-            self.btn_mute.setIcon(
-                fa_icons.icon("volume", "#E7EBF2", 14))
             self.btn_mute.clicked.connect(self.toggle_mute)
             b_layout.addWidget(self.btn_mute, 0, Qt.AlignVCenter)
 
@@ -4392,14 +4388,13 @@ if HAS_QT:
 
             b_layout.addStretch(1)
 
-            self.chk_popout = QPushButton("Pop-out")
+            self.chk_popout = IconTextButton(
+                "Pop-out", "external", text_color="#9AA0B0",
+                icon_size=13)
             self.chk_popout.setObjectName("btnBar")
             self.chk_popout.setCursor(Qt.PointingHandCursor)
             self.chk_popout.setFixedHeight(ui_theme.BUTTON_H)
             self.chk_popout.setCheckable(True)
-            self.chk_popout.setIconSize(QSize(13, 13))
-            self.chk_popout.setIcon(
-                fa_icons.icon("external", "#9AA0B0", 13, "#E7EBF2"))
             self.chk_popout.setToolTip(
                 "Pop the video out into a standalone SDL window. "
                 "Unchecked keeps the zero-latency embedded surface.")
@@ -4408,13 +4403,12 @@ if HAS_QT:
             self.chk_popout.toggled.connect(self.on_popout_toggled)
             b_layout.addWidget(self.chk_popout, 0, Qt.AlignVCenter)
 
-            self.btn_cinema_fs = QPushButton("Fullscreen")
+            self.btn_cinema_fs = IconTextButton(
+                "Fullscreen", "expand", text_color="#9AA0B0",
+                icon_size=13)
             self.btn_cinema_fs.setObjectName("btnBar")
             self.btn_cinema_fs.setCursor(Qt.PointingHandCursor)
             self.btn_cinema_fs.setFixedHeight(ui_theme.BUTTON_H)
-            self.btn_cinema_fs.setIconSize(QSize(13, 13))
-            self.btn_cinema_fs.setIcon(
-                fa_icons.icon("expand", "#9AA0B0", 13, "#E7EBF2"))
             self.btn_cinema_fs.setToolTip(
                 "Expand the embedded video stage to fullscreen "
                 "(F / F11 / double-click · Esc exits)")
@@ -4559,7 +4553,7 @@ if HAS_QT:
             if hasattr(self, "btn_github"):
                 self.btn_github.setVisible(self.width() >= 1240)
             if hasattr(self, "btn_discord"):
-                self.btn_discord.setVisible(self.width() >= 1160)
+                self.btn_discord.setVisible(self.width() >= 1220)
             if hasattr(self, "top_bar"):
                 self.top_bar.setSpacing(6 if narrow else 8)
                 self.top_bar.setContentsMargins(
@@ -4616,19 +4610,28 @@ if HAS_QT:
                 if override:
                     icon = (str(override), "#FFFFFF")
                 if icon:
-                    self.btn_launch.setIcon(
-                        fa_icons.icon(icon[0], icon[1], 14))
+                    if hasattr(self.btn_launch, "set_icon_name"):
+                        self.btn_launch.set_icon_name(icon[0])
+                    else:
+                        self.btn_launch.setIcon(
+                            fa_icons.icon(icon[0], icon[1], 14))
             if hasattr(self, "btn_studio"):
                 self.btn_studio.setText(_label(self.btn_studio))
                 icon = action_icons.get(self.btn_studio.objectName())
                 if icon:
-                    self.btn_studio.setIcon(
-                        fa_icons.icon(icon[0], icon[1], 14))
+                    if hasattr(self.btn_studio, "set_icon_name"):
+                        self.btn_studio.set_icon_name(icon[0])
+                    else:
+                        self.btn_studio.setIcon(
+                            fa_icons.icon(icon[0], icon[1], 14))
             if hasattr(self, "btn_resync"):
                 self.btn_resync.setText(
                     "Restart" if self.vfio_mode else "Re-sync")
-                self.btn_resync.setIcon(
-                    fa_icons.icon("rotate", "#E7EBF2", 14))
+                if hasattr(self.btn_resync, "set_icon_name"):
+                    self.btn_resync.set_icon_name("rotate")
+                else:
+                    self.btn_resync.setIcon(
+                        fa_icons.icon("rotate", "#E7EBF2", 14))
 
         def _compact_signal_text(self):
             """Compact bottom-bar badge: state or resolution + audio format."""
@@ -4710,9 +4713,13 @@ if HAS_QT:
                 self.btn_cinema_fs.setText(
                     "Exit Fullscreen" if self._cinema_fullscreen
                     else "Fullscreen")
-                self.btn_cinema_fs.setIcon(fa_icons.icon(
-                    "compress" if self._cinema_fullscreen else "expand",
-                    "#9AA0B0", 13, "#E7EBF2"))
+                if hasattr(self.btn_cinema_fs, "set_icon_name"):
+                    self.btn_cinema_fs.set_icon_name(
+                        "compress" if self._cinema_fullscreen else "expand")
+                else:
+                    self.btn_cinema_fs.setIcon(fa_icons.icon(
+                        "compress" if self._cinema_fullscreen else "expand",
+                        "#9AA0B0", 13, "#E7EBF2"))
             if self._cinema_fullscreen:
                 self.header_widget.setVisible(False)
                 self.telemetry_strip.setVisible(False)
@@ -6123,14 +6130,19 @@ if HAS_QT:
                 self._restore_service_after_failed_start()
                 QTimer.singleShot(300, self._restore_led_after_stream)
 
+        def _set_edid_mode_text(self, mode_value: str):
+            if not hasattr(self, "lbl_edid_mode"):
+                return
+            self.lbl_edid_mode.setText(
+                "<span style=\"color:#94A3B8;\">Mode:</span> "
+                f"<span style=\"color:#CBD5E1;\">{mode_value}</span>")
+
         def _duo_edid_action(self, bridge: bool):
             if not self.duo_mode:
                 return
             save_settings({"duo_edid_bridge": bool(bridge)})
-            if hasattr(self, "lbl_edid_mode"):
-                self.lbl_edid_mode.setText(
-                    "Mode: Built-in Bridge" if bridge
-                    else "Mode: Downstream Copy")
+            self._set_edid_mode_text(
+                "Built-in Bridge" if bridge else "Downstream Copy")
             self._update_vdev_label()
             if not self.streamer.is_running:
                 self._set_vfio_notice(
@@ -7029,13 +7041,14 @@ if HAS_QT:
             if not hasattr(self, "btn_mute"):
                 return
             icon_name = "mute" if self.muted else "volume"
-            if hasattr(self.btn_mute, "set_icon"):
+            if hasattr(self.btn_mute, "set_icon_name"):
+                self.btn_mute.set_icon_name(icon_name)
+            elif hasattr(self.btn_mute, "set_icon"):
                 self.btn_mute.set_icon(icon_name)
             else:
-                self.btn_mute.setText(
-                    " Unmute" if self.muted else " Mute")
                 self.btn_mute.setIcon(
                     fa_icons.icon(icon_name, "#E7EBF2", 14))
+            self.btn_mute.setText("Unmute" if self.muted else "Mute")
             self.btn_mute.setToolTip(
                 "Unmute HDMI audio" if self.muted else "Mute HDMI audio")
             self.btn_mute.setStyleSheet(

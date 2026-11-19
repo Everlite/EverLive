@@ -46,8 +46,7 @@ class TokenTests(unittest.TestCase):
                        "QFrame#telemetryDeck",
                        "QFrame#cardFrame",
                        "QFrame#sourceGroup",
-                       "\nQPushButton {",
-                       "\nQComboBox {"):
+                       "\nQPushButton {"):
             start = stylesheet.index(needle)
             block = stylesheet[start:stylesheet.index("}", start)]
             self.assertIn("border-radius: 12px", block, needle)
@@ -56,7 +55,7 @@ class TokenTests(unittest.TestCase):
         import re
         stylesheet = ui_theme.build_stylesheet()
         values = set(re.findall(r"border-radius:\s*([^;]+);", stylesheet))
-        self.assertLessEqual(values, {"0px", "2px", "6px", "7px", "12px"}, values)
+        self.assertLessEqual(values, {"0px", "2px", "6px", "7px", "8px", "12px"}, values)
 
     def test_segment_inner_edges_stay_square(self):
         stylesheet = ui_theme.build_stylesheet()
@@ -77,6 +76,24 @@ class TokenTests(unittest.TestCase):
         self.assertIn("height: 14px", block)
         self.assertIn("border-radius: 7px", block)
         self.assertIn("background: #F8FAFC", block)
+
+    def test_section_headers_and_combo_geometry(self):
+        stylesheet = ui_theme.build_stylesheet()
+        start = stylesheet.index("QLabel#sectionTitle")
+        block = stylesheet[start:stylesheet.index("}", start)]
+        self.assertIn("font-size: 12px", block)
+        self.assertIn("#CBD5E1", block)
+        self.assertIn("letter-spacing: 0.7px", block)
+
+        start = stylesheet.index("\nQComboBox {")
+        block = stylesheet[start:stylesheet.index("}", start)]
+        self.assertIn("border-bottom: 1px solid #334155", block)
+        self.assertIn("border-radius: 6px", block)
+
+        start = stylesheet.index("QComboBox::drop-down")
+        block = stylesheet[start:stylesheet.index("}", start)]
+        self.assertIn("border-left: 1px solid #334155", block)
+        self.assertIn("width: 28px", block)
 
     def test_missing_tokens_reports_typos(self):
         found = ui_theme.missing_tokens("color: @NOT_A_TOKEN@;")

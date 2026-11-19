@@ -148,6 +148,11 @@ QFrame#telemetryCard {
     border: 1px solid @BORDER@;
     border-radius: @RADIUS@;
 }
+QFrame#edidCard {
+    background-color: @SURFACE@;
+    border: 1px solid #263042;
+    border-radius: 8px;
+}
 QFrame#remoteCard {
     background-color: @SURFACE@;
     border: 1px solid @GROUP_BORDER@;
@@ -255,10 +260,10 @@ QLabel#pillLive {
     font-weight: 600;
 }
 QLabel#sectionTitle {
-    color: #94A3B8;
-    font-size: 11px;
+    color: #CBD5E1;
+    font-size: 12px;
     font-weight: 600;
-    letter-spacing: 1px;
+    letter-spacing: 0.7px;
 }
 QLabel#fieldLabel {
     color: @LABEL@;
@@ -269,9 +274,13 @@ QLabel#hintText {
     font-size: 13px;
 }
 QLabel#kvKey {
-    color: @TEXT_DIM@;
+    color: #94A3B8;
     font-size: 13.5px;
     font-variant-numeric: tabular-nums;
+}
+QLabel#telemetryMeta {
+    color: #94A3B8;
+    font-size: 13px;
 }
 QLabel#kvVal {
     color: @TEXT@;
@@ -492,10 +501,11 @@ QPushButton#iconButton:checked {
 QComboBox {
     background-color: @SURFACE_RAISED@;
     color: @TEXT@;
-    border: 1px solid @BORDER_STRONG@;
-    border-radius: @RADIUS@;
-    min-height: 30px;
-    padding: 3px 10px;
+    border: 1px solid #334155;
+    border-bottom: 1px solid #334155;
+    border-radius: 6px;
+    min-height: 26px;
+    padding: 2px 9px 2px 12px;
     font-size: 14px;
 }
 QComboBox:hover {
@@ -504,7 +514,8 @@ QComboBox:hover {
 }
 QComboBox::drop-down {
     border: none;
-    width: 26px;
+    border-left: 1px solid #334155;
+    width: 28px;
 }
 QComboBox::down-arrow {
     image: url(@ASSET_DIR@/chevron-down.png);
@@ -555,11 +566,11 @@ QTextEdit {
 
 /* Buttons */
 QPushButton {
-    padding: 7px 16px;
+    padding: 4px 14px;
     font-size: 14px;
     font-weight: 600;
     border-radius: @RADIUS@;
-    min-height: 28px;
+    min-height: 26px;
     background-color: @SURFACE_RAISED@;
     color: @TEXT@;
     border: 1px solid @GROUP_BORDER@;
