@@ -4742,13 +4742,10 @@ if HAS_QT:
                 self._set_cinema_fullscreen(False)
 
         def _sync_osd_mode(self):
-            """Tell the engine whether the Hub is showing a fullscreen card."""
+            """Use the identity card as the normal OSD in every mode."""
             if self._ipc is None or not self._ipc.connected:
                 return
-            popout = (hasattr(self, "chk_popout")
-                      and self.chk_popout.isChecked())
-            card = bool(getattr(self, "_cinema_fullscreen", False)) and not popout
-            self._ipc.set_osd_mode("card" if card else "auto")
+            self._ipc.set_osd_mode("card")
 
         def _set_cinema_fullscreen(self, enabled: bool):
             self._cinema_fullscreen = bool(enabled)
@@ -4771,7 +4768,6 @@ if HAS_QT:
                 self.showFullScreen()
                 self.activateWindow()
                 self.setFocus()
-                self._sync_osd_mode()
             else:
                 self.showNormal()
                 self.content_layout.setContentsMargins(14, 10, 14, 10)
@@ -4782,7 +4778,6 @@ if HAS_QT:
                 self.bottom_box.setVisible(True)
                 self._apply_ui_mode(
                     getattr(self, "ui_mode", "simple"), persist=False)
-                self._sync_osd_mode()
 
         def _get_video_host_winid(self) -> int:
             if not hasattr(self, "video_host") or self.video_host is None:

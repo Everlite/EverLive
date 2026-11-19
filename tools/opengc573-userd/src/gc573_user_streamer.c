@@ -424,7 +424,7 @@ enum osd_mode {
 	OSD_MODE_CARD,
 };
 
-static enum osd_mode g_osd_mode = OSD_MODE_AUTO;
+static enum osd_mode g_osd_mode = OSD_MODE_CARD;
 
 static const char *osd_pos_name(enum osd_position pos)
 {

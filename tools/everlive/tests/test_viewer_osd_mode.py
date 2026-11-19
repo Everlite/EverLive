@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Tests for the Hub -> engine fullscreen OSD mode handshake."""
+"""Tests for the Hub -> engine OSD mode handshake."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import everlive_viewer  # noqa: E402
 
 
 @unittest.skipUnless(everlive_viewer.HAS_QT, "PySide6 is not installed")
-class CinemaOsdModeTests(unittest.TestCase):
+class OsdModeTests(unittest.TestCase):
     class FakeIpc:
         connected = True
 
@@ -41,20 +41,20 @@ class CinemaOsdModeTests(unittest.TestCase):
             chk_popout=self.FakeCheck(popout),
         )
 
+    def test_embedded_window_requests_card(self):
+        window = self._window(fullscreen=False)
+        everlive_viewer.MainWindow._sync_osd_mode(window)
+        self.assertEqual(window._ipc.calls, ["card"])
+
     def test_cinema_fullscreen_requests_card(self):
         window = self._window(fullscreen=True)
         everlive_viewer.MainWindow._sync_osd_mode(window)
         self.assertEqual(window._ipc.calls, ["card"])
 
-    def test_leaving_cinema_restores_auto(self):
-        window = self._window(fullscreen=False)
+    def test_popout_window_requests_card(self):
+        window = self._window(fullscreen=False, popout=True)
         everlive_viewer.MainWindow._sync_osd_mode(window)
-        self.assertEqual(window._ipc.calls, ["auto"])
-
-    def test_popout_keeps_engine_auto_detection(self):
-        window = self._window(fullscreen=True, popout=True)
-        everlive_viewer.MainWindow._sync_osd_mode(window)
-        self.assertEqual(window._ipc.calls, ["auto"])
+        self.assertEqual(window._ipc.calls, ["card"])
 
     def test_no_ipc_connection_is_a_no_op(self):
         window = self._window(fullscreen=True)

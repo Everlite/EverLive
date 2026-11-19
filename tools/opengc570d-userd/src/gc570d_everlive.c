@@ -135,7 +135,7 @@ static struct everlive_state g_everlive = {
 	.pip = ATOMIC_VAR_INIT(false),
 	.osd = ATOMIC_VAR_INIT(true),
 	.osd_pos = ATOMIC_VAR_INIT(EVERLIVE_OSD_TR),
-	.osd_mode = ATOMIC_VAR_INIT(EVERLIVE_OSD_MODE_AUTO),
+	.osd_mode = ATOMIC_VAR_INIT(EVERLIVE_OSD_MODE_CARD),
 	.aspect = ATOMIC_VAR_INIT(EVERLIVE_ASPECT_AUTO),
 	.scale = ATOMIC_VAR_INIT(EVERLIVE_SCALE_FIT),
 	.volume_pct = ATOMIC_VAR_INIT(100),
@@ -1831,6 +1831,7 @@ int gc570d_everlive_start(struct everlive_framestore *framestore,
 	atomic_init(&g_everlive.pip, options->pip);
 	atomic_init(&g_everlive.osd, options->osd);
 	atomic_init(&g_everlive.osd_pos, parse_osd_pos(options->osd_pos));
+	atomic_init(&g_everlive.osd_mode, EVERLIVE_OSD_MODE_CARD);
 	atomic_init(&g_everlive.aspect, parse_aspect_mode(options->aspect));
 	atomic_init(&g_everlive.scale, parse_scale_mode(options->scale));
 	atomic_init(&g_everlive.volume_pct, vol);
