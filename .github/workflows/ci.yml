@@ -16,8 +16,8 @@ jobs:
 
       - name: Install userspace dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y -o Acquire::Retries=5 --fix-missing \
             build-essential \
             clang \
             pkg-config \
@@ -47,7 +47,7 @@ jobs:
           test -x "$RUNNER_TEMP/stage/usr/bin/everlive-ctl"
           test -x "$RUNNER_TEMP/stage/usr/lib/everlive/tools/opengc573-userd/gc573_user_streamer"
           test -x "$RUNNER_TEMP/stage/usr/lib/everlive/tools/opengc570d-userd/opengc570d-userd"
-          for module in everlive_client.py card_profile.py service_manager.py app_integrations.py ui_theme.py ui_widgets.py fa_icons.py; do
+          for module in everlive_client.py card_profile.py service_manager.py app_integrations.py everlive_recorder.py ui_theme.py ui_widgets.py fa_icons.py; do
             test -f "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive/$module"
           done
           for asset in fonts/fa-solid-900.ttf fonts/fa-brands-400.ttf fonts/LICENSE.txt fonts/chevron-down.png; do
@@ -77,6 +77,7 @@ jobs:
           python3 -m py_compile tools/everlive/card_profile.py
           python3 -m py_compile tools/everlive/service_manager.py
           python3 -m py_compile tools/everlive/app_integrations.py
+          python3 -m py_compile tools/everlive/everlive_recorder.py
           python3 -m py_compile tools/everlive/ui_theme.py
           python3 -m py_compile tools/everlive/ui_widgets.py
           python3 -m py_compile tools/everlive/fa_icons.py

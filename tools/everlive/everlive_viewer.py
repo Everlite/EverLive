@@ -22,6 +22,7 @@ if os.environ.get("DISPLAY") and "--cli" not in sys.argv:
 
 try:
     import app_integrations
+    import everlive_recorder
     import fa_icons
     import service_manager
     import ui_theme
@@ -34,6 +35,7 @@ try:
 except ImportError:  # imported as a module from another working directory
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import app_integrations
+    import everlive_recorder
     import fa_icons
     import service_manager
     import ui_theme
@@ -136,6 +138,13 @@ DEFAULT_SETTINGS = {
     "duo_edid_bridge": True,
     "popout_window": False,
     "ui_mode": "simple",
+    "rec_fps": "auto",
+    "rec_source": "auto",
+    "rec_encoder": "auto",
+    "rec_quality": "high",
+    "rec_format": "mkv",
+    "rec_audio": "everlive",
+    "rec_dir": "",
 }
 
 
@@ -211,6 +220,20 @@ def load_settings() -> dict:
         settings["popout_window"] = False
     if settings.get("ui_mode") not in ("simple", "advanced"):
         settings["ui_mode"] = "simple"
+    if settings.get("rec_fps") not in everlive_recorder.REC_FPS_KEYS:
+        settings["rec_fps"] = "auto"
+    if settings.get("rec_source") not in everlive_recorder.REC_SOURCE_KEYS:
+        settings["rec_source"] = "auto"
+    if settings.get("rec_encoder") not in everlive_recorder.REC_ENCODER_KEYS:
+        settings["rec_encoder"] = "auto"
+    if settings.get("rec_quality") not in everlive_recorder.REC_QUALITY_KEYS:
+        settings["rec_quality"] = "high"
+    if settings.get("rec_format") not in everlive_recorder.REC_FORMAT_KEYS:
+        settings["rec_format"] = "mkv"
+    if settings.get("rec_audio") not in everlive_recorder.REC_AUDIO_KEYS:
+        settings["rec_audio"] = "everlive"
+    if not isinstance(settings.get("rec_dir"), str):
+        settings["rec_dir"] = ""
     # "bitstream" used to be a separate EDID profile.  Every built-in profile
     # now advertises AC-3/DTS, so old settings migrate to the unified default.
     if settings.get("edid_profile") == "bitstream":
@@ -496,6 +519,17 @@ def _stop_vfio_daemon(wait_s: float = 0.8):
                 _proc_running("opengc570d-user")):
             return
         time.sleep(0.05)
+
+
+def _format_rec_dir_display(path: str) -> str:
+    """Shorten a recording directory path for display using '~' for $HOME."""
+    raw = os.path.normpath(str(path or ""))
+    home = os.path.normpath(os.path.expanduser("~"))
+    if raw == home:
+        return "~"
+    if raw.startswith(home + os.sep):
+        return "~" + raw[len(home):]
+    return raw
 
 
 def _vfio_streamer_running(any_user: bool = False) -> bool:
@@ -3073,6 +3107,8 @@ if HAS_QT:
             # Target mode of an in-flight gaming <-> studio handover.
             self._switch_pending: Optional[str] = None
             self._handoff_tries = 0
+            self.recorder = everlive_recorder.EverLiveRecorder()
+            self._rec_was_active = False
             if streamer_mode:
                 self.saved_cfg["streamer_mode"] = True
             if not self.vfio_mode and self.saved_cfg.get("engine", "native") == "mpv":
@@ -4083,6 +4119,147 @@ if HAS_QT:
             lay_stream.addWidget(card_osd)
             self._update_osd_controls()
 
+            # --- Video Recording Card ---
+            self.lbl_rec_status = QLabel("Standby")
+            self.lbl_rec_status.setObjectName("fieldLabel")
+            card_rec, grid_rec = _section(
+                "VIDEO RECORDING", "#FF6B7A", self.lbl_rec_status)
+            grid_rec.setColumnStretch(0, 2)
+            grid_rec.setColumnStretch(1, 1)
+
+            self.combo_rec_fps = _shrinkable(QComboBox())
+            for text, key in everlive_recorder.REC_FPS_OPTIONS:
+                self.combo_rec_fps.addItem(text, key)
+            rfps_idx = self.combo_rec_fps.findData(
+                self.saved_cfg.get("rec_fps", "auto"))
+            if rfps_idx >= 0:
+                self.combo_rec_fps.setCurrentIndex(rfps_idx)
+            self.combo_rec_fps.setToolTip(
+                "Target output frame rate. 'Auto' matches capture FPS and "
+                "scales with active Frame Generation (up to 240 FPS).")
+            self.combo_rec_fps.currentIndexChanged.connect(
+                lambda *_: save_settings(
+                    {"rec_fps": self.combo_rec_fps.currentData() or "auto"}))
+            grid_rec.addWidget(_stacked_field(
+                "Frame Rate", self.combo_rec_fps), 0, 0)
+
+            self.combo_rec_format = _shrinkable(QComboBox())
+            for text, key in everlive_recorder.REC_FORMAT_OPTIONS:
+                self.combo_rec_format.addItem(text, key)
+            rfmt_idx = self.combo_rec_format.findData(
+                self.saved_cfg.get("rec_format", "mkv"))
+            if rfmt_idx >= 0:
+                self.combo_rec_format.setCurrentIndex(rfmt_idx)
+            self.combo_rec_format.setToolTip(
+                "MKV survives unexpected power loss; MP4 enables faststart.")
+            self.combo_rec_format.currentIndexChanged.connect(
+                lambda *_: save_settings(
+                    {"rec_format": self.combo_rec_format.currentData() or "mkv"}))
+            grid_rec.addWidget(_stacked_field(
+                "Format", self.combo_rec_format), 0, 1)
+
+            self.combo_rec_source = _shrinkable(QComboBox())
+            for text, key in everlive_recorder.REC_SOURCE_OPTIONS:
+                self.combo_rec_source.addItem(text, key)
+            rsrc_idx = self.combo_rec_source.findData(
+                self.saved_cfg.get("rec_source", "auto"))
+            if rsrc_idx >= 0:
+                self.combo_rec_source.setCurrentIndex(rsrc_idx)
+            self.combo_rec_source.setToolTip(
+                "Direct Hardware (SHM) records clean HDMI without OSD; "
+                "Gaming Viewport records rendered post-FrameGen output (120-240 FPS).")
+            self.combo_rec_source.currentIndexChanged.connect(
+                lambda *_: save_settings(
+                    {"rec_source": self.combo_rec_source.currentData() or "auto"}))
+            grid_rec.addWidget(_stacked_field(
+                "Capture Source", self.combo_rec_source), 1, 0, 1, 2)
+
+            self.combo_rec_encoder = _shrinkable(QComboBox())
+            for text, key in everlive_recorder.REC_ENCODER_OPTIONS:
+                self.combo_rec_encoder.addItem(text, key)
+            renc_idx = self.combo_rec_encoder.findData(
+                self.saved_cfg.get("rec_encoder", "auto"))
+            if renc_idx >= 0:
+                self.combo_rec_encoder.setCurrentIndex(renc_idx)
+            self.combo_rec_encoder.setToolTip(
+                "Video encoder backend. Auto prefers GPU hardware (NVENC / VAAPI) "
+                "with CPU fallback.")
+            self.combo_rec_encoder.currentIndexChanged.connect(
+                lambda *_: save_settings(
+                    {"rec_encoder": self.combo_rec_encoder.currentData() or "auto"}))
+            grid_rec.addWidget(_stacked_field(
+                "Encoder", self.combo_rec_encoder), 2, 0, 1, 2)
+
+            self.combo_rec_audio = _shrinkable(QComboBox())
+            for text, key in everlive_recorder.REC_AUDIO_OPTIONS:
+                self.combo_rec_audio.addItem(text, key)
+            raud_idx = self.combo_rec_audio.findData(
+                self.saved_cfg.get("rec_audio", "everlive"))
+            if raud_idx >= 0:
+                self.combo_rec_audio.setCurrentIndex(raud_idx)
+            self.combo_rec_audio.setToolTip(
+                "Choose whether recordings capture only isolated EverLive HDMI "
+                "audio (no Discord/desktop sounds), full desktop audio, or mute audio.")
+            self.combo_rec_audio.currentIndexChanged.connect(
+                lambda *_: save_settings(
+                    {"rec_audio": self.combo_rec_audio.currentData() or "everlive"}))
+            grid_rec.addWidget(_stacked_field(
+                "Audio Track", self.combo_rec_audio), 3, 0, 1, 2)
+
+            self.combo_rec_quality = _shrinkable(QComboBox())
+            for text, key in everlive_recorder.REC_QUALITY_OPTIONS:
+                self.combo_rec_quality.addItem(text, key)
+            rqual_idx = self.combo_rec_quality.findData(
+                self.saved_cfg.get("rec_quality", "high"))
+            if rqual_idx >= 0:
+                self.combo_rec_quality.setCurrentIndex(rqual_idx)
+            self.combo_rec_quality.setToolTip(
+                "Constant quantizer / CRF quality target.")
+            self.combo_rec_quality.currentIndexChanged.connect(
+                lambda *_: save_settings(
+                    {"rec_quality": self.combo_rec_quality.currentData() or "high"}))
+            grid_rec.addWidget(_stacked_field(
+                "Quality", self.combo_rec_quality), 4, 0, 1, 2)
+
+            rec_dir_box = QWidget()
+            rec_dir_lay = QHBoxLayout(rec_dir_box)
+            rec_dir_lay.setContentsMargins(0, 0, 0, 0)
+            rec_dir_lay.setSpacing(6)
+            rec_dir_frame = QFrame()
+            rec_dir_frame.setObjectName("sourceGroup")
+            rec_dir_frame.setFixedHeight(ui_theme.INPUT_H)
+            rec_dir_frame_lay = QHBoxLayout(rec_dir_frame)
+            rec_dir_frame_lay.setContentsMargins(10, 0, 10, 0)
+            rec_dir_val = (
+                self.saved_cfg.get("rec_dir", "").strip()
+                or everlive_recorder.default_recording_dir())
+            self.edit_rec_dir = QLabel(_format_rec_dir_display(rec_dir_val))
+            self.edit_rec_dir.setObjectName("fieldLabel")
+            self.edit_rec_dir.setToolTip(rec_dir_val)
+            self.edit_rec_dir.setSizePolicy(
+                QSizePolicy.Ignored, QSizePolicy.Preferred)
+            rec_dir_frame_lay.addWidget(self.edit_rec_dir, 1)
+            rec_dir_lay.addWidget(rec_dir_frame, 1)
+
+            btn_rec_browse = QPushButton("Browse…")
+            btn_rec_browse.setObjectName("btnGhost")
+            btn_rec_browse.setFixedHeight(ui_theme.BUTTON_H)
+            btn_rec_browse.setCursor(Qt.PointingHandCursor)
+            btn_rec_browse.setToolTip("Choose recording output folder")
+            btn_rec_browse.clicked.connect(self._browse_recording_dir)
+            rec_dir_lay.addWidget(btn_rec_browse, 0)
+
+            btn_rec_open = IconButton(
+                "folder", "Open recordings folder",
+                size=ui_theme.BUTTON_H, icon_size=15)
+            btn_rec_open.clicked.connect(self._open_recording_dir)
+            rec_dir_lay.addWidget(btn_rec_open, 0)
+
+            grid_rec.addWidget(_stacked_field(
+                "Output Folder", rec_dir_box), 5, 0, 1, 2)
+
+            lay_stream.addWidget(card_rec)
+
             # --- OBS & Capture Routing Card ---
             card_obs, grid_obs = _section("OBS & CAPTURE ROUTING", "#5ED4B2")
             grid_obs.setColumnStretch(0, 1)
@@ -4423,6 +4600,18 @@ if HAS_QT:
             self.chip_bar_capture.setVisible(True)
             b_layout.addWidget(self.chip_bar_capture, 0, Qt.AlignVCenter)
 
+            self.btn_record = QPushButton("Record")
+            self.btn_record.setObjectName("btnGhost")
+            self.btn_record.setFixedSize(98, ui_theme.BUTTON_H)
+            self.btn_record.setCursor(Qt.PointingHandCursor)
+            self.btn_record.clicked.connect(self.toggle_recording)
+            b_layout.addWidget(self.btn_record, 0, Qt.AlignVCenter)
+
+            self.chip_bar_record = StatusChip("● REC 00:00", "danger")
+            self.chip_bar_record.setVisible(False)
+            b_layout.addWidget(self.chip_bar_record, 0, Qt.AlignVCenter)
+            self._sync_recording_ui()
+
             # Device route stays available through the bar tooltip; the mockup
             # keeps the bar free of long diagnostic strings.
             if self.vfio_mode:
@@ -4512,6 +4701,9 @@ if HAS_QT:
             sc_dock = QShortcut(QKeySequence("T"), self)
             sc_dock.setContext(app_ctx)
             sc_dock.activated.connect(self._remote_dock)
+            sc_rec = QShortcut(QKeySequence("Ctrl+R"), self)
+            sc_rec.setContext(app_ctx)
+            sc_rec.activated.connect(self.toggle_recording)
 
         def _cycle_framegen(self):
             if not hasattr(self, "combo_framegen"):
@@ -5183,6 +5375,7 @@ if HAS_QT:
             ("L", "Cycle Scaling Mode"),
             ("M", "Mute Or Unmute Audio"),
             ("Ctrl+Shift+A", "Toggle Simple / Advanced View"),
+            ("Ctrl+R", "Start / Stop Video Recording"),
             ("T", "Dock Remote Video"),
         )
 
@@ -5915,7 +6108,289 @@ if HAS_QT:
             else:
                 self.start_gaming_screen()
 
+        def _browse_recording_dir(self):
+            current = (
+                self.saved_cfg.get("rec_dir", "").strip()
+                or everlive_recorder.default_recording_dir())
+            os.makedirs(current, exist_ok=True)
+            chosen = QFileDialog.getExistingDirectory(
+                self, "Select Recording Output Folder", current)
+            if not chosen:
+                return
+            save_settings({"rec_dir": chosen})
+            self.saved_cfg["rec_dir"] = chosen
+            if hasattr(self, "edit_rec_dir"):
+                self.edit_rec_dir.setText(_format_rec_dir_display(chosen))
+                self.edit_rec_dir.setToolTip(chosen)
+
+        def _open_recording_dir(self):
+            folder = (
+                self.saved_cfg.get("rec_dir", "").strip()
+                or everlive_recorder.default_recording_dir())
+            os.makedirs(folder, exist_ok=True)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
+        def _recording_geometry_and_fps(self) -> Tuple[int, int, float]:
+            w, h, src_fps = 1920, 1080, 60.0
+            status = (
+                self._remote_status
+                if isinstance(getattr(self, "_remote_status", None), dict)
+                else {})
+            signal_d = (
+                status.get("signal")
+                if isinstance(status.get("signal"), dict) else {})
+            video_d = (
+                status.get("video")
+                if isinstance(status.get("video"), dict) else {})
+            m = getattr(self.streamer, "_vfio_metrics", {}) or {}
+            live = getattr(self, "_live", None)
+            if not isinstance(live, dict):
+                live = {}
+
+            if (int(video_d.get("output_width") or 0) >= 320 and
+                    int(video_d.get("output_height") or 0) >= 240):
+                w = int(video_d["output_width"])
+                h = int(video_d["output_height"])
+            elif int(m.get("out_w") or 0) >= 320 and int(m.get("out_h") or 0) >= 240:
+                w = int(m["out_w"])
+                h = int(m["out_h"])
+            elif (int(signal_d.get("width") or 0) >= 320 and
+                  int(signal_d.get("height") or 0) >= 240):
+                w = int(signal_d["width"])
+                h = int(signal_d["height"])
+            else:
+                res_m = re.match(r"(\d+)x(\d+)", str(live.get("resolution") or ""))
+                if res_m:
+                    w, h = int(res_m.group(1)), int(res_m.group(2))
+
+            for cand in (signal_d.get("rate_hz"), video_d.get("fps"), m.get("fps")):
+                try:
+                    val = float(cand or 0.0)
+                    if val >= 20.0:
+                        src_fps = val
+                        break
+                except (TypeError, ValueError):
+                    pass
+            else:
+                fps_m = re.search(
+                    r"([0-9]+(?:\.[0-9]+)?)", str(live.get("framerate") or ""))
+                if fps_m:
+                    val = float(fps_m.group(1))
+                    if val >= 20.0:
+                        src_fps = val
+
+            return w, h, src_fps
+
+        def _sync_recording_ui(self):
+            active = bool(getattr(self, "recorder", None) and self.recorder.is_recording)
+            plan = self.recorder.current_plan if active else None
+
+            if hasattr(self, "btn_record"):
+                if active:
+                    self.btn_record.setStyleSheet(
+                        "QPushButton#btnGhost {"
+                        " background-color: #9E3342;"
+                        " border: 1px solid #FF5D5D;"
+                        " color: #FFFFFF;"
+                        " font-weight: 700;"
+                        " padding: 0px 10px;"
+                        " min-height: 34px; max-height: 34px;"
+                        "}"
+                        "QPushButton#btnGhost:hover {"
+                        " background-color: #B53B4C;"
+                        " border-color: #FF7885;"
+                        " color: #FFFFFF;"
+                        "}")
+                else:
+                    self.btn_record.setStyleSheet(
+                        "QPushButton#btnGhost {"
+                        " padding: 0px 10px;"
+                        " min-height: 34px; max-height: 34px;"
+                        "}")
+                if fa_icons.available():
+                    self.btn_record.setText("Stop" if active else "Record")
+                    self.btn_record.setIcon(
+                        fa_icons.icon("stop", "#FFFFFF", 12) if active
+                        else fa_icons.icon("record", "#FF6B7A", 12,
+                                           active_color="#FF8A96"))
+                    self.btn_record.setIconSize(QSize(12, 12))
+                else:
+                    glyph = fa_icons.fallback_text("stop" if active else "record")
+                    label = "Stop" if active else "Record"
+                    self.btn_record.setText(f"{glyph} {label}")
+                self.btn_record.setToolTip(
+                    "Stop Video Recording (Ctrl+R)" if active
+                    else "Start Video Recording (Ctrl+R)")
+
+            if hasattr(self, "chip_bar_record"):
+                if active and plan is not None:
+                    elapsed = self.recorder.format_elapsed()
+                    size_txt = self.recorder.format_size()
+                    chip_txt = f"● REC {elapsed} · {plan.fps} fps · {size_txt}"
+                    if self.chip_bar_record.state_text() != chip_txt:
+                        self.chip_bar_record.set_state(chip_txt, "danger")
+                    width = (self.chip_bar_record.fontMetrics().horizontalAdvance(chip_txt)
+                             + 34)
+                    self.chip_bar_record.setMinimumWidth(width)
+                    self.chip_bar_record.setSizePolicy(
+                        QSizePolicy.Minimum, QSizePolicy.Fixed)
+                    self.chip_bar_record.setVisible(True)
+                else:
+                    self.chip_bar_record.setVisible(False)
+
+            if hasattr(self, "lbl_rec_status"):
+                if active and plan is not None:
+                    self.lbl_rec_status.setText(
+                        f"● {self.recorder.format_elapsed()} · {plan.fps} fps")
+                    self.lbl_rec_status.setStyleSheet(
+                        "color: #FF6B7A; font-weight: 700;")
+                else:
+                    self.lbl_rec_status.setText("Standby")
+                    self.lbl_rec_status.setStyleSheet("")
+
+            for attr in (
+                "combo_rec_fps", "combo_rec_source", "combo_rec_encoder",
+                "combo_rec_audio", "combo_rec_format", "combo_rec_quality",
+            ):
+                w = getattr(self, attr, None)
+                if w is not None:
+                    w.setEnabled(not active)
+
+        def _poll_recording_state(self):
+            if not hasattr(self, "recorder"):
+                return
+            if self.recorder.is_recording or self._rec_was_active:
+                alive = self.recorder.poll()
+                if not alive and self._rec_was_active:
+                    self._rec_was_active = False
+                    self._sync_recording_ui()
+                    if self.recorder.last_error:
+                        self._set_vfio_notice(
+                            "Recording Error",
+                            self.recorder.last_error,
+                            seconds=8.0)
+                    else:
+                        self._set_vfio_notice(
+                            "Recording Stopped",
+                            "Capture writer exited cleanly.",
+                            seconds=5.0)
+                else:
+                    self._sync_recording_ui()
+
+        def toggle_recording(self):
+            if self.recorder.is_recording:
+                self.stop_recording()
+            else:
+                self.start_recording()
+
+        def start_recording(self) -> bool:
+            if self.recorder.is_recording:
+                return True
+            shm_alive = (
+                os.path.exists("/dev/shm/gc573_v4l2_shm")
+                or os.path.exists("/dev/shm/gc570d_v4l2_shm"))
+            if self.vfio_mode and not (
+                self.streamer.is_running
+                or self._remote
+                or self._background_service_active
+                or shm_alive
+            ):
+                self._set_vfio_notice(
+                    "Capture Inactive",
+                    "Start Gaming or Studio first before recording.",
+                    seconds=5.0)
+                return False
+
+            w, h, src_fps = self._recording_geometry_and_fps()
+            fg_cfg = self._framegen_config()
+            win_id = (
+                self._get_video_host_winid()
+                if self._is_embedded_gaming_active() else None)
+            preload_lib = (
+                app_integrations.find_preload_library(self.card_profile)
+                if self.vfio_mode else None)
+            duo_inp = (
+                self.combo_duo_input.currentData()
+                if hasattr(self, "combo_duo_input")
+                else self.saved_cfg.get("duo_input", 0))
+            rec_audio = (
+                self.combo_rec_audio.currentData()
+                if hasattr(self, "combo_rec_audio")
+                else self.saved_cfg.get("rec_audio", "everlive"))
+            audio_tap_active = bool(
+                self.vfio_mode and hasattr(self, "chk_audio_tap")
+                and self.chk_audio_tap.isChecked())
+            audio_source = everlive_recorder.resolve_pulse_monitor(
+                audio_tap_active=audio_tap_active,
+                audio_tap_node=AUDIO_TAP_NODE,
+                audio_mode=rec_audio or "everlive",
+                model=self.model,
+                duo_input=int(duo_inp or 0))
+            out_dir = (
+                self.saved_cfg.get("rec_dir", "").strip()
+                or everlive_recorder.default_recording_dir())
+            v4l2_dev = (
+                None if self.vfio_mode
+                else getattr(self.streamer, "vdev", None))
+
+            plan = everlive_recorder.build_recording_plan(
+                output_dir=out_dir,
+                model=self.model,
+                duo_input=int(duo_inp or 0),
+                vfio_mode=self.vfio_mode,
+                v4l2_device=v4l2_dev,
+                preload_library=preload_lib,
+                width=w,
+                height=h,
+                source_fps=src_fps,
+                fps_setting=(
+                    self.combo_rec_fps.currentData()
+                    if hasattr(self, "combo_rec_fps") else "auto"),
+                source_setting=(
+                    self.combo_rec_source.currentData()
+                    if hasattr(self, "combo_rec_source") else "auto"),
+                framegen_mode=fg_cfg.get("framegen_mode", "off"),
+                fg_multiplier=int(fg_cfg.get("fg_multiplier", 2)),
+                encoder_setting=(
+                    self.combo_rec_encoder.currentData()
+                    if hasattr(self, "combo_rec_encoder") else "auto"),
+                quality_setting=(
+                    self.combo_rec_quality.currentData()
+                    if hasattr(self, "combo_rec_quality") else "high"),
+                container_format=(
+                    self.combo_rec_format.currentData()
+                    if hasattr(self, "combo_rec_format") else "mkv"),
+                window_id=win_id,
+                audio_source=audio_source,
+            )
+
+            ok, msg = self.recorder.start(plan)
+            self._rec_was_active = ok
+            self._sync_recording_ui()
+            if ok:
+                self._set_vfio_notice(
+                    "Recording Started",
+                    f"{plan.width}×{plan.height} @ {plan.fps} FPS ({plan.encoder}) → {os.path.basename(plan.output_path)}",
+                    seconds=6.0)
+            else:
+                self._set_vfio_notice("Recording Failed", msg, seconds=8.0)
+            return ok
+
+        def stop_recording(self):
+            if not self.recorder.is_recording and not self._rec_was_active:
+                return
+            ok, msg = self.recorder.stop()
+            self._rec_was_active = False
+            self._sync_recording_ui()
+            self._set_vfio_notice(
+                "Recording Saved" if ok else "Recording Stopped",
+                msg, seconds=6.0)
+
         def _stop_stream(self):
+            if getattr(self, "recorder", None) and self.recorder.is_recording:
+                plan = self.recorder.current_plan
+                if not (self._background_service_active and plan and plan.source == "shm"):
+                    self.stop_recording()
             # Cancel any in-flight mode handover so its timer cannot relaunch.
             self._switch_pending = None
             self._handoff_tries = 0
@@ -5956,8 +6431,14 @@ if HAS_QT:
                 osd_pos = self.combo_osd_pos.currentData() or "tr"
                 if osd_pos not in OSD_POSITIONS:
                     osd_pos = "tr"
-                audio_tap = (AUDIO_TAP_NODE
-                             if self.chk_audio_tap.isChecked() else None)
+                want_isolated_rec_tap = (
+                    not self.duo_mode
+                    and hasattr(self, "combo_rec_audio")
+                    and self.combo_rec_audio.currentData() == "everlive")
+                audio_tap = (
+                    AUDIO_TAP_NODE
+                    if (self.chk_audio_tap.isChecked() or want_isolated_rec_tap)
+                    else None)
                 want_hdr = self.chk_hdr.isChecked()
                 hdr_exposure = float(self.spin_hdr_exposure.value())
                 scale_mode = self.combo_scale.currentData() or "fit"
@@ -5982,7 +6463,7 @@ if HAS_QT:
                     "aspect_ratio": aspect,
                     "osd_enabled": want_osd,
                     "osd_position": osd_pos,
-                    "audio_tap": bool(audio_tap),
+                    "audio_tap": self.chk_audio_tap.isChecked(),
                     "hdr_tonemap": want_hdr,
                     "hdr_exposure": hdr_exposure,
                     "scale_mode": scale_mode,
@@ -6076,8 +6557,14 @@ if HAS_QT:
             aspect = self.combo_aspect.currentData() or "auto"
             if aspect not in ASPECT_KEYS:
                 aspect = "auto"
-            audio_tap = (AUDIO_TAP_NODE
-                         if self.chk_audio_tap.isChecked() else None)
+            want_isolated_rec_tap = (
+                not self.duo_mode
+                and hasattr(self, "combo_rec_audio")
+                and self.combo_rec_audio.currentData() == "everlive")
+            audio_tap = (
+                AUDIO_TAP_NODE
+                if (self.chk_audio_tap.isChecked() or want_isolated_rec_tap)
+                else None)
             want_hdr = self.chk_hdr.isChecked()
             hdr_exposure = float(self.spin_hdr_exposure.value())
             scale_mode = self.combo_scale.currentData() or "fit"
@@ -6089,7 +6576,7 @@ if HAS_QT:
             save_settings({
                 "v4l2_loopback": want_v4l2,
                 "aspect_ratio": aspect,
-                "audio_tap": bool(audio_tap),
+                "audio_tap": self.chk_audio_tap.isChecked(),
                 "hdr_tonemap": want_hdr,
                 "hdr_exposure": hdr_exposure,
                 "scale_mode": scale_mode,
@@ -7273,6 +7760,7 @@ if HAS_QT:
             self._set_vfio_standby(info)
 
         def update_status(self):
+            self._poll_recording_state()
             if self.vfio_mode:
                 self._update_status_vfio()
                 return
@@ -7455,6 +7943,8 @@ if HAS_QT:
 
         def _force_quit(self):
             self._switch_pending = None
+            if getattr(self, "recorder", None) and self.recorder.is_recording:
+                self.recorder.stop()
             self._release_remote_preview()
             self._ipc_shutdown = True
             if self._ipc is not None:
@@ -7487,6 +7977,8 @@ if HAS_QT:
                 return
 
             self._ipc_shutdown = True
+            if getattr(self, "recorder", None) and self.recorder.is_recording:
+                self.recorder.stop()
             self._release_remote_preview()
             if self._ipc is not None:
                 self._ipc.close()
