@@ -35,6 +35,11 @@ class WidgetTests(unittest.TestCase):
         self.assertFalse(switch.isChecked())
         self.assertEqual(seen, [True, False])
 
+    def test_toggle_switch_uses_slate_blue(self):
+        switch = ui_widgets.ToggleSwitch()
+        self.assertEqual(switch.TRACK_ON.name(), "#3b5b8c")
+        self.assertEqual(switch.KNOB.name(), "#f8fafc")
+
     def test_toggle_switch_snaps_when_hidden(self):
         switch = ui_widgets.ToggleSwitch()
         switch.setChecked(True)

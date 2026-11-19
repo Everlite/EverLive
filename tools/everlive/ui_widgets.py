@@ -31,9 +31,9 @@ if HAS_QT:
         """Animated pill switch used in place of a checkbox indicator."""
 
         TRACK_OFF = QColor("#383B4F")
-        TRACK_ON = QColor("#D93B86")
+        TRACK_ON = QColor("#3B5B8C")
         TRACK_DISABLED = QColor("#2A2C38")
-        KNOB = QColor("#FFFFFF")
+        KNOB = QColor("#F8FAFC")
         KNOB_DISABLED = QColor("#7A7E8C")
 
         def __init__(self, parent=None, *, width: int = 40, height: int = 22):

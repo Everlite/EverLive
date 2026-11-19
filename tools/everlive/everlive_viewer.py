@@ -55,9 +55,11 @@ GC570D_SUBSYSTEM_ID = "0x5700"
 GC573_SUBSYSTEM_ID = "0x5730"
 MODEL_GC573 = "gc573"
 MODEL_GC570D = "gc570d"
+# The background-service/app-camera feature is not part of this release.
+FEATURE_BACKGROUND_SERVICE_UI = False
 MODEL_NAMES = {
-    MODEL_GC573: "GC573 · LIVE GAMER 4K",
-    MODEL_GC570D: "GC570D · LIVE GAMER DUO",
+    MODEL_GC573: "GC573 • LIVE GAMER 4K",
+    MODEL_GC570D: "GC570D • LIVE GAMER DUO",
 }
 ENGINE_VFIO_TEXT = "● Userspace VFIO"
 V4L2_DEFAULT_DEVICE = "/dev/video10"
@@ -570,7 +572,8 @@ try:
         QGridLayout, QLabel, QPushButton, QComboBox, QCheckBox, QSlider, QFrame,
         QGroupBox, QMessageBox, QStackedLayout, QSizePolicy, QFileDialog,
         QSystemTrayIcon, QMenu, QDoubleSpinBox, QAbstractSpinBox,
-        QTabWidget, QStackedWidget, QScrollArea, QDialog, QTextEdit
+        QTabWidget, QStackedWidget, QScrollArea, QDialog, QTextEdit,
+        QGraphicsOpacityEffect
     )
     from PySide6.QtCore import Qt, QTimer, QThread, Signal, QEvent, QUrl, QSize, QRectF, QPointF
     from PySide6.QtGui import (
@@ -3045,8 +3048,9 @@ if HAS_QT:
                 self.streamer.force_mpv = True
 
             self.init_ui()
-            self._refresh_service_config()
-            self._refresh_service_status()
+            if FEATURE_BACKGROUND_SERVICE_UI:
+                self._refresh_service_config()
+                self._refresh_service_status()
 
             if v4l2_device:
                 self.chk_v4l2.setChecked(True)
@@ -3062,11 +3066,14 @@ if HAS_QT:
             self.timer.timeout.connect(self.update_status)
             self.timer.start(1000)
 
-            # Background capture service state (10s polling).
-            self._service_timer = QTimer(self)
-            self._service_timer.setInterval(10000)
-            self._service_timer.timeout.connect(self._refresh_service_status)
-            self._service_timer.start()
+            # Background capture service state (10s polling) is only
+            # started when the release build exposes the integrations card.
+            if FEATURE_BACKGROUND_SERVICE_UI:
+                self._service_timer = QTimer(self)
+                self._service_timer.setInterval(10000)
+                self._service_timer.timeout.connect(
+                    self._refresh_service_status)
+                self._service_timer.start()
 
             # Fast 100 ms poll for embedded SDL2 hotkey forwarders ([HUB] ...)
             self._hub_action_timer = QTimer(self)
@@ -3132,8 +3139,8 @@ if HAS_QT:
             self.header_widget.setObjectName("headerBar")
             self.header_widget.setFixedHeight(ui_theme.HEADER_HEIGHT)
             top_bar = QHBoxLayout(self.header_widget)
-            top_bar.setContentsMargins(24, 0, 24, 0)
-            top_bar.setSpacing(10)
+            top_bar.setContentsMargins(16, 0, 16, 0)
+            top_bar.setSpacing(8)
             self.top_bar = top_bar
 
             if os.path.isfile(icon_path):
@@ -3152,7 +3159,7 @@ if HAS_QT:
             lbl_ver.setObjectName("logoVersion")
             top_bar.addWidget(lbl_ver, 0, Qt.AlignVCenter)
 
-            top_bar.addSpacing(28)
+            top_bar.addSpacing(12)
 
             # --- Capture source: card name and DUO input share one group ---
             card_detected = (
@@ -3162,20 +3169,21 @@ if HAS_QT:
             self._card_full_label = MODEL_NAMES.get(
                 self.model, MODEL_NAMES[MODEL_GC573])
             self._card_short_label = (
-                "GC570D · DUO" if self.model == MODEL_GC570D
-                else "GC573 · 4K")
+                "GC570D • DUO" if self.model == MODEL_GC570D
+                else "GC573 • 4K")
 
             self.source_group = QFrame()
             self.source_group.setObjectName("sourceGroup")
+            self.source_group.setFixedHeight(ui_theme.CONTROL_H)
             source_layout = QHBoxLayout(self.source_group)
-            source_layout.setContentsMargins(14, 5, 5, 5)
+            source_layout.setContentsMargins(12, 1, 2, 1)
             source_layout.setSpacing(8)
 
             self.lbl_card_title = QLabel(
                 self._card_full_label if card_detected else "NO CAPTURE CARD")
             self.lbl_card_title.setObjectName("sourceName")
             self.lbl_card_title.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-            self.lbl_card_title.setFixedHeight(ui_theme.CONTROL_H)
+            self.lbl_card_title.setFixedHeight(30)
             self.lbl_card_title.setToolTip("Status: Standby")
             if not card_detected:
                 self.lbl_card_title.setStyleSheet(
@@ -3187,8 +3195,8 @@ if HAS_QT:
                 saved_input = load_settings().get("duo_input", 0)
                 self.combo_duo_input = SegmentedControl(
                     [("HDMI 1", 0), ("HDMI 2", 1)],
-                    button_height=36, object_name="sourceSegments")
-                self.combo_duo_input.setFixedHeight(ui_theme.CONTROL_H)
+                    button_height=26, object_name="sourceSegments")
+                self.combo_duo_input.setFixedHeight(30)
                 self.combo_duo_input.setCurrentData(
                     1 if saved_input == 1 else 0)
                 self.combo_duo_input.setToolTip(
@@ -3255,7 +3263,7 @@ if HAS_QT:
 
             self.seg_mode = SegmentedControl(
                 [("Simple", "simple"), ("Advanced", "advanced")],
-                button_height=36)
+                button_height=26)
             self.seg_mode.setFixedHeight(ui_theme.CONTROL_H)
             self.seg_mode.setToolTip(
                 "Simple hides the inspector and telemetry deck. Advanced "
@@ -3267,7 +3275,7 @@ if HAS_QT:
 
             self.btn_discord = IconButton(
                 "discord", "Join the EverLive Discord community",
-                size=ui_theme.CONTROL_H, icon_size=21)
+                size=ui_theme.CONTROL_H, icon_size=18)
             self.btn_discord.clicked.connect(
                 lambda: QDesktopServices.openUrl(
                     QUrl("https://discord.com/invite/D2XFhkPMmc")))
@@ -3275,7 +3283,7 @@ if HAS_QT:
 
             self.btn_github = IconButton(
                 "github", "EverLive on GitHub",
-                size=ui_theme.CONTROL_H, icon_size=21)
+                size=ui_theme.CONTROL_H, icon_size=18)
             self.btn_github.clicked.connect(
                 lambda: QDesktopServices.openUrl(
                     QUrl("https://github.com/PolygonPrincess/EverLive")))
@@ -3283,7 +3291,7 @@ if HAS_QT:
 
             self.btn_help = IconButton(
                 "help", "Help and keyboard shortcuts",
-                size=ui_theme.CONTROL_H, icon_size=21)
+                size=ui_theme.CONTROL_H, icon_size=18)
             self.btn_help.clicked.connect(self.on_help_clicked)
             top_bar.addWidget(self.btn_help, 0, Qt.AlignVCenter)
 
@@ -3333,6 +3341,32 @@ if HAS_QT:
             # Standby / Status Overlay inside the video stage (hidden when embedded SDL is active)
             self.video_standby_overlay = NoSignalCanvas(self.video_host)
             host_inner_layout.addWidget(self.video_standby_overlay)
+
+            # Detached remote-session card, overlaid on the stage.
+            self.remote_card = QFrame(self.video_host)
+            self.remote_card.setObjectName("remoteCard")
+            self.remote_card.setFixedSize(440, 196)
+            self.remote_card.setVisible(False)
+            remote_lay = QVBoxLayout(self.remote_card)
+            remote_lay.setContentsMargins(24, 22, 24, 20)
+            remote_lay.setSpacing(10)
+            remote_title = QLabel("REMOTE SESSION ATTACHED")
+            remote_title.setObjectName("remoteTitle")
+            remote_title.setAlignment(Qt.AlignCenter)
+            remote_lay.addWidget(remote_title)
+            remote_sub = QLabel(
+                "Click below or press 'T' to dock video here.")
+            remote_sub.setObjectName("hintText")
+            remote_sub.setWordWrap(True)
+            remote_sub.setAlignment(Qt.AlignCenter)
+            remote_lay.addWidget(remote_sub)
+            remote_lay.addStretch(1)
+            self.btn_remote_takeback = QPushButton("Take Back Capture")
+            self.btn_remote_takeback.setObjectName("btnLaunchStart")
+            self.btn_remote_takeback.setFixedHeight(ui_theme.BUTTON_H)
+            self.btn_remote_takeback.setCursor(Qt.PointingHandCursor)
+            self.btn_remote_takeback.clicked.connect(self._remote_dock)
+            remote_lay.addWidget(self.btn_remote_takeback)
 
             stage_frame_layout.addWidget(self.video_host, 1)
 
@@ -3389,13 +3423,22 @@ if HAS_QT:
             s1_top.addWidget(self.lbl_hero_signal, 1)
             seg1.addLayout(s1_top)
 
-            # Compatibility carriers for the existing status-update path.
+            # Granular status sub-column: format/tonemap, EDID and route.
+            s1_sub = QGridLayout()
+            s1_sub.setContentsMargins(0, 0, 0, 0)
+            s1_sub.setHorizontalSpacing(10)
+            s1_sub.setVerticalSpacing(2)
             self.lbl_kv_color = QLabel("YUV 4:2:2 · SDR")
             self.lbl_kv_color.setObjectName("kvKey")
-            self.lbl_kv_color.setVisible(False)
+            self.lbl_kv_pclk = QLabel(
+                f"EDID: {self._edid_profile_label()}")
+            self.lbl_kv_pclk.setObjectName("kvKey")
             self.lbl_kv_route = QLabel("SHM (/dev/video63)")
             self.lbl_kv_route.setObjectName("kvKey")
-            self.lbl_kv_route.setVisible(False)
+            s1_sub.addWidget(self.lbl_kv_color, 0, 0)
+            s1_sub.addWidget(self.lbl_kv_pclk, 0, 1)
+            s1_sub.addWidget(self.lbl_kv_route, 1, 0, 1, 2)
+            seg1.addLayout(s1_sub)
 
             self.lbl_hero_meta = QLabel("")
             self.lbl_hero_meta.setObjectName("heroMeta")
@@ -3403,12 +3446,10 @@ if HAS_QT:
             self.lbl_kv_audio = QLabel("No HDMI Audio")
             self.lbl_kv_audio.setObjectName("kvKey")
             self.lbl_kv_audio.setVisible(False)
-            self.lbl_kv_pclk = QLabel(f"EDID: {self._edid_profile_label()}")
-            self.lbl_kv_pclk.setObjectName("kvKey")
-            self.lbl_kv_pclk.setVisible(False)
 
+            # Retained for the status-update path; not shown in the deck.
             self.status_light = VeyraStatusLight()
-            seg1.addWidget(self.status_light)
+            self.status_light.setVisible(False)
             tele_row.addLayout(seg1, 10)
             tele_row.addWidget(_vsep())
 
@@ -3579,8 +3620,8 @@ if HAS_QT:
                 return row
 
             self.inspector_tabbar = SegmentedControl(
-                [("Video EQ", 0), ("Audio && Stream", 1), ("System", 2)],
-                button_height=36)
+                [("Video", 0), ("Audio && Stream", 1), ("System", 2)],
+                button_height=26)
             self.inspector_tabbar.setFixedHeight(ui_theme.CONTROL_H)
             dock_layout.addWidget(self.inspector_tabbar)
 
@@ -3603,10 +3644,7 @@ if HAS_QT:
             grid_edid.setColumnStretch(1, 1)
 
             if self.duo_mode:
-                edid_mode_text = (
-                    "Mode: built-in bridge"
-                    if load_settings().get("duo_edid_bridge", True)
-                    else "Mode: downstream copy")
+                edid_mode_text = "Mode: Downstream Copy"
             else:
                 edid_mode_text = f"Mode: {self._edid_profile_label()}"
             self.lbl_edid_mode = QLabel(edid_mode_text)
@@ -3664,7 +3702,7 @@ if HAS_QT:
             self.combo_presets = _shrinkable(QComboBox())
             if self.vfio_mode:
                 for text, key in EDID_PROFILES:
-                    display = ("Default · 4K60/1440p120"
+                    display = ("Default (4K60 / 1440p120)"
                                if key == "default" else text)
                     self.combo_presets.addItem(display, key)
                 saved_profile = self.saved_cfg.get("edid_profile", "default")
@@ -3698,6 +3736,7 @@ if HAS_QT:
             grid_video.addWidget(_stacked_field(
                 "EDID Profile" if self.vfio_mode else "Format / Preset",
                 self.combo_presets), 0, 0, 1, 2)
+            self._update_edid_port_label()
 
             self.combo_aspect = _shrinkable(QComboBox())
             for text, key in ASPECT_OPTIONS:
@@ -3765,7 +3804,7 @@ if HAS_QT:
 
             self.lbl_hdr_exposure = QLabel(
                 f"{self.spin_hdr_exposure.value():+.1f} EV")
-            self.lbl_hdr_exposure.setObjectName("fieldLabel")
+            self.lbl_hdr_exposure.setObjectName("numericValue")
             self.lbl_hdr_exposure.setFixedWidth(54)
             self.lbl_hdr_exposure.setAlignment(Qt.AlignCenter)
 
@@ -3781,17 +3820,19 @@ if HAS_QT:
             exposure_lay = QVBoxLayout(exposure_box)
             exposure_lay.setContentsMargins(0, 0, 0, 0)
             exposure_lay.setSpacing(6)
-            exposure_lay.addWidget(_field(
+            exposure_head = QHBoxLayout()
+            exposure_head.setContentsMargins(0, 0, 0, 0)
+            exposure_head.setSpacing(8)
+            exposure_head.addWidget(_field(
                 "Exposure Bias",
                 "Linear exposure bias for the tonemapper (-2.0 .. +2.0 EV)."))
+            exposure_head.addStretch(1)
+            exposure_head.addWidget(self.lbl_hdr_exposure)
+            exposure_lay.addLayout(exposure_head)
             exposure_lay.addWidget(self.slider_hdr_exposure)
-            value_row = QHBoxLayout()
-            value_row.setContentsMargins(0, 0, 0, 0)
-            value_row.setSpacing(8)
-            value_row.addWidget(self.lbl_hdr_exposure)
-            value_row.addStretch(1)
-            value_row.addWidget(self.btn_hdr_exp_reset)
-            exposure_lay.addLayout(value_row)
+            self.btn_hdr_exp_reset.setSizePolicy(
+                QSizePolicy.Expanding, QSizePolicy.Fixed)
+            exposure_lay.addWidget(self.btn_hdr_exp_reset)
 
             def _on_exposure_slider(value: int):
                 self.spin_hdr_exposure.setValue(value / 10.0)
@@ -3866,7 +3907,7 @@ if HAS_QT:
             h_flow.addWidget(self.slider_flow, 1)
 
             self.lbl_flow = QLabel(f"{self.slider_flow.value()}%")
-            self.lbl_flow.setObjectName("fieldLabel")
+            self.lbl_flow.setObjectName("numericValue")
             self.lbl_flow.setFixedWidth(36)
             h_flow.addWidget(self.lbl_flow, 0, Qt.AlignVCenter)
 
@@ -3963,18 +4004,25 @@ if HAS_QT:
                 "overlay never covers console navigation.")
             self.combo_osd_pos.setEnabled(self.chk_osd.isChecked())
             self.combo_osd_pos.currentIndexChanged.connect(self.on_osd_pos_changed)
-            grid_osd.addWidget(_stacked_field(
+            self.osd_pos_field = _stacked_field(
                 "OSD Position", self.combo_osd_pos,
-                "Screen corner for the On-Screen Stats overlay (Hotkey: P)."),
-                1, 0, 1, 2)
+                "Screen corner for the On-Screen Stats overlay (Hotkey: P).")
+            self.osd_pos_effect = QGraphicsOpacityEffect(self.osd_pos_field)
+            self.osd_pos_effect.setOpacity(1.0)
+            self.osd_pos_field.setGraphicsEffect(self.osd_pos_effect)
+            grid_osd.addWidget(self.osd_pos_field, 1, 0, 1, 2)
 
             self.chk_streamer = QCheckBox("Clean Feed (Hide All Overlays)")
             self.chk_streamer.setToolTip(
                 "Hides mouse cursor, HUD and overlays for clean recordings.")
             self.chk_streamer.setChecked(self.saved_cfg.get("streamer_mode", False))
-            self.chk_streamer.toggled.connect(lambda val: save_settings({"streamer_mode": val}))
+            self.chk_streamer.toggled.connect(
+                lambda val: save_settings({"streamer_mode": val}))
+            self.chk_streamer.toggled.connect(
+                lambda _val: self._update_osd_controls())
             grid_osd.addWidget(_toggle(self.chk_streamer), 2, 0, 1, 2)
             lay_stream.addWidget(card_osd)
+            self._update_osd_controls()
 
             # --- OBS & Capture Routing Card ---
             card_obs, grid_obs = _section("OBS & CAPTURE ROUTING", "#5ED4B2")
@@ -4017,17 +4065,25 @@ if HAS_QT:
             v4l2_row.setContentsMargins(0, 0, 0, 0)
             v4l2_row.setSpacing(6)
             v4l2_row.addWidget(row_v4l2, 1)
-            lbl_v4l2_obsolete = QLabel("OBSOLETE")
-            lbl_v4l2_obsolete.setObjectName("obsoleteBadge")
+            lbl_v4l2_obsolete = QLabel("Legacy")
+            lbl_v4l2_obsolete.setObjectName("legacyBadge")
             lbl_v4l2_obsolete.setFixedHeight(18)
             lbl_v4l2_obsolete.setToolTip(
                 "PipeWire and the LD_PRELOAD shim cover OBS, Discord and "
                 "browsers without a kernel module.")
             v4l2_row.addWidget(lbl_v4l2_obsolete, 0, Qt.AlignVCenter)
             grid_obs.addLayout(v4l2_row, 1, 0)
-            grid_obs.addWidget(_hint(
-                "PipeWire video & SHM (libgc573-v4l2.so) are always active without kernel modules."),
-                2, 0)
+            note = QLabel(
+                "PipeWire video &amp; DMA-BUF Zero-Copy are always active "
+                "without kernel modules.")
+            note.setObjectName("helperNote")
+            note.setWordWrap(True)
+            note.setTextFormat(Qt.RichText)
+            note.setText(
+                "<div style=\"line-height:150%\">PipeWire video &amp; "
+                "DMA-BUF Zero-Copy are always active without kernel "
+                "modules.</div>")
+            grid_obs.addWidget(note, 2, 0)
             lay_stream.addWidget(card_obs)
             lay_stream.addStretch(1)
 
@@ -4040,11 +4096,7 @@ if HAS_QT:
             self.combo_led = _shrinkable(QComboBox())
             self.combo_led.setIconSize(QSize(14, 14))
             for name, val in LED_MODES.items():
-                icon = create_led_icon(val)
-                if icon:
-                    self.combo_led.addItem(icon, name, val)
-                else:
-                    self.combo_led.addItem(name, val)
+                self.combo_led.addItem(name, val)
 
             saved_led = self.saved_cfg.get("led_mode", None)
             if self.vfio_mode:
@@ -4213,6 +4265,8 @@ if HAS_QT:
                 "open. The App Camera shortcuts are separate per-app "
                 "launchers, never a session-wide LD_PRELOAD."),
                 5, 0, 1, 2)
+            # Feature branch not included in this release build.
+            card_integrations.setVisible(FEATURE_BACKGROUND_SERVICE_UI)
             lay_app.addWidget(card_integrations)
 
             card_diag, grid_diag = _section("DIAGNOSTICS & HELP", "#BB96F3")
@@ -4252,9 +4306,14 @@ if HAS_QT:
 
             initial_vol = int(self.saved_cfg.get("volume", 1.0) * 100)
 
-            self.btn_mute = IconButton(
-                "volume", "Mute the HDMI audio stream",
-                size=ui_theme.BUTTON_H, icon_size=21)
+            self.btn_mute = QPushButton(" Mute")
+            self.btn_mute.setObjectName("btnBar")
+            self.btn_mute.setFixedHeight(ui_theme.BUTTON_H)
+            self.btn_mute.setFixedWidth(92)
+            self.btn_mute.setCursor(Qt.PointingHandCursor)
+            self.btn_mute.setIconSize(QSize(14, 14))
+            self.btn_mute.setIcon(
+                fa_icons.icon("volume", "#E7EBF2", 14))
             self.btn_mute.clicked.connect(self.toggle_mute)
             b_layout.addWidget(self.btn_mute, 0, Qt.AlignVCenter)
 
@@ -4269,8 +4328,9 @@ if HAS_QT:
             b_layout.addWidget(self.slider_vol, 0, Qt.AlignVCenter)
 
             self.lbl_vol = QLabel(f"{initial_vol}%")
-            self.lbl_vol.setFixedWidth(38)
-            self.lbl_vol.setObjectName("fieldLabel")
+            self.lbl_vol.setFixedWidth(42)
+            self.lbl_vol.setAlignment(Qt.AlignCenter)
+            self.lbl_vol.setObjectName("numericValue")
             b_layout.addWidget(self.lbl_vol, 0, Qt.AlignVCenter)
 
             if self.vfio_mode:
@@ -4282,6 +4342,7 @@ if HAS_QT:
             self.lbl_audio_fmt = QLabel("No Audio")
             self.lbl_audio_fmt.setObjectName("audioFormat")
             self.lbl_audio_fmt.setFixedHeight(ui_theme.BUTTON_H)
+            self.lbl_audio_fmt.setMinimumWidth(124)
             self.lbl_audio_fmt.setAlignment(Qt.AlignCenter)
             self.lbl_audio_fmt.setToolTip(
                 "Audio format detected by the userspace engine from the "
@@ -4384,6 +4445,12 @@ if HAS_QT:
             sc_fg = QShortcut(QKeySequence("G"), self)
             sc_fg.setContext(app_ctx)
             sc_fg.activated.connect(self._cycle_framegen)
+            sc_mode = QShortcut(QKeySequence("Ctrl+Shift+A"), self)
+            sc_mode.setContext(app_ctx)
+            sc_mode.activated.connect(self._toggle_ui_mode)
+            sc_dock = QShortcut(QKeySequence("T"), self)
+            sc_dock.setContext(app_ctx)
+            sc_dock.activated.connect(self._remote_dock)
 
         def _cycle_framegen(self):
             if not hasattr(self, "combo_framegen"):
@@ -4434,6 +4501,15 @@ if HAS_QT:
         def on_ui_mode_changed(self, mode):
             self._apply_ui_mode(str(mode))
 
+        def _toggle_ui_mode(self):
+            mode = ("advanced"
+                    if getattr(self, "ui_mode", "simple") == "simple"
+                    else "simple")
+            if hasattr(self, "seg_mode"):
+                self.seg_mode.setCurrentData(mode)
+            else:
+                self._apply_ui_mode(mode)
+
         def on_help_clicked(self):
             self._open_shortcuts_dialog()
 
@@ -4470,15 +4546,15 @@ if HAS_QT:
             if hasattr(self, "btn_discord"):
                 self.btn_discord.setVisible(self.width() >= 1160)
             if hasattr(self, "top_bar"):
-                self.top_bar.setSpacing(4 if narrow else 10)
+                self.top_bar.setSpacing(6 if narrow else 8)
                 self.top_bar.setContentsMargins(
-                    12 if narrow else 20, 0, 12 if narrow else 20, 0)
+                    12 if narrow else 16, 0, 12 if narrow else 16, 0)
             if hasattr(self, "lbl_hints"):
                 self.lbl_hints.setVisible(False)
-            self._compact_labels = self.width() < 1500
+            self._compact_labels = self.width() < 1320
             # The deck drops secondary readouts before they start clipping.
             for attr in ("lbl_hero_signal", "lbl_drops_counter",
-                         "lbl_fg_status", "status_light"):
+                         "lbl_fg_status", "status_light", "lbl_kv_pclk"):
                 widget = getattr(self, attr, None)
                 if widget is not None:
                     widget.setVisible(not narrow)
@@ -4488,13 +4564,13 @@ if HAS_QT:
         def resizeEvent(self, event):  # noqa: N802 (Qt casing)
             super().resizeEvent(event)
             self._apply_responsive_chrome()
+            self._position_remote_card()
 
         def _refresh_header_labels(self):
             """Use compact action labels; full wording stays in tooltips."""
             short = {
                 "btnLaunchStart": "Start Gaming",
-                "btnLaunchStop": "Stop",
-                "btnLaunchSwitch": "Open Game",
+                "btnLaunchActive": "Local Capture Active",
                 "btnStudioStart": "Studio",
                 "btnStudioSwitch": "Studio",
                 "btnStudioStop": "Stop Studio",
@@ -4502,8 +4578,7 @@ if HAS_QT:
             if getattr(self, "_compact_labels", False):
                 short.update({
                     "btnLaunchStart": "Start",
-                    "btnLaunchStop": "Stop",
-                    "btnLaunchSwitch": "Start",
+                    "btnLaunchActive": "Capture Active",
                 })
 
             def _label(button):
@@ -4514,8 +4589,7 @@ if HAS_QT:
 
             action_icons = {
                 "btnLaunchStart": ("play", "#FFFFFF"),
-                "btnLaunchStop": ("stop", "#FFFFFF"),
-                "btnLaunchSwitch": ("play", "#FFFFFF"),
+                "btnLaunchActive": ("video", "#FFFFFF"),
                 "btnStudioStart": ("tower-broadcast", "#E7EBF2"),
                 "btnStudioSwitch": ("tower-broadcast", "#E7EBF2"),
                 "btnStudioStop": ("stop", "#FFFFFF"),
@@ -4523,6 +4597,9 @@ if HAS_QT:
             if hasattr(self, "btn_launch"):
                 self.btn_launch.setText(_label(self.btn_launch))
                 icon = action_icons.get(self.btn_launch.objectName())
+                override = self.btn_launch.property("iconName")
+                if override:
+                    icon = (str(override), "#FFFFFF")
                 if icon:
                     self.btn_launch.setIcon(
                         fa_icons.icon(icon[0], icon[1], 14))
@@ -4547,26 +4624,15 @@ if HAS_QT:
                 if getattr(self, "_remote", False):
                     return "Remote • No Signal", "accent"
                 if getattr(self, "_launch_mode", None):
-                    return f"No Signal • {audio}", "warn"
+                    return "CAPTURE ACTIVE • No Signal", "warn"
                 return "Standby • No Signal", "idle"
 
-            resolution = str(live.get("resolution") or "")
+            resolution = str(live.get("resolution") or "—")
             rate = str(live.get("framerate") or "")
-            height = re.search(r"(\d{3,4})p", resolution)
-            hz = re.search(r"([\d.]+)", rate)
-            mode = ""
-            if height:
-                mode = f"{height.group(1)}p"
-                if hz:
-                    try:
-                        mode += f"{round(float(hz.group(1)))}"
-                    except ValueError:
-                        pass
-            elif resolution:
-                mode = resolution
-            if mode:
-                return f"{mode} • {audio}", "active"
-            return f"Signal • {audio}", "active"
+            text = f"CAPTURE ACTIVE • {resolution}"
+            if rate:
+                text += f" @ {rate}"
+            return text, "active"
 
         def _refresh_signal_badge(self):
             if not hasattr(self, "chip_bar_capture"):
@@ -4574,6 +4640,11 @@ if HAS_QT:
             text, tone = self._compact_signal_text()
             if self.chip_bar_capture.state_text() != text:
                 self.chip_bar_capture.set_state(text, tone)
+            width = (self.chip_bar_capture.fontMetrics().horizontalAdvance(text)
+                     + 34)
+            self.chip_bar_capture.setMinimumWidth(width)
+            self.chip_bar_capture.setSizePolicy(
+                QSizePolicy.Minimum, QSizePolicy.Fixed)
             self.chip_bar_capture.setVisible(True)
 
         def _apply_capture_controls(self):
@@ -4592,12 +4663,9 @@ if HAS_QT:
                 label = "Standby"
 
             ui_mode = getattr(self, "ui_mode", "simple")
-            # Simple mode hides the explicit Start/Stop action while running;
-            # Advanced always keeps Stop available.
-            show_launch = (
-                ui_mode == "advanced"
-                or not active
-                or mode == "studio")
+            # The primary button doubles as the capture state control, so it
+            # stays visible in both Simple and Advanced.
+            show_launch = True
             if hasattr(self, "lbl_card_title"):
                 short = self.width() < 1340
                 card_label = (getattr(self, "_card_short_label", "")
@@ -4675,10 +4743,31 @@ if HAS_QT:
                 and self._get_video_host_winid() > 0
             )
 
+        def _position_remote_card(self):
+            if not hasattr(self, "remote_card"):
+                return
+            host = self.video_host.size()
+            self.remote_card.move(
+                max(0, (host.width() - self.remote_card.width()) // 2),
+                max(0, (host.height() - self.remote_card.height()) // 2))
+
         def _refresh_stage_overlay(self):
             if not hasattr(self, "video_standby_overlay"):
                 return
+            remote_detached = (
+                bool(getattr(self, "_remote", False))
+                and not bool(getattr(self, "_remote_docked", False)))
+            if hasattr(self, "remote_card"):
+                self.remote_card.setVisible(
+                    remote_detached and not self._is_embedded_gaming_active())
+                if self.remote_card.isVisible():
+                    self._position_remote_card()
+                    self.remote_card.raise_()
+
             if self._is_embedded_gaming_active():
+                self.video_standby_overlay.setVisible(False)
+                return
+            if remote_detached:
                 self.video_standby_overlay.setVisible(False)
                 return
 
@@ -4691,10 +4780,6 @@ if HAS_QT:
                 self.video_standby_overlay.set_messages(
                     "EXTERNAL POP-OUT ACTIVE",
                     "Uncheck 'Pop-out Window' below to dock the stream back here")
-            elif self._remote:
-                self.video_standby_overlay.set_messages(
-                    "REMOTE SESSION ATTACHED",
-                    "Click 'Dock Video Here' to view the running engine in this viewport")
             else:
                 self.video_standby_overlay.set_messages(
                     "NO HDMI SIGNAL",
@@ -4712,8 +4797,9 @@ if HAS_QT:
             self._refresh_stage_overlay()
 
         def _set_launch_running(self, running: bool, mode: Optional[str] = None):
-            for button in (self.btn_launch, self.btn_studio):
-                button.setProperty("shortLabel", None)
+            self.btn_launch.setProperty("shortLabel", None)
+            self.btn_launch.setProperty("iconName", None)
+            self.btn_studio.setProperty("shortLabel", None)
             if running:
                 self._launch_mode = mode or "gaming"
                 self._last_launch_mode = self._launch_mode
@@ -4734,23 +4820,23 @@ if HAS_QT:
             if self._launch_mode == "studio":
                 # Studio keeps capturing; the gaming window can be opened on
                 # top of the running headless engine without dropping OBS.
-                self.btn_launch.setText("Switch to Gaming Screen")
-                self.btn_launch.setObjectName("btnLaunchSwitch")
+                self.btn_launch.setText("Local Capture Active")
+                self.btn_launch.setObjectName("btnLaunchActive")
                 self.btn_launch.setEnabled(True)
                 self.btn_launch.setToolTip(
-                    "Seamlessly open the interactive SDL2 gaming window "
-                    "(background capture to OBS remains uninterrupted).")
+                    "Capture is active. Click to open the interactive SDL2 "
+                    "gaming window without interrupting OBS.")
                 self.btn_studio.setText("Stop Studio")
                 self.btn_studio.setObjectName("btnStudioStop")
                 self.btn_studio.setEnabled(True)
                 self.btn_studio.setToolTip(
                     "Stop the headless streamer and release the capture card.")
             elif self._launch_mode == "gaming":
-                self.btn_launch.setText("Stop Gaming Screen")
-                self.btn_launch.setObjectName("btnLaunchStop")
+                self.btn_launch.setText("Local Capture Active")
+                self.btn_launch.setObjectName("btnLaunchActive")
                 self.btn_launch.setEnabled(True)
                 self.btn_launch.setToolTip(
-                    "Close the gaming window and stop the streamer.")
+                    "Capture is active. Click to stop the gaming session.")
                 self.btn_studio.setText("Switch to Studio (Headless)")
                 self.btn_studio.setObjectName("btnStudioSwitch")
                 self.btn_studio.setEnabled(self.vfio_mode)
@@ -4759,7 +4845,7 @@ if HAS_QT:
                     "native frames in the background for OBS."
                     if self.vfio_mode else studio_idle_tip)
             else:
-                self.btn_launch.setText("Start Gaming Screen")
+                self.btn_launch.setText("Start Gaming")
                 self.btn_launch.setObjectName("btnLaunchStart")
                 self.btn_launch.setEnabled(True)
                 self.btn_launch.setToolTip("")
@@ -5058,19 +5144,21 @@ if HAS_QT:
 
         SHORTCUT_ROWS = (
             ("F / F11 / Double-click", "Toggle Cinema Fullscreen"),
-            ("Esc", "Exit fullscreen or pop-out"),
-            ("G", "Cycle frame generation (Off / 2x / 3x / 4x)"),
-            ("Tab / O", "Toggle the on-screen stats overlay"),
-            ("P", "Cycle the OSD corner"),
-            ("H", "Toggle HDR to SDR tonemapping"),
-            ("L", "Cycle the scaling mode"),
-            ("M", "Mute or unmute HDMI audio"),
+            ("Esc", "Exit Fullscreen"),
+            ("G", "Cycle Frame Generation"),
+            ("Tab / O", "Toggle On-Screen Stats"),
+            ("P", "Cycle OSD Corner"),
+            ("H", "Toggle HDR Tonemapping"),
+            ("L", "Cycle Scaling Mode"),
+            ("M", "Mute Or Unmute Audio"),
+            ("Ctrl+Shift+A", "Toggle Simple / Advanced View"),
+            ("T", "Dock Remote Video"),
         )
 
         def _open_shortcuts_dialog(self):
             dialog = QDialog(self)
             dialog.setWindowTitle("EverLive Keyboard Shortcuts")
-            dialog.resize(480, 420)
+            dialog.resize(560, 500)
             dialog.setStyleSheet(CameraLauncherDialog.DIALOG_QSS)
 
             lay = QVBoxLayout(dialog)
@@ -5083,23 +5171,32 @@ if HAS_QT:
             lay.addWidget(title)
 
             subtitle = QLabel(
-                "Shortcuts work while the Console Hub has focus. The engine "
-                "window accepts the same keys.")
+                "Shortcuts work while EverLive has focus. The engine window "
+                "accepts the same keys.")
             subtitle.setObjectName("hintText")
             subtitle.setWordWrap(True)
             lay.addWidget(subtitle)
 
             grid = QGridLayout()
-            grid.setColumnMinimumWidth(0, 168)
-            grid.setHorizontalSpacing(12)
-            grid.setVerticalSpacing(7)
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 0)
+            grid.setHorizontalSpacing(16)
+            grid.setVerticalSpacing(9)
             for row, (keys, description) in enumerate(self.SHORTCUT_ROWS):
-                key_label = QLabel(keys)
-                key_label.setObjectName("kvVal")
                 desc_label = QLabel(description)
                 desc_label.setObjectName("fieldLabel")
-                grid.addWidget(key_label, row, 0)
-                grid.addWidget(desc_label, row, 1)
+                desc_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                grid.addWidget(desc_label, row, 0)
+
+                key_box = QHBoxLayout()
+                key_box.setContentsMargins(0, 0, 0, 0)
+                key_box.setSpacing(4)
+                for part in keys.split(" / "):
+                    key_label = QLabel(part)
+                    key_label.setObjectName("kbd")
+                    key_label.setAlignment(Qt.AlignCenter)
+                    key_box.addWidget(key_label)
+                grid.addLayout(key_box, row, 1, Qt.AlignRight)
             lay.addLayout(grid)
             lay.addStretch(1)
 
@@ -5257,13 +5354,15 @@ if HAS_QT:
                     self.lbl_pill.setText("● Remote Session")
                     self.lbl_pill.setStyleSheet(
                         "background-color: #122B26; color: #5ED4B2; border: 1px solid #24584B;")
-                self.btn_launch.setText("Dock Video Here")
-                self.btn_launch.setObjectName("btnLaunchStart")
-                self.btn_launch.setProperty("shortLabel", "Dock Video")
+                self.btn_launch.setText("Remote Session Active")
+                self.btn_launch.setObjectName("btnLaunchActive")
+                self.btn_launch.setProperty(
+                    "shortLabel", "Remote Session Active")
+                self.btn_launch.setProperty("iconName", "tower-broadcast")
                 self.btn_launch.setEnabled(True)
                 self.btn_launch.setToolTip(
-                    "Attach the running capture engine to the Hub viewport "
-                    "without interrupting DMA, OBS or audio.")
+                    "A headless capture session owns the card. Use Take Back "
+                    "Capture in the viewport to dock it here.")
                 self.btn_studio.setText("Studio / Headless (external)")
                 self.btn_studio.setObjectName("btnStudioStart")
                 self.btn_studio.setEnabled(False)
@@ -5281,6 +5380,7 @@ if HAS_QT:
                     "click 'Dock Video Here' for the preview",
                     seconds=6.0)
                 self._apply_capture_controls()
+                self._refresh_stage_overlay()
             else:
                 self._remote_docked = False
                 self._dock_pending_until = 0.0
@@ -6012,6 +6112,10 @@ if HAS_QT:
             if not self.duo_mode:
                 return
             save_settings({"duo_edid_bridge": bool(bridge)})
+            if hasattr(self, "lbl_edid_mode"):
+                self.lbl_edid_mode.setText(
+                    "Mode: Built-in Bridge" if bridge
+                    else "Mode: Downstream Copy")
             self._update_vdev_label()
             if not self.streamer.is_running:
                 self._set_vfio_notice(
@@ -6038,11 +6142,26 @@ if HAS_QT:
                 "HPD Pulse Sent" if ok else "HPD Pulse Failed",
                 "HDMI 1" if port == 0 else "HDMI 2", seconds=4.0)
 
+        def _update_edid_port_label(self):
+            """Reflect the active DUO input in the EDID profile label."""
+            if not hasattr(self, "combo_presets"):
+                return
+            index = self.combo_presets.findData("default")
+            if index < 0:
+                return
+            port = 0
+            if self.duo_mode and hasattr(self, "combo_duo_input"):
+                port = 1 if self.combo_duo_input.currentData() == 1 else 0
+            label = ("Default (1080p60)" if port == 1
+                     else "Default (4K60 / 1440p120)")
+            self.combo_presets.setItemText(index, label)
+
         def on_duo_input_changed(self, index: int):
             if not self.duo_mode:
                 return
             port = 1 if self.combo_duo_input.itemData(index) == 1 else 0
             self.streamer.set_duo_input(port)
+            self._update_edid_port_label()
             label = "HDMI 1" if port == 0 else "HDMI 2"
             if self.streamer.is_running:
                 self._set_vfio_notice(
@@ -6093,11 +6212,19 @@ if HAS_QT:
             elif self.streamer.is_running:
                 print("[*] Audio layout saved; restart the stream to apply it.")
 
+        def _update_osd_controls(self):
+            if not hasattr(self, "combo_osd_pos"):
+                return
+            allowed = (self.chk_osd.isChecked()
+                       and not self.chk_streamer.isChecked())
+            self.combo_osd_pos.setEnabled(allowed)
+            if hasattr(self, "osd_pos_effect"):
+                self.osd_pos_effect.setOpacity(1.0 if allowed else 0.45)
+
         def on_osd_changed(self, enabled: bool):
             self.saved_cfg["osd_enabled"] = bool(enabled)
             save_settings({"osd_enabled": bool(enabled)})
-            if hasattr(self, "combo_osd_pos"):
-                self.combo_osd_pos.setEnabled(bool(enabled))
+            self._update_osd_controls()
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_osd(bool(enabled))
             elif self.duo_mode and self.streamer.is_running:
@@ -6610,7 +6737,7 @@ if HAS_QT:
                     f"DMA: 0 MB/s · Drops: {drops} · Audio Underruns: {underruns}"
                 )
                 if hasattr(self, "bar_latency"):
-                    self.bar_latency.set_metric(0.0, "— ms", known=False)
+                    self.bar_latency.set_metric(0.0, "Idle", known=False)
                 if hasattr(self, "bar_dma"):
                     self.bar_dma.set_metric(0.0, "0 MB/s", known=False)
 
@@ -6886,11 +7013,18 @@ if HAS_QT:
             self.muted = bool(muted)
             if not hasattr(self, "btn_mute"):
                 return
-            self.btn_mute.set_icon("mute" if self.muted else "volume")
+            icon_name = "mute" if self.muted else "volume"
+            if hasattr(self.btn_mute, "set_icon"):
+                self.btn_mute.set_icon(icon_name)
+            else:
+                self.btn_mute.setText(
+                    " Unmute" if self.muted else " Mute")
+                self.btn_mute.setIcon(
+                    fa_icons.icon(icon_name, "#E7EBF2", 14))
             self.btn_mute.setToolTip(
                 "Unmute HDMI audio" if self.muted else "Mute HDMI audio")
             self.btn_mute.setStyleSheet(
-                "QPushButton#iconButton { background-color: #3B1D25; "
+                "QPushButton#btnBar { background-color: #3B1D25; "
                 "border: 1px solid #7A2A38; }"
                 if self.muted else "")
 

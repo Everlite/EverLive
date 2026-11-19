@@ -30,8 +30,8 @@ ACCENT = "#D93B86"
 ACCENT_SOFT = "#C689F0"
 ACCENT_DEEP = "#A92C66"
 
-BLUE = "#39598A"
-BLUE_HOVER = "#43679C"
+BLUE = "#3B5B8C"
+BLUE_HOVER = "#4A6FA5"
 BLUE_TEXT = "#E4EEFF"
 
 MINT = "#7FD8C0"
@@ -54,14 +54,15 @@ PAD = 14
 GAP = 10
 RADIUS = 12
 RADIUS_CSS = "12px"
-HEADER_HEIGHT = 72
-BOTTOM_BAR_HEIGHT = 64
+SEGMENT_RADIUS_CSS = "6px"
+HEADER_HEIGHT = 48
+BOTTOM_BAR_HEIGHT = 52
 INSPECTOR_WIDTH = 372
 
 # One control rhythm across the header, inspector, dialogs and bottom bar.
-CONTROL_H = 40
-BUTTON_H = 36
-INPUT_H = 36
+CONTROL_H = 32
+BUTTON_H = 32
+INPUT_H = 32
 
 FONT_STACK = ('-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, '
               '"Helvetica Neue", Arial, sans-serif')
@@ -98,6 +99,7 @@ TOKENS = {
     "CHIP_BG": CHIP_BG,
     "CHIP_BORDER": CHIP_BORDER,
     "RADIUS": RADIUS_CSS,
+    "SEGMENT_RADIUS": SEGMENT_RADIUS_CSS,
     "FONT_STACK": FONT_STACK,
     "MONO_STACK": MONO_STACK,
 }
@@ -139,6 +141,17 @@ QFrame#telemetryCard {
     background-color: @SURFACE@;
     border: 1px solid @BORDER@;
     border-radius: @RADIUS@;
+}
+QFrame#remoteCard {
+    background-color: @SURFACE@;
+    border: 1px solid @GROUP_BORDER@;
+    border-radius: @RADIUS@;
+}
+QLabel#remoteTitle {
+    color: @TEXT@;
+    font-size: 16px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
 }
 QFrame#telemetryDeck {
     background-color: @SURFACE@;
@@ -217,7 +230,7 @@ QLabel#sourceName {
 QWidget#sourceSegments {
     background-color: @SURFACE_SUNKEN@;
     border: 1px solid @BORDER@;
-    border-radius: @RADIUS@;
+    border-radius: @SEGMENT_RADIUS@;
 }
 QLabel#badgeModel {
     color: @TEXT@;
@@ -252,18 +265,21 @@ QLabel#hintText {
 QLabel#kvKey {
     color: @TEXT_DIM@;
     font-size: 13.5px;
+    font-variant-numeric: tabular-nums;
 }
 QLabel#kvVal {
     color: @TEXT@;
     font-family: @MONO_STACK@;
     font-size: 13.5px;
     font-weight: 600;
+    font-variant-numeric: tabular-nums;
 }
 QLabel#heroSignal {
     color: @TEXT@;
     font-family: @MONO_STACK@;
     font-size: 14px;
     font-weight: 700;
+    font-variant-numeric: tabular-nums;
 }
 QLabel#heroMeta {
     color: @TEXT_MUTED@;
@@ -274,6 +290,7 @@ QLabel#fpsHero {
     font-family: @MONO_STACK@;
     font-size: 26px;
     font-weight: 800;
+    font-variant-numeric: tabular-nums;
 }
 QLabel#fpsUnit {
     color: @TEXT_MUTED@;
@@ -336,15 +353,35 @@ QLabel#statusChip {
     font-weight: 700;
     letter-spacing: 0.3px;
 }
-QLabel#obsoleteBadge {
-    color: @WARN@;
-    background-color: @WARN_BG@;
-    border: 1px solid @WARN_BORDER@;
-    border-radius: @RADIUS@;
+QLabel#legacyBadge {
+    color: #C9A96B;
+    background-color: #2A2A33;
+    border: 1px solid #4A4436;
+    border-radius: @SEGMENT_RADIUS@;
     padding: 1px 7px;
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 700;
-    letter-spacing: 0.6px;
+    letter-spacing: 0.5px;
+}
+QLabel#helperNote {
+    color: @LABEL@;
+    font-size: 13px;
+}
+QLabel#kbd {
+    color: @TEXT@;
+    background-color: #1E2634;
+    border: 1px solid @GROUP_BORDER@;
+    border-radius: @SEGMENT_RADIUS@;
+    padding: 2px 7px;
+    font-family: @MONO_STACK@;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#numericValue {
+    color: @TEXT@;
+    font-family: @MONO_STACK@;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
 }
 
 /* Inspector tabs */
@@ -385,7 +422,7 @@ QScrollArea#inspectorScroll, QScrollArea#inspectorScroll > QWidget > QWidget {
 QWidget#segmentedControl {
     background-color: @SURFACE@;
     border: 1px solid @GROUP_BORDER@;
-    border-radius: @RADIUS@;
+    border-radius: @SEGMENT_RADIUS@;
 }
 QWidget#sourceSegments {
     background-color: @SURFACE_SUNKEN@;
@@ -402,12 +439,16 @@ QPushButton#segmentButton {
     font-weight: 600;
 }
 QPushButton#segmentButton[segmentPos="first"] {
-    border-top-left-radius: @RADIUS@;
-    border-bottom-left-radius: @RADIUS@;
+    border-top-left-radius: @SEGMENT_RADIUS@;
+    border-bottom-left-radius: @SEGMENT_RADIUS@;
+    border-right: 1px solid @GROUP_BORDER@;
+}
+QPushButton#segmentButton[segmentPos="middle"] {
+    border-right: 1px solid @GROUP_BORDER@;
 }
 QPushButton#segmentButton[segmentPos="last"] {
-    border-top-right-radius: @RADIUS@;
-    border-bottom-right-radius: @RADIUS@;
+    border-top-right-radius: @SEGMENT_RADIUS@;
+    border-bottom-right-radius: @SEGMENT_RADIUS@;
 }
 QPushButton#segmentButton:hover:!checked {
     color: @TEXT@;
@@ -447,8 +488,8 @@ QComboBox {
     color: @TEXT@;
     border: 1px solid @BORDER_STRONG@;
     border-radius: @RADIUS@;
-    min-height: 26px;
-    padding: 4px 10px;
+    min-height: 24px;
+    padding: 3px 10px;
     font-size: 14px;
 }
 QComboBox:hover {
@@ -579,6 +620,19 @@ QPushButton#btnLaunchStart:hover {
     background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
         stop:0 #2B9679, stop:1 #40BA98);
 }
+QPushButton#btnLaunchActive {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #25856B, stop:1 #36A888);
+    border: 1px solid #5ED4B2;
+    color: #FFFFFF;
+    font-size: 13px;
+    font-weight: 700;
+    padding: 4px 12px;
+}
+QPushButton#btnLaunchActive:hover {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #2B9679, stop:1 #40BA98);
+}
 QPushButton#btnLaunchStop {
     background-color: #9E3342;
     border: 1px solid #FF5D5D;
@@ -639,8 +693,8 @@ QCheckBox::indicator {
 }
 QCheckBox::indicator:hover { border-color: @ACCENT@; }
 QCheckBox::indicator:checked {
-    background-color: @ACCENT@;
-    border-color: @ACCENT@;
+    background-color: @BLUE@;
+    border-color: @BLUE_HOVER@;
 }
 
 /* Sliders */

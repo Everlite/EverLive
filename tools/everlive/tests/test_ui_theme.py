@@ -38,7 +38,7 @@ class TokenTests(unittest.TestCase):
     def test_palette_matches_mockup_tokens(self):
         self.assertEqual(ui_theme.BG.lower(), "#12151f")
         self.assertEqual(ui_theme.ACCENT.lower(), "#d93b86")
-        self.assertEqual(ui_theme.BLUE.lower(), "#39598a")
+        self.assertEqual(ui_theme.BLUE.lower(), "#3b5b8c")
 
     def test_primary_radius_is_uniform(self):
         stylesheet = ui_theme.build_stylesheet()
@@ -46,8 +46,6 @@ class TokenTests(unittest.TestCase):
                        "QFrame#telemetryDeck",
                        "QFrame#cardFrame",
                        "QFrame#sourceGroup",
-                       "QWidget#segmentedControl",
-                       "QWidget#sourceSegments",
                        "\nQPushButton {",
                        "\nQComboBox {"):
             start = stylesheet.index(needle)
@@ -58,7 +56,7 @@ class TokenTests(unittest.TestCase):
         import re
         stylesheet = ui_theme.build_stylesheet()
         values = set(re.findall(r"border-radius:\s*([^;]+);", stylesheet))
-        self.assertLessEqual(values, {"0px", "12px"}, values)
+        self.assertLessEqual(values, {"0px", "6px", "12px"}, values)
 
     def test_segment_inner_edges_stay_square(self):
         stylesheet = ui_theme.build_stylesheet()
@@ -67,8 +65,9 @@ class TokenTests(unittest.TestCase):
         self.assertIn("border-radius: 0px", block)
         first = stylesheet.index('QPushButton#segmentButton[segmentPos="first"]')
         block = stylesheet[first:stylesheet.index("}", first)]
-        self.assertIn("border-top-left-radius: 12px", block)
-        self.assertIn("border-bottom-left-radius: 12px", block)
+        self.assertIn("border-top-left-radius: 6px", block)
+        self.assertIn("border-bottom-left-radius: 6px", block)
+        self.assertIn("border-right: 1px solid", block)
 
     def test_missing_tokens_reports_typos(self):
         found = ui_theme.missing_tokens("color: @NOT_A_TOKEN@;")
