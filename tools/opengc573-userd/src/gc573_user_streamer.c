@@ -797,7 +797,7 @@ static void print_usage(const char *prog)
 	printf("  --fg-low-latency  Preserve the minimal Vulkan swapchain image count\n");
 	printf("                    (LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT=1, default).\n");
 	printf("  --no-fg-low-latency  Let lsfg-vk add its default buffering.\n");
-	printf("  Hotkeys: g cycles frame generation Off -> 60->120 -> 30->60.\n");
+	printf("  Hotkeys: g cycles frame generation Off -> 2x -> 3x -> 4x -> Off.\n");
 	printf("  EVERLIVE_LED      fallback used when --led is not given.\n");
 }
 
@@ -7584,14 +7584,19 @@ int main(int argc, char *argv[])
 					SDL_SetWindowTitle(window, title);
 				} else if (event.key.keysym.sym == SDLK_TAB ||
 					   event.key.keysym.sym == SDLK_i ||
-					   event.key.keysym.sym == SDLK_o ||
-					   event.key.keysym.sym == SDLK_s ||
+					   event.key.keysym.sym == SDLK_o) {
+					g_osd_enabled = !g_osd_enabled;
+					printf("[OSD] Overlay: %s\n",
+					       g_osd_enabled ? "on" : "off");
+					fflush(stdout);
+				} else if (event.key.keysym.sym == SDLK_s ||
 					   event.key.keysym.sym == SDLK_F10) {
 					g_osd_enabled = !g_osd_enabled;
 					SDL_ShowCursor(g_osd_enabled ?
 						       SDL_ENABLE : SDL_DISABLE);
-					printf("[OSD] Overlay: %s\n",
-					       g_osd_enabled ? "on" : "off");
+					printf("[OSD] Streamer mode: %s (cursor %s)\n",
+					       g_osd_enabled ? "off" : "on",
+					       g_osd_enabled ? "visible" : "hidden");
 					fflush(stdout);
 				} else if (event.key.keysym.sym == SDLK_F1 ||
 					   event.key.keysym.sym == SDLK_QUESTION) {

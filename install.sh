@@ -456,7 +456,7 @@ make -C "${SCRIPT_DIR}" -j"$(nproc)"
 
 # Never leave build artifacts world-writable, and keep binaries setcap-safe.
 chmod 0755 "${USERD_DIR}/gc573_user_streamer" "${USERD_DIR}/everlive_userd" \
-    "${USERD_DIR}/gc573_user_probe" "${CORE_DIR}/everlive-ctl" \
+    "${USERD_DIR}/gc573_user_probe" "${USERD_DIR}/gc573_user_diag" "${CORE_DIR}/everlive-ctl" \
     "${GC570D_DIR}/opengc570d-userd" "${GC570D_DIR}/gc570d-ctl" \
     "${SCRIPT_DIR}/play.sh"
 chmod 0644 "${GC570D_DIR}/libgc570d-v4l2.so" 2>/dev/null || true

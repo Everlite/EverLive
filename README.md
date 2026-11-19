@@ -58,7 +58,7 @@ sudo ./install.sh --no-loopback
 
 ### Building, testing, and system packaging
 ```bash
-make -j"$(nproc)"                                       # libeverlive-core + both engines + VK pacer
+make -j"$(nproc)"                                       # libeverlive-core + AVerMedia engines + VK pacer (optional: make hwsuhd)
 make test                                              # 11 C unit-test suites (alias: make -C tests test)
 python3 -m unittest discover -s tools/everlive/tests -v # Python Console Hub & GC553G2 unit tests
 make asan                                              # AddressSanitizer + UBSan run (alias: make -C tests asan)
@@ -72,7 +72,7 @@ sudo make install                                      # optional system-wide in
 2. Configures udev rules (`/etc/udev/rules.d/70-everlive.rules`) and early-boot VFIO autobind (`/etc/modules-load.d/everlive-vfio.conf` + `/etc/modprobe.d/everlive-vfio.conf`) granting your local user read/write access to PCIe VFIO groups, binding `vfio-pci`, and granting non-root USB/HID access to the GC553G2 (`07ca:2553` / `07ca:d553`).
 3. Sets `/etc/security/limits.d/99-everlive-memlock.conf` and adds `cap_ipc_lock` capabilities so unprivileged users can pin DMA buffers required for native 4K and dual-HDMI capture.
 4. Blacklists the legacy out-of-tree `open_gc573` module (`/etc/modprobe.d/blacklist-everlive-legacy.conf`) so it cannot race with `vfio-pci` at boot.
-5. Compiles the shared core and userspace engines through the top-level `Makefile`: `libeverlive-core` (`everlive-ctl`, `libeverlive_core.so`), `opengc573-userd` (`gc573_user_streamer`, `everlive_userd`, `gc573_user_probe`, `gc573_user_diag`, `libgc573-v4l2.so`, `libeverlive-vk-pacer.so`) and `opengc570d-userd` (`opengc570d-userd`, `gc570d-ctl`, `libgc570d-v4l2.so`). The core library, its headers, `everlive-ctl`, `everlive-service`, the module-free V4L2 preload libraries, the Vulkan pacer library, and the universal `everlive.service` unit are installed system-wide.
+5. Compiles the shared core and userspace engines through the top-level `Makefile`: `libeverlive-core` (`everlive-ctl`, `libeverlive_core.so`), `opengc573-userd` (`gc573_user_streamer`, `everlive_userd`, `gc573_user_probe`, `gc573_user_diag`, `libgc573-v4l2.so`, `libeverlive-vk-pacer.so`) and `opengc570d-userd` (`opengc570d-userd`, `gc570d-ctl`, `libgc570d-v4l2.so`); the HWS UHD engine (`tools/openhws-userd`) is built on demand (`make hwsuhd`) or automatically via `play.sh` when an HWS UHD card is selected. The core library, its headers, `everlive-ctl`, `everlive-service`, the module-free V4L2 preload libraries, the Vulkan pacer library, and the universal `everlive.service` unit are installed system-wide.
 6. Configures an isolated PipeWire audio sink (`50-everlive-capture.conf`) providing the dedicated `"EverLive Capture Audio"` source for OBS.
 7. *(Unless `--no-loopback` is requested)* Configures the Virtual Camera loopback nodes: `/etc/modprobe.d/everlive-v4l2loopback.conf` (`video_nr=10,11 card_label="EverLive Capture,EverLive Capture HDMI 2" exclusive_caps=0`) and loads the module at boot via `/etc/modules-load.d/`.
 8. Installs the desktop application launcher and icon.

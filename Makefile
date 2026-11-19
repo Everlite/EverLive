@@ -34,7 +34,7 @@ VIEWER_DIR := tools/everlive
 TESTS_DIR  := tests
 PKG_DIR    := packaging
 
-GC573_BINS  := gc573_user_streamer everlive_userd gc573_user_probe
+GC573_BINS  := gc573_user_streamer everlive_userd gc573_user_probe gc573_user_diag
 GC570D_BINS := opengc570d-userd gc570d-ctl
 ICON_SIZES  := 16 32 48 64 128 256 512
 

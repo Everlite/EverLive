@@ -133,12 +133,12 @@ LIBDIR := $(DESTDIR)$(PREFIX)/lib
 
 install: all
 	install -d $(BINDIR) $(LIBDIR)
-	install -m 0755 gc573_user_streamer everlive_userd gc573_user_probe $(BINDIR)/
+	install -m 0755 gc573_user_streamer everlive_userd gc573_user_probe gc573_user_diag $(BINDIR)/
 	install -m 0644 libgc573-v4l2.so libeverlive-vk-pacer.so $(LIBDIR)/
 	command -v setcap >/dev/null 2>&1 && setcap cap_ipc_lock=+ep $(BINDIR)/gc573_user_streamer 2>/dev/null || true
 
 uninstall:
-	rm -f $(BINDIR)/gc573_user_streamer $(BINDIR)/everlive_userd $(BINDIR)/gc573_user_probe
+	rm -f $(BINDIR)/gc573_user_streamer $(BINDIR)/everlive_userd $(BINDIR)/gc573_user_probe $(BINDIR)/gc573_user_diag
 	rm -f $(LIBDIR)/libgc573-v4l2.so $(LIBDIR)/libeverlive-vk-pacer.so
 
 .PHONY: all test selftest framegen-selftest clean install uninstall
