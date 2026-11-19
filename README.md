@@ -289,6 +289,10 @@ build, CLI and hotkey details.
 
 ## Running Several Cards at Once
 
+**In the Console Hub:** with more than one card installed, the header shows a **Multiview** toggle next to the card selector. Turning it on starts every other card (up to three) in its own tile beside the main video. It also turns on with the next capture start once enabled. The extra cards stay quiet locally; each tile has a speaker button and a volume slider for listening to that card (saved per card; turning the slider up also unmutes it). These only change what you hear: recordings keep each card's own level. **Record** then records every card into separate files that share one take timestamp, and the tiles show each card's signal and recording time. Stopping capture, switching cards or quitting stops the extra engines. The Hub's controls (inspector, volume, EDID…) apply to the card selected in the header.
+
+**From the command line:**
+
 `./play.sh --all` prepares every supported PCIe card (build, `cap_ipc_lock`, vfio-pci binding) and starts one engine per card, each in its own window. Each engine gets its own control socket (`$XDG_RUNTIME_DIR/everlive-<model>-<pci>.sock`) and, for the GC573 and HWS UHD, its own PipeWire audio sink (`everlive-<model>-<pci>-audio`), so the cards' audio never mixes. The default `everlive.sock` stays free, so close the Console Hub first.
 
 ```bash

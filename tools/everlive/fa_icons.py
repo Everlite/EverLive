@@ -55,6 +55,8 @@ ICONS = {
     "volume": ("solid", "\uf028"),
     "mute": ("solid", "\uf6a9"),
     "waveform": ("solid", "\uf8de"),
+    "table-cells-large": ("solid", "\uf009"),
+    "headphones": ("solid", "\uf025"),
     # help / diagnostics
     "help": ("solid", "\uf059"),
     "info": ("solid", "\uf05a"),
@@ -94,6 +96,8 @@ _FALLBACK_GLYPHS = {
     "volume": "🔊",
     "mute": "🔇",
     "waveform": "∿",
+    "table-cells-large": "▦",
+    "headphones": "🎧",
     "help": "?",
     "info": "i",
     "keyboard": "⌨",

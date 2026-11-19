@@ -71,6 +71,72 @@ class EngineCommandTests(unittest.TestCase):
         self.assertEqual(cmd[-1], "--headless")
 
 
+class EmbedAndAudioTests(unittest.TestCase):
+    def test_parent_winid(self) -> None:
+        cmd, env = em.build_engine_command(HWS, "/bin/hws", socket="/s", parent_winid=0x3a00007)
+        self.assertEqual(cmd[-2:], ["--parent-winid", str(0x3a00007)])
+        self.assertEqual(env["EVERLIVE_PARENT_WINID"], str(0x3a00007))
+        self.assertEqual(env["SDL_VIDEODRIVER"], "x11")
+        # The GC570D engine reads the environment only.
+        cmd, env = em.build_engine_command(GC570D, "/bin/duo", socket="/s", parent_winid=42)
+        self.assertNotIn("--parent-winid", cmd)
+        self.assertEqual(env["EVERLIVE_PARENT_WINID"], "42")
+
+    def test_headless_ignores_parent(self) -> None:
+        cmd, env = em.build_engine_command(GC573, "/bin/gc", socket="/s",
+                                           headless=True, parent_winid=42)
+        self.assertNotIn("--parent-winid", cmd)
+        self.assertNotIn("EVERLIVE_PARENT_WINID", env)
+
+    def test_silent_playback_keeps_tap_untouched(self) -> None:
+        _, env = em.build_engine_command(GC573, "/bin/gc", socket="/s", silent_playback=True)
+        self.assertEqual(env["SDL_AUDIODRIVER"], "pulseaudio")
+        self.assertEqual(env["PULSE_PROP_state.restore-props"], "false")
+        # PIPEWIRE_PROPS would also retarget the native tap stream.
+        self.assertNotIn("PIPEWIRE_PROPS", env)
+        self.assertNotIn("PULSE_SINK", env)
+
+    def test_mute_applies_to_playback_not_tap(self) -> None:
+        runner = em.MultiCardRunner([HWS], silent_playback=True)
+        sess = runner.sessions[0]
+        sess.proc = mock.Mock(pid=4242, poll=mock.Mock(return_value=None))
+        streams = [
+            {"id": "10", "pid": 4242, "sink": "everlive-hwsuhd-84-00-0-audio", "mute": False},
+            {"id": "11", "pid": 4242, "sink": "alsa_output.speakers", "mute": False},
+            {"id": "12", "pid": 999, "sink": "alsa_output.speakers", "mute": False},
+        ]
+        with mock.patch.object(em, "list_sink_inputs", return_value=streams), \
+                mock.patch.object(em, "_pactl") as pactl:
+            runner.apply_playback_mute()
+            pactl.assert_called_once_with("set-sink-input-mute", "11", "1")
+            pactl.reset_mock()
+            streams[1]["mute"] = True
+            runner.set_listen(HWS["pci"], True)
+            pactl.assert_called_once_with("set-sink-input-mute", "11", "0")
+
+
+class VolumeTests(unittest.TestCase):
+    def test_volume_applies_to_playback_only(self) -> None:
+        runner = em.MultiCardRunner([HWS], silent_playback=True)
+        sess = runner.sessions[0]
+        sess.proc = mock.Mock(pid=4242, poll=mock.Mock(return_value=None))
+        sess.listening = True
+        streams = [
+            {"id": "10", "pid": 4242, "sink": "everlive-hwsuhd-84-00-0-audio",
+             "mute": False, "volume": 100},
+            {"id": "11", "pid": 4242, "sink": "alsa_output.speakers",
+             "mute": False, "volume": 100},
+        ]
+        with mock.patch.object(em, "list_sink_inputs", return_value=streams), \
+                mock.patch.object(em, "_pactl") as pactl:
+            self.assertTrue(runner.set_volume(HWS["pci"], 60))
+            pactl.assert_called_once_with("set-sink-input-volume", "11", "60%")
+            self.assertEqual(runner.playback_stream_ids(), ["10", "11"])
+        self.assertEqual(sess.volume, 60)
+        runner.set_volume(HWS["pci"], 999)
+        self.assertEqual(sess.volume, 150)
+
+
 class RecordingSourceTests(unittest.TestCase):
     def test_single_input_cards(self) -> None:
         (gc,) = em.recording_sources(GC573, "/lib/libgc573-v4l2.so")
@@ -85,6 +151,25 @@ class RecordingSourceTests(unittest.TestCase):
         self.assertEqual([s.camera_node for s in srcs], ["/dev/video60", "/dev/video61"])
         self.assertEqual([s.audio_source for s in srcs],
                          ["gc570d_hdmi1_audio", "gc570d_hdmi2_audio"])
+
+
+class TakeNameTests(unittest.TestCase):
+    def test_take_filename_for(self) -> None:
+        self.assertEqual(
+            em.take_filename_for("gc573", "0000:85:00.0", 0, "20261119_120000", 120, "mp4"),
+            "EverLive_20261119_120000_GC573_85-00-0_120fps.mp4")
+        self.assertEqual(
+            em.take_filename_for("gc570d", "0000:03:00.0", 1, "S", 60, "mkv"),
+            "EverLive_S_GC570D_03-00-0_HDMI2_60fps.mkv")
+
+    def test_configure_recording_resets_encoder(self) -> None:
+        runner = em.MultiCardRunner([GC573])
+        runner._resolved_encoder = "libx264"
+        runner.configure_recording(rec_dir="/r", encoder="hevc_vaapi",
+                                   quality="ultra", container="mp4")
+        self.assertEqual((runner.rec_dir, runner.encoder_setting, runner.quality,
+                          runner.container), ("/r", "hevc_vaapi", "ultra", "mp4"))
+        self.assertIsNone(runner._resolved_encoder)
 
 
 class GeometryTests(unittest.TestCase):

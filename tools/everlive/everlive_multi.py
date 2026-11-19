@@ -25,6 +25,7 @@ cap_ipc_lock, vfio-pci binding) and then runs it.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import select
@@ -67,6 +68,7 @@ SHORT_NAMES = {MODEL_GC573: "GC573", MODEL_GC570D: "GC570D",
 GC570D_AUDIO_SOURCES = ("gc570d_hdmi1_audio", "gc570d_hdmi2_audio")
 
 FALLBACK_GEOMETRY = (1920, 1080, 60.0)
+
 
 
 def log(msg: str) -> None:
@@ -119,12 +121,22 @@ def build_engine_command(
     *,
     socket: str,
     headless: bool = False,
+    parent_winid: int = 0,
+    silent_playback: bool = False,
     extra_args: Sequence[str] = (),
 ) -> Tuple[List[str], Dict[str, str]]:
-    """Engine argv and the environment additions for one card."""
+    """Engine argv and the environment additions for one card.
+
+    ``parent_winid`` embeds the engine's SDL window into that X11 window
+    (Console Hub multiview tile).  ``silent_playback`` prepares the engine's
+    local playback stream to be muted on its own (see
+    :meth:`MultiCardRunner.apply_playback_mute`); the audio tap is a
+    separate stream, so recordings keep their sound.
+    """
     model = card["model"]
     pci = card["pci"]
     env = {"EVERLIVE_SOCKET": socket}
+    embed = int(parent_winid or 0) if not headless else 0
     if model == MODEL_GC570D:
         cmd = [binary, "--pci", pci, "--headless" if headless else "--sdl"]
     else:
@@ -133,8 +145,80 @@ def build_engine_command(
         cmd = [binary, pci, f"--audio-tap={audio_tap_name(model, pci)}"]
         if headless:
             cmd.append("--headless")
+        elif embed > 0:
+            cmd.extend(["--parent-winid", str(embed)])
+    if embed > 0:
+        # The GC570D engine only reads the environment variable.
+        env["EVERLIVE_PARENT_WINID"] = str(embed)
+        env["SDL_VIDEODRIVER"] = "x11"
+    if silent_playback:
+        # SDL plays through the PulseAudio API, whose PULSE_PROP_* variables
+        # reach only that playback stream (PIPEWIRE_PROPS would also hit the
+        # native audio-tap stream).  Without restore, WirePlumber neither
+        # remembers the mute applied here nor carries it over to a normal
+        # session of the same engine.
+        env["SDL_AUDIODRIVER"] = "pulseaudio"
+        env["PULSE_PROP_state.restore-props"] = "false"
+        env["PULSE_PROP_state.restore-target"] = "false"
     cmd.extend(extra_args)
     return cmd, env
+
+
+def _pactl(*args: str, timeout: float = 3.0) -> Optional[str]:
+    pactl = shutil.which("pactl")
+    if not pactl:
+        return None
+    try:
+        res = subprocess.run([pactl, *args], capture_output=True, text=True,
+                             timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return res.stdout.strip() if res.returncode == 0 else None
+
+
+def list_sink_inputs() -> List[Dict[str, object]]:
+    """``[{"id", "pid", "sink", "mute", "volume"}]`` for every playback stream.
+
+    ``volume`` is the first channel's level in percent.
+    """
+    pactl = shutil.which("pactl")
+    if not pactl:
+        return []
+    try:
+        res = subprocess.run([pactl, "--format=json", "list", "sink-inputs"],
+                             capture_output=True, text=True, timeout=3.0)
+        items = json.loads(res.stdout or "[]") if res.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    sinks = {}
+    out = _pactl("list", "short", "sinks") or ""
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) > 1:
+            sinks[parts[0]] = parts[1]
+    streams = []
+    for item in items if isinstance(items, list) else []:
+        props = item.get("properties") or {}
+        try:
+            pid = int(props.get("application.process.id") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        volume = 100
+        channels = item.get("volume") or {}
+        if isinstance(channels, dict) and channels:
+            first = next(iter(channels.values()))
+            try:
+                volume = int(str(first.get("value_percent", "100%")).rstrip("%"))
+            except (AttributeError, TypeError, ValueError):
+                pass
+        streams.append({
+            "id": str(item.get("index")),
+            "pid": pid,
+            "sink": sinks.get(str(item.get("sink")), str(item.get("sink"))),
+            "mute": bool(item.get("mute")),
+            "volume": volume,
+        })
+    return streams
 
 
 @dataclass
@@ -182,6 +266,9 @@ class CardSession:
     proc: Optional[subprocess.Popen] = None
     log_path: str = ""
     sources: List[RecordingSource] = field(default_factory=list)
+    parent_winid: int = 0
+    listening: bool = False
+    volume: int = 100  # local playback level in percent (0..150)
 
     @property
     def label(self) -> str:
@@ -216,12 +303,23 @@ def signal_geometry(status: Optional[dict]) -> Tuple[int, int, float, bool]:
     return w, h, (fps if fps >= 24.0 else FALLBACK_GEOMETRY[2]), True
 
 
+def take_filename_for(model: str, pci: str, input_index: int, stamp: str,
+                      fps: int, container: str) -> str:
+    """File name inside one take: ``EverLive_<stamp>_<MODEL>_<pci>[_HDMIn]_<fps>fps``."""
+    ext = "mp4" if container == "mp4" else "mkv"
+    slug = everlive_recorder.re_sub_slug(model)
+    suffix = f"_HDMI{input_index + 1}" if model == MODEL_GC570D else ""
+    return f"EverLive_{stamp}_{slug}_{pci_slug(pci)}{suffix}_{fps}fps.{ext}"
+
+
 def take_filename(source: RecordingSource, stamp: str, fps: int,
                   container: str) -> str:
-    ext = "mp4" if container == "mp4" else "mkv"
-    model = everlive_recorder.re_sub_slug(source.model)
-    suffix = f"_HDMI{source.input_index + 1}" if source.model == MODEL_GC570D else ""
-    return f"EverLive_{stamp}_{model}_{pci_slug(source.pci)}{suffix}_{fps}fps.{ext}"
+    return take_filename_for(source.model, source.pci, source.input_index,
+                             stamp, fps, container)
+
+
+def take_stamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 class MultiCardRunner:
@@ -234,8 +332,13 @@ class MultiCardRunner:
                  quality: str = "high",
                  container: str = "mkv",
                  log_dir: Optional[str] = None,
+                 parent_winids: Optional[Dict[str, int]] = None,
+                 silent_playback: bool = False,
                  extra_args: Sequence[str] = ()):
         self.headless = headless
+        self.silent_playback = silent_playback
+        self._last_mute_check = 0.0
+        self._fast_mute_until = 0.0
         self.rec_dir = rec_dir or everlive_recorder.default_recording_dir()
         self.encoder_setting = encoder
         self.quality = quality
@@ -247,12 +350,21 @@ class MultiCardRunner:
                         socket=session_socket_path(card["model"], card["pci"]))
             for card in cards
         ]
+        for sess in self.sessions:
+            sess.parent_winid = int((parent_winids or {}).get(sess.card["pci"], 0))
         self._resolved_encoder: Optional[str] = None
+
+    def session_for(self, pci: str) -> Optional[CardSession]:
+        return next((s for s in self.sessions if s.card["pci"] == pci), None)
+
+    def engine_pids(self) -> List[int]:
+        return [s.proc.pid for s in self.sessions if s.alive]
 
     # -- engines -----------------------------------------------------------
 
     def start_engines(self) -> int:
         os.makedirs(self.log_dir, exist_ok=True)
+        self._fast_mute_until = time.monotonic() + 10.0
         started = 0
         for sess in self.sessions:
             model = sess.card["model"]
@@ -272,7 +384,9 @@ class MultiCardRunner:
             sess.sources = recording_sources(sess.card, preload)
             sess.cmd, sess.env = build_engine_command(
                 sess.card, binary, socket=sess.socket,
-                headless=self.headless, extra_args=self.extra_args)
+                headless=self.headless, parent_winid=sess.parent_winid,
+                silent_playback=self.silent_playback,
+                extra_args=self.extra_args)
             sess.log_path = os.path.join(
                 self.log_dir, f"{model}-{pci_slug(sess.card['pci'])}.log")
             env = os.environ.copy()
@@ -313,6 +427,60 @@ class MultiCardRunner:
             log(f"{sess.label}: control socket not ready after {timeout:.0f}s "
                 "(recording falls back to 1920x1080@60).")
 
+    # -- local listening ---------------------------------------------------
+
+    def set_listen(self, pci: str, enabled: bool) -> bool:
+        """Unmute (or mute) one card's local playback.
+
+        Only meaningful with ``silent_playback``.  Recordings are not
+        affected: they read the card's audio tap.
+        """
+        sess = self.session_for(pci)
+        if sess is None:
+            return False
+        sess.listening = bool(enabled)
+        self.apply_playback_mute()
+        return True
+
+    def set_volume(self, pci: str, percent: int) -> bool:
+        """Local playback level of one card (0..150 %); recordings keep
+        the card's own level because they read its audio tap."""
+        sess = self.session_for(pci)
+        if sess is None:
+            return False
+        sess.volume = max(0, min(150, int(percent)))
+        self.apply_playback_mute()
+        return True
+
+    def playback_stream_ids(self) -> List[str]:
+        """Sink-input ids of the quiet engines' playback streams."""
+        pids = {s.proc.pid for s in self.sessions if s.alive}
+        return [st["id"] for st in list_sink_inputs() if st["pid"] in pids]
+
+    def apply_playback_mute(self) -> None:
+        """Mute every quiet engine's playback stream (not its tap) unless
+        that card is being listened to, and apply its volume.
+
+        Engines may reopen their SDL stream (format changes), so the Hub
+        calls this from its poll loop.
+        """
+        if not self.silent_playback:
+            return
+        wanted = {s.proc.pid: s for s in self.sessions if s.alive}
+        if not wanted:
+            return
+        for stream in list_sink_inputs():
+            sess = wanted.get(stream["pid"])
+            if sess is None:
+                continue
+            if stream["sink"] == audio_tap_name(sess.card["model"], sess.card["pci"]):
+                continue
+            mute = not sess.listening
+            if stream["mute"] != mute:
+                _pactl("set-sink-input-mute", stream["id"], "1" if mute else "0")
+            if stream.get("volume", 100) != sess.volume:
+                _pactl("set-sink-input-volume", stream["id"], f"{sess.volume}%")
+
     def stop_engines(self, timeout: float = 5.0) -> None:
         for sess in self.sessions:
             if sess.alive:
@@ -333,8 +501,23 @@ class MultiCardRunner:
                 except OSError:
                     sess.proc.kill()
                 sess.proc.wait(timeout=2.0)
+            sess.proc = None
 
     # -- recording ---------------------------------------------------------
+
+    def configure_recording(self, *, rec_dir: Optional[str] = None,
+                            encoder: Optional[str] = None,
+                            quality: Optional[str] = None,
+                            container: Optional[str] = None) -> None:
+        if rec_dir:
+            self.rec_dir = rec_dir
+        if encoder and encoder != self.encoder_setting:
+            self.encoder_setting = encoder
+            self._resolved_encoder = None
+        if quality:
+            self.quality = quality
+        if container:
+            self.container = "mp4" if container == "mp4" else "mkv"
 
     @property
     def is_recording(self) -> bool:
@@ -350,7 +533,7 @@ class MultiCardRunner:
     def build_plans(self, stamp: Optional[str] = None
                     ) -> List[Tuple[CardSession, RecordingSource,
                                     everlive_recorder.RecordingPlan]]:
-        stamp = stamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+        stamp = stamp or take_stamp()
         plans = []
         for sess in self.sessions:
             if not sess.alive:
@@ -388,11 +571,11 @@ class MultiCardRunner:
                 plans.append((sess, src, plan))
         return plans
 
-    def start_recording(self) -> int:
+    def start_recording(self, stamp: Optional[str] = None) -> int:
         if self.is_recording:
             return 0
         started = 0
-        for sess, src, plan in self.build_plans():
+        for sess, src, plan in self.build_plans(stamp):
             if src.recorder is None:
                 src.recorder = everlive_recorder.EverLiveRecorder(
                     log_path=os.path.join(
@@ -423,6 +606,13 @@ class MultiCardRunner:
 
     def poll(self) -> bool:
         """Reap dead engines/recorders; False once no engine is running."""
+        now = time.monotonic()
+        # Check on every poll while engines are opening their playback
+        # streams, so a quiet card is not heard for a moment at start.
+        interval = 0.0 if now < self._fast_mute_until else 2.0
+        if self.silent_playback and now - self._last_mute_check >= interval:
+            self._last_mute_check = now
+            self.apply_playback_mute()
         for sess in self.sessions:
             if sess.proc is not None and not sess.alive:
                 rc = sess.proc.returncode

@@ -22,6 +22,7 @@ if os.environ.get("DISPLAY") and "--cli" not in sys.argv:
 
 try:
     import app_integrations
+    import everlive_multi
     import everlive_recorder
     import fa_icons
     import service_manager
@@ -35,6 +36,7 @@ try:
 except ImportError:  # imported as a module from another working directory
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import app_integrations
+    import everlive_multi
     import everlive_recorder
     import fa_icons
     import service_manager
@@ -544,13 +546,19 @@ def detect_gc573_driver() -> Dict[str, Optional[str]]:
     return result
 
 
+# Engines the Hub started for its multiview tiles.  They own other cards,
+# so the single-engine checks below ("a streamer is already running",
+# stopping a stale DUO daemon) must not see them.
+_MULTIVIEW_PIDS: set = set()
+
+
 def _proc_running(name_prefix: str, any_user: bool = False) -> bool:
     """Match /proc/<pid>/comm (15-char safe) without relying on pgrep.
 
     Only this user's processes count by default: an engine that belongs to
     another user is not ours to stop or wait for.  It releases the capture
     card on request instead (see everlive_handoff.h), so it must not block a
-    launch from here.
+    launch from here.  Multiview engines (``_MULTIVIEW_PIDS``) are ignored.
     """
     try:
         pids = os.listdir("/proc")
@@ -559,7 +567,7 @@ def _proc_running(name_prefix: str, any_user: bool = False) -> bool:
 
     uid = os.getuid()
     for pid in pids:
-        if not pid.isdigit():
+        if not pid.isdigit() or int(pid) in _MULTIVIEW_PIDS:
             continue
         try:
             if not any_user and os.stat(f"/proc/{pid}").st_uid != uid:
@@ -1167,6 +1175,20 @@ def _is_everlive_audio_line(line: str) -> bool:
             and "input." not in low)
 
 
+def _multiview_stream_ids() -> set:
+    """Sink-input ids owned by multiview engines.
+
+    Their playback is muted / levelled per tile, so the Hub's own volume
+    and mute helpers must leave them alone (a GC573 tile also calls its
+    stream "EverLive").  pipewire-pulse uses the PipeWire object id as the
+    sink-input index, so the ids also match wpctl's.
+    """
+    if not _MULTIVIEW_PIDS:
+        return set()
+    return {st["id"] for st in everlive_multi.list_sink_inputs()
+            if st["pid"] in _MULTIVIEW_PIDS}
+
+
 def _wpctl_everlive_stream_ids() -> list:
     """PipeWire stream ids for EverLive playback, via wpctl."""
     ids = []
@@ -1189,7 +1211,8 @@ def _wpctl_everlive_stream_ids() -> list:
                 if clean.isdigit():
                     ids.append(clean)
                     break
-    return ids
+    skip = _multiview_stream_ids()
+    return [i for i in ids if i not in skip]
 
 
 def _pactl_everlive_sink_ids() -> list:
@@ -1217,7 +1240,8 @@ def _pactl_everlive_sink_ids() -> list:
         elif current is not None and _is_everlive_audio_line(line_s):
             matches = True
     flush()
-    return ids
+    skip = _multiview_stream_ids()
+    return [i for i in ids if i not in skip]
 
 
 def set_audio_stream_unity():
@@ -3247,6 +3271,98 @@ if HAS_QT:
                 except Exception:
                     pass
 
+    class MultiviewTile(QFrame):
+        """One extra card in the multiview stage.
+
+        The card's engine embeds its SDL window into ``host`` (a native
+        child window); the slim bar on top names the card and carries its
+        listen toggle and recording state.
+        """
+
+        listenToggled = Signal(str, bool)
+        volumeChanged = Signal(str, int)
+
+        def __init__(self, card: Dict[str, Optional[str]], parent=None,
+                     volume: int = 100):
+            super().__init__(parent)
+            self.pci = str(card.get("pci") or "")
+            self.setObjectName("multiviewTile")
+            self.setStyleSheet(
+                "QFrame#multiviewTile { background-color: #07060E;"
+                " border: 1px solid #23202F; border-radius: 6px; }")
+            lay = QVBoxLayout(self)
+            lay.setContentsMargins(1, 1, 1, 1)
+            lay.setSpacing(0)
+
+            bar = QWidget(self)
+            bar.setFixedHeight(30)
+            bar_lay = QHBoxLayout(bar)
+            bar_lay.setContentsMargins(10, 0, 4, 0)
+            bar_lay.setSpacing(8)
+            self.lbl_name = QLabel(card_display_name(card), bar)
+            self.lbl_name.setStyleSheet(
+                "color: #E7EBF2; font-size: 11.5px; font-weight: 700;"
+                " letter-spacing: 0.4px;")
+            bar_lay.addWidget(self.lbl_name)
+            self.lbl_state = QLabel("Starting…", bar)
+            self.lbl_state.setStyleSheet("color: #9AA0B0; font-size: 11px;")
+            bar_lay.addWidget(self.lbl_state, 1)
+            self.lbl_rec = QLabel("", bar)
+            self.lbl_rec.setStyleSheet(
+                "color: #FF6B7A; font-size: 11px; font-weight: 700;")
+            bar_lay.addWidget(self.lbl_rec)
+            self.btn_listen = IconButton(
+                "mute", "Listen to this card (its recording always has sound)",
+                bar, checkable=True, size=26, icon_size=13)
+            self.btn_listen.toggled.connect(self._on_listen)
+            bar_lay.addWidget(self.btn_listen)
+            # Local listening level only; the recording keeps the card's
+            # own level (it reads the audio tap).
+            self.slider_vol = QSlider(Qt.Horizontal, bar)
+            self.slider_vol.setRange(0, 150)
+            self.slider_vol.setFixedWidth(96)
+            self.slider_vol.setValue(max(0, min(150, int(volume))))
+            self.slider_vol.setToolTip(
+                "Listening volume for this card (recordings are not affected)")
+            self.slider_vol.valueChanged.connect(self._on_volume)
+            bar_lay.addWidget(self.slider_vol)
+            self.lbl_vol = QLabel(f"{self.slider_vol.value()}%", bar)
+            self.lbl_vol.setFixedWidth(38)
+            self.lbl_vol.setStyleSheet("color: #9AA0B0; font-size: 11px;")
+            bar_lay.addWidget(self.lbl_vol)
+            lay.addWidget(bar)
+
+            self.host = QWidget(self)
+            self.host.setAttribute(Qt.WA_NativeWindow, True)
+            self.host.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
+            self.host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.host.setStyleSheet("background-color: #07060E;")
+            lay.addWidget(self.host, 1)
+            _ = self.host.winId()
+
+        def host_winid(self) -> int:
+            try:
+                return int(self.host.winId())
+            except Exception:
+                return 0
+
+        def _on_listen(self, checked: bool):
+            self.btn_listen.set_icon("volume" if checked else "mute")
+            self.listenToggled.emit(self.pci, bool(checked))
+
+        def _on_volume(self, value: int):
+            self.lbl_vol.setText(f"{value}%")
+            self.volumeChanged.emit(self.pci, int(value))
+            # Turning a muted card up means "let me hear it".
+            if value > 0 and not self.btn_listen.isChecked():
+                self.btn_listen.setChecked(True)
+
+        def set_state(self, text: str, rec: str = ""):
+            if self.lbl_state.text() != text:
+                self.lbl_state.setText(text)
+            if self.lbl_rec.text() != rec:
+                self.lbl_rec.setText(rec)
+
     class MainWindow(QMainWindow):
         def __init__(self, streamer: GameStreamer, vsync: bool = True, streamer_mode: bool = False,
                      headless_start: bool = False, v4l2_device: Optional[str] = None):
@@ -3311,6 +3427,13 @@ if HAS_QT:
                     self.chk_v4l2.setToolTip(
                         f"Virtual camera output to {v4l2_device} "
                         "(custom path from the command line).")
+
+            # Multiview (extra cards in stage tiles).
+            self._mv_runner = None
+            self._mv_tiles: Dict[str, "MultiviewTile"] = {}
+            self._mv_timer = QTimer(self)
+            self._mv_timer.setInterval(1000)
+            self._mv_timer.timeout.connect(self._multiview_poll)
 
             # Signal monitor timer (1s polling)
             self.timer = QTimer(self)
@@ -3468,6 +3591,17 @@ if HAS_QT:
                     self.on_card_changed)
                 source_layout.addWidget(self.combo_card, 0, Qt.AlignVCenter)
 
+                # Multiview: every other card in its own tile on the stage.
+                self.btn_multiview = IconButton(
+                    "table-cells-large",
+                    "Multiview: show the other capture cards beside this one. "
+                    "Record then records every card.",
+                    checkable=True, size=ui_theme.CONTROL_H, icon_size=15)
+                self.btn_multiview.setChecked(
+                    bool(load_settings().get("multiview", False)))
+                self.btn_multiview.toggled.connect(self.on_multiview_toggled)
+                source_layout.addWidget(self.btn_multiview, 0, Qt.AlignVCenter)
+
             # Built for every card; _apply_card_profile() shows it on the DUO.
             saved_input = load_settings().get("duo_input", 0)
             self.combo_duo_input = QComboBox()
@@ -3614,7 +3748,15 @@ if HAS_QT:
             stage_frame_layout.setContentsMargins(1, 1, 1, 1)
             stage_frame_layout.setSpacing(0)
 
-            self.video_host = QWidget(self.video_stage_frame)
+            # Grid for the multiview stage: the main video host sits at
+            # (0, 0); extra cards' tiles are added beside it when Multiview
+            # is on.
+            self.stage_grid_host = QWidget(self.video_stage_frame)
+            self.stage_grid = QGridLayout(self.stage_grid_host)
+            self.stage_grid.setContentsMargins(0, 0, 0, 0)
+            self.stage_grid.setSpacing(0)
+
+            self.video_host = QWidget(self.stage_grid_host)
             self.video_host.setFocusPolicy(Qt.StrongFocus)
             self.video_host.setAttribute(Qt.WA_NativeWindow, True)
             self.video_host.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
@@ -3656,7 +3798,8 @@ if HAS_QT:
             self.btn_remote_takeback.clicked.connect(self._remote_dock)
             remote_lay.addWidget(self.btn_remote_takeback)
 
-            stage_frame_layout.addWidget(self.video_host, 1)
+            self.stage_grid.addWidget(self.video_host, 0, 0)
+            stage_frame_layout.addWidget(self.stage_grid_host, 1)
 
             # Force creation of the native X11 window handle early
             _ = self.video_host.winId()
@@ -5381,6 +5524,10 @@ if HAS_QT:
             if running:
                 self._launch_mode = mode or "gaming"
                 self._last_launch_mode = self._launch_mode
+                if (getattr(self, "btn_multiview", None) is not None
+                        and self.btn_multiview.isChecked()
+                        and self._mv_runner is None):
+                    QTimer.singleShot(400, self._multiview_start)
             else:
                 self._launch_mode = None
                 if getattr(self, "_cinema_fullscreen", False):
@@ -6524,6 +6671,171 @@ if HAS_QT:
 
             return w, h, src_fps
 
+        # -- multiview -------------------------------------------------------
+
+        def _multiview_cards(self) -> List[Dict[str, Optional[str]]]:
+            """Supported cards other than the Hub's own, in PCI order."""
+            own = getattr(self.streamer, "hw_info", {}).get("pci")
+            return [c for c in detect_capture_cards() if c["pci"] != own]
+
+        def on_multiview_toggled(self, checked: bool):
+            save_settings({"multiview": bool(checked)})
+            if checked:
+                self._multiview_start()
+            else:
+                self._multiview_stop()
+
+        def _multiview_layout(self):
+            """Main video at (0, 0); tiles fill a 1×2 or 2×2 grid."""
+            tiles = list(self._mv_tiles.values())
+            cols = 2 if tiles else 1
+            for idx, tile in enumerate(tiles, start=1):
+                self.stage_grid.addWidget(tile, idx // cols, idx % cols)
+            rows = (len(tiles) + 1 + cols - 1) // cols
+            for r in range(max(rows, 2)):
+                self.stage_grid.setRowStretch(r, 1 if r < rows else 0)
+            for c in range(2):
+                self.stage_grid.setColumnStretch(c, 1 if c < cols else 0)
+            self.stage_grid.setSpacing(6 if tiles else 0)
+
+        def _multiview_start(self):
+            if self._mv_runner is not None:
+                return
+            cards = self._multiview_cards()
+            ready = [c for c in cards if c["mode"] == "vfio"][:3]
+            skipped = [card_display_name(c) for c in cards if c["mode"] != "vfio"]
+            if not ready:
+                detail = ("No other capture card is installed." if not cards else
+                          f"{', '.join(skipped)} not bound to vfio-pci; "
+                          "run ./play.sh --all once.")
+                self._set_vfio_notice("Multiview", detail, seconds=8.0)
+                return
+            if not os.environ.get("DISPLAY"):
+                self._set_vfio_notice(
+                    "Multiview", "Embedding needs X11 or XWayland.", seconds=8.0)
+                return
+
+            volumes = load_settings().get("multiview_volumes", {})
+            if not isinstance(volumes, dict):
+                volumes = {}
+            for card in ready:
+                try:
+                    vol = int(volumes.get(card["pci"], 100))
+                except (TypeError, ValueError):
+                    vol = 100
+                tile = MultiviewTile(card, self.stage_grid_host, volume=vol)
+                tile.listenToggled.connect(self._multiview_listen)
+                tile.volumeChanged.connect(self._multiview_volume)
+                self._mv_tiles[card["pci"]] = tile
+            self._multiview_layout()
+            for tile in self._mv_tiles.values():
+                tile.show()
+            QApplication.processEvents()
+
+            runner = everlive_multi.MultiCardRunner(
+                ready,
+                parent_winids={pci: t.host_winid()
+                               for pci, t in self._mv_tiles.items()},
+                silent_playback=True)
+            for pci, tile in self._mv_tiles.items():
+                runner.set_volume(pci, tile.slider_vol.value())
+            started = runner.start_engines()
+            _MULTIVIEW_PIDS.update(runner.engine_pids())
+            if started == 0:
+                self._multiview_clear_tiles()
+                self._set_vfio_notice(
+                    "Multiview Failed",
+                    "No engine started; see ~/.config/everlive/multi/.",
+                    seconds=8.0)
+                return
+            self._mv_runner = runner
+            self._mv_timer.start()
+            # The streams appear within the first second; mute them early.
+            for delay in (300, 700):
+                QTimer.singleShot(delay, self._multiview_mute_now)
+            note = f"{started} more card{'s' if started != 1 else ''} running"
+            if skipped:
+                note += f"; {', '.join(skipped)} not bound to vfio-pci"
+            self._set_vfio_notice("Multiview", note, seconds=6.0)
+
+        def _multiview_clear_tiles(self):
+            for tile in self._mv_tiles.values():
+                self.stage_grid.removeWidget(tile)
+                tile.hide()
+                tile.deleteLater()
+            self._mv_tiles.clear()
+            self._multiview_layout()
+
+        def _multiview_stop(self):
+            runner = getattr(self, "_mv_runner", None)
+            if runner is None:
+                return
+            self._mv_runner = None
+            self._mv_timer.stop()
+            runner.stop_recording()
+            # Engines first: their windows live inside the tiles.
+            runner.stop_engines()
+            _MULTIVIEW_PIDS.clear()
+            self._multiview_clear_tiles()
+
+        def _multiview_listen(self, pci: str, enabled: bool):
+            if self._mv_runner is not None:
+                self._mv_runner.set_listen(pci, enabled)
+
+        def _multiview_mute_now(self):
+            if self._mv_runner is not None:
+                self._mv_runner.apply_playback_mute()
+
+        def _multiview_volume(self, pci: str, percent: int):
+            if self._mv_runner is not None:
+                self._mv_runner.set_volume(pci, percent)
+            volumes = load_settings().get("multiview_volumes", {})
+            if not isinstance(volumes, dict):
+                volumes = {}
+            volumes[pci] = int(percent)
+            save_settings({"multiview_volumes": volumes})
+
+        def _multiview_poll(self):
+            runner = self._mv_runner
+            if runner is None:
+                return
+            alive = runner.poll()
+            for sess in runner.sessions:
+                tile = self._mv_tiles.get(sess.card["pci"])
+                if tile is None:
+                    continue
+                if not sess.alive:
+                    tile.set_state("Engine stopped (see ~/.config/everlive/multi/)")
+                    continue
+                w, h, fps, locked = everlive_multi.signal_geometry(
+                    sess.status(timeout=0.2))
+                state = f"{w}×{h} @ {fps:.0f}" if locked else "No signal"
+                rec = ""
+                for src in sess.sources:
+                    if src.active:
+                        rec = f"● REC {src.recorder.format_elapsed()}"
+                tile.set_state(state, rec)
+            if not alive:
+                self._set_vfio_notice(
+                    "Multiview", "The other cards' engines have exited.",
+                    seconds=6.0)
+                self._multiview_stop()
+                if getattr(self, "btn_multiview", None) is not None:
+                    self.btn_multiview.blockSignals(True)
+                    self.btn_multiview.setChecked(False)
+                    self.btn_multiview.blockSignals(False)
+
+        def _multiview_recording_settings(self):
+            def _combo(name, default):
+                combo = getattr(self, name, None)
+                return (combo.currentData() if combo is not None else None) or default
+            self._mv_runner.configure_recording(
+                rec_dir=(self.saved_cfg.get("rec_dir", "").strip()
+                         or everlive_recorder.default_recording_dir()),
+                encoder=_combo("combo_rec_encoder", "auto"),
+                quality=_combo("combo_rec_quality", "high"),
+                container=_combo("combo_rec_format", "mkv"))
+
         def _sync_recording_ui(self):
             active = bool(getattr(self, "recorder", None) and self.recorder.is_recording)
             plan = self.recorder.current_plan if active else None
@@ -6629,9 +6941,9 @@ if HAS_QT:
         def start_recording(self) -> bool:
             if self.recorder.is_recording:
                 return True
-            shm_alive = (
-                os.path.exists("/dev/shm/gc573_v4l2_shm")
-                or os.path.exists("/dev/shm/gc570d_v4l2_shm"))
+            shm_alive = any(
+                os.path.exists(f"/dev/shm/{m}_v4l2_shm")
+                for m in (MODEL_GC573, MODEL_GC570D, MODEL_HWSUHD))
             if self.vfio_mode and not (
                 self.streamer.is_running
                 or self._remote
@@ -6676,7 +6988,7 @@ if HAS_QT:
                 None if self.vfio_mode
                 else getattr(self.streamer, "vdev", None))
 
-            plan = everlive_recorder.build_recording_plan(
+            plan_args = dict(
                 output_dir=out_dir,
                 model=self.model,
                 duo_input=int(duo_inp or 0),
@@ -6706,20 +7018,39 @@ if HAS_QT:
                 window_id=win_id,
                 audio_source=audio_source,
             )
+            plan = everlive_recorder.build_recording_plan(**plan_args)
+            mv = self._mv_runner
+            stamp = everlive_multi.take_stamp()
+            if mv is not None:
+                # One take: every card's file carries the same timestamp.
+                plan = everlive_recorder.build_recording_plan(
+                    **plan_args,
+                    filename=everlive_multi.take_filename_for(
+                        self.model,
+                        getattr(self.streamer, "hw_info", {}).get("pci") or "card",
+                        int(duo_inp or 0) if self.duo_mode else 0,
+                        stamp, plan.fps, plan_args["container_format"]))
 
             ok, msg = self.recorder.start(plan)
             self._rec_was_active = ok
+            extra = 0
+            if mv is not None and ok:
+                self._multiview_recording_settings()
+                extra = mv.start_recording(stamp)
             self._sync_recording_ui()
             if ok:
+                more = f" + {extra} more card{'s' if extra != 1 else ''}" if extra else ""
                 self._set_vfio_notice(
                     "Recording Started",
-                    f"{plan.width}×{plan.height} @ {plan.fps} FPS ({plan.encoder}) → {os.path.basename(plan.output_path)}",
+                    f"{plan.width}×{plan.height} @ {plan.fps} FPS ({plan.encoder}) → {os.path.basename(plan.output_path)}{more}",
                     seconds=6.0)
             else:
                 self._set_vfio_notice("Recording Failed", msg, seconds=8.0)
             return ok
 
         def stop_recording(self):
+            if self._mv_runner is not None:
+                self._mv_runner.stop_recording()
             if not self.recorder.is_recording and not self._rec_was_active:
                 return
             ok, msg = self.recorder.stop()
@@ -6730,6 +7061,7 @@ if HAS_QT:
                 msg, seconds=6.0)
 
         def _stop_stream(self):
+            self._multiview_stop()
             if getattr(self, "recorder", None) and self.recorder.is_recording:
                 plan = self.recorder.current_plan
                 if not (self._background_service_active and plan and plan.source == "shm"):
@@ -7186,6 +7518,8 @@ if HAS_QT:
             """Move the Hub to another capture card without restarting."""
             self._card_switching = True
             self._switch_pending = None
+            # The new card may be one of the multiview tiles.
+            self._multiview_stop()
             if getattr(self, "recorder", None) and self.recorder.is_recording:
                 self.recorder.stop()
                 self._sync_recording_ui()
@@ -8698,6 +9032,7 @@ if HAS_QT:
             if getattr(self, "recorder", None) and self.recorder.is_recording:
                 self.recorder.stop()
             self._release_remote_preview()
+            self._multiview_stop()
             self._ipc_shutdown = True
             if self._ipc is not None:
                 self._ipc.close()
@@ -8732,6 +9067,7 @@ if HAS_QT:
             self._ipc_shutdown = True
             if getattr(self, "recorder", None) and self.recorder.is_recording:
                 self.recorder.stop()
+            self._multiview_stop()
             self._release_remote_preview()
             if self._ipc is not None:
                 self._ipc.close()
@@ -8914,7 +9250,15 @@ def main():
               f"(driver={streamer.hw_info.get('driver') or 'unknown'})")
 
     # Graceful shutdown on Ctrl+C
+    hub = {"window": None}
+
     def sig_handler(sig, frame):
+        win = hub["window"]
+        if win is not None:
+            # Multiview engines run in their own sessions; stop them too.
+            win._multiview_stop()
+            # A card switch replaces the window's engine wrapper.
+            win.streamer.stop()
         streamer.stop()
         sys.exit(0)
     signal.signal(signal.SIGINT, sig_handler)
@@ -8961,9 +9305,12 @@ def main():
             app.setWindowIcon(QIcon(icon_path))
         window = MainWindow(streamer, vsync=args.vsync, streamer_mode=args.streamer_mode,
                             headless_start=args.headless, v4l2_device=args.v4l2)
+        hub["window"] = window
         if not args.tray:
             window.show()
         code = app.exec()
+        window._multiview_stop()
+        hub["window"] = None
         restart_pci = getattr(window, "_card_restart", None)
         _destroy_qt_objects(app, window)
         del window
