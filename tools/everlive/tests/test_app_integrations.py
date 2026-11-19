@@ -56,6 +56,20 @@ X-Flatpak=com.discordapp.Discord
             self.assertTrue(entry.flatpak)
             self.assertTrue(entry.sandboxed)
 
+    def test_parse_brave_app(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write_desktop(Path(tmp), "brave-browser.desktop", """
+[Desktop Entry]
+Type=Application
+Name=Brave Web Browser
+Exec=/usr/bin/brave-browser-stable %U
+Icon=brave-browser
+""")
+            entry = ai._parse_desktop(path)
+            self.assertIsNotNone(entry)
+            assert entry is not None
+            self.assertTrue(ai._matches_known_app(entry))
+
     def test_ignores_discord_game_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = _write_desktop(Path(tmp), "discord-123.desktop", """
@@ -117,6 +131,44 @@ class LauncherTests(unittest.TestCase):
                 ok, message = ai.create_launcher(app, str(library))
             self.assertFalse(ok)
             self.assertIn("sandbox", message.lower())
+
+    def test_install_launchers_creates_native_and_skips_sandboxed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            apps_dir = home / ".local/share/applications"
+            apps_dir.mkdir(parents=True)
+            library = home / "libgc573-v4l2.so"
+            library.write_bytes(b"\x7fELF")
+            native = ai.AppEntry(
+                desktop_id="com.obsproject.Studio.desktop",
+                name="OBS Studio",
+                exec_line="obs %F",
+                icon="obs",
+                desktop_path="/usr/share/applications/com.obsproject.Studio.desktop",
+                flatpak=False,
+                snap=False,
+            )
+            sandboxed = ai.AppEntry(
+                desktop_id="com.discordapp.Discord.desktop",
+                name="Discord",
+                exec_line="/usr/bin/flatpak run com.discordapp.Discord",
+                icon="discord",
+                desktop_path="/var/lib/flatpak/exports/share/applications/com.discordapp.Discord.desktop",
+                flatpak=True,
+                snap=False,
+            )
+            with mock.patch.object(Path, "home", return_value=home):
+                results = ai.install_launchers(
+                    str(library), apps=[native, sandboxed])
+                self.assertTrue(results[0][1], results[0][2])
+                self.assertFalse(results[1][1])
+                self.assertIn("sandbox", results[1][2].lower())
+                self.assertTrue(ai.launcher_path(native).is_file())
+                self.assertFalse(ai.launcher_path(sandboxed).exists())
+
+                again = ai.install_launchers(str(library), apps=[native])
+                self.assertTrue(again[0][1])
+                self.assertIn("already", again[0][2].lower())
 
     def test_preload_library_lookup(self) -> None:
         from types import SimpleNamespace

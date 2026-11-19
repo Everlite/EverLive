@@ -33,6 +33,9 @@ WANT_LOOPBACK=1
 # Optionale 2x Frame Generation (lsfg-vk 2.0): standardmäßig interaktiv [y/N],
 # in nicht-interaktiven Läufen aus (oder explizit per --with-framegen).
 WANT_FRAMEGEN="ask"
+# Optionale LD_PRELOAD-Kamera-Starter für Discord, OBS und Browser:
+# standardmäßig interaktiv [y/N] (oder explizit per --with-preload).
+WANT_PRELOAD="ask"
 
 usage() {
     cat <<EOF
@@ -50,6 +53,15 @@ Usage: sudo ./install.sh [OPTIONS]
   --no-framegen, --skip-framegen
       Skip installing the optional lsfg-vk 2.0 Vulkan layer without prompting.
 
+  --with-preload, --preload-apps
+      Create reversible "(EverLive Camera)" application-menu launchers for
+      Discord, OBS, Chrome, Chromium, Brave, Firefox and Zoom. Each launcher
+      starts that app with the card-specific LD_PRELOAD virtual camera.
+
+  --no-preload, --skip-preload
+      Skip the LD_PRELOAD app launchers without prompting. Print manual
+      terminal launch instructions instead.
+
   -h, --help
       Show this help and exit.
 EOF
@@ -66,6 +78,12 @@ parse_args() {
                 ;;
             --no-framegen|--skip-framegen)
                 WANT_FRAMEGEN=0
+                ;;
+            --with-preload|--preload-apps)
+                WANT_PRELOAD=1
+                ;;
+            --no-preload|--skip-preload)
+                WANT_PRELOAD=0
                 ;;
             -h|--help)
                 usage
@@ -113,6 +131,25 @@ ask_framegen() {
     esac
 }
 
+ask_preload() {
+    if [ "$WANT_PRELOAD" != "ask" ]; then
+        return 0
+    fi
+    if [ ! -t 0 ]; then
+        WANT_PRELOAD=0
+        return 0
+    fi
+
+    local answer=""
+
+    echo ""
+    read -r -p "Create LD_PRELOAD camera launchers for Discord, OBS and browsers? [y/N] " answer || true
+    case "${answer:-n}" in
+        [yY]|[jJ]*) WANT_PRELOAD=1 ;;
+        *)          WANT_PRELOAD=0 ;;
+    esac
+}
+
 # Vor der Root-Prüfung parsen, damit --help kein sudo benötigt. Der
 # sudo-Neustart übergibt "$@", wodurch das Kind erneut parst.
 parse_args "$@"
@@ -141,6 +178,11 @@ fi
 ask_framegen
 if [ "$WANT_FRAMEGEN" -eq 0 ]; then
     echo -e "${GREEN}[*] Optional lsfg-vk Frame Generation download skipped (can be installed anytime later).${NC}"
+fi
+
+ask_preload
+if [ "$WANT_PRELOAD" -eq 0 ]; then
+    echo -e "${GREEN}[*] LD_PRELOAD app launchers skipped (manual launch instructions will be shown).${NC}"
 fi
 
 # 2. Paketmanager & Abhängigkeiten erkennen
@@ -618,6 +660,72 @@ chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive.desktop" 2>/dev/n
 rm -f "${APPS_DIR}/everlive-experimental.desktop" 2>/dev/null || true
 rm -f "${APPS_DIR}/everlive-intern.desktop" 2>/dev/null || true
 rmdir "${TARGET_HOME}/.config/everlive-experimental" 2>/dev/null || true
+
+# Optional: reversible, per-process LD_PRELOAD camera launchers. These are
+# separate "(EverLive Camera)" entries, so the original application launchers
+# and any user overrides are never modified.
+install_preload_launchers() {
+    echo -e "\n${BLUE}[*] Konfiguriere LD_PRELOAD-Kamera-Starter (Discord, OBS, Browser)...${NC}"
+
+    local py_bin="python3"
+    if [ -x "${VIEWER_DIR}/.venv/bin/python" ]; then
+        py_bin="${VIEWER_DIR}/.venv/bin/python"
+    fi
+
+    if ! sudo -u "${TARGET_USER}" env HOME="${TARGET_HOME}" \
+            EVERLIVE_VIEWER_DIR="${VIEWER_DIR}" \
+            EVERLIVE_PRELOAD_LIB="${EVERLIVE_PRELOAD_LIB:-}" \
+            "${py_bin}" - <<'PY'
+import os
+import sys
+
+sys.path.insert(0, os.environ["EVERLIVE_VIEWER_DIR"])
+import app_integrations
+import card_profile
+
+override = os.environ.get("EVERLIVE_PRELOAD_LIB", "").strip()
+profile = card_profile.detect_card_profile()
+system_lib = f"/usr/local/lib/{profile.preload_library}"
+library = override
+if not library and os.path.isfile(system_lib):
+    library = system_lib
+if not library:
+    library = app_integrations.find_preload_library(profile) or ""
+if not library or not os.path.isfile(library):
+    print("[!] EverLive preload library not found. Build/install it first.")
+    sys.exit(3)
+
+apps = app_integrations.find_camera_apps()
+if not apps:
+    print("[*] No supported native apps found "
+          "(Discord, OBS, Chrome, Chromium, Brave, Firefox, Zoom).")
+    sys.exit(0)
+
+created = 0
+for app, ok, message in app_integrations.install_launchers(library):
+    print(("[+] " if ok else "[-] ") + f"{app.name}: {message}")
+    if ok and message.startswith("Created"):
+        created += 1
+print(f"[*] {library} -> {created} new launcher(s).")
+PY
+    then
+        echo -e "${YELLOW}[!] Kamera-Starter konnten nicht eingerichtet werden; EverLive bleibt funktionsfähig.${NC}"
+        echo -e "    Manuell: ${GREEN}LD_PRELOAD=/usr/local/lib/lib<karte>-v4l2.so <app>${NC}"
+        return 0
+    fi
+}
+
+print_manual_preload_hint() {
+    echo -e "\n${GREEN}[*] Module-free camera launch examples:${NC}"
+    echo -e "    GC573 : ${BLUE}LD_PRELOAD=/usr/local/lib/libgc573-v4l2.so obs${NC}"
+    echo -e "    GC570D: ${BLUE}LD_PRELOAD=/usr/local/lib/libgc570d-v4l2.so obs${NC}"
+}
+
+if [ "$WANT_PRELOAD" -eq 1 ]; then
+    install_preload_launchers
+else
+    print_manual_preload_hint
+fi
 
 echo -e "\n${GREEN}===================================================================${NC}"
 echo -e "${GREEN}   EverLive v1.6.0 erfolgreich installiert!                        ${NC}"

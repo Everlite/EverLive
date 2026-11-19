@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Optional LD_PRELOAD app launchers in the installer:** `install.sh --with-preload` (or the interactive prompt) creates reversible `<App> (EverLive Camera)` menu entries for native Discord, OBS, Chrome, Chromium, Brave, Firefox and Zoom installs. Each entry launches that process with the card-specific `LD_PRELOAD` library and the shared `X-EverLive-Preload` marker, so the Console Hub recognizes the shortcut and `uninstall.sh` removes it. Existing launchers, user overrides and Flatpak/Snap sandboxes are left untouched.
 - **Console Hub shell refresh (Simple / Advanced):**
   - Fresh installs open in **Simple** mode: a full-width video stage with no inspector or telemetry deck, a `Local Capture Active` status chip in the bottom bar while running, and a full-width bottom audio/status bar. The choice persists as `ui_mode`.
   - **Advanced** restores the inspector and telemetry deck. The header now carries a compound capture-source group (card name plus DUO HDMI 1/2 input), right-aligned Start/Stop, Studio and Restart actions, the mode switch, and Font Awesome Discord, GitHub and Help buttons.

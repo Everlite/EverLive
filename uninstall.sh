@@ -91,9 +91,29 @@ udevadm trigger 2>/dev/null || true
 #
 # Remove both the current launcher and the leftover entry from the earlier
 # "experimental" naming phase of this project.
-rm -f "${TARGET_HOME}/.local/share/applications/everlive.desktop"
-rm -f "${TARGET_HOME}/.local/share/applications/everlive-experimental.desktop"
-rm -f "${TARGET_HOME}/.local/share/applications/everlive-intern.desktop"
+APPS_DIR="${TARGET_HOME}/.local/share/applications"
+rm -f "${APPS_DIR}/everlive.desktop"
+rm -f "${APPS_DIR}/everlive-experimental.desktop"
+rm -f "${APPS_DIR}/everlive-intern.desktop"
+
+# Remove reversible "(EverLive Camera)" LD_PRELOAD shortcuts and strip the
+# injection from same-name launcher overrides created by older installers.
+if [ -d "${APPS_DIR}" ]; then
+    for desktop in "${APPS_DIR}"/*.desktop; do
+        [ -f "${desktop}" ] || continue
+        if grep -q '^X-EverLive-Preload=true' "${desktop}" 2>/dev/null; then
+            rm -f "${desktop}"
+            continue
+        fi
+        if grep -qE '^Exec=env LD_PRELOAD=.*libgc(573|570d)-v4l2\.so' "${desktop}" 2>/dev/null; then
+            owner="$(stat -c '%u:%g' "${desktop}" 2>/dev/null || true)"
+            mode="$(stat -c '%a' "${desktop}" 2>/dev/null || true)"
+            sed -i -E 's|^Exec=env LD_PRELOAD=[^ ]+libgc(573|570d)-v4l2\.so |Exec=|' "${desktop}" || true
+            if [ -n "${owner}" ]; then chown "${owner}" "${desktop}" 2>/dev/null || true; fi
+            if [ -n "${mode}" ]; then chmod "${mode}" "${desktop}" 2>/dev/null || true; fi
+        fi
+    done
+fi
 rm -f "${TARGET_HOME}/.config/autostart/everlive.desktop"
 rmdir "${TARGET_HOME}/.config/everlive-experimental" 2>/dev/null || true
 rm -f "${TARGET_HOME}/.local/share/icons/hicolor/"*/apps/everlive.png
