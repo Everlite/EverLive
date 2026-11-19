@@ -5294,7 +5294,7 @@ if HAS_QT:
                 return False
             self._set_vfio_notice(
                 "Background Service Active",
-                "Stop or disable the service in Hardware & App before "
+                "Stop or disable the service in the System tab before "
                 "starting a local engine.",
                 seconds=8.0)
             return True

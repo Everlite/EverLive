@@ -13,45 +13,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Optional LD_PRELOAD app launchers in the installer:** `install.sh --with-preload` (or the interactive prompt) creates reversible `<App> (EverLive Camera)` menu entries for native Discord, OBS, Chrome, Chromium, Brave, Firefox and Zoom installs. Each entry launches that process with the card-specific `LD_PRELOAD` library and the shared `X-EverLive-Preload` marker, so the Console Hub recognizes the shortcut and `uninstall.sh` removes it. Existing launchers, user overrides and Flatpak/Snap sandboxes are left untouched.
 - **Console Hub shell refresh (Simple / Advanced):**
   - Fresh installs open in **Simple** mode: a full-width video stage with no inspector or telemetry deck, a `Local Capture Active` status chip in the bottom bar while running, and a full-width bottom audio/status bar. The choice persists as `ui_mode`.
-  - **Advanced** restores the inspector and telemetry deck. The header now carries a compound capture-source group (card name plus DUO HDMI 1/2 input), right-aligned Start/Stop, Studio and Restart actions, the mode switch, and Font Awesome Discord, GitHub and Help buttons.
-  - The bottom bar uses Font Awesome volume, pop-out and fullscreen controls, shows the live capture resolution, and keeps device routing in its tooltip.
-  - Added `ui_theme.py` (palette, spacing and application QSS), `ui_widgets.py` (`ToggleSwitch`, `ToggleRow`, `SegmentedControl`, `StatusChip`, `IconButton`) and `fa_icons.py` with bundled Font Awesome Free 6 solid/brand fonts. All three modules and the fonts install with the viewer, and Python tests cover them.
-  - The header (56 px) and bottom bar (52 px) are full-bleed. Header controls share a 32 px height: a hardware pill sits beside the version with the DUO HDMI switcher nested inside, and the capture controls are a fused icon-only `Start | Studio | Restart` group with state tooltips. Segmented groups use 6 px outer corners, square inner edges and a 1 px divider.
-  - The active accent is the muted slate-blue `#3B5B8C` on every toggle and slider, with an off-white thumb. Text buttons carry a border; icon-only links stay flat. All containers share the 12 px radius.
-  - Remote sessions show a centred `REMOTE SESSION ATTACHED` card with a **Take Back Capture** action; `T` docks the feed and `Ctrl+Shift+A` toggles Simple/Advanced.
-  - Inspector inputs stack labels above their controls, toggles lead with the switch, OSD Position dims when unavailable, and the System tab hides the unmerged background-service card. The LED picker uses the standard chevron, Legacy V4L2 carries a muted badge, and the EDID footer stays pinned.
-  - The telemetry deck keeps a granular status sub-column, freezes Latency at `Idle` when standby, and the transport bar adds a live signal pill beside the mute button, audio format and classic Pop-out/Fullscreen actions.
-  - Keyboard Shortcuts uses action-first rows with right-aligned keycap badges.
-  - Follow-up polish: removed a stray top-level status widget (no secondary windows), restored the Background Service card, added the **App Camera Shortcuts** card in the System tab, added 8 px LED swatch dots plus a visible combo chevron, made slider handles circular, matched the Telemetry Deck title to section headers, and relaxed inspector/canvas/transport spacing.
-  - The App Camera Shortcuts dialog lists supported native apps, creates or removes reversible `<App> (EverLive Camera)` launchers, and adds **Create All Shortcuts** for bulk setup. The same `install_launchers()` path is shared with `install.sh --with-preload`; Flatpak/Snap apps are skipped, and Chromium-family apps carry the renderer-sandbox warning.
-  - Final control pass: 12 px section headers with stronger contrast, 32 px controls inside taller header/transport bars, complete combo borders with a chevron divider, and the pinned EDID card framed to match the inspector cards.
-  - Control-bar refactor: the header and transport are taller with balanced padding; Start/Studio/Restart and Mute/Pop-out/Fullscreen are icon-only controls; combo popups connect to the closed field with blue hover/focus borders and flat menu items; the LED picker uses a standard combo so its swatch and labels align in both states.
-  - Final sizing pass: header 64 px / transport 56 px with 36 px controls, 14 px header and 10 px transport vertical padding, 8 px button radii, 36 px combos, HDMI and Simple/Advanced selectors converted to dropdowns, and all Discord/GitHub/Help icons kept visible at every width.
-  - Source and transport parity: the DUO HDMI selector is a slate-tinted segment flush to the hardware pill's inner edges, the signal chip matches the audio pill at 36 px with an 8 px radius and shared typography, and the Video tab's Reset button clears its card's bottom edge so its border and radii render fully.
-  - Inspector inputs use stacked labels above their control, toggles put the switch first with the label beside it, and input/toggle labels share one muted colour and size. The segmented groups now paint their outer border correctly, and the telemetry deck is a rounded card with a full outline.
-  - Every container, button, input, badge and chip now uses the same 12 px corner radius; segmented controls keep square inner edges between options.
-  - The header lockup is now a clean `EVERLIVE v1.7.0` without a connection dot. The bottom bar carries a compact signal badge (`Standby • No Signal` or `1080p60 • LPCM 48kHz`) beside the audio format, and sliders use the slate-blue accent. The no-signal canvas gained headline/subtitle breathing room and a balanced footer margin.
+  - **Advanced** restores the inspector and telemetry deck. The header carries a compound hardware pill with the DUO HDMI dropdown, a fused icon-only `Start | Studio | Restart` group, the Simple/Advanced dropdown, and Font Awesome Discord, GitHub and Help links.
+  - The header is 64 px and the transport 56 px, both full-bleed, with 36 px controls, 14 px / 10 px vertical padding, 8 px button radii and 36 px combo fields. Every header action stays visible at 1180 px and wider, and runtime state is conveyed by icons and tooltips rather than changing labels.
+  - Added `ui_theme.py` (palette, spacing and application QSS), `ui_widgets.py` (`ToggleSwitch`, `ToggleRow`, `SegmentedControl`, `StatusChip`, `IconButton`) and bundled Font Awesome Free 6 solid/brand fonts. The modules and fonts install with the viewer and are covered by the Python tests and CI asset checks.
+  - The DUO HDMI selector is a slate-tinted segment flush to the hardware pill's inner edges. Combo popups connect to the closed field with blue hover/focus borders, aligned 32 px items and flat selection; the LED picker keeps its colour dots in both the closed field and popup.
+  - The transport shows a compact signal chip beside the audio pill with matching height, 8 px radius, typography and padding, plus icon-only mute, pop-out and fullscreen controls.
+  - Remote sessions show a centred `REMOTE SESSION ATTACHED` card with **Take Back Capture**. Docked/headless transitions keep the header actions icon-only, `T` docks the feed and `Ctrl+Shift+A` toggles Simple/Advanced.
+  - The no-signal canvas gained headline/subtitle breathing room and a balanced footer margin.
 - **Inspector reorganisation (Advanced mode):**
-  - The inspector tabs are now the same segmented control as Simple/Advanced, driving a stacked page view.
-  - The three tabs are now **Video EQ**, **Audio & Stream** and **System**.
-  - Checkbox rows became toggle switches, and exposure bias is a slider with a live `EV` readout and Reset button.
-  - **Diagnostics & Help** now hosts the Keyboard Shortcuts dialog and a **Copy Diagnostic Report** action.
-  - **EDID & Handshake** is pinned below the tabs on every card; Legacy V4L2 is marked **Obsolete**.
-  - Background Service & App Camera moved into the System tab below Window & Startup.
+  - The **Video**, **Audio & Stream** and **System** tabs use the same segmented control as Simple/Advanced and drive a stacked page view.
+  - Checkbox rows became toggle switches; panel labels sit above their controls; exposure bias has a live `EV` readout and Reset button.
+  - **App Camera Shortcuts** and **Background Service** live in the System tab below Window & Startup. **Diagnostics & Help** hosts the Keyboard Shortcuts dialog and **Copy Diagnostic Report**.
+  - **EDID & Handshake** stays pinned below the tabs; Legacy V4L2 is marked **Obsolete**; keyboard shortcuts use action-first rows with right-aligned keycap badges.
 - **Telemetry Deck:**
-  - The pinned EDID card is compact, with Bridge/Copy on one row and Pulse HPD beneath, freeing vertical space in the System tab.
   - The deck sits below the video stage in the centre column (not under the inspector) and follows the mockup layout: status and lock state, frame-rate sparkline, PCIe DMA/latency bars and DMA/GPU/CPU orbs.
   - A centred `Telemetry Deck` title sits above the metrics; the deck is always expanded and has no collapse control.
+  - The pinned EDID card is compact, with Bridge/Copy on one row and Pulse HPD beneath, freeing vertical space in the System tab.
   - Simple mode hides the deck entirely.
 - **Live GC570D presentation switching (`mode.set`):**
   - The Live Gamer DUO engine now implements the unified `mode.set` JSON-RPC method. The Console Hub can dock a headless capture session into its viewport, or return it to headless, without releasing VFIO or interrupting the DMA rings, the V4L2/SHM outputs or HDMI audio.
   - `everlive-ctl runtime mode <gaming|headless> [winid]` exposes the same switch from the CLI.
 - **Console Hub remote-session docking:**
-  - A remote session now offers **Dock Video Here** instead of a disabled Start button, with an automatic fallback that stops the headless user unit and restarts capture locally when the running engine predates `mode.set`. A stopped unit is restarted when the Hub exits.
+  - A remote session now surfaces a **Dock Video Here** action (display icon) instead of a disabled Start button, with an automatic fallback that stops the headless user unit and restarts capture locally when the running engine predates `mode.set`. A stopped unit is restarted when the Hub exits.
   - `everlive-ctl runtime status` reports the real splitter pixel clock instead of a placeholder value.
 - **Console Hub background service & app camera integration:**
-  - The **Hardware & App** tab can install, enable, start, stop, disable and uninstall the per-user EverLive capture service, with service logs and optional `--v4l2`/`--audio-tap` engine arguments.
-  - **App Camera Shortcuts** creates reversible OBS/Discord/Chrome/Zoom launchers that set `LD_PRELOAD` for one process. Flatpak/Snap sandboxes are detected and Chrome's renderer sandbox is flagged.
+  - The **System** tab can install, enable, start, stop, disable and uninstall the per-user EverLive capture service, with service logs and optional `--v4l2`/`--audio-tap` engine arguments.
+  - **App Camera Shortcuts** creates or removes reversible OBS/Discord/Chrome/Chromium/Brave/Firefox/Zoom launchers that set `LD_PRELOAD` for one process, including **Create All Shortcuts**. The same launcher path is shared with `install.sh --with-preload`; Flatpak/Snap sandboxes are skipped and Chromium-family renderer sandboxes are flagged.
   - The service keeps the shared frame store and optional virtual camera alive for OBS while the Hub is closed.
 
 ### Fixed
