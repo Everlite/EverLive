@@ -2790,7 +2790,7 @@ if HAS_QT:
             p.drawText(QRectF(0, title_y, w, 52 * s), Qt.AlignHCenter | Qt.AlignTop, self._title)
 
             # Subtitle: Waiting for console / input...
-            sub_y = title_y + 46.0 * s
+            sub_y = title_y + 54.0 * s
             sub_font = QFont("JetBrains Mono", max(9, int(round(13 * s))))
             p.setFont(sub_font)
             p.setPen(QColor(100, 116, 139, 255))
@@ -2801,7 +2801,7 @@ if HAS_QT:
             foot_font.setLetterSpacing(QFont.AbsoluteSpacing, max(1.0, 2.0 * s))
             p.setFont(foot_font)
             p.setPen(QColor(51, 65, 85, 230))
-            p.drawText(QRectF(0, h - 32.0 * s, w, 22 * s), Qt.AlignHCenter | Qt.AlignTop, self._footer)
+            p.drawText(QRectF(0, h - 38.0 * s, w, 22 * s), Qt.AlignHCenter | Qt.AlignTop, self._footer)
 
     class CameraLauncherDialog(QDialog):
         """Create reversible per-app desktop shortcuts with LD_PRELOAD."""
@@ -3151,11 +3151,6 @@ if HAS_QT:
             lbl_ver = QLabel(f"v{__version__}")
             lbl_ver.setObjectName("logoVersion")
             top_bar.addWidget(lbl_ver, 0, Qt.AlignVCenter)
-
-            self.lbl_conn_dot = QLabel("●")
-            self.lbl_conn_dot.setObjectName("connDot")
-            self.lbl_conn_dot.setToolTip("Local engine")
-            top_bar.addWidget(self.lbl_conn_dot, 0, Qt.AlignVCenter)
 
             top_bar.addSpacing(28)
 
@@ -4293,8 +4288,8 @@ if HAS_QT:
                 "IT6805 / SDL2 stream log.")
             b_layout.addWidget(self.lbl_audio_fmt, 0, Qt.AlignVCenter)
 
-            self.chip_bar_capture = StatusChip("CAPTURE ACTIVE", "active")
-            self.chip_bar_capture.setVisible(False)
+            self.chip_bar_capture = StatusChip("Standby • No Signal", "idle")
+            self.chip_bar_capture.setVisible(True)
             b_layout.addWidget(self.chip_bar_capture, 0, Qt.AlignVCenter)
 
             # Device route stays available through the bar tooltip; the mockup
@@ -4543,6 +4538,44 @@ if HAS_QT:
                 self.btn_resync.setIcon(
                     fa_icons.icon("rotate", "#E7EBF2", 14))
 
+        def _compact_signal_text(self):
+            """Compact bottom-bar badge: state or resolution + audio format."""
+            live = getattr(self, "_live", None) or {}
+            audio = (self.lbl_audio_fmt.text()
+                     if hasattr(self, "lbl_audio_fmt") else "No Audio")
+            if not live.get("locked"):
+                if getattr(self, "_remote", False):
+                    return "Remote • No Signal", "accent"
+                if getattr(self, "_launch_mode", None):
+                    return f"No Signal • {audio}", "warn"
+                return "Standby • No Signal", "idle"
+
+            resolution = str(live.get("resolution") or "")
+            rate = str(live.get("framerate") or "")
+            height = re.search(r"(\d{3,4})p", resolution)
+            hz = re.search(r"([\d.]+)", rate)
+            mode = ""
+            if height:
+                mode = f"{height.group(1)}p"
+                if hz:
+                    try:
+                        mode += f"{round(float(hz.group(1)))}"
+                    except ValueError:
+                        pass
+            elif resolution:
+                mode = resolution
+            if mode:
+                return f"{mode} • {audio}", "active"
+            return f"Signal • {audio}", "active"
+
+        def _refresh_signal_badge(self):
+            if not hasattr(self, "chip_bar_capture"):
+                return
+            text, tone = self._compact_signal_text()
+            if self.chip_bar_capture.state_text() != text:
+                self.chip_bar_capture.set_state(text, tone)
+            self.chip_bar_capture.setVisible(True)
+
         def _apply_capture_controls(self):
             """Sync the passive capture chip and the idle Start button."""
             self._refresh_header_labels()
@@ -4577,17 +4610,9 @@ if HAS_QT:
                 return
             self._capture_ui_state = state
 
-            if hasattr(self, "chip_bar_capture"):
-                self.chip_bar_capture.set_state(
-                    label.upper(), "active" if active else "idle")
-                self.chip_bar_capture.setVisible(active)
+            self._refresh_signal_badge()
             if hasattr(self, "btn_launch"):
                 self.btn_launch.setVisible(show_launch)
-            if hasattr(self, "lbl_conn_dot"):
-                self.lbl_conn_dot.setStyleSheet(
-                    "color: #C689F0;" if remote else "color: #7FD8C0;")
-                self.lbl_conn_dot.setToolTip(
-                    "Remote session" if remote else "Local engine")
 
         def toggle_cinema_fullscreen(self):
             self._set_cinema_fullscreen(not getattr(self, "_cinema_fullscreen", False))
@@ -6731,16 +6756,7 @@ if HAS_QT:
                     idle_txt = f"Standby · {fg_summary}" if fg_summary else "Standby · Waiting for HDMI input"
                     self.status_light.set_status("idle", idle_txt)
 
-            if hasattr(self, "chip_bar_capture") and \
-                    self.chip_bar_capture.isVisible():
-                live = getattr(self, "_live", None) or {}
-                text = "CAPTURE ACTIVE"
-                if live.get("resolution"):
-                    text += f" · {live['resolution']}"
-                if live.get("framerate"):
-                    text += f" @ {live['framerate']}"
-                if self.chip_bar_capture.state_text() != text:
-                    self.chip_bar_capture.set_state(text, "active")
+            self._refresh_signal_badge()
 
         def on_preset_changed(self, *_):
             if self.vfio_mode:

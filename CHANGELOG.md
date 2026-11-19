@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The header (72 px) and bottom bar (64 px) are now full-bleed, with the capture source left-aligned beside the version and all runtime actions right-aligned. Segmented controls use square inner edges inside a visible group outline, the type scale is larger, and text buttons share 40 px (header) and 36 px (standard) heights across the header, inspector, dialogs and bottom bar. Every standalone text button carries a border; icon-only buttons stay borderless.
   - Inspector inputs use stacked labels above their control, toggles put the switch first with the label beside it, and input/toggle labels share one muted colour and size. The segmented groups now paint their outer border correctly, and the telemetry deck is a rounded card with a full outline.
   - Every container, button, input, badge and chip now uses the same 12 px corner radius; segmented controls keep square inner edges between options.
+  - The header lockup is now a clean `EVERLIVE v1.7.0` without a connection dot. The bottom bar carries a compact signal badge (`Standby • No Signal` or `1080p60 • LPCM 48kHz`) beside the audio format, and sliders use the slate-blue accent. The no-signal canvas gained headline/subtitle breathing room and a balanced footer margin.
 - **Inspector reorganisation (Advanced mode):**
   - The inspector tabs are now the same segmented control as Simple/Advanced, driving a stacked page view.
   - The three tabs are now **Video EQ**, **Audio & Stream** and **System**.

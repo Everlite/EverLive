@@ -201,10 +201,6 @@ QLabel#logoVersion {
     font-size: 13px;
     font-weight: 600;
 }
-QLabel#connDot {
-    color: @MINT@;
-    font-size: 11px;
-}
 QFrame#sourceGroup {
     background-color: @SURFACE@;
     border: 1px solid @GROUP_BORDER@;
@@ -674,13 +670,12 @@ QSlider::groove:horizontal {
     border-radius: @RADIUS@;
 }
 QSlider::sub-page:horizontal {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 @ACCENT_SOFT@, stop:0.55 @ACCENT@, stop:1 @WARN@);
+    background: @BLUE@;
     border-radius: @RADIUS@;
 }
 QSlider::handle:horizontal {
     background: #FFFFFF;
-    border: 1px solid @ACCENT@;
+    border: 1px solid @BLUE_HOVER@;
     width: 14px;
     margin-top: -5px;
     margin-bottom: -5px;
