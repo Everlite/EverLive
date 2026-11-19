@@ -55,9 +55,6 @@ GC570D_SUBSYSTEM_ID = "0x5700"
 GC573_SUBSYSTEM_ID = "0x5730"
 MODEL_GC573 = "gc573"
 MODEL_GC570D = "gc570d"
-# The App Camera helpers are not part of this release; the service
-# controls themselves ship in the System tab.
-FEATURE_APP_CAMERA_UI = False
 MODEL_NAMES = {
     MODEL_GC573: "GC573 • LIVE GAMER 4K",
     MODEL_GC570D: "GC570D • LIVE GAMER DUO",
@@ -2868,6 +2865,14 @@ if HAS_QT:
             btn_refresh = QPushButton("Refresh")
             btn_refresh.clicked.connect(self._populate)
             footer.addWidget(btn_refresh)
+
+            self.btn_create_all = QPushButton("Create All Shortcuts")
+            self.btn_create_all.setToolTip(
+                "Create an EverLive camera launcher for every supported "
+                "native app. Existing shortcuts are left untouched.")
+            self.btn_create_all.clicked.connect(self._create_all)
+            self.btn_create_all.setEnabled(bool(self.library))
+            footer.addWidget(self.btn_create_all)
             footer.addStretch(1)
             btn_close = QPushButton("Close")
             btn_close.clicked.connect(self.accept)
@@ -2889,7 +2894,7 @@ if HAS_QT:
             if not apps:
                 empty = QLabel(
                     "No supported apps detected. Install OBS Studio, Discord, "
-                    "Chrome/Chromium or Zoom, then refresh.")
+                    "Chrome/Chromium/Brave, Firefox or Zoom, then refresh.")
                 empty.setWordWrap(True)
                 empty.setObjectName("fieldLabel")
                 self.body_layout.addWidget(empty)
@@ -2914,9 +2919,10 @@ if HAS_QT:
                 state.setObjectName("fieldLabel")
                 text.addWidget(state)
                 if ("chrome" in app.desktop_id.lower() or
-                        "chromium" in app.desktop_id.lower()):
+                        "chromium" in app.desktop_id.lower() or
+                        "brave" in app.desktop_id.lower()):
                     warn = QLabel(
-                        "Experimental: Chrome's renderer sandbox may block "
+                        "Experimental: Chromium's renderer sandbox may block "
                         "the virtual camera.")
                     warn.setObjectName("fieldLabel")
                     warn.setStyleSheet("color: #F0B17B;")
@@ -2965,6 +2971,28 @@ if HAS_QT:
                 return
             _ok, message = app_integrations.create_launcher(app, self.library)
             self._notify(message)
+            self._populate()
+
+        def _create_all(self):
+            if not self.library:
+                self._notify("Preload library not found.")
+                return
+            results = app_integrations.install_launchers(self.library)
+            created = sum(
+                1 for _app, ok, message in results
+                if ok and message.startswith("Created"))
+            failed = sum(1 for _app, ok, _message in results if not ok)
+            if created:
+                message = f"Created {created} camera shortcut(s)."
+                if failed:
+                    message += f" {failed} app(s) could not be configured."
+                self._notify(message)
+            elif failed:
+                self._notify(
+                    f"No shortcuts created; {failed} app(s) could not be "
+                    "configured.")
+            else:
+                self._notify("All supported apps already have shortcuts.")
             self._populate()
 
         def _remove(self, app):
@@ -4193,7 +4221,34 @@ if HAS_QT:
                     "Clean feed: hides the on-screen stats overlay and the "
                     "mouse cursor in the game window (Tab/'o' toggles at runtime).")
             lay_app.addWidget(card_app)
-            # --- Background capture service & per-app camera shortcuts ---
+
+            # --- Reversible per-app LD_PRELOAD camera shortcuts -----------
+            card_camera, grid_camera = _section(
+                "APP CAMERA SHORTCUTS", "#5ED4B2")
+            grid_camera.setColumnStretch(0, 1)
+
+            self.app_camera_note = _hint(
+                "Create separate per-app launchers for OBS, Discord and "
+                "browsers, or run the installer with --with-preload. Each "
+                "shortcut sets LD_PRELOAD for one process; session-wide "
+                "LD_PRELOAD is never used.")
+            grid_camera.addWidget(self.app_camera_note, 0, 0)
+
+            self.btn_app_shortcuts = QPushButton("App Camera Shortcuts…")
+            self.btn_app_shortcuts.setObjectName("btnGhost")
+            self.btn_app_shortcuts.setCursor(Qt.PointingHandCursor)
+            self.btn_app_shortcuts.setFixedHeight(ui_theme.BUTTON_H)
+            self.btn_app_shortcuts.setSizePolicy(
+                QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.btn_app_shortcuts.setToolTip(
+                "Create reversible OBS/Discord/browser launchers that use the "
+                "module-free virtual camera.")
+            self.btn_app_shortcuts.clicked.connect(
+                self._open_app_shortcuts)
+            grid_camera.addWidget(self.btn_app_shortcuts, 1, 0)
+            lay_app.addWidget(card_camera)
+
+            # --- Background capture service ---------------------------------
             card_integrations, grid_int = _section(
                 "BACKGROUND SERVICE", "#5ED4B2")
             grid_int.setColumnStretch(0, 1)
@@ -4262,7 +4317,6 @@ if HAS_QT:
                 "node is available.")
             self._service_v4l2_row = _toggle(self.chk_service_v4l2)
             grid_int.addWidget(self._service_v4l2_row, 2, 0, 1, 2)
-            self._service_v4l2_row.setVisible(FEATURE_APP_CAMERA_UI)
 
             self.chk_service_audio_tap = QCheckBox(
                 "Service: virtual audio track")
@@ -4279,22 +4333,6 @@ if HAS_QT:
             self.chk_service_audio_tap.toggled.connect(
                 lambda _checked: self._service_config_changed())
 
-            self.btn_app_shortcuts = _service_button(
-                "App Camera Shortcuts…")
-            self.btn_app_shortcuts.setToolTip(
-                "Create reversible OBS/Discord/Chrome launchers that use the "
-                "module-free virtual camera.")
-            self.btn_app_shortcuts.clicked.connect(
-                self._open_app_shortcuts)
-            grid_int.addWidget(self.btn_app_shortcuts, 4, 0, 1, 2)
-            self.btn_app_shortcuts.setVisible(FEATURE_APP_CAMERA_UI)
-
-            self.app_camera_note = _hint(
-                "Keep the capture card available to OBS without the Hub "
-                "open. The App Camera shortcuts are separate per-app "
-                "launchers, never a session-wide LD_PRELOAD.")
-            self.app_camera_note.setVisible(FEATURE_APP_CAMERA_UI)
-            grid_int.addWidget(self.app_camera_note, 5, 0, 1, 2)
             lay_app.addWidget(card_integrations)
 
             card_diag, grid_diag = _section("DIAGNOSTICS & HELP", "#BB96F3")

@@ -150,7 +150,7 @@ LD_PRELOAD=/usr/local/lib/libgc570d-v4l2.so obs
 ```
 * **Process-Local Nodes:** Preload nodes (`/dev/video60..63`) exist only inside the process launched with `LD_PRELOAD`. Launch OBS from a terminal, choose an installer-created **`<App> (EverLive Camera)`** menu entry, or use the Hub's app shortcuts.
 * **Identical Picture Quality:** Preload shims read the same post-tonemap frames and standby cards as the loopback sink, but without requiring `v4l2loopback` or any additional kernel modules.
-* **Installer + Hub Integration:** `sudo ./install.sh --with-preload` (or the interactive prompt) creates reversible per-app launchers for supported native apps. **Hardware & App → App Camera Shortcuts** creates the same entries from the Console Hub, while **Background Service** keeps the frame store active for OBS even when the Hub is closed. Flatpak/Snap apps are skipped because `LD_PRELOAD` cannot cross their sandbox.
+* **Installer + Hub Integration:** `sudo ./install.sh --with-preload` (or the interactive prompt) creates reversible per-app launchers for supported native apps. **System → App Camera Shortcuts** creates or removes the same entries from the Console Hub, including a **Create All Shortcuts** action, while **Background Service** keeps the frame store active for OBS even when the Hub is closed. Flatpak/Snap apps are skipped because `LD_PRELOAD` cannot cross their sandbox.
 
 ### Option 3: Studio / Headless Mode (Zero Display Overhead)
 If you play directly on a TV or secondary monitor connected to the GC573's **HDMI OUT (Hardware Passthrough)**, you do not need an open game window on your PC desktop:
