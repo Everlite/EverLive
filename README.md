@@ -149,7 +149,7 @@ LD_PRELOAD=/usr/local/lib/libgc573-v4l2.so obs
 # GC570D (Live Gamer DUO) -> exposes /dev/video60 (HDMI 1) and /dev/video61 (HDMI 2)
 LD_PRELOAD=/usr/local/lib/libgc570d-v4l2.so obs
 ```
-* **Process-Local Nodes:** Preload nodes (`/dev/video60..63`) exist only inside the process launched with `LD_PRELOAD`. Launch OBS from a terminal, choose an installer-created **`<App> (EverLive Camera)`** menu entry, or use the Hub's app shortcuts.
+* **Process-Local Nodes:** Preload nodes (`/dev/video60..65`) exist only inside the process launched with `LD_PRELOAD`. Launch OBS from a terminal, choose an installer-created **`<App> (EverLive Camera)`** menu entry, or use the Hub's app shortcuts.
 * **Identical Picture Quality:** Preload shims read the same post-tonemap frames and standby cards as the loopback sink, but without requiring `v4l2loopback` or any additional kernel modules.
 * **Installer + Hub Integration:** `sudo ./install.sh --with-preload` (or the interactive prompt) creates reversible per-app launchers for supported native apps. **System → App Camera Shortcuts** creates or removes the same entries from the Console Hub, including a **Create All Shortcuts** action, while **Background Service** keeps the frame store active for OBS even when the Hub is closed. Flatpak/Snap apps are skipped because `LD_PRELOAD` cannot cross their sandbox.
 
@@ -304,6 +304,25 @@ python3 tools/everlive/everlive_multi.py --list      # show detected cards
 ```
 
 While it runs, type `r` + Enter to start/stop recording, `s` for status and `q` to quit (or send `SIGUSR1` to toggle recording). Every input is recorded to its own file from its frame store; all files of one take share a timestamp, e.g. `EverLive_20261119_154557_GC573_85-00-0_60fps.mkv` and `EverLive_20261119_154557_HWSUHD_84-00-0_60fps.mkv`. A GC570D records both HDMI inputs. Engine and `ffmpeg` logs are written to `~/.config/everlive/multi/`. Two cards of the same model cannot run together yet, because they would share a frame store name.
+
+## Webcam Picture-in-Picture
+
+The Console Hub can show a webcam in a corner of the main card's picture and put it into recordings. Turn it on with the **camera** button in the header or **Audio & Stream → Webcam → Picture-in-Picture**; the same card picks the camera, the mode (720p/1080p at 30 or 60 FPS; 720p60 by default), the corner and the size. The webcam starts and stops with capture.
+
+The webcam is opened once by the bridge `everlive_camd` (built by `make`, in `tools/everlive-cam`), which publishes it into the frame store `/dev/shm/everlive_cam_v4l2_shm`. Everything else reads from there, so several programs can use the camera at the same time:
+
+* **Hub preview:** a small window drawn over the picture.
+* **Recordings:** **Record** overlays the camera onto the main card's video at the same corner and size (with Gaming Viewport capture, exactly over the preview). Multiview tiles are recorded without it.
+* **OBS / Discord:** `libeverlive-cam-v4l2.so` presents the camera as `/dev/video65`, alongside the card's own preload library:
+
+```bash
+LD_PRELOAD=/usr/local/lib/libgc573-v4l2.so:/usr/local/lib/libeverlive-cam-v4l2.so obs
+# Without the Hub: run the bridge yourself
+everlive_camd --list                               # find webcams
+everlive_camd --device /dev/video0 --size 1280x720 --fps 60
+```
+
+The bridge takes YUYV or NV12 directly and decodes MJPEG when built with FFmpeg's libraries. The log is `~/.config/everlive/webcam.log`.
 
 ---
 

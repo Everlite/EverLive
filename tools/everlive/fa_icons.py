@@ -57,6 +57,7 @@ ICONS = {
     "waveform": ("solid", "\uf8de"),
     "table-cells-large": ("solid", "\uf009"),
     "headphones": ("solid", "\uf025"),
+    "camera": ("solid", "\uf030"),
     # help / diagnostics
     "help": ("solid", "\uf059"),
     "info": ("solid", "\uf05a"),
@@ -98,6 +99,7 @@ _FALLBACK_GLYPHS = {
     "waveform": "∿",
     "table-cells-large": "▦",
     "headphones": "🎧",
+    "camera": "◉",
     "help": "?",
     "info": "i",
     "keyboard": "⌨",

@@ -12,7 +12,9 @@ import subprocess
 import time
 import argparse
 import re
+import dataclasses
 import json
+import threading
 import shutil
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List
@@ -22,6 +24,7 @@ if os.environ.get("DISPLAY") and "--cli" not in sys.argv:
 
 try:
     import app_integrations
+    import everlive_cam
     import everlive_multi
     import everlive_recorder
     import fa_icons
@@ -36,6 +39,7 @@ try:
 except ImportError:  # imported as a module from another working directory
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import app_integrations
+    import everlive_cam
     import everlive_multi
     import everlive_recorder
     import fa_icons
@@ -700,7 +704,7 @@ try:
     from PySide6.QtGui import (
         QGuiApplication, QFont, QIcon, QColor, QPalette, QKeySequence, QShortcut,
         QDesktopServices, QPixmap, QPainter, QAction, QPen, QBrush,
-        QLinearGradient, QPainterPath
+        QLinearGradient, QPainterPath, QImage
     )
     HAS_QT = True
 except ImportError:
@@ -3271,6 +3275,78 @@ if HAS_QT:
                 except Exception:
                     pass
 
+    class PipPreview(QWidget):
+        """Webcam picture-in-picture preview painted by the Hub.
+
+        A native child (so it can sit above the engine's embedded window)
+        that paints RGB24 frames read from the bridge's preview pipe on a
+        background thread.  Only the newest frame is kept.
+        """
+
+        frameReady = Signal(object)
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setAttribute(Qt.WA_NativeWindow, True)
+            self.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
+            self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+            self._image: Optional[QImage] = None
+            self._thread: Optional[threading.Thread] = None
+            self._stream = None
+            self.frames = 0
+            self.frameReady.connect(self._on_frame)
+
+        def attach(self, stream, width: int, height: int):
+            """Read ``width`` x ``height`` RGB24 frames from ``stream``."""
+            self.detach()
+            self._stream = stream
+            self._thread = threading.Thread(
+                target=self._reader, args=(stream, width, height),
+                name="pip-preview", daemon=True)
+            self._thread.start()
+
+        def detach(self):
+            # The reader ends at EOF, when the preview process is stopped.
+            self._stream = None
+            self._thread = None
+            self._image = None
+
+        def _reader(self, stream, width: int, height: int):
+            size = width * height * 3
+            while self._stream is stream:
+                buf = bytearray(size)
+                view = memoryview(buf)
+                got = 0
+                try:
+                    while got < size:
+                        n = stream.readinto(view[got:])
+                        if not n:
+                            return
+                        got += n
+                except (OSError, ValueError):
+                    return
+                if self._stream is stream:
+                    self.frameReady.emit((stream, bytes(buf), width, height))
+
+        def _on_frame(self, payload):
+            stream, data, width, height = payload
+            if stream is not self._stream:
+                return
+            self._image = QImage(data, width, height, width * 3,
+                                 QImage.Format_RGB888).copy()
+            self.frames += 1
+            self.update()
+
+        def paintEvent(self, event):  # noqa: N802 (Qt casing)
+            painter = QPainter(self)
+            if self._image is None:
+                painter.fillRect(self.rect(), QColor("#000000"))
+            else:
+                painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+                painter.drawImage(self.rect(), self._image)
+            painter.end()
+
     class MultiviewTile(QFrame):
         """One extra card in the multiview stage.
 
@@ -3434,6 +3510,13 @@ if HAS_QT:
             self._mv_timer = QTimer(self)
             self._mv_timer.setInterval(1000)
             self._mv_timer.timeout.connect(self._multiview_poll)
+
+            # Webcam bridge + picture-in-picture preview (the bridge object
+            # is created by init_ui, which needs it for the settings card).
+            self._ensure_cam()
+            self._cam_timer = QTimer(self)
+            self._cam_timer.setInterval(2000)
+            self._cam_timer.timeout.connect(self._webcam_tick)
 
             # Signal monitor timer (1s polling)
             self.timer = QTimer(self)
@@ -3602,6 +3685,18 @@ if HAS_QT:
                 self.btn_multiview.toggled.connect(self.on_multiview_toggled)
                 source_layout.addWidget(self.btn_multiview, 0, Qt.AlignVCenter)
 
+            # Webcam picture-in-picture over the main card's picture.
+            self.btn_pip = IconButton(
+                "camera",
+                "Webcam picture-in-picture: shows the webcam in a corner of "
+                "the picture and adds it to recordings. Settings: Audio & Stream "
+                "→ Webcam.",
+                checkable=True, size=ui_theme.CONTROL_H, icon_size=15)
+            self.btn_pip.setChecked(
+                bool(everlive_cam.normalize_settings(load_settings())["pip_enabled"]))
+            self.btn_pip.toggled.connect(self.on_pip_toggled)
+            source_layout.addWidget(self.btn_pip, 0, Qt.AlignVCenter)
+
             # Built for every card; _apply_card_profile() shows it on the DUO.
             saved_input = load_settings().get("duo_input", 0)
             self.combo_duo_input = QComboBox()
@@ -3763,6 +3858,11 @@ if HAS_QT:
             self.video_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self.video_host.setStyleSheet("background-color: #07060E;")
             self.video_host.installEventFilter(self)
+
+            # Webcam preview: a native sibling raised above video_host (and
+            # the engine window inside it).
+            self.pip_host = PipPreview(self.stage_grid_host)
+            self.pip_host.hide()
 
             host_inner_layout = QVBoxLayout(self.video_host)
             host_inner_layout.setContentsMargins(24, 24, 24, 24)
@@ -4642,6 +4742,88 @@ if HAS_QT:
 
             lay_stream.addWidget(card_rec)
 
+            # --- Webcam Picture-in-Picture Card ---
+            pip_cfg = everlive_cam.normalize_settings(self.saved_cfg)
+            self._ensure_cam()
+            card_pip, grid_pip = _section("WEBCAM", "#7AB8FF")
+            grid_pip.setColumnStretch(0, 1)
+            grid_pip.setColumnStretch(1, 1)
+
+            self.chk_pip = QCheckBox("Picture-in-Picture")
+            self.chk_pip.setToolTip(
+                "Shows the webcam in a corner of the main card's picture and "
+                "adds it to recordings. OBS can use it too: "
+                f"LD_PRELOAD={everlive_cam.CAM_PRELOAD}, {everlive_cam.CAM_NODE}.")
+            self.chk_pip.setChecked(bool(pip_cfg["pip_enabled"]))
+            self.chk_pip.toggled.connect(self.on_pip_toggled)
+            grid_pip.addWidget(_toggle(self.chk_pip), 0, 0, 1, 2)
+
+            self.combo_pip_device = _shrinkable(QComboBox())
+            self.combo_pip_device.addItem("First webcam found", "")
+            for path, name in everlive_cam.list_webcams(self._cam.camd):
+                self.combo_pip_device.addItem(f"{name} ({path})", path)
+            dev_idx = self.combo_pip_device.findData(pip_cfg["pip_device"])
+            if dev_idx < 0 and pip_cfg["pip_device"]:
+                self.combo_pip_device.addItem(
+                    pip_cfg["pip_device"], pip_cfg["pip_device"])
+                dev_idx = self.combo_pip_device.count() - 1
+            self.combo_pip_device.setCurrentIndex(max(0, dev_idx))
+            self.combo_pip_device.currentIndexChanged.connect(
+                lambda *_: self._pip_setting_changed(
+                    {"pip_device": self.combo_pip_device.currentData() or ""},
+                    restart=True))
+            grid_pip.addWidget(_stacked_field(
+                "Camera", self.combo_pip_device), 1, 0, 1, 2)
+
+            self.combo_pip_mode = _shrinkable(QComboBox())
+            for text, key in everlive_cam.PIP_MODE_OPTIONS:
+                self.combo_pip_mode.addItem(text, key)
+            mode_idx = self.combo_pip_mode.findData(pip_cfg["pip_mode"])
+            self.combo_pip_mode.setCurrentIndex(max(0, mode_idx))
+            self.combo_pip_mode.setToolTip(
+                "Webcam capture mode. 720p is plenty for a corner overlay; "
+                "60 FPS halves the camera's frame delay.")
+            self.combo_pip_mode.currentIndexChanged.connect(
+                lambda *_: self._pip_setting_changed(
+                    {"pip_mode": self.combo_pip_mode.currentData()},
+                    restart=True))
+            grid_pip.addWidget(_stacked_field(
+                "Mode", self.combo_pip_mode), 2, 0, 1, 2)
+
+            self.combo_pip_corner = _shrinkable(QComboBox())
+            for text, key in everlive_cam.PIP_CORNER_OPTIONS:
+                self.combo_pip_corner.addItem(text, key)
+            self.combo_pip_corner.setCurrentIndex(
+                max(0, self.combo_pip_corner.findData(pip_cfg["pip_corner"])))
+            self.combo_pip_corner.currentIndexChanged.connect(
+                lambda *_: self._pip_setting_changed(
+                    {"pip_corner": self.combo_pip_corner.currentData()}))
+            grid_pip.addWidget(_stacked_field(
+                "Corner", self.combo_pip_corner), 3, 0)
+
+            self.combo_pip_size = _shrinkable(QComboBox())
+            for text, key in everlive_cam.PIP_SIZE_OPTIONS:
+                self.combo_pip_size.addItem(text, key)
+            size_idx = self.combo_pip_size.findData(pip_cfg["pip_size"])
+            self.combo_pip_size.setCurrentIndex(
+                size_idx if size_idx >= 0 else 1)
+            self.combo_pip_size.currentIndexChanged.connect(
+                lambda *_: self._pip_setting_changed(
+                    {"pip_size": self.combo_pip_size.currentData()}))
+            grid_pip.addWidget(_stacked_field(
+                "Size", self.combo_pip_size), 3, 1)
+
+            if not self._cam.available:
+                for w in (self.chk_pip, self.combo_pip_device,
+                          self.combo_pip_mode, self.btn_pip):
+                    w.setEnabled(False)
+                self.chk_pip.setToolTip(
+                    "Webcam bridge not built: run 'make cam'.")
+                self.btn_pip.setToolTip(
+                    "Webcam bridge not built: run 'make cam'.")
+
+            lay_stream.addWidget(card_pip)
+
             # --- OBS & Capture Routing Card ---
             card_obs, grid_obs = _section("OBS & CAPTURE ROUTING", "#5ED4B2")
             grid_obs.setColumnStretch(0, 1)
@@ -5206,6 +5388,8 @@ if HAS_QT:
 
         def eventFilter(self, obj, event):
             if obj is getattr(self, "video_host", None):
+                if event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
+                    self._position_pip()
                 if event.type() == QEvent.Type.MouseButtonPress:
                     self.video_host.setFocus()
                 elif event.type() == QEvent.Type.MouseButtonDblClick:
@@ -5528,8 +5712,10 @@ if HAS_QT:
                         and self.btn_multiview.isChecked()
                         and self._mv_runner is None):
                     QTimer.singleShot(400, self._multiview_start)
+                QTimer.singleShot(600, self._webcam_start)
             else:
                 self._launch_mode = None
+                self._webcam_stop()
                 if getattr(self, "_cinema_fullscreen", False):
                     self._set_cinema_fullscreen(False)
 
@@ -6766,6 +6952,151 @@ if HAS_QT:
             self._mv_tiles.clear()
             self._multiview_layout()
 
+        # -----------------------------------------------------------------
+        # Webcam picture-in-picture
+        # -----------------------------------------------------------------
+        def _ensure_cam(self):
+            if getattr(self, "_cam", None) is None:
+                self._cam = everlive_cam.CameraBridge(
+                    log_path=os.path.join(CONFIG_DIR, "webcam.log"))
+
+        def _pip_settings(self) -> dict:
+            """PiP settings as the Hub shows them.
+
+            The controls are the source of truth while the Hub runs;
+            settings.json only fills in values before the UI exists (it can
+            be replaced behind the Hub's back, and Record must still match
+            what the camera button shows).
+            """
+            cfg = dict(load_settings())
+            btn = getattr(self, "btn_pip", None)
+            if btn is not None:
+                cfg["pip_enabled"] = btn.isChecked()
+            for key, name in (("pip_device", "combo_pip_device"),
+                              ("pip_mode", "combo_pip_mode"),
+                              ("pip_corner", "combo_pip_corner"),
+                              ("pip_size", "combo_pip_size")):
+                combo = getattr(self, name, None)
+                if combo is not None and combo.currentIndex() >= 0:
+                    cfg[key] = combo.currentData()
+            return everlive_cam.normalize_settings(cfg)
+
+        def on_pip_toggled(self, enabled: bool):
+            enabled = bool(enabled)
+            save_settings({"pip_enabled": enabled})
+            for control in (getattr(self, "btn_pip", None),
+                            getattr(self, "chk_pip", None)):
+                if control is not None and control.isChecked() != enabled:
+                    control.blockSignals(True)
+                    control.setChecked(enabled)
+                    control.blockSignals(False)
+            if enabled:
+                if self._launch_mode is not None:
+                    self._webcam_start()
+            else:
+                self._webcam_stop()
+
+        def _pip_setting_changed(self, values: dict, restart: bool = False):
+            save_settings(values)
+            if restart and self._cam.running:
+                self._cam.stop()
+                self._webcam_start()
+            else:
+                self._position_pip()
+
+        def _webcam_start(self):
+            cfg = self._pip_settings()
+            if not cfg["pip_enabled"] or self._launch_mode is None:
+                return
+            if not self._cam.start(str(cfg["pip_device"]), str(cfg["pip_mode"])):
+                self._set_vfio_notice(
+                    "Webcam Unavailable", self._cam.last_error, seconds=6.0)
+                return
+            self._cam_timer.start()
+            self._webcam_update_preview()
+
+        def _webcam_stop(self):
+            cam = getattr(self, "_cam", None)
+            if cam is None:
+                return
+            self._cam_timer.stop()
+            if getattr(self, "pip_host", None) is not None:
+                self.pip_host.detach()
+                self.pip_host.hide()
+            cam.stop()
+
+        def _webcam_tick(self):
+            if not self._cam.running:
+                # The camera was unplugged or the bridge failed.
+                self._webcam_stop()
+                self._set_vfio_notice(
+                    "Webcam Stopped",
+                    f"The webcam bridge exited; see {self._cam.log_path}.",
+                    seconds=6.0)
+                return
+            self._webcam_update_preview()
+
+        def _webcam_update_preview(self):
+            host = getattr(self, "pip_host", None)
+            if host is None:
+                return
+            if not (self._cam.running and self._is_embedded_gaming_active()):
+                host.detach()
+                self._cam.stop_preview()
+                host.hide()
+                return
+            self._position_pip()
+            host.show()
+            host.raise_()
+            if not self._cam.preview_running:
+                pw, ph = everlive_cam.PREVIEW_SIZE
+                if self._cam.start_preview(pw, ph):
+                    host.attach(self._cam.preview.stdout, pw, ph)
+                else:
+                    host.hide()
+                    if self._cam.last_error:
+                        self._set_vfio_notice(
+                            "Webcam Preview", self._cam.last_error, seconds=6.0)
+
+        def _position_pip(self):
+            host = getattr(self, "pip_host", None)
+            if host is None or not hasattr(self, "video_host"):
+                return
+            area = self.video_host.geometry()
+            if area.width() < 32 or area.height() < 32:
+                return
+            # The engine letterboxes the picture to 16:9 inside video_host.
+            pic_w = min(area.width(), int(area.height() * 16 / 9))
+            pic_h = min(area.height(), int(pic_w * 9 / 16))
+            pic_x = area.x() + (area.width() - pic_w) // 2
+            pic_y = area.y() + (area.height() - pic_h) // 2
+            cfg = self._pip_settings()
+            x, y, w, h = everlive_recorder.pip_geometry(
+                everlive_recorder.PipOverlay(
+                    corner=str(cfg["pip_corner"]), size_pct=int(cfg["pip_size"])),
+                pic_w, pic_h)
+            host.setGeometry(pic_x + x, pic_y + y, w, h)
+            if host.isVisible():
+                host.raise_()
+
+        def _webcam_recording_overlay(self, plan):
+            """The PiP for the main recording, or None when it is off."""
+            if not (self._cam.running and self._pip_settings()["pip_enabled"]):
+                return None
+            pip = everlive_cam.pip_overlay(
+                self._pip_settings(), self._cam.preload_library)
+            if plan.source == "window" and self.pip_host.isVisible():
+                # The window grab already holds the (smaller, scaled)
+                # preview; draw the full-quality camera exactly over it.
+                ratio = self.video_host.devicePixelRatioF() or 1.0
+                local = self.pip_host.geometry().translated(
+                    -self.video_host.x(), -self.video_host.y())
+                pip = dataclasses.replace(pip, rect=(
+                    int(local.x() * ratio), int(local.y() * ratio),
+                    int(local.width() * ratio) & ~1,
+                    int(local.height() * ratio) & ~1))
+            return pip
+
         def _multiview_stop(self):
             runner = getattr(self, "_mv_runner", None)
             if runner is None:
@@ -7019,6 +7350,10 @@ if HAS_QT:
                 audio_source=audio_source,
             )
             plan = everlive_recorder.build_recording_plan(**plan_args)
+            pip = self._webcam_recording_overlay(plan)
+            if pip is not None:
+                plan_args["pip"] = pip
+                plan = everlive_recorder.build_recording_plan(**plan_args)
             mv = self._mv_runner
             stamp = everlive_multi.take_stamp()
             if mv is not None:
@@ -7040,6 +7375,8 @@ if HAS_QT:
             self._sync_recording_ui()
             if ok:
                 more = f" + {extra} more card{'s' if extra != 1 else ''}" if extra else ""
+                if plan.pip is not None:
+                    more += " · webcam overlay"
                 self._set_vfio_notice(
                     "Recording Started",
                     f"{plan.width}×{plan.height} @ {plan.fps} FPS ({plan.encoder}) → {os.path.basename(plan.output_path)}{more}",
@@ -9033,6 +9370,7 @@ if HAS_QT:
                 self.recorder.stop()
             self._release_remote_preview()
             self._multiview_stop()
+            self._webcam_stop()
             self._ipc_shutdown = True
             if self._ipc is not None:
                 self._ipc.close()
@@ -9068,6 +9406,7 @@ if HAS_QT:
             if getattr(self, "recorder", None) and self.recorder.is_recording:
                 self.recorder.stop()
             self._multiview_stop()
+            self._webcam_stop()
             self._release_remote_preview()
             if self._ipc is not None:
                 self._ipc.close()
@@ -9257,6 +9596,7 @@ def main():
         if win is not None:
             # Multiview engines run in their own sessions; stop them too.
             win._multiview_stop()
+            win._webcam_stop()
             # A card switch replaces the window's engine wrapper.
             win.streamer.stop()
         streamer.stop()
@@ -9310,6 +9650,7 @@ def main():
             window.show()
         code = app.exec()
         window._multiview_stop()
+        window._webcam_stop()
         hub["window"] = None
         restart_pci = getattr(window, "_card_restart", None)
         _destroy_qt_objects(app, window)

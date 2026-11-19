@@ -87,6 +87,43 @@ _ENCODER_PROBE_CACHE: Dict[Tuple[str, str], bool] = {}
 DEFAULT_REC_LOG_PATH = os.path.expanduser("~/.config/everlive/recorder.log")
 
 
+PIP_CORNERS = ("br", "bl", "tr", "tl")
+
+
+@dataclass(frozen=True)
+class PipOverlay:
+    """Webcam picture-in-picture for a recording.
+
+    ``node`` is the webcam bridge's virtual camera (``/dev/video65`` through
+    ``preload_library``); ``size_pct`` is the overlay width as a share of
+    the recorded width.
+    """
+
+    node: str = "/dev/video65"
+    preload_library: Optional[str] = None
+    corner: str = "br"
+    size_pct: int = 25
+    fps: int = 30
+    margin_pct: float = 2.5
+    # Exact (x, y, w, h) in recorded pixels; overrides corner/size.  Used for
+    # Gaming Viewport (window) capture, where the Hub's preview occupies that
+    # rectangle of the grabbed window.
+    rect: Optional[Tuple[int, int, int, int]] = None
+
+
+def pip_geometry(pip: PipOverlay, width: int, height: int,
+                 cam_aspect: float = 16 / 9) -> Tuple[int, int, int, int]:
+    """``(x, y, w, h)`` of the overlay inside a ``width`` x ``height`` frame."""
+    pct = max(5, min(50, int(pip.size_pct)))
+    w = max(2, int(width * pct / 100) & ~1)
+    h = max(2, int(round(w / cam_aspect)) & ~1)
+    margin = int(round(width * pip.margin_pct / 100))
+    corner = pip.corner if pip.corner in PIP_CORNERS else "br"
+    x = width - w - margin if corner in ("br", "tr") else margin
+    y = height - h - margin if corner in ("br", "bl") else margin
+    return x, y, w, h
+
+
 @dataclass(frozen=True)
 class RecordingPlan:
     cmd: List[str]
@@ -98,6 +135,7 @@ class RecordingPlan:
     width: int
     height: int
     audio_source: Optional[str]
+    pip: Optional[PipOverlay] = None
 
 
 def _read_xdg_videos_dir() -> str:
@@ -416,6 +454,7 @@ def build_recording_plan(
     resolved_encoder: Optional[str] = None,
     filename: Optional[str] = None,
     ffmpeg_bin: str = "ffmpeg",
+    pip: Optional[PipOverlay] = None,
 ) -> RecordingPlan:
     """Build a complete ``RecordingPlan`` (command, env, output path)."""
     even_w = max(2, int(width) & ~1)
@@ -478,18 +517,53 @@ def build_recording_plan(
                 "-i", node,
             ])
 
+    if pip is not None:
+        # Input 1: the webcam bridge's virtual camera.  Its preload DSO is
+        # stacked after the card's (both are built with -Bsymbolic).
+        if pip.preload_library:
+            env["LD_PRELOAD"] = ":".join(
+                p for p in (env.get("LD_PRELOAD"), pip.preload_library) if p)
+        cmd.extend([
+            "-f", "v4l2",
+            "-thread_queue_size", "1024",
+            "-input_format", "yuyv422",
+            "-framerate", str(max(1, int(pip.fps))),
+            "-i", pip.node,
+        ])
+
     if audio_source:
         cmd.extend(["-f", "pulse", "-thread_queue_size", "1024", "-i", audio_source])
 
+    def video_filter(chain: str) -> List[str]:
+        if pip is None:
+            return ["-vf", chain]
+        if pip.rect is not None:
+            rx, ry, rw, rh = (int(v) for v in pip.rect)
+            scale = f"{max(2, rw)}:{max(2, rh)}"
+            ox, oy = str(max(0, rx)), str(max(0, ry))
+        else:
+            _x, _y, w, _h = pip_geometry(pip, even_w, even_h)
+            margin = int(round(even_w * pip.margin_pct / 100))
+            corner = pip.corner if pip.corner in PIP_CORNERS else "br"
+            scale = f"{w}:-2"
+            ox = f"main_w-overlay_w-{margin}" if corner in ("br", "tr") else str(margin)
+            oy = f"main_h-overlay_h-{margin}" if corner in ("br", "bl") else str(margin)
+        graph = (f"[1:v]scale={scale}[pip];"
+                 f"[0:v][pip]overlay={ox}:{oy}:eof_action=pass,{chain}[v]")
+        args = ["-filter_complex", graph, "-map", "[v]"]
+        if audio_source:
+            args.extend(["-map", "2:a"])
+        return args
+
     if encoder in ("h264_vaapi", "hevc_vaapi"):
         cmd.extend([
-            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=nv12,hwupload",
+            *video_filter("scale=trunc(iw/2)*2:trunc(ih/2)*2,format=nv12,hwupload"),
             "-c:v", encoder,
             "-qp", str(qp_val),
         ])
     elif encoder in ("h264_nvenc", "hevc_nvenc"):
         cmd.extend([
-            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+            *video_filter("scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p"),
             "-c:v", encoder,
             "-preset", "p4",
             "-rc", "constqp",
@@ -497,7 +571,7 @@ def build_recording_plan(
         ])
     else:
         cmd.extend([
-            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+            *video_filter("scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p"),
             "-c:v", encoder,
             "-preset", "veryfast",
             "-crf", str(crf_val),
@@ -523,6 +597,7 @@ def build_recording_plan(
         width=even_w,
         height=even_h,
         audio_source=audio_source,
+        pip=pip,
     )
 
 

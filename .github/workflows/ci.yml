@@ -47,13 +47,15 @@ jobs:
           test -x "$RUNNER_TEMP/stage/usr/bin/everlive-ctl"
           test -x "$RUNNER_TEMP/stage/usr/lib/everlive/tools/opengc573-userd/gc573_user_streamer"
           test -x "$RUNNER_TEMP/stage/usr/lib/everlive/tools/opengc570d-userd/opengc570d-userd"
-          for module in everlive_client.py card_profile.py service_manager.py app_integrations.py everlive_recorder.py gc553g2_control.py ui_theme.py ui_widgets.py fa_icons.py everlive_multi.py; do
+          for module in everlive_client.py card_profile.py service_manager.py app_integrations.py everlive_recorder.py gc553g2_control.py ui_theme.py ui_widgets.py fa_icons.py everlive_multi.py everlive_cam.py; do
             test -f "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive/$module"
           done
           for asset in fonts/fa-solid-900.ttf fonts/fa-brands-400.ttf fonts/LICENSE.txt fonts/chevron-down.png; do
             test -f "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive/$asset"
           done
           test -f "$RUNNER_TEMP/stage/usr/lib/libeverlive-vk-pacer.so"
+          test -f "$RUNNER_TEMP/stage/usr/lib/libeverlive-cam-v4l2.so"
+          test -x "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive-cam/everlive_camd"
           make uninstall DESTDIR="$RUNNER_TEMP/stage" PREFIX=/usr
 
       - name: Frame generation cadence self-test
@@ -84,6 +86,7 @@ jobs:
           python3 -m py_compile tools/everlive/ui_widgets.py
           python3 -m py_compile tools/everlive/fa_icons.py
           python3 -m py_compile tools/everlive/everlive_multi.py
+          python3 -m py_compile tools/everlive/everlive_cam.py
 
       - name: Verify shell script syntax
         run: |
