@@ -54,6 +54,15 @@ DANGER_BORDER = "#7A2A38"
 CHIP_BG = "#211F2E"
 CHIP_BORDER = "#3A3650"
 
+# Engine OSD card shares the Hub palette. Keep these in sync with
+# tools/libeverlive-core/osd/everlive_osd.h (covered by test_osd_theme.py).
+OSD_CARD_BG = "#141724"
+OSD_ROUTE = "#94A3BB"
+OSD_INPUT_BG = "#25334A"
+OSD_DIVIDER = "#334155"
+OSD_LIVE = "#19FF3B"
+OSD_CARD_ALPHA = 0.85
+
 # Spacing / geometry shared by the shell.
 PAD = 14
 GAP = 10
@@ -103,6 +112,11 @@ TOKENS = {
     "DANGER_BORDER": DANGER_BORDER,
     "CHIP_BG": CHIP_BG,
     "CHIP_BORDER": CHIP_BORDER,
+    "OSD_CARD_BG": OSD_CARD_BG,
+    "OSD_ROUTE": OSD_ROUTE,
+    "OSD_INPUT_BG": OSD_INPUT_BG,
+    "OSD_DIVIDER": OSD_DIVIDER,
+    "OSD_LIVE": OSD_LIVE,
     "RADIUS": RADIUS_CSS,
     "SEGMENT_RADIUS": SEGMENT_RADIUS_CSS,
     "ASSET_DIR": ASSET_DIR,

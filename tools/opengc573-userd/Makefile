@@ -12,11 +12,13 @@ DEPFLAGS := -MMD -MP
 # Flags every translation unit needs.
 BASE_CFLAGS := $(CFLAGS) -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
 	-std=gnu11 -D_GNU_SOURCE
-BASE_CFLAGS += -Isrc -I../libeverlive-core
+BASE_CFLAGS += -Isrc -I../libeverlive-core -I../libeverlive-core/osd
 override LDFLAGS += -pthread
 
 SDL_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl2 2>/dev/null)
 SDL_LIBS   := $(shell $(PKG_CONFIG) --libs sdl2 2>/dev/null)
+SDL_TTF_CFLAGS := $(shell $(PKG_CONFIG) --cflags SDL2_ttf 2>/dev/null)
+SDL_TTF_LIBS   := $(shell $(PKG_CONFIG) --libs SDL2_ttf 2>/dev/null)
 X11_CFLAGS := $(shell $(PKG_CONFIG) --cflags x11 2>/dev/null)
 X11_LIBS   := $(shell $(PKG_CONFIG) --libs x11 2>/dev/null)
 AV_CFLAGS  := $(shell $(PKG_CONFIG) --cflags libavcodec libavutil libswresample libswscale 2>/dev/null)
@@ -26,6 +28,8 @@ PW_LIBS    := $(shell $(PKG_CONFIG) --libs libpipewire-0.3 2>/dev/null)
 
 CORE_LIB := ../libeverlive-core/libeverlive_core.a
 CORE_V4L2_DIR := ../libeverlive-core/v4l2
+OSD_DIR := ../libeverlive-core/osd
+OSD_OBJ := $(OSD_DIR)/everlive_osd.o
 
 # Hardware / register layer: no SDL, no FFmpeg, no PipeWire.
 HW_OBJS := \
@@ -65,8 +69,8 @@ all: $(TARGETS)
 gc573_user_probe: src/gc573_user_probe.o $(HW_OBJS) $(CORE_LIB)
 	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS)
 
-gc573_user_streamer: src/gc573_user_streamer.o $(HW_OBJS) $(STREAM_OBJS) $(CORE_LIB)
-	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS) $(SDL_LIBS) $(X11_LIBS) $(AV_LIBS) $(PW_LIBS) -lm
+gc573_user_streamer: src/gc573_user_streamer.o $(HW_OBJS) $(STREAM_OBJS) $(OSD_OBJ) $(CORE_LIB)
+	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS) $(SDL_LIBS) $(SDL_TTF_LIBS) $(X11_LIBS) $(AV_LIBS) $(PW_LIBS) -lm
 
 everlive_userd: src/everlive_userd.o $(HW_OBJS) $(CORE_LIB)
 	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -104,7 +108,10 @@ $(STREAM_OBJS): src/%.o: src/%.c
 
 # Only the SDL2 renderer needs SDL headers.
 src/gc573_user_streamer.o: src/gc573_user_streamer.c
-	$(CC) $(BASE_CFLAGS) $(SDL_CFLAGS) $(X11_CFLAGS) $(AV_CFLAGS) $(PW_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+	$(CC) $(BASE_CFLAGS) $(SDL_CFLAGS) $(SDL_TTF_CFLAGS) $(X11_CFLAGS) $(AV_CFLAGS) $(PW_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+$(OSD_OBJ): $(OSD_DIR)/everlive_osd.c $(OSD_DIR)/everlive_osd.h
+	$(CC) $(BASE_CFLAGS) $(SDL_CFLAGS) $(SDL_TTF_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 # The framegen cadence test now lives in tests/; forward the legacy target.
 test selftest:
@@ -114,10 +121,10 @@ framegen-selftest:
 	$(MAKE) -C ../../tests test_framegen
 	../../tests/test_framegen
 
--include $(HW_OBJS:.o=.d) $(STREAM_OBJS:.o=.d) $(ENTRY_OBJS:.o=.d)
+-include $(HW_OBJS:.o=.d) $(STREAM_OBJS:.o=.d) $(ENTRY_OBJS:.o=.d) $(OSD_OBJ:.o=.d)
 
 clean:
-	rm -f src/*.o src/*.d $(TARGETS)
+	rm -f src/*.o src/*.d $(OSD_OBJ) $(OSD_OBJ:.o=.d) $(TARGETS)
 
 PREFIX ?= /usr/local
 DESTDIR ?=

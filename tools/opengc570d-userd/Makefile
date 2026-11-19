@@ -18,20 +18,22 @@ CORE_V4L2_DIR := $(CORE_DIR)/v4l2
 USER_CFLAGS := $(CFLAGS) -O2 -g -Wall -Wextra -Wno-unused-parameter \
 	-Wno-sign-compare -std=gnu11 \
 	-D_GNU_SOURCE -DGC570D_USERSPACE -DGC570D_DEVELOPER_DEBUGFS \
-	-Isrc -I. -I$(CORE_DIR)
+	-Isrc -I. -I$(CORE_DIR) -I$(CORE_DIR)/osd
 override LDFLAGS += -pthread
 USER_LDFLAGS := $(LDFLAGS) -lm -lrt
 
 SDL_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl2 2>/dev/null)
 SDL_LIBS   := $(shell $(PKG_CONFIG) --libs sdl2 2>/dev/null)
+SDL_TTF_CFLAGS := $(shell $(PKG_CONFIG) --cflags SDL2_ttf 2>/dev/null)
+SDL_TTF_LIBS   := $(shell $(PKG_CONFIG) --libs SDL2_ttf 2>/dev/null)
 X11_CFLAGS := $(shell $(PKG_CONFIG) --cflags x11 2>/dev/null)
 X11_LIBS   := $(shell $(PKG_CONFIG) --libs x11 2>/dev/null)
 PW_CFLAGS  := $(shell $(PKG_CONFIG) --cflags libpipewire-0.3 2>/dev/null)
 PW_LIBS    := $(shell $(PKG_CONFIG) --libs libpipewire-0.3 2>/dev/null)
 
 ifneq ($(strip $(SDL_LIBS)),)
-USER_CFLAGS += -DHAVE_SDL2 $(SDL_CFLAGS) $(X11_CFLAGS)
-USER_LDFLAGS += $(SDL_LIBS) $(X11_LIBS)
+USER_CFLAGS += -DHAVE_SDL2 $(SDL_CFLAGS) $(SDL_TTF_CFLAGS) $(X11_CFLAGS)
+USER_LDFLAGS += $(SDL_LIBS) $(SDL_TTF_LIBS) $(X11_LIBS)
 endif
 
 ifneq ($(strip $(PW_LIBS)),)
@@ -55,6 +57,8 @@ USERD_SRCS := \
 	src/gc570d-jsonrpc.c
 
 USERD_OBJS := $(USERD_SRCS:.c=.o)
+OSD_DIR := $(CORE_DIR)/osd
+OSD_OBJ := $(OSD_DIR)/everlive_osd.o
 
 USER_HEADERS := \
 	src/gc570d.h \
@@ -70,14 +74,17 @@ TARGETS := opengc570d-userd gc570d-ctl libgc570d-v4l2.so
 
 all: $(TARGETS)
 
-opengc570d-userd: $(USERD_OBJS) $(CORE_LIB)
-	$(CC) $(USER_CFLAGS) -o $@ $(USERD_OBJS) $(USER_LDFLAGS) $(LDFLAGS) $(CORE_LIB)
+opengc570d-userd: $(USERD_OBJS) $(OSD_OBJ) $(CORE_LIB)
+	$(CC) $(USER_CFLAGS) -o $@ $(USERD_OBJS) $(OSD_OBJ) $(USER_LDFLAGS) $(LDFLAGS) $(CORE_LIB)
 	@chmod 0755 $@
 
 $(CORE_LIB):
 	$(MAKE) -C $(CORE_DIR)
 
 src/%.o: src/%.c $(USER_HEADERS)
+	$(CC) $(USER_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+$(OSD_OBJ): $(OSD_DIR)/everlive_osd.c $(OSD_DIR)/everlive_osd.h
 	$(CC) $(USER_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 gc570d-ctl: src/gc570d-ctl.c
@@ -103,7 +110,7 @@ libgc570d-v4l2.so: src/gc570d-v4l2.c \
 test selftest:
 	$(MAKE) -C ../../tests test
 
--include $(USERD_OBJS:.o=.d)
+-include $(USERD_OBJS:.o=.d) $(OSD_OBJ:.o=.d)
 
 PREFIX ?= /usr/local
 DESTDIR ?=

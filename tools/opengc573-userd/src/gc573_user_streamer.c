@@ -32,7 +32,7 @@
 #include "gc573_user_framegen.h"
 #include "gc573_camera.h"
 #include "gc573_user_log.h"
-#include "gc573_user_font8x8.h"
+#include "everlive_osd.h"
 #include "everlive_handoff.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_syswm.h>
@@ -1802,18 +1802,12 @@ static int configure_and_start(struct gc573_vfio_ctx *ctx,
 }
 
 static void framegen_describe(char *out, size_t len);
-
-/*
- * Minimal bitmap-font OSD.  The text is rasterised into an ARGB surface only
- * when its content or pixel scale changes, then composited over the video
- * with a semi-transparent background.  Costs nothing in the steady state.
- */
-#define OSD_BULLET 0x1f
-
-/* Subtle 4x4 bullet glyph; the bitmap font only covers ASCII. */
-static const uint8_t osd_bullet[8] = {
-	0x00, 0x00, 0x18, 0x3c, 0x3c, 0x18, 0x00, 0x00,
-};
+static float float_from_bits(uint32_t bits);
+static uint32_t float_to_bits(float value);
+static uint32_t g_audio_gain_bits;
+static int g_audio_mute_flag;
+static unsigned long g_parent_winid;
+static void toast_trigger(const char *msg);
 
 struct osd_overlay {
 	SDL_Texture *texture;
@@ -1824,8 +1818,17 @@ struct osd_overlay {
 };
 
 static struct osd_overlay g_osd;
-/* Fullscreen identity card; windowed mode keeps g_osd. */
-static struct osd_overlay g_card;
+static struct everlive_osd_card g_card;
+static struct everlive_osd_popup g_popup;
+static enum everlive_osd_popup_kind g_popup_kind;
+static bool g_popup_open;
+static bool g_popup_dragging;
+static bool g_popup_dirty;
+static float g_popup_scale;
+static int g_popup_volume = 100;
+static bool g_osd_font_init_attempted;
+static SDL_Rect g_card_dest;
+static SDL_Rect g_popup_dest;
 static bool g_osd_card_was_active;
 
 /* Centred F1 help card; separate texture so the stats OSD stays intact. */
@@ -1865,14 +1868,10 @@ static void osd_destroy(void)
 	g_osd.height = 0;
 	g_osd.scale = 0;
 	g_osd.text[0] = '\0';
-	if (g_card.texture) {
-		SDL_DestroyTexture(g_card.texture);
-		g_card.texture = NULL;
-	}
-	g_card.width = 0;
-	g_card.height = 0;
-	g_card.scale = 0;
-	g_card.text[0] = '\0';
+	everlive_osd_destroy_card(&g_card);
+	everlive_osd_destroy_popup(&g_popup);
+	g_popup_open = false;
+	g_popup_kind = EVERLIVE_OSD_POPUP_NONE;
 	toast_destroy();
 }
 
@@ -1888,135 +1887,6 @@ static void help_destroy(void)
 	g_help.text[0] = '\0';
 	/* The card belongs to the renderer that just went away. */
 	g_help_overlay = false;
-}
-
-static int osd_pad_for_scale(int scale)
-{
-	return 10 + (scale - 1) * 4;
-}
-
-static int osd_gap_for_scale(int scale)
-{
-	return 4 * scale;
-}
-
-static int osd_border_for_scale(int scale)
-{
-	return scale > 1 ? 2 : 1;
-}
-
-static void osd_draw_text_at(SDL_Surface *surface, int x0, int y0,
-			     const char *text, int scale, Uint32 fg)
-{
-	const int line_height = 8 * scale;
-	const int line_gap = osd_gap_for_scale(scale);
-	int x = x0;
-	int y = y0;
-
-	for (const char *p = text; *p; p++) {
-		const uint8_t *bitmap;
-		unsigned char glyph;
-
-		if (*p == '\n') {
-			x = x0;
-			y += line_height + line_gap;
-			continue;
-		}
-
-		glyph = (unsigned char)*p;
-		if (glyph == (unsigned char)OSD_BULLET) {
-			bitmap = osd_bullet;
-		} else {
-			if (glyph > 127)
-				glyph = '?';
-			bitmap = font8x8_basic[glyph];
-		}
-
-		for (int row = 0; row < 8; row++) {
-			uint8_t bits = bitmap[row];
-
-			for (int col = 0; col < 8; col++) {
-				Uint32 *px;
-
-				if (!(bits & (1 << col)))
-					continue;
-				for (int sy = 0; sy < scale; sy++) {
-					px = (Uint32 *)((Uint8 *)surface->pixels +
-							(y + row * scale + sy) *
-							surface->pitch);
-					for (int sx = 0; sx < scale; sx++)
-						px[x + col * scale + sx] = fg;
-				}
-			}
-		}
-		x += 8 * scale;
-	}
-}
-
-static void osd_draw_text(SDL_Surface *surface, const char *text, int scale)
-{
-	const int pad = osd_pad_for_scale(scale);
-	Uint32 fg = SDL_MapRGBA(surface->format, 235, 242, 255, 255);
-
-	osd_draw_text_at(surface, pad, pad, text, scale, fg);
-}
-
-/* ------------------------------------------------------------------ *
- * Fullscreen OSD card
- *
- * Fullscreen gets a three-line card: identity, signal route and a row of
- * hotkey chips.  Windowed mode keeps the compact one-line readout so the
- * embedded Hub viewport stays unobstructed.
- * ------------------------------------------------------------------ */
-static int osd_scale_for_height(int win_h);
-
-static int osd_text_width(const char *text, int scale)
-{
-	return (int)strlen(text) * 8 * scale;
-}
-
-static void osd_fill_rounded(SDL_Surface *surface, int x, int y,
-			     int w, int h, int radius, Uint32 color)
-{
-	SDL_Rect mid;
-	int dy;
-
-	if (radius <= 0) {
-		SDL_Rect rect = { x, y, w, h };
-
-		SDL_FillRect(surface, &rect, color);
-		return;
-	}
-
-	mid.x = x;
-	mid.y = y + radius;
-	mid.w = w;
-	mid.h = h - 2 * radius;
-	SDL_FillRect(surface, &mid, color);
-
-	for (dy = 0; dy < radius; dy++) {
-		int rem = radius - dy;
-		int dx = (int)(sqrt((double)(radius * radius - rem * rem)) + 0.5);
-		int inset = radius - dx;
-		SDL_Rect row = { x + inset, y + dy, w - 2 * inset, 1 };
-
-		SDL_FillRect(surface, &row, color);
-		row.y = y + h - 1 - dy;
-		SDL_FillRect(surface, &row, color);
-	}
-}
-
-static void osd_fill_circle(SDL_Surface *surface, int cx, int cy, int r,
-			    Uint32 color)
-{
-	int dy;
-
-	for (dy = -r; dy <= r; dy++) {
-		int dx = (int)(sqrt((double)(r * r - dy * dy)) + 0.5);
-		SDL_Rect row = { cx - dx, cy + dy, dx * 2 + 1, 1 };
-
-		SDL_FillRect(surface, &row, color);
-	}
 }
 
 static bool osd_window_is_fullscreen(SDL_Window *window)
@@ -2087,244 +1957,89 @@ static void osd_audio_label(const char *audio_text, char *out, size_t n)
 		strncat(out, " Muted", n - strlen(out) - 1);
 }
 
-struct osd_hotkey_chip {
-	const char *key;
-	const char *label;
-};
+static void osd_card_invalidate(void)
+{
+	g_card.cache_key[0] = '\0';
+}
 
 static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
 			    uint32_t in_w, uint32_t in_h,
 			    uint32_t rate_x100, const char *chroma_text,
 			    const char *audio_text)
 {
-	static const struct osd_hotkey_chip chips[] = {
-		{ "A", "Aspect" },
-		{ "L", "Scale" },
-		{ "M", "Mute" },
-		{ "Tab", "Hide" },
-		{ "F", "Exit" },
-	};
-	char line1[128];
-	char line2[224];
+	char title[128];
+	char source[40];
+	char target[220];
 	char output[32];
 	char audio[48];
-	char key[512];
 	int win_w = 0;
 	int win_h = 0;
-	int scale;
-	int pad;
-	int gap;
-	int line_h;
-	int chip_h;
-	int dot_d;
-	int line1_w;
-	int line2_w;
-	int chips_w = 0;
-	int content_w;
-	int width;
-	int height;
-	int x;
-	int y;
-	SDL_Surface *surface;
-	SDL_Texture *texture;
-	Uint32 bg;
-	Uint32 border;
-	Uint32 fg;
-	Uint32 muted;
-	Uint32 green;
-	Uint32 chip_bg;
-	Uint32 chip_border;
-	size_t i;
+	float scale;
+	float gain;
+	struct everlive_osd_snapshot snap;
 
 	if (!renderer || !window || !g_osd_enabled)
 		return;
 
+	if (!everlive_osd_available()) {
+		if (!g_osd_font_init_attempted) {
+			g_osd_font_init_attempted = true;
+			everlive_osd_init();
+		}
+		if (!everlive_osd_available())
+			return;
+	}
+
 	SDL_GetWindowSize(window, &win_w, &win_h);
 	if (win_w <= 0 || win_h <= 0)
 		return;
-	scale = osd_scale_for_height(win_h);
-
+	scale = (float)win_h / 1080.0f;
 	osd_output_label(output, sizeof(output), win_w, win_h, rate_x100);
 	osd_audio_label(audio_text, audio, sizeof(audio));
-
-	snprintf(line1, sizeof(line1), "GC573 %c HDMI (Auto)", OSD_BULLET);
-	snprintf(line2, sizeof(line2), "%ux%u -> %s %s %c %s",
-		 in_w, in_h, output,
+	snprintf(title, sizeof(title), "GC573 : HDMI (%s)",
+		 aspect_name(g_aspect));
+	snprintf(source, sizeof(source), "%ux%u", in_w, in_h);
+	snprintf(target, sizeof(target), "%s %s | %s", output,
 		 chroma_text && *chroma_text ? chroma_text : "YUV",
-		 OSD_BULLET, audio);
+		 audio);
 
-	snprintf(key, sizeof(key), "%s|%s|%d|%d|%d",
-		 line1, line2, scale, win_w, win_h);
-	if (scale == g_card.scale && strcmp(key, g_card.text) == 0)
+	gain = float_from_bits(__atomic_load_n(&g_audio_gain_bits,
+					      __ATOMIC_RELAXED));
+	memset(&snap, 0, sizeof(snap));
+	snap.title = title;
+	snap.route_source = source;
+	snap.route_target = target;
+	snap.input_label = NULL;
+	snap.aspect_label = "Aspect";
+	snap.scale_label = "Scale";
+	snap.show_input = false;
+	snap.pip = false;
+	snap.muted = __atomic_load_n(&g_audio_mute_flag, __ATOMIC_RELAXED) != 0;
+	snap.fullscreen = osd_window_is_fullscreen(window);
+	snap.interactive = g_parent_winid == 0 && !g_headless;
+	snap.volume_pct = (int)(gain * 100.0f + 0.5f);
+
+	if (!everlive_osd_build_card(renderer, &snap, scale, win_w, win_h,
+				     &g_card))
 		return;
-	snprintf(g_card.text, sizeof(g_card.text), "%s", key);
-
-	pad = 12 * scale;
-	gap = 5 * scale;
-	line_h = 8 * scale;
-	dot_d = 6 * scale;
-	chip_h = line_h + 4 * scale;
-
-	line1_w = dot_d + gap + osd_text_width(line1, scale);
-	line2_w = osd_text_width(line2, scale);
-	for (i = 0; i < SDL_arraysize(chips); i++) {
-		int chip_w = 6 * scale + osd_text_width(chips[i].key, scale);
-
-		chips_w += chip_w + 4 * scale +
-			   osd_text_width(chips[i].label, scale);
-		if (i + 1 < SDL_arraysize(chips))
-			chips_w += 12 * scale;
-	}
-
-	content_w = line1_w;
-	if (line2_w > content_w)
-		content_w = line2_w;
-	if (chips_w > content_w)
-		content_w = chips_w;
-
-	width = pad * 2 + content_w;
-	height = pad * 2 + line_h + gap + line_h + gap + chip_h;
-
-	surface = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32,
-						 SDL_PIXELFORMAT_RGBA32);
-	if (!surface)
-		return;
-
-	bg = SDL_MapRGBA(surface->format, 30, 34, 48, 235);
-	border = SDL_MapRGBA(surface->format, 90, 98, 120, 170);
-	fg = SDL_MapRGBA(surface->format, 235, 242, 255, 255);
-	muted = SDL_MapRGBA(surface->format, 154, 160, 176, 255);
-	green = SDL_MapRGBA(surface->format, 80, 220, 140, 255);
-	chip_bg = SDL_MapRGBA(surface->format, 22, 25, 36, 230);
-	chip_border = SDL_MapRGBA(surface->format, 60, 66, 82, 220);
-
-	osd_fill_rounded(surface, 0, 0, width, height, 9 * scale, border);
-	osd_fill_rounded(surface, 1, 1, width - 2, height - 2,
-			 (9 * scale) - 1, bg);
-
-	y = pad;
-	osd_fill_circle(surface, pad + dot_d / 2, y + line_h / 2,
-			dot_d / 2, green);
-	osd_draw_text_at(surface, pad + dot_d + gap, y, line1, scale, fg);
-
-	y += line_h + gap;
-	osd_draw_text_at(surface, pad, y, line2, scale, muted);
-
-	y += line_h + gap;
-	x = pad;
-	for (i = 0; i < SDL_arraysize(chips); i++) {
-		int chip_w = 6 * scale + osd_text_width(chips[i].key, scale);
-		int label_w = osd_text_width(chips[i].label, scale);
-
-		osd_fill_rounded(surface, x, y, chip_w, chip_h, 4 * scale,
-				 chip_border);
-		osd_fill_rounded(surface, x + 1, y + 1, chip_w - 2,
-				 chip_h - 2, (4 * scale) - 1, chip_bg);
-		osd_draw_text_at(surface, x + 3 * scale, y + 2 * scale,
-				 chips[i].key, scale, fg);
-		x += chip_w + 4 * scale;
-		osd_draw_text_at(surface, x, y + 2 * scale,
-				 chips[i].label, scale, muted);
-		x += label_w + 12 * scale;
-	}
-
-	texture = SDL_CreateTextureFromSurface(renderer, surface);
-	SDL_FreeSurface(surface);
-	if (!texture)
-		return;
-	SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-	if (g_card.texture)
-		SDL_DestroyTexture(g_card.texture);
-	g_card.texture = texture;
-	g_card.width = width;
-	g_card.height = height;
-	g_card.scale = scale;
 }
 
 static void osd_build(SDL_Renderer *renderer, int scale, const char *text,
 		      struct osd_overlay *out)
 {
-	const int pad = osd_pad_for_scale(scale);
-	const int line_height = 8 * scale;
-	const int line_gap = osd_gap_for_scale(scale);
-	const int border = osd_border_for_scale(scale);
-	unsigned int max_len = 0;
-	unsigned int line_len = 0;
-	unsigned int lines = 1;
-	SDL_Surface *surface;
-	SDL_Texture *texture;
-	SDL_Rect edge;
-	Uint32 bg;
-	Uint32 border_color;
-	int width;
-	int height;
-
 	if (!renderer || !out)
 		return;
-
-	for (const char *p = text;; p++) {
-		if (*p == '\n' || *p == '\0') {
-			if (line_len > max_len)
-				max_len = line_len;
-			line_len = 0;
-			if (*p == '\0')
-				break;
-			lines++;
-			continue;
+	if (!everlive_osd_available()) {
+		if (!g_osd_font_init_attempted) {
+			g_osd_font_init_attempted = true;
+			everlive_osd_init();
 		}
-		line_len++;
+		if (!everlive_osd_available())
+			return;
 	}
-
-	/*
-	 * Use the exact line width (numeric fields in osd_update use fixed
-	 * widths so the box neither twitches nor wastes space on the right).
-	 */
-
-	width = pad * 2 + (int)max_len * 8 * scale;
-	height = pad * 2 + (int)lines * line_height +
-		 ((int)lines - 1) * line_gap;
-
-	/*
-	 * RGBA32 is byte-order-correct R, G, B, A in memory, which is what
-	 * SDL_CreateTextureFromSurface() expects for the OSD overlay on both the
-	 * OpenGL and the Vulkan SDL renderer.
-	 */
-	surface = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32,
-						 SDL_PIXELFORMAT_RGBA32);
-	if (!surface)
+	if (!everlive_osd_build_text(renderer, text, 1080, &out->texture,
+				     &out->width, &out->height, NULL))
 		return;
-
-	bg = SDL_MapRGBA(surface->format, 22, 20, 37, 222);
-	SDL_FillRect(surface, NULL, bg);
-
-	border_color = SDL_MapRGBA(surface->format, 187, 150, 243, 96);
-	edge.x = 0;
-	edge.y = 0;
-	edge.w = width;
-	edge.h = border;
-	SDL_FillRect(surface, &edge, border_color);
-	edge.y = height - border;
-	SDL_FillRect(surface, &edge, border_color);
-	edge.y = 0;
-	edge.w = border;
-	edge.h = height;
-	SDL_FillRect(surface, &edge, border_color);
-	edge.x = width - border;
-	SDL_FillRect(surface, &edge, border_color);
-
-	osd_draw_text(surface, text, scale);
-
-	texture = SDL_CreateTextureFromSurface(renderer, surface);
-	SDL_FreeSurface(surface);
-	if (!texture)
-		return;
-	SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-
-	if (out->texture)
-		SDL_DestroyTexture(out->texture);
-	out->texture = texture;
-	out->width = width;
-	out->height = height;
 	out->scale = scale;
 	snprintf(out->text, sizeof(out->text), "%s", text);
 }
@@ -2394,28 +2109,28 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 	}
 
 	if (hdr_text && *hdr_text)
-		snprintf(tail, sizeof(tail), " %c %s", OSD_BULLET, hdr_text);
+		snprintf(tail, sizeof(tail), " | %s", hdr_text);
 	if (g_aspect != ASPECT_AUTO)
-		snprintf(ar_tag, sizeof(ar_tag), " %c %s",
-			 OSD_BULLET, aspect_label(g_aspect));
+		snprintf(ar_tag, sizeof(ar_tag), " | %s",
+			 aspect_label(g_aspect));
 	if (g_integer_factor > 0)
-		snprintf(scale_tag, sizeof(scale_tag), " %c %dx",
-			 OSD_BULLET, g_integer_factor);
+		snprintf(scale_tag, sizeof(scale_tag), " | %dx",
+			 g_integer_factor);
 	if (g_osd_dma_ms > 0.0)
-		snprintf(dma_tag, sizeof(dma_tag), " %c %4.1fms",
-			 OSD_BULLET, g_osd_dma_ms);
+		snprintf(dma_tag, sizeof(dma_tag), " | %4.1fms",
+			 g_osd_dma_ms);
 	if (g_vsync)
-		snprintf(vsync_tag, sizeof(vsync_tag), " %c VSync", OSD_BULLET);
+		snprintf(vsync_tag, sizeof(vsync_tag), " | VSync");
 
 	SDL_GetWindowSize(window, NULL, &win_h);
 	scale = osd_scale_for_height(win_h);
 
 	snprintf(line2, sizeof(line2),
-		 "%ux%u%s %.0fHz %c %5.1f FPS%s%s%s%s %c %s%s",
+		 "%ux%u%s %.0fHz | %5.1f FPS%s%s%s%s | %s%s",
 		 in_w, in_h, interlaced ? "i" : "p",
-		 (double)rate_x100 / 100.0, OSD_BULLET, fps,
+		 (double)rate_x100 / 100.0, fps,
 		 ar_tag, scale_tag, dma_tag, vsync_tag,
-		 OSD_BULLET, audio_text, tail);
+		 audio_text, tail);
 
 	framegen_describe(line3, sizeof(line3));
 
@@ -2430,27 +2145,86 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 	osd_rebuild(renderer, scale, text);
 }
 
-static void osd_destination(SDL_Rect *dst, const struct osd_overlay *overlay,
-			    int win_w, int win_h)
+static void osd_place(SDL_Rect *dst, int width, int height, float scale,
+		     int win_w, int win_h)
 {
-	int margin = overlay->scale >= 3 ? 24
-		: (overlay->scale == 2 ? 16 : 10);
+	int margin = (int)(28.0f * scale + 0.5f);
 	bool right = g_osd_pos == OSD_POS_TR || g_osd_pos == OSD_POS_BR;
 	bool bottom = g_osd_pos == OSD_POS_BR || g_osd_pos == OSD_POS_BL;
 
-	dst->w = overlay->width;
-	dst->h = overlay->height;
-	dst->x = right ? win_w - margin - dst->w : margin;
-	dst->y = bottom ? win_h - margin - dst->h : margin;
+	if (margin < 10)
+		margin = 10;
+	dst->w = width;
+	dst->h = height;
+	dst->x = right ? win_w - margin - width : margin;
+	dst->y = bottom ? win_h - margin - height : margin;
 	if (dst->x < 0)
 		dst->x = 0;
 	if (dst->y < 0)
 		dst->y = 0;
 }
 
+static const struct everlive_osd_hitbox *osd_card_hit(
+	enum everlive_osd_action action)
+{
+	for (int i = 0; i < g_card.hit_count; i++) {
+		if (g_card.hits[i].action == action)
+			return &g_card.hits[i];
+	}
+	return NULL;
+}
+
+static void osd_popup_build(SDL_Renderer *renderer, float scale)
+{
+	int selected = 0;
+
+	if (!g_popup_open)
+		return;
+	if (g_popup_kind == EVERLIVE_OSD_POPUP_VOLUME)
+		selected = g_popup_volume;
+	everlive_osd_build_popup(renderer, g_popup_kind, selected,
+				 g_popup_volume, scale, &g_popup);
+	g_popup_scale = scale;
+	g_popup_dirty = false;
+}
+
+static void osd_render_popup(SDL_Renderer *renderer, int win_w, int win_h,
+			     float scale)
+{
+	const struct everlive_osd_hitbox *anchor;
+	enum everlive_osd_action action =
+		g_popup_kind == EVERLIVE_OSD_POPUP_INPUT
+			? EVERLIVE_OSD_ACTION_INPUT : EVERLIVE_OSD_ACTION_VOLUME;
+
+	if (!g_popup_open)
+		return;
+	if (!g_popup.texture || g_popup_dirty ||
+	    fabsf(g_popup_scale - scale) > 0.001f)
+		osd_popup_build(renderer, scale);
+	if (!g_popup.texture)
+		return;
+	anchor = osd_card_hit(action);
+	if (!anchor)
+		return;
+	g_popup_dest.x = g_card_dest.x + anchor->rect.x;
+	g_popup_dest.y = g_card_dest.y + anchor->rect.y + anchor->rect.h + 8;
+	g_popup_dest.w = g_popup.width;
+	g_popup_dest.h = g_popup.height;
+	if (g_popup_dest.x + g_popup_dest.w > win_w - 10)
+		g_popup_dest.x = win_w - g_popup_dest.w - 10;
+	if (g_popup_dest.x < 10)
+		g_popup_dest.x = 10;
+	if (g_popup_dest.y + g_popup_dest.h > win_h - 10) {
+		g_popup_dest.y = g_card_dest.y + anchor->rect.y -
+				 g_popup.height - 8;
+		if (g_popup_dest.y < 10)
+			g_popup_dest.y = 10;
+	}
+	SDL_RenderCopy(renderer, g_popup.texture, NULL, &g_popup_dest);
+}
+
 static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
 {
-	const struct osd_overlay *overlay;
 	int win_w = 0;
 	int win_h = 0;
 	SDL_Rect dst;
@@ -2458,15 +2232,210 @@ static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
 	if (!g_osd_enabled)
 		return;
 
-	overlay = (osd_card_active(window) && g_card.texture)
-		? &g_card : &g_osd;
-	if (!overlay->texture)
-		return;
-
 	SDL_GetWindowSize(window, &win_w, &win_h);
-	osd_destination(&dst, overlay, win_w, win_h);
-	SDL_RenderCopy(renderer, overlay->texture, NULL, &dst);
+	if (osd_card_active(window) && g_card.texture) {
+		float scale = (float)win_h / 1080.0f;
+
+		osd_place(&dst, g_card.width, g_card.height, scale,
+			  win_w, win_h);
+		g_card_dest = dst;
+		SDL_RenderCopy(renderer, g_card.texture, NULL, &dst);
+		osd_render_popup(renderer, win_w, win_h, scale);
+		return;
+	}
+	if (!g_osd.texture)
+		return;
+	osd_place(&dst, g_osd.width, g_osd.height, (float)g_osd.scale,
+		  win_w, win_h);
+	SDL_RenderCopy(renderer, g_osd.texture, NULL, &dst);
 }
+
+static int osd_volume_percent(void)
+{
+	float gain = float_from_bits(__atomic_load_n(&g_audio_gain_bits,
+						     __ATOMIC_RELAXED));
+	int pct = (int)(gain * 100.0f + 0.5f);
+
+	return pct < 0 ? 0 : (pct > 150 ? 150 : pct);
+}
+
+static void osd_apply_volume(int pct)
+{
+	if (pct < 0)
+		pct = 0;
+	if (pct > 150)
+		pct = 150;
+	__atomic_store_n(&g_audio_gain_bits,
+			 float_to_bits((float)pct / 100.0f),
+			 __ATOMIC_RELAXED);
+	if (pct > 0)
+		__atomic_store_n(&g_audio_mute_flag, 0, __ATOMIC_RELAXED);
+	g_popup_volume = pct;
+	g_popup_dirty = true;
+	osd_card_invalidate();
+}
+
+static void osd_apply_mute(bool muted)
+{
+	__atomic_store_n(&g_audio_mute_flag, muted ? 1 : 0, __ATOMIC_RELAXED);
+	osd_card_invalidate();
+}
+
+static void osd_toggle_fullscreen(SDL_Window *window)
+{
+	uint32_t flags = SDL_GetWindowFlags(window);
+	bool enable = !(flags & SDL_WINDOW_FULLSCREEN_DESKTOP);
+
+	SDL_SetWindowFullscreen(window, enable ?
+				SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+	osd_card_invalidate();
+}
+
+static void osd_cycle_aspect(SDL_Window *window)
+{
+	char title[128];
+	char message[64];
+
+	g_aspect = (enum stream_aspect)((g_aspect + 1) % ASPECT_COUNT);
+	snprintf(title, sizeof(title), "EverLive — Aspect: %s",
+		 aspect_name(g_aspect));
+	snprintf(message, sizeof(message), "Aspect: %s", aspect_name(g_aspect));
+	SDL_SetWindowTitle(window, title);
+	toast_trigger(message);
+	osd_card_invalidate();
+}
+
+static void osd_cycle_scale(SDL_Window *window)
+{
+	char title[128];
+	char message[64];
+
+	g_scale_mode = (enum stream_scale)
+		((g_scale_mode + 1) % SCALE_COUNT);
+	snprintf(title, sizeof(title), "EverLive — Scaling: %s",
+		 scale_name(g_scale_mode));
+	snprintf(message, sizeof(message), "Scale: %s", scale_name(g_scale_mode));
+	SDL_SetWindowTitle(window, title);
+	toast_trigger(message);
+	osd_card_invalidate();
+}
+
+static void osd_open_popup(enum everlive_osd_popup_kind kind)
+{
+	g_popup_kind = kind;
+	g_popup_open = true;
+	g_popup_dirty = true;
+	if (kind == EVERLIVE_OSD_POPUP_VOLUME)
+		g_popup_volume = osd_volume_percent();
+	everlive_osd_destroy_popup(&g_popup);
+	osd_card_invalidate();
+}
+
+static void osd_close_popup(void)
+{
+	g_popup_open = false;
+	g_popup_dragging = false;
+	g_popup_kind = EVERLIVE_OSD_POPUP_NONE;
+	everlive_osd_destroy_popup(&g_popup);
+}
+
+static enum everlive_osd_action osd_hit_card(int x, int y)
+{
+	SDL_Point point = { x - g_card_dest.x, y - g_card_dest.y };
+
+	if (!g_card.texture || g_card_dest.w <= 0)
+		return EVERLIVE_OSD_ACTION_NONE;
+	for (int i = 0; i < g_card.hit_count; i++) {
+		if (SDL_PointInRect(&point, &g_card.hits[i].rect))
+			return g_card.hits[i].action;
+	}
+	return EVERLIVE_OSD_ACTION_NONE;
+}
+
+static bool osd_volume_track_event(int x, bool press)
+{
+	SDL_Rect track = g_popup.volume_track;
+	int rel;
+	int pct;
+
+	if (!g_popup_open || g_popup.kind != EVERLIVE_OSD_POPUP_VOLUME)
+		return false;
+	rel = x - (g_popup_dest.x + track.x);
+	if (rel < 0)
+		rel = 0;
+	if (rel > track.w)
+		rel = track.w;
+	pct = track.w > 0 ? (rel * 150 + track.w / 2) / track.w : 0;
+	if (press)
+		g_popup_dragging = true;
+	if (g_popup_dragging)
+		osd_apply_volume(pct);
+	return true;
+}
+
+static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
+{
+	enum everlive_osd_action action;
+	SDL_Point point;
+	int x;
+	int y;
+
+	if (!window || g_parent_winid != 0 || g_headless || !g_osd_enabled)
+		return false;
+	if (!osd_card_active(window) || !g_card.texture)
+		return false;
+
+	if (event->type == SDL_MOUSEBUTTONUP && event->button.button == SDL_BUTTON_LEFT) {
+		g_popup_dragging = false;
+		return true;
+	}
+	if (event->type == SDL_MOUSEMOTION) {
+		if (g_popup_dragging)
+			return osd_volume_track_event(event->motion.x, false);
+		return false;
+	}
+	if (event->type != SDL_MOUSEBUTTONDOWN ||
+	    event->button.button != SDL_BUTTON_LEFT)
+		return false;
+	x = event->button.x;
+	y = event->button.y;
+
+	if (g_popup_open) {
+		point.x = x - g_popup_dest.x;
+		point.y = y - g_popup_dest.y;
+		if (g_popup_dest.w > 0 && SDL_PointInRect(&point, &g_popup_dest)) {
+			if (g_popup.kind == EVERLIVE_OSD_POPUP_VOLUME)
+				osd_volume_track_event(x, true);
+			return true;
+		}
+		osd_close_popup();
+	}
+
+	action = osd_hit_card(x, y);
+	switch (action) {
+	case EVERLIVE_OSD_ACTION_ASPECT:
+		osd_cycle_aspect(window);
+		break;
+	case EVERLIVE_OSD_ACTION_SCALE:
+		osd_cycle_scale(window);
+		break;
+	case EVERLIVE_OSD_ACTION_VOLUME:
+		osd_open_popup(EVERLIVE_OSD_POPUP_VOLUME);
+		break;
+	case EVERLIVE_OSD_ACTION_MUTE:
+		osd_apply_mute(__atomic_load_n(&g_audio_mute_flag,
+					       __ATOMIC_RELAXED) == 0);
+		toast_trigger("Audio muted");
+		break;
+	case EVERLIVE_OSD_ACTION_FULLSCREEN:
+		osd_toggle_fullscreen(window);
+		break;
+	default:
+		break;
+	}
+	return action != EVERLIVE_OSD_ACTION_NONE;
+}
+
 
 /* F1 help card.  Built lazily, re-rasterised only on scale or text change. */
 static const char g_help_text[] =
@@ -6551,7 +6520,7 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 	case GC573_IPC_CMD_OSD_MODE:
 		if (cmd->a >= 0 && cmd->a <= OSD_MODE_CARD) {
 			g_osd_mode = (enum osd_mode)cmd->a;
-			g_card.scale = -1;
+			osd_card_invalidate();
 			g_osd.scale = -1;
 			g_osd_card_was_active = true;
 		}
@@ -7492,11 +7461,18 @@ int main(int argc, char *argv[])
 			embed_window_sync_size(window);
 
 		while (SDL_PollEvent(&event)) {
+			if (osd_handle_mouse(window, &event))
+				continue;
 			if (event.type == SDL_QUIT) {
 				if (g_trace_mode && streaming)
 					g_trace_requested = true;
 				g_running = 0;
 			} else if (event.type == SDL_KEYDOWN && !g_headless) {
+				if (g_popup_open &&
+				    event.key.keysym.sym == SDLK_ESCAPE) {
+					osd_close_popup();
+					continue;
+				}
 				if (event.key.keysym.sym == SDLK_ESCAPE) {
 					/* First Esc only dismisses the help card. */
 					if (g_help_overlay) {

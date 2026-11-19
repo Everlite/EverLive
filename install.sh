@@ -380,6 +380,7 @@ detect_and_install_deps() {
         # Arch / CachyOS / Manjaro
         ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(base-devel)
         ! command -v sdl2-config >/dev/null 2>&1 && MISSING_PKGS+=(sdl2)
+        ! pkg-config --exists SDL2_ttf >/dev/null 2>&1 && MISSING_PKGS+=(sdl2_ttf)
         ! pkg-config --exists libavcodec libswresample libswscale >/dev/null 2>&1 && MISSING_PKGS+=(ffmpeg)
         ! pkg-config --exists libpipewire-0.3 >/dev/null 2>&1 && MISSING_PKGS+=(pipewire)
         ! command -v setcap >/dev/null 2>&1 && MISSING_PKGS+=(libcap)
@@ -395,6 +396,7 @@ detect_and_install_deps() {
         # Ubuntu / Debian / Pop!_OS / Mint
         ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(build-essential pkg-config)
         ! command -v sdl2-config >/dev/null 2>&1 && MISSING_PKGS+=(libsdl2-dev)
+        ! pkg-config --exists SDL2_ttf >/dev/null 2>&1 && MISSING_PKGS+=(libsdl2-ttf-dev)
         ! pkg-config --exists libavcodec libswresample libswscale >/dev/null 2>&1 && MISSING_PKGS+=(libavcodec-dev libswresample-dev libswscale-dev libavutil-dev)
         ! pkg-config --exists libpipewire-0.3 >/dev/null 2>&1 && MISSING_PKGS+=(libpipewire-0.3-dev)
         ! command -v setcap >/dev/null 2>&1 && MISSING_PKGS+=(libcap2-bin)
@@ -411,6 +413,7 @@ detect_and_install_deps() {
         # Fedora / Nobara
         ! command -v gcc >/dev/null 2>&1 && MISSING_PKGS+=(gcc make pkgconf-pkg-config)
         ! command -v sdl2-config >/dev/null 2>&1 && MISSING_PKGS+=(SDL2-devel)
+        ! pkg-config --exists SDL2_ttf >/dev/null 2>&1 && MISSING_PKGS+=(SDL2_ttf-devel)
         ! pkg-config --exists libavcodec libswresample libswscale >/dev/null 2>&1 && MISSING_PKGS+=(ffmpeg-devel)
         ! pkg-config --exists libpipewire-0.3 >/dev/null 2>&1 && MISSING_PKGS+=(pipewire-devel)
         ! command -v setcap >/dev/null 2>&1 && MISSING_PKGS+=(libcap)

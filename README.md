@@ -67,7 +67,7 @@ sudo make install          # optional system-wide install (PREFIX=/usr/local, in
 `./build.sh` is a thin wrapper around the top-level `make`. Arch Linux `PKGBUILD` files (`everlive` and `everlive-git`) are provided in [`packaging/arch/`](packaging/arch/).
 
 ### What the installer does:
-1. Installs the build/runtime dependencies: SDL2, FFmpeg development libraries (`libavcodec`/`libswresample`/`libswscale`/`libavutil`), `libcap` (`setcap`), PipeWire/WirePlumber, `xcb-util-cursor`, PySide6, standard build tools, optional `lsfg-vk` frame generation layer (skip with `--no-framegen`), and `v4l2loopback` where packaged (skip with `--no-loopback`).
+1. Installs the build/runtime dependencies: SDL2 + SDL2_ttf, FFmpeg development libraries (`libavcodec`/`libswresample`/`libswscale`/`libavutil`), `libcap` (`setcap`), PipeWire/WirePlumber, `xcb-util-cursor`, PySide6, standard build tools, optional `lsfg-vk` frame generation layer (skip with `--no-framegen`), and `v4l2loopback` where packaged (skip with `--no-loopback`).
 2. Configures udev rules (`/etc/udev/rules.d/70-everlive.rules`) and early-boot VFIO autobind (`/etc/modules-load.d/everlive-vfio.conf` + `/etc/modprobe.d/everlive-vfio.conf`) granting your local user read/write access to the card's VFIO group and binding `vfio-pci`.
 3. Sets `/etc/security/limits.d/99-everlive-memlock.conf` and adds `cap_ipc_lock` capabilities so unprivileged users can pin DMA buffers required for native 4K and dual-HDMI capture.
 4. Blacklists the legacy out-of-tree `open_gc573` module (`/etc/modprobe.d/blacklist-everlive-legacy.conf`) so it cannot race with `vfio-pci` at boot.
@@ -100,7 +100,7 @@ sudo make install          # optional system-wide install (PREFIX=/usr/local, in
 | <kbd>s</kbd> or <kbd>F10</kbd> *(GC573)* | Toggle overlay and mouse cursor (Streamer Mode toggle; `--streamer-mode` starts with both hidden) |
 | <kbd>Esc</kbd> or <kbd>q</kbd> | Exit Cinema Fullscreen (embedded mode) or exit pop-out window (or dismiss F1 help) |
 
-When the OSD is enabled, the identity card is the normal readout in the embedded Hub feed, pop-out window and fullscreen. It shows the card/input, source→output route, audio format and hotkey chips. <kbd>Tab</kbd>/<kbd>O</kbd> hides it; use `everlive-ctl runtime osd-mode compact` if you prefer the old compact stats line.
+When the OSD is enabled, the identity/control card is the normal readout in the embedded Hub feed, pop-out window and fullscreen. It shows the card/input, source→output route, audio format and a GUI-style control strip. In the pop-out window the HDMI, Aspect, Scale, PiP, volume, mute and fullscreen controls are clickable; the embedded Hub card is visual-only so the Hub remains the control surface. <kbd>Tab</kbd>/<kbd>O</kbd> hides it; use `everlive-ctl runtime osd-mode compact` if you prefer the old compact stats line.
 
 *VSync is a launch option (`--vsync` / Hub checkbox) and cannot be toggled while streaming. Volume, mute, and scaling can also be controlled through the EverLive Console Hub GUI.*
 
@@ -474,6 +474,7 @@ Writing clean-room Linux drivers for proprietary capture hardware requires havin
 | **Live Gamer DUO Engine** | `tools/opengc570d-userd/` | **GPL-2.0-only** | Derived from [`neoyagami/OpenGC570D`](https://github.com/neoyagami/OpenGC570D) with userspace VFIO-PCI + PipeWire port by [@PolygonPrincess](https://github.com/PolygonPrincess). Upstream base `4673bb9`, splitter PR #6 `484aa8d`, userspace import `afbb06e`. EverLive integration and frontend © 2026 Everlite & PolygonPrincess. |
 | **EverLive Console Hub** | `tools/everlive/`, `play.sh`, `install.sh` | **GPL-2.0-only** | Python/Qt hub and launcher scripts. Copyright © 2026 Everlite. |
 | **Font Awesome Free 6** | `tools/everlive/fonts/` | **CC BY 4.0 / SIL OFL 1.1** | Bundled interface icons (CC BY 4.0) and icon fonts (SIL OFL 1.1). Copyright © Fonticons, Inc. Full text in `fonts/LICENSE.txt`. |
+| **Noto Sans** | `tools/everlive/fonts/` | **Apache 2.0** | Bundled text faces for the engine OSD and Hub typography. Copyright © Google. Full text in `fonts/NotoSans-LICENSE.txt`. |
 | **Legacy Kernel Module** | `legacy/open_gc573-kernel/` | **GPL-2.0-only** | Historical kernel module based on work by ostrich, extended by Everlite. |
 
 ### Disclaimers & Trademark Notice
