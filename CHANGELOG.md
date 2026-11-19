@@ -10,16 +10,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Optional LD_PRELOAD app launchers in the installer:** `install.sh --with-preload` (or the interactive prompt) creates reversible `<App> (EverLive Camera)` menu entries for native Discord, OBS, Chrome, Chromium, Brave, Firefox and Zoom installs. Each entry launches that process with the card-specific `LD_PRELOAD` library and the shared `X-EverLive-Preload` marker, so the Console Hub recognizes the shortcut and `uninstall.sh` removes it. Existing launchers, user overrides and Flatpak/Snap sandboxes are left untouched.
+- **Console Hub shell refresh (Simple / Advanced):**
+  - Fresh installs open in **Simple** mode: a full-width video stage with no inspector or telemetry deck, a `Local Capture Active` status chip in the bottom bar while running, and a full-width bottom audio/status bar. The choice persists as `ui_mode`.
+  - **Advanced** restores the inspector and telemetry deck. The header carries a compound hardware pill with the DUO HDMI dropdown, a fused icon-only `Start | Studio | Restart` group, the Simple/Advanced dropdown, and Font Awesome Discord, GitHub and Help links.
+  - The header is 64 px and the transport 56 px, both full-bleed, with 36 px controls, 14 px / 10 px vertical padding, 8 px button radii and 36 px combo fields. Every header action stays visible at 1180 px and wider, and runtime state is conveyed by icons and tooltips rather than changing labels.
+  - Added `ui_theme.py` (palette, spacing and application QSS), `ui_widgets.py` (`ToggleSwitch`, `ToggleRow`, `SegmentedControl`, `StatusChip`, `IconButton`) and bundled Font Awesome Free 6 solid/brand fonts. The modules and fonts install with the viewer and are covered by the Python tests and CI asset checks.
+  - The DUO HDMI selector is a slate-tinted segment flush to the hardware pill's inner edges. Combo popups connect to the closed field with blue hover/focus borders, aligned 32 px items and flat selection; the LED picker keeps its colour dots in both the closed field and popup.
+  - The transport shows a compact signal chip beside the audio pill with matching height, 8 px radius, typography and padding, plus icon-only mute, pop-out and fullscreen controls.
+  - Remote sessions show a centred `REMOTE SESSION ATTACHED` card with **Take Back Capture**. Docked/headless transitions keep the header actions icon-only, `T` docks the feed and `Ctrl+Shift+A` toggles Simple/Advanced.
+  - The no-signal canvas gained headline/subtitle breathing room and a balanced footer margin.
+- **Inspector reorganisation (Advanced mode):**
+  - The **Video**, **Audio & Stream** and **System** tabs use the same segmented control as Simple/Advanced and drive a stacked page view.
+  - Checkbox rows became toggle switches; panel labels sit above their controls; exposure bias has a live `EV` readout and Reset button.
+  - **App Camera Shortcuts** and **Background Service** live in the System tab below Window & Startup. **Diagnostics & Help** hosts the Keyboard Shortcuts dialog and **Copy Diagnostic Report**.
+  - **EDID & Handshake** stays pinned below the tabs; Legacy V4L2 is marked **Obsolete**; keyboard shortcuts use action-first rows with right-aligned keycap badges.
+- **Telemetry Deck:**
+  - The deck sits below the video stage in the centre column (not under the inspector) and follows the mockup layout: status and lock state, frame-rate sparkline, PCIe DMA/latency bars and DMA/GPU/CPU orbs.
+  - A centred `Telemetry Deck` title sits above the metrics; the deck is always expanded and has no collapse control.
+  - The pinned EDID card is compact, with Bridge/Copy on one row and Pulse HPD beneath, freeing vertical space in the System tab.
+  - Simple mode hides the deck entirely.
 - **Live GC570D presentation switching (`mode.set`):**
   - The Live Gamer DUO engine now implements the unified `mode.set` JSON-RPC method. The Console Hub can dock a headless capture session into its viewport, or return it to headless, without releasing VFIO or interrupting the DMA rings, the V4L2/SHM outputs or HDMI audio.
   - `everlive-ctl runtime mode <gaming|headless> [winid]` exposes the same switch from the CLI.
 - **Console Hub remote-session docking:**
-  - A remote session now offers **Dock Video Here** instead of a disabled Start button, with an automatic fallback that stops the headless user unit and restarts capture locally when the running engine predates `mode.set`. A stopped unit is restarted when the Hub exits.
+  - A remote session now surfaces a **Dock Video Here** action (display icon) instead of a disabled Start button, with an automatic fallback that stops the headless user unit and restarts capture locally when the running engine predates `mode.set`. A stopped unit is restarted when the Hub exits.
   - `everlive-ctl runtime status` reports the real splitter pixel clock instead of a placeholder value.
 - **Console Hub background service & app camera integration:**
-  - The **Hardware & App** tab can install, enable, start, stop, disable and uninstall the per-user EverLive capture service, with service logs and optional `--v4l2`/`--audio-tap` engine arguments.
-  - **App Camera Shortcuts** creates reversible OBS/Discord/Chrome/Zoom launchers that set `LD_PRELOAD` for one process. Flatpak/Snap sandboxes are detected and Chrome's renderer sandbox is flagged.
+  - The **System** tab can install, enable, start, stop, disable and uninstall the per-user EverLive capture service, with service logs and optional `--v4l2`/`--audio-tap` engine arguments.
+  - **App Camera Shortcuts** creates or removes reversible OBS/Discord/Chrome/Chromium/Brave/Firefox/Zoom launchers that set `LD_PRELOAD` for one process, including **Create All Shortcuts**. The same launcher path is shared with `install.sh --with-preload`; Flatpak/Snap sandboxes are skipped and Chromium-family renderer sandboxes are flagged.
   - The service keeps the shared frame store and optional virtual camera alive for OBS while the Hub is closed.
+
+### Fixed
+- Icon-only header actions no longer replace their glyph with text when taking back a background capture (or while docking, undocking and switching modes). Transient states now update the icon and tooltip only, and `IconButton` rejects visible text so the fixed square geometry cannot regress.
 
 ---
 

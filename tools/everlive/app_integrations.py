@@ -53,6 +53,11 @@ KNOWN_APPS = {
         ("chromium-",),
         {"chromium"},
     ),
+    "brave": (
+        {"brave", "brave-browser", "com.brave.browser"},
+        ("brave-browser-",),
+        {"brave", "brave browser"},
+    ),
     "zoom": (
         {"zoom", "us.zoom.zoom"},
         (),
@@ -229,6 +234,26 @@ def create_launcher(app: AppEntry, library: str) -> Tuple[bool, str]:
         return False, f"Could not write {path}: {exc}"
     _refresh_desktop_database()
     return True, f"Created {path.name} in the application menu."
+
+
+def install_launchers(
+        library: str,
+        apps: Optional[Sequence[AppEntry]] = None,
+) -> List[Tuple[AppEntry, bool, str]]:
+    """Create camera shortcuts for every supported native app.
+
+    Sandboxed (Flatpak/Snap) apps are reported as skipped because LD_PRELOAD
+    cannot cross their runtime.  Existing shortcuts are left untouched so the
+    installer and the Console Hub can be run in either order.
+    """
+    results: List[Tuple[AppEntry, bool, str]] = []
+    for app in (find_camera_apps() if apps is None else apps):
+        if launcher_exists(app):
+            results.append((app, True, "EverLive camera launcher already exists."))
+            continue
+        ok, message = create_launcher(app, library)
+        results.append((app, ok, message))
+    return results
 
 
 def remove_launcher(app: AppEntry) -> Tuple[bool, str]:

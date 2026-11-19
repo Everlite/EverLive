@@ -54,7 +54,7 @@ If you chose EverLive for its module-free architecture and want to keep the syst
 sudo ./install.sh --no-loopback
 ```
 
-`--skip-loopback` is an alias, and `sudo ./install.sh --help` lists all options. Without `v4l2loopback`, `/dev/video10` is unavailable — capture via the module-free preload libraries (`libgc573-v4l2.so` / `libgc570d-v4l2.so`) or PipeWire window capture instead (see [Streaming & Recording with OBS](#-streaming--recording-with-obs)). Re-running the installer without the flag re-enables the system-wide loopback nodes.
+`--skip-loopback` is an alias, and `sudo ./install.sh --help` lists all options. Without `v4l2loopback`, `/dev/video10` is unavailable — capture via the module-free preload libraries (`libgc573-v4l2.so` / `libgc570d-v4l2.so`) or PipeWire window capture instead (see [Streaming & Recording with OBS](#-streaming--recording-with-obs)). Add `--with-preload` to create `(EverLive Camera)` launchers for Discord, OBS and supported browsers at the same time. Re-running the installer without the flag re-enables the system-wide loopback nodes.
 
 ### Building, testing, and system packaging
 ```bash
@@ -75,6 +75,7 @@ sudo make install          # optional system-wide install (PREFIX=/usr/local, in
 6. Configures an isolated PipeWire audio sink (`50-everlive-capture.conf`) providing the dedicated `"EverLive Capture Audio"` source for OBS.
 7. *(Unless `--no-loopback` is requested)* Configures the Virtual Camera loopback nodes: `/etc/modprobe.d/everlive-v4l2loopback.conf` (`video_nr=10,11 card_label="EverLive Capture,EverLive Capture HDMI 2" exclusive_caps=0`) and loads the module at boot via `/etc/modules-load.d/`.
 8. Installs the desktop application launcher and icon.
+9. *(Optional, `--with-preload`)* Creates reversible **`<App> (EverLive Camera)`** application-menu launchers for supported native apps (Discord, OBS, Chrome, Chromium, Brave, Firefox and Zoom). Each entry starts that app with the card-specific `LD_PRELOAD` virtual camera; existing launchers and user overrides are left untouched.
 
 *(To cleanly remove EverLive and revert all system configurations, run `sudo ./uninstall.sh`).*
 
@@ -147,9 +148,9 @@ LD_PRELOAD=/usr/local/lib/libgc573-v4l2.so obs
 # GC570D (Live Gamer DUO) -> exposes /dev/video60 (HDMI 1) and /dev/video61 (HDMI 2)
 LD_PRELOAD=/usr/local/lib/libgc570d-v4l2.so obs
 ```
-* **Process-Local Nodes:** Preload nodes (`/dev/video60..63`) exist only inside the process launched with `LD_PRELOAD`. Launch OBS from a terminal or adjust your desktop launcher wrapper.
+* **Process-Local Nodes:** Preload nodes (`/dev/video60..63`) exist only inside the process launched with `LD_PRELOAD`. Launch OBS from a terminal, choose an installer-created **`<App> (EverLive Camera)`** menu entry, or use the Hub's app shortcuts.
 * **Identical Picture Quality:** Preload shims read the same post-tonemap frames and standby cards as the loopback sink, but without requiring `v4l2loopback` or any additional kernel modules.
-* **Hub Integration:** **Hardware & App → App Camera Shortcuts** creates reversible per-app launchers for supported native apps, while **Background Service** keeps the frame store active for OBS even when the Console Hub is closed.
+* **Installer + Hub Integration:** `sudo ./install.sh --with-preload` (or the interactive prompt) creates reversible per-app launchers for supported native apps. **System → App Camera Shortcuts** creates or removes the same entries from the Console Hub, including a **Create All Shortcuts** action, while **Background Service** keeps the frame store active for OBS even when the Hub is closed. Flatpak/Snap apps are skipped because `LD_PRELOAD` cannot cross their sandbox.
 
 ### Option 3: Studio / Headless Mode (Zero Display Overhead)
 If you play directly on a TV or secondary monitor connected to the GC573's **HDMI OUT (Hardware Passthrough)**, you do not need an open game window on your PC desktop:
@@ -470,6 +471,7 @@ Writing clean-room Linux drivers for proprietary capture hardware requires havin
 | **Shared Core Library** | `tools/libeverlive-core/` | **GPL-2.0-only** | Card registry and autodiscovery, POSIX shared memory frame store (`everlive_framestore`), V4L2 virtual camera preload engine, cross-user handoff protocol (`everlive_handoff`), YUY2 frame conversion, jsmn JSON-RPC helpers, `everlive-ctl`, and systemd service. Copyright © 2026 Everlite. |
 | **Live Gamer DUO Engine** | `tools/opengc570d-userd/` | **GPL-2.0-only** | Derived from [`neoyagami/OpenGC570D`](https://github.com/neoyagami/OpenGC570D) with userspace VFIO-PCI + PipeWire port by [@PolygonPrincess](https://github.com/PolygonPrincess). Upstream base `4673bb9`, splitter PR #6 `484aa8d`, userspace import `afbb06e`. EverLive integration and frontend © 2026 Everlite & PolygonPrincess. |
 | **EverLive Console Hub** | `tools/everlive/`, `play.sh`, `install.sh` | **GPL-2.0-only** | Python/Qt hub and launcher scripts. Copyright © 2026 Everlite. |
+| **Font Awesome Free 6** | `tools/everlive/fonts/` | **CC BY 4.0 / SIL OFL 1.1** | Bundled interface icons (CC BY 4.0) and icon fonts (SIL OFL 1.1). Copyright © Fonticons, Inc. Full text in `fonts/LICENSE.txt`. |
 | **Legacy Kernel Module** | `legacy/open_gc573-kernel/` | **GPL-2.0-only** | Historical kernel module based on work by ostrich, extended by Everlite. |
 
 ### Disclaimers & Trademark Notice
