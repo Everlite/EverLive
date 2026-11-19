@@ -1,0 +1,5 @@
+hws_user_probe
+hws_user_streamer
+libhwsuhd-v4l2.so
+src/*.o
+src/*.d

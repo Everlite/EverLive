@@ -3,6 +3,8 @@
 # EverLive — top-level orchestration and system-wide installation.
 #
 #   make                                        # build core, engines, and CLI
+#   make hwsuhd                                 # HWS UHD engine (opt-in, see
+#                                               # tools/openhws-userd/README.md)
 #   make test                                   # run all unit tests
 #   sudo make install                           # system-wide install (PREFIX=/usr/local)
 #   make install DESTDIR="$pkgdir" PREFIX=/usr  # distro packaging
@@ -27,6 +29,7 @@ SYSCONFDIR      ?= /etc
 CORE_DIR   := tools/libeverlive-core
 GC573_DIR  := tools/opengc573-userd
 GC570D_DIR := tools/opengc570d-userd
+HWSUHD_DIR := tools/openhws-userd
 VIEWER_DIR := tools/everlive
 TESTS_DIR  := tests
 PKG_DIR    := packaging
@@ -48,7 +51,7 @@ GC570D_SED := sed -e 's|/usr/local/libexec/|$(GC570D_RUNDIR)/|g' \
 
 L := $(DESTDIR)$(EVERLIVE_LIBDIR)
 
-.PHONY: all core gc573 gc570d test check asan clean install uninstall
+.PHONY: all core gc573 gc570d hwsuhd test check asan clean install uninstall
 
 all: core gc573 gc570d
 
@@ -60,6 +63,10 @@ gc573: core
 
 gc570d: core
 	+$(MAKE) -C $(GC570D_DIR)
+
+# Not part of `all`: the HWS UHD engine is built and installed on request.
+hwsuhd: core
+	+$(MAKE) -C $(HWSUHD_DIR)
 
 test: all
 	+$(MAKE) -C $(TESTS_DIR) test
@@ -74,6 +81,7 @@ clean:
 	+$(MAKE) -C $(CORE_DIR) clean
 	+$(MAKE) -C $(GC573_DIR) clean
 	+$(MAKE) -C $(GC570D_DIR) clean
+	+$(MAKE) -C $(HWSUHD_DIR) clean
 	+$(MAKE) -C $(TESTS_DIR) clean
 
 install: all

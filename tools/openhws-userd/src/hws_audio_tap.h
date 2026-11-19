@@ -1,0 +1,68 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * hws_audio_tap.h — PipeWire capture tap for the EverLive streamer
+ *
+ * Mirrors the mixed HDMI audio (L-PCM after gain, or the decoded AC-3/DTS
+ * stereo downmix) into a dedicated PipeWire node so OBS/Discord/FFmpeg can
+ * record it as its own track, independent of the desktop mix.
+ *
+ * The tap publishes S16_LE in the same channel layout as the playback
+ * device: stereo, 5.1 or 7.1.  16-bit carriers are forwarded as-is; 24-bit
+ * carriers reach this layer as left-aligned S32LSB (the streamer already
+ * widened them for SDL) and are re-quantised to S16.
+ */
+
+#ifndef HWS_AUDIO_TAP_H
+#define HWS_AUDIO_TAP_H
+
+#include <stdbool.h>
+#include <stddef.h>
+
+#define HWS_AUDIO_TAP_DEFAULT	"everlive-capture-audio"
+
+/**
+ * hws_audio_tap_start - Create the PipeWire client and locate the sink
+ * @node_name: Sink node name to publish into (NULL/"" for the default)
+ *
+ * The sink is normally created by a config drop-in installed by install.sh.
+ * If it does not exist, the adapter module is loaded at runtime as a fallback.
+ * The audio stream itself is only connected once the HDMI sample rate is known
+ * (see hws_audio_tap_set_format()), so a 44.1 kHz source never plays at the
+ * wrong pitch.
+ *
+ * Returns 0 on success, a negative errno otherwise.  Safe to call twice.
+ */
+int hws_audio_tap_start(const char *node_name);
+
+/**
+ * hws_audio_tap_set_format - (Re)connect the stream for rate and layout
+ * @rate_hz: HDMI sample rate (32/44.1/48 kHz)
+ * @channels: 2, 6 or 8 interleaved S16 channels
+ *
+ * No-op when the tap is disabled or both rate and channel count are unchanged.
+ */
+void hws_audio_tap_set_format(unsigned int rate_hz, unsigned int channels);
+
+/**
+ * hws_audio_tap_write - Queue PCM for the tap
+ * @data: Interleaved PCM block (S16LE or left-aligned S32LSB)
+ * @bytes: Size of the block
+ * @sample_bits: 16 or 24, matching the streamer's playback format
+ *
+ * The block is truncated to whole frames of the active channel count.
+ * Lock-free: called from the audio worker, read from the PipeWire RT thread.
+ */
+void hws_audio_tap_write(const void *data, size_t bytes,
+			   unsigned int sample_bits);
+
+/**
+ * hws_audio_tap_stop - Tear the PipeWire client down
+ */
+void hws_audio_tap_stop(void);
+
+/**
+ * hws_audio_tap_active - True when the tap is running
+ */
+bool hws_audio_tap_active(void);
+
+#endif /* HWS_AUDIO_TAP_H */

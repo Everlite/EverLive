@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# EverLive: HWS UHD 4K60 HDMI capture card (ACASIS VS2583 class, subsystem
+# 0x0007) on stock vfio-pci for the openhws-userd engine.  Opt-in: installed
+# only by `make -C tools/openhws-userd install-system`.  Matches this card only;
+# AVerMedia cards keep their own rules.
+#
+# driver_override is written before the kernel driver module loads, so the
+# card never binds to it; the bind script then attaches vfio-pci, keeps the
+# card powered (no D3cold, no HDMI relock), disables its bus reset and gives
+# /dev/vfio/<group> to group video.
+ACTION!="add", GOTO="hwsuhd_end"
+SUBSYSTEM!="pci", GOTO="hwsuhd_end"
+ATTR{subsystem_device}!="0x0007", GOTO="hwsuhd_end"
+ATTR{vendor}=="0x8888", ATTR{device}=="0x8581", GOTO="hwsuhd_bind"
+ATTR{vendor}=="0x8888", ATTR{device}=="0x85a1", GOTO="hwsuhd_bind"
+ATTR{vendor}=="0x8888", ATTR{device}=="0x8591", GOTO="hwsuhd_bind"
+ATTR{vendor}=="0x1f33", ATTR{device}=="0x8581", GOTO="hwsuhd_bind"
+GOTO="hwsuhd_end"
+
+LABEL="hwsuhd_bind"
+ATTR{driver_override}="vfio-pci"
+RUN+="/usr/local/libexec/hws-vfio-bind.sh --udev %k"
+
+LABEL="hwsuhd_end"
