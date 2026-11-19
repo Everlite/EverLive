@@ -505,13 +505,13 @@ void gc573_audio_tap_set_format(unsigned int rate_hz, unsigned int channels)
 
 	props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio",
 				  PW_KEY_MEDIA_CATEGORY, "Capture",
-				  PW_KEY_MEDIA_ROLE, "Game",
-				  PW_KEY_APP_NAME, "EverLive",
+				  PW_KEY_MEDIA_ROLE, "Production",
+				  PW_KEY_APP_NAME, "EverLive-Capture",
 				  PW_KEY_APP_ICON_NAME, "everlive",
 				  PW_KEY_NODE_NAME, "everlive-capture-tap",
 				  PW_KEY_NODE_DESCRIPTION,
 				  "EverLive Capture Tap",
-				  PW_KEY_NODE_VIRTUAL, "false",
+				  PW_KEY_NODE_VIRTUAL, "true",
 				  PW_KEY_TARGET_OBJECT, tap->node_name,
 				  "node.dont-reconnect", "true",
 				  NULL);
