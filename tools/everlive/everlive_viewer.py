@@ -55,8 +55,9 @@ GC570D_SUBSYSTEM_ID = "0x5700"
 GC573_SUBSYSTEM_ID = "0x5730"
 MODEL_GC573 = "gc573"
 MODEL_GC570D = "gc570d"
-# The background-service/app-camera feature is not part of this release.
-FEATURE_BACKGROUND_SERVICE_UI = False
+# The App Camera helpers are not part of this release; the service
+# controls themselves ship in the System tab.
+FEATURE_APP_CAMERA_UI = False
 MODEL_NAMES = {
     MODEL_GC573: "GC573 • LIVE GAMER 4K",
     MODEL_GC570D: "GC570D • LIVE GAMER DUO",
@@ -906,7 +907,9 @@ def create_led_icon(mode: int, size: int = 14):
         painter.setPen(QColor("#94a3b8"))
     else:
         painter.setPen(Qt.NoPen)
-    painter.drawEllipse(1, 1, size - 2, size - 2)
+    dot = 8
+    offset = max(0, (size - dot) // 2)
+    painter.drawEllipse(offset, offset, dot, dot)
     painter.end()
     return QIcon(pix)
 
@@ -2784,7 +2787,7 @@ if HAS_QT:
             p.drawLine(p1, p2)
 
             # Headline: NO HDMI SIGNAL
-            title_y = stand_top + stand_h + 24.0 * s
+            title_y = stand_top + stand_h + 40.0 * s
             title_font = QFont("JetBrains Mono", max(14, int(round(34 * s))))
             title_font.setBold(True)
             title_font.setLetterSpacing(QFont.AbsoluteSpacing, max(2.0, 4.0 * s))
@@ -2793,7 +2796,7 @@ if HAS_QT:
             p.drawText(QRectF(0, title_y, w, 52 * s), Qt.AlignHCenter | Qt.AlignTop, self._title)
 
             # Subtitle: Waiting for console / input...
-            sub_y = title_y + 54.0 * s
+            sub_y = title_y + 60.0 * s
             sub_font = QFont("JetBrains Mono", max(9, int(round(13 * s))))
             p.setFont(sub_font)
             p.setPen(QColor(100, 116, 139, 255))
@@ -3048,9 +3051,8 @@ if HAS_QT:
                 self.streamer.force_mpv = True
 
             self.init_ui()
-            if FEATURE_BACKGROUND_SERVICE_UI:
-                self._refresh_service_config()
-                self._refresh_service_status()
+            self._refresh_service_config()
+            self._refresh_service_status()
 
             if v4l2_device:
                 self.chk_v4l2.setChecked(True)
@@ -3066,14 +3068,11 @@ if HAS_QT:
             self.timer.timeout.connect(self.update_status)
             self.timer.start(1000)
 
-            # Background capture service state (10s polling) is only
-            # started when the release build exposes the integrations card.
-            if FEATURE_BACKGROUND_SERVICE_UI:
-                self._service_timer = QTimer(self)
-                self._service_timer.setInterval(10000)
-                self._service_timer.timeout.connect(
-                    self._refresh_service_status)
-                self._service_timer.start()
+            # Background capture service state (10s polling).
+            self._service_timer = QTimer(self)
+            self._service_timer.setInterval(10000)
+            self._service_timer.timeout.connect(self._refresh_service_status)
+            self._service_timer.start()
 
             # Fast 100 ms poll for embedded SDL2 hotkey forwarders ([HUB] ...)
             self._hub_action_timer = QTimer(self)
@@ -3213,7 +3212,7 @@ if HAS_QT:
 
             # Hidden compatibility carrier; existing update paths still write
             # the compact status text here and to the card-chip tooltip.
-            self.lbl_pill = QLabel("○ Standby")
+            self.lbl_pill = QLabel("○ Standby", self.header_widget)
             self.lbl_pill.setVisible(False)
 
             # Primary runtime actions (right-aligned with the mode switch).
@@ -3383,17 +3382,16 @@ if HAS_QT:
             # =============================================================
             self.telemetry_strip = QFrame()
             self.telemetry_strip.setObjectName("telemetryDeck")
-            self.telemetry_strip.setFixedHeight(132)
+            self.telemetry_strip.setFixedHeight(140)
             deck_layout = QVBoxLayout(self.telemetry_strip)
-            deck_layout.setContentsMargins(16, 6, 16, 10)
-            deck_layout.setSpacing(4)
-            deck_title = QLabel("Telemetry Deck")
-            deck_title.setObjectName("deckTitle")
-            deck_title.setAlignment(Qt.AlignCenter)
+            deck_layout.setContentsMargins(16, 12, 16, 12)
+            deck_layout.setSpacing(6)
+            deck_title = QLabel("TELEMETRY DECK")
+            deck_title.setObjectName("sectionTitle")
             deck_layout.addWidget(deck_title)
             tele_row = QHBoxLayout()
             tele_row.setContentsMargins(0, 0, 0, 0)
-            tele_row.setSpacing(14)
+            tele_row.setSpacing(16)
 
             def _vsep():
                 v = QFrame()
@@ -3426,7 +3424,7 @@ if HAS_QT:
             # Granular status sub-column: format/tonemap, EDID and route.
             s1_sub = QGridLayout()
             s1_sub.setContentsMargins(0, 0, 0, 0)
-            s1_sub.setHorizontalSpacing(10)
+            s1_sub.setHorizontalSpacing(16)
             s1_sub.setVerticalSpacing(2)
             self.lbl_kv_color = QLabel("YUV 4:2:2 · SDR")
             self.lbl_kv_color.setObjectName("kvKey")
@@ -3440,15 +3438,16 @@ if HAS_QT:
             s1_sub.addWidget(self.lbl_kv_route, 1, 0, 1, 2)
             seg1.addLayout(s1_sub)
 
-            self.lbl_hero_meta = QLabel("")
+            self.lbl_hero_meta = QLabel("", self.telemetry_strip)
             self.lbl_hero_meta.setObjectName("heroMeta")
             self.lbl_hero_meta.setVisible(False)
-            self.lbl_kv_audio = QLabel("No HDMI Audio")
+            self.lbl_kv_audio = QLabel(
+                "No HDMI Audio", self.telemetry_strip)
             self.lbl_kv_audio.setObjectName("kvKey")
             self.lbl_kv_audio.setVisible(False)
 
             # Retained for the status-update path; not shown in the deck.
-            self.status_light = VeyraStatusLight()
+            self.status_light = VeyraStatusLight(self.telemetry_strip)
             self.status_light.setVisible(False)
             tele_row.addLayout(seg1, 10)
             tele_row.addWidget(_vsep())
@@ -3487,9 +3486,11 @@ if HAS_QT:
             seg3.setSpacing(5)
             self.bar_dma = VeyraMetricBar("PCIe DMA", "#38BDF8", "#BB96F3")
             self.bar_latency = VeyraMetricBar("Latency", "#5ED4B2", "#38BDF8")
-            self.bar_vram = VeyraMetricBar("VRAM", "#BB96F3", "#F287A7")
+            self.bar_vram = VeyraMetricBar(
+                "VRAM", "#BB96F3", "#F287A7", self.telemetry_strip)
             self.bar_vram.setVisible(False)
-            self.bar_cpu = VeyraMetricBar("CPU", "#F0B17B", "#EF6FA3")
+            self.bar_cpu = VeyraMetricBar(
+                "CPU", "#F0B17B", "#EF6FA3", self.telemetry_strip)
             self.bar_cpu.setVisible(False)
             seg3.addWidget(self.bar_dma)
             seg3.addWidget(self.bar_latency)
@@ -3504,10 +3505,12 @@ if HAS_QT:
             self.lbl_fg_status.setObjectName("hintText")
             seg3.addWidget(self.lbl_fg_status)
 
-            self.lbl_tele_pipeline = QLabel("— ms Latency · 0.0 FPS")
+            self.lbl_tele_pipeline = QLabel(
+                "— ms Latency · 0.0 FPS", self.telemetry_strip)
             self.lbl_tele_pipeline.setVisible(False)
             self.lbl_tele_routing = QLabel(
-                "DMA: 0 MB/s · Drops: 0 · Underruns: 0")
+                "DMA: 0 MB/s · Drops: 0 · Underruns: 0",
+                self.telemetry_strip)
             self.lbl_tele_routing.setVisible(False)
             tele_row.addLayout(seg3, 9)
             tele_row.addWidget(_vsep())
@@ -3524,7 +3527,8 @@ if HAS_QT:
             orbs_row.addWidget(self.orb_cpu)
             tele_row.addLayout(orbs_row, 0)
 
-            self.lbl_tele_cadence = QLabel("CPU: —% · GPU: —%")
+            self.lbl_tele_cadence = QLabel(
+                "CPU: —% · GPU: —%", self.telemetry_strip)
             self.lbl_tele_cadence.setVisible(False)
             deck_layout.addLayout(tele_row)
             stage_col.addWidget(self.telemetry_strip, 0)
@@ -3537,13 +3541,13 @@ if HAS_QT:
             self.right_dock.setFixedWidth(ui_theme.INSPECTOR_WIDTH)
             dock_layout = QVBoxLayout(self.right_dock)
             dock_layout.setContentsMargins(0, 0, 0, 0)
-            dock_layout.setSpacing(6)
+            dock_layout.setSpacing(12)
 
             def _section(title: str, dot_color: str = "#F287A7", right_widget: Optional[QWidget] = None):
                 frame = QFrame()
                 frame.setObjectName("cardFrame")
                 lay = QVBoxLayout(frame)
-                lay.setContentsMargins(16, 12, 16, 13)
+                lay.setContentsMargins(12, 12, 12, 12)
                 lay.setSpacing(10)
                 h_head = QHBoxLayout()
                 h_head.setContentsMargins(0, 0, 0, 0)
@@ -3557,7 +3561,7 @@ if HAS_QT:
                 lay.addLayout(h_head)
                 grid = QGridLayout()
                 grid.setHorizontalSpacing(10)
-                grid.setVerticalSpacing(10)
+                grid.setVerticalSpacing(12)
                 lay.addLayout(grid)
                 return frame, grid
 
@@ -3579,7 +3583,7 @@ if HAS_QT:
                 box = QWidget()
                 lay = QVBoxLayout(box)
                 lay.setContentsMargins(0, 0, 0, 0)
-                lay.setSpacing(6)
+                lay.setSpacing(8)
                 lay.addWidget(_field(text, tip))
                 lay.addWidget(control)
                 return box
@@ -3593,6 +3597,7 @@ if HAS_QT:
                 combo.setSizePolicy(
                     QSizePolicy.Ignored, QSizePolicy.Fixed)
                 combo.setMinimumWidth(0)
+                combo.setFixedHeight(ui_theme.INPUT_H)
                 return combo
 
             def _make_tab_page():
@@ -3605,8 +3610,8 @@ if HAS_QT:
                 page_lay = QVBoxLayout(page)
                 # Leave room for the 8 px scrollbar so card borders are
                 # never painted underneath it.
-                page_lay.setContentsMargins(0, 2, 8, 4)
-                page_lay.setSpacing(10)
+                page_lay.setContentsMargins(12, 12, 12, 12)
+                page_lay.setSpacing(12)
                 scroll.setWidget(page)
                 return scroll, page_lay
 
@@ -3614,6 +3619,10 @@ if HAS_QT:
 
             def _toggle(checkbox, text: str = "", hint: str = ""):
                 """Wrap a QCheckBox in a ToggleRow without changing behavior."""
+                # Own the hidden checkbox so it is never a stray top-level
+                # window; it must stay enabled-parented for state mirroring.
+                checkbox.setParent(self)
+                checkbox.hide()
                 row = ToggleRow(
                     text or checkbox.text(), hint, checkbox=checkbox)
                 self._toggle_rows[checkbox] = row
@@ -4096,7 +4105,11 @@ if HAS_QT:
             self.combo_led = _shrinkable(QComboBox())
             self.combo_led.setIconSize(QSize(14, 14))
             for name, val in LED_MODES.items():
-                self.combo_led.addItem(name, val)
+                icon = create_led_icon(val)
+                if icon:
+                    self.combo_led.addItem(icon, name, val)
+                else:
+                    self.combo_led.addItem(name, val)
 
             saved_led = self.saved_cfg.get("led_mode", None)
             if self.vfio_mode:
@@ -4169,7 +4182,7 @@ if HAS_QT:
             lay_app.addWidget(card_app)
             # --- Background capture service & per-app camera shortcuts ---
             card_integrations, grid_int = _section(
-                "BACKGROUND SERVICE & APP CAMERA", "#5ED4B2")
+                "BACKGROUND SERVICE", "#5ED4B2")
             grid_int.setColumnStretch(0, 1)
 
             self.lbl_background_service = QLabel(
@@ -4234,7 +4247,9 @@ if HAS_QT:
             self.chk_service_v4l2.setToolTip(
                 "Pass --v4l2 to the background engine when the v4l2loopback "
                 "node is available.")
-            grid_int.addWidget(_toggle(self.chk_service_v4l2), 2, 0, 1, 2)
+            self._service_v4l2_row = _toggle(self.chk_service_v4l2)
+            grid_int.addWidget(self._service_v4l2_row, 2, 0, 1, 2)
+            self._service_v4l2_row.setVisible(FEATURE_APP_CAMERA_UI)
 
             self.chk_service_audio_tap = QCheckBox(
                 "Service: virtual audio track")
@@ -4259,14 +4274,14 @@ if HAS_QT:
             self.btn_app_shortcuts.clicked.connect(
                 self._open_app_shortcuts)
             grid_int.addWidget(self.btn_app_shortcuts, 4, 0, 1, 2)
+            self.btn_app_shortcuts.setVisible(FEATURE_APP_CAMERA_UI)
 
-            grid_int.addWidget(_hint(
+            self.app_camera_note = _hint(
                 "Keep the capture card available to OBS without the Hub "
                 "open. The App Camera shortcuts are separate per-app "
-                "launchers, never a session-wide LD_PRELOAD."),
-                5, 0, 1, 2)
-            # Feature branch not included in this release build.
-            card_integrations.setVisible(FEATURE_BACKGROUND_SERVICE_UI)
+                "launchers, never a session-wide LD_PRELOAD.")
+            self.app_camera_note.setVisible(FEATURE_APP_CAMERA_UI)
+            grid_int.addWidget(self.app_camera_note, 5, 0, 1, 2)
             lay_app.addWidget(card_integrations)
 
             card_diag, grid_diag = _section("DIAGNOSTICS & HELP", "#BB96F3")
@@ -4554,7 +4569,7 @@ if HAS_QT:
             self._compact_labels = self.width() < 1320
             # The deck drops secondary readouts before they start clipping.
             for attr in ("lbl_hero_signal", "lbl_drops_counter",
-                         "lbl_fg_status", "status_light", "lbl_kv_pclk"):
+                         "lbl_fg_status", "lbl_kv_pclk"):
                 widget = getattr(self, attr, None)
                 if widget is not None:
                     widget.setVisible(not narrow)

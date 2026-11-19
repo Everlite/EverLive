@@ -9,6 +9,11 @@ widget modules style themselves without copying hex strings around.
 
 from __future__ import annotations
 
+import os
+
+ASSET_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "fonts").replace(os.sep, "/")
+
 # ---------------------------------------------------------------------------
 # Palette (sampled from the Console Hub mockups)
 # ---------------------------------------------------------------------------
@@ -56,7 +61,7 @@ RADIUS = 12
 RADIUS_CSS = "12px"
 SEGMENT_RADIUS_CSS = "6px"
 HEADER_HEIGHT = 48
-BOTTOM_BAR_HEIGHT = 52
+BOTTOM_BAR_HEIGHT = 44
 INSPECTOR_WIDTH = 372
 
 # One control rhythm across the header, inspector, dialogs and bottom bar.
@@ -100,6 +105,7 @@ TOKENS = {
     "CHIP_BORDER": CHIP_BORDER,
     "RADIUS": RADIUS_CSS,
     "SEGMENT_RADIUS": SEGMENT_RADIUS_CSS,
+    "ASSET_DIR": ASSET_DIR,
     "FONT_STACK": FONT_STACK,
     "MONO_STACK": MONO_STACK,
 }
@@ -249,10 +255,10 @@ QLabel#pillLive {
     font-weight: 600;
 }
 QLabel#sectionTitle {
-    color: @TEXT_MUTED@;
-    font-size: 13.5px;
-    font-weight: 700;
-    letter-spacing: 0.8px;
+    color: #94A3B8;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
 }
 QLabel#fieldLabel {
     color: @LABEL@;
@@ -488,7 +494,7 @@ QComboBox {
     color: @TEXT@;
     border: 1px solid @BORDER_STRONG@;
     border-radius: @RADIUS@;
-    min-height: 24px;
+    min-height: 30px;
     padding: 3px 10px;
     font-size: 14px;
 }
@@ -498,7 +504,12 @@ QComboBox:hover {
 }
 QComboBox::drop-down {
     border: none;
-    width: 18px;
+    width: 26px;
+}
+QComboBox::down-arrow {
+    image: url(@ASSET_DIR@/chevron-down.png);
+    width: 12px;
+    height: 12px;
 }
 QComboBox QAbstractItemView {
     background-color: @SURFACE_RAISED@;
@@ -548,6 +559,7 @@ QPushButton {
     font-size: 14px;
     font-weight: 600;
     border-radius: @RADIUS@;
+    min-height: 28px;
     background-color: @SURFACE_RAISED@;
     color: @TEXT@;
     border: 1px solid @GROUP_BORDER@;
@@ -719,21 +731,21 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
     background: transparent;
 }
 QSlider::groove:horizontal {
-    height: 5px;
+    height: 4px;
     background: @SURFACE_HOVER@;
-    border-radius: @RADIUS@;
+    border-radius: 2px;
 }
 QSlider::sub-page:horizontal {
     background: @BLUE@;
-    border-radius: @RADIUS@;
+    border-radius: 2px;
 }
 QSlider::handle:horizontal {
-    background: #FFFFFF;
-    border: 1px solid @BLUE_HOVER@;
+    background: #F8FAFC;
+    border: 1px solid #1E293B;
     width: 14px;
-    margin-top: -5px;
-    margin-bottom: -5px;
-    border-radius: @RADIUS@;
+    height: 14px;
+    margin: -5px 0px;
+    border-radius: 7px;
 }
 QSlider::handle:horizontal:hover { background: #FFFFFF; }
 """

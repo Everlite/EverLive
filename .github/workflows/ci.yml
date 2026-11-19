@@ -50,7 +50,7 @@ jobs:
           for module in everlive_client.py card_profile.py service_manager.py app_integrations.py ui_theme.py ui_widgets.py fa_icons.py; do
             test -f "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive/$module"
           done
-          for asset in fonts/fa-solid-900.ttf fonts/fa-brands-400.ttf fonts/LICENSE.txt; do
+          for asset in fonts/fa-solid-900.ttf fonts/fa-brands-400.ttf fonts/LICENSE.txt fonts/chevron-down.png; do
             test -f "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive/$asset"
           done
           make uninstall DESTDIR="$RUNNER_TEMP/stage" PREFIX=/usr

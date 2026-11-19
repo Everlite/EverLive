@@ -56,7 +56,7 @@ class TokenTests(unittest.TestCase):
         import re
         stylesheet = ui_theme.build_stylesheet()
         values = set(re.findall(r"border-radius:\s*([^;]+);", stylesheet))
-        self.assertLessEqual(values, {"0px", "6px", "12px"}, values)
+        self.assertLessEqual(values, {"0px", "2px", "6px", "7px", "12px"}, values)
 
     def test_segment_inner_edges_stay_square(self):
         stylesheet = ui_theme.build_stylesheet()
@@ -68,6 +68,15 @@ class TokenTests(unittest.TestCase):
         self.assertIn("border-top-left-radius: 6px", block)
         self.assertIn("border-bottom-left-radius: 6px", block)
         self.assertIn("border-right: 1px solid", block)
+
+    def test_slider_handle_is_circular(self):
+        stylesheet = ui_theme.build_stylesheet()
+        start = stylesheet.index("QSlider::handle:horizontal {")
+        block = stylesheet[start:stylesheet.index("}", start)]
+        self.assertIn("width: 14px", block)
+        self.assertIn("height: 14px", block)
+        self.assertIn("border-radius: 7px", block)
+        self.assertIn("background: #F8FAFC", block)
 
     def test_missing_tokens_reports_typos(self):
         found = ui_theme.missing_tokens("color: @NOT_A_TOKEN@;")
