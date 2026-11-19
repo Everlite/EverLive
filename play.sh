@@ -11,6 +11,7 @@ CORE_DIR="${SCRIPT_DIR}/tools/libeverlive-core"
 CORE_CTL="${CORE_DIR}/everlive-ctl"
 GC573_DIR="${SCRIPT_DIR}/tools/opengc573-userd"
 GC570D_DIR="${SCRIPT_DIR}/tools/opengc570d-userd"
+HWS_DIR="${SCRIPT_DIR}/tools/openhws-userd"
 VIEWER="${SCRIPT_DIR}/tools/everlive/everlive_viewer.py"
 
 # 0. Detect the installed capture card.  GC573 and GC570D share PCI device
@@ -43,12 +44,98 @@ detect_card_sysfs() {
     done
 }
 
+# HWS UHD capture card (ACASIS VS2583 class, subsystem 0x0007).  Its engine
+# is separate from the AVerMedia ones and is only auto-detected
+# when no AVerMedia card is installed.
+detect_hwsuhd_sysfs() {
+    local dev ids
+
+    for dev in /sys/bus/pci/devices/*; do
+        [ -f "$dev/subsystem_device" ] || continue
+        ids="$(cat "$dev/vendor" "$dev/device" "$dev/subsystem_device" 2>/dev/null | tr '\n' ' ')"
+        case "$ids" in
+            "0x8888 0x8581 0x0007 "|"0x8888 0x85a1 0x0007 "|"0x8888 0x8591 0x0007 "|"0x1f33 0x8581 0x0007 ")
+                CARD_MODEL="hwsuhd"
+                CARD_PCI=$(basename "$dev")
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+# Explicit card choice, in order: EVERLIVE_CARD_PCI (the Console Hub sets it
+# when switching cards), EVERLIVE_CARD (gc573|gc570d|hwsuhd), the card chosen
+# in the Hub's card selector (card_pci in settings.json).  Without one, the
+# auto-detection below applies unchanged.
+card_model_for_bdf() {
+    local dev="/sys/bus/pci/devices/${1:-}" ids
+
+    [ -n "${1:-}" ] && [ -f "$dev/subsystem_device" ] || return 1
+    ids="$(cat "$dev/vendor" "$dev/device" "$dev/subsystem_device" 2>/dev/null | tr '\n' ' ')"
+    case "$ids" in
+        "0x1461 0x0054 0x5700 ") echo gc570d ;;
+        "0x1461 0x0054 "*|"0x1461 0x0055 "*) echo gc573 ;;
+        "0x8888 0x8581 0x0007 "|"0x8888 0x85a1 0x0007 "|"0x8888 0x8591 0x0007 "|"0x1f33 0x8581 0x0007 ") echo hwsuhd ;;
+        *) return 1 ;;
+    esac
+}
+
+find_card_of_model() {
+    local dev bdf
+
+    for dev in /sys/bus/pci/devices/*; do
+        bdf="$(basename "$dev")"
+        if [ "$(card_model_for_bdf "$bdf" || true)" = "$1" ]; then
+            echo "$bdf"
+            return 0
+        fi
+    done
+    return 1
+}
+
+use_card() {
+    local model
+
+    model="$(card_model_for_bdf "$1")" || return 1
+    CARD_MODEL="$model"
+    CARD_PCI="$1"
+}
+
+select_card_explicit() {
+    local pci saved settings="${HOME:-}/.config/everlive/settings.json"
+
+    if [ -n "${EVERLIVE_CARD_PCI:-}" ]; then
+        use_card "${EVERLIVE_CARD_PCI}" && return 0
+        echo "[!] EVERLIVE_CARD_PCI=${EVERLIVE_CARD_PCI} ist keine unterstützte Karte; automatische Erkennung." >&2
+    fi
+    case "${EVERLIVE_CARD:-}" in
+        gc573|gc570d|hwsuhd)
+            pci="$(find_card_of_model "${EVERLIVE_CARD}" || true)"
+            if [ -z "$pci" ]; then
+                echo "[!] EVERLIVE_CARD=${EVERLIVE_CARD}, aber keine solche Karte gefunden." >&2
+                exit 1
+            fi
+            use_card "$pci"
+            return 0
+            ;;
+    esac
+    if [ -r "$settings" ]; then
+        saved="$(sed -n 's/^[[:space:]]*"card_pci":[[:space:]]*"\([^"]*\)".*/\1/p' "$settings" | head -n 1)"
+        if [ -n "$saved" ] && use_card "$saved"; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
 CARD_MODEL=""
 CARD_PCI=""
-if [ ! -x "${CORE_CTL}" ] && command -v everlive-ctl >/dev/null 2>&1; then
+select_card_explicit || true
+if [ -z "${CARD_MODEL}" ] && [ ! -x "${CORE_CTL}" ] && command -v everlive-ctl >/dev/null 2>&1; then
     CORE_CTL="$(command -v everlive-ctl)"
 fi
-if [ -x "${CORE_CTL}" ]; then
+if [ -z "${CARD_MODEL}" ] && [ -x "${CORE_CTL}" ]; then
     DETECT_OUT="$("${CORE_CTL}" detect 2>/dev/null || true)"
     CARD_MODEL="$(printf '%s\n' "${DETECT_OUT}" \
         | sed -n 's/.*Model Slug:[[:space:]]*//p' | head -n 1)"
@@ -62,7 +149,14 @@ fi
 if [ -z "${CARD_MODEL}" ]; then
     detect_card_sysfs
 fi
+if [ -z "${CARD_MODEL}" ]; then
+    detect_hwsuhd_sysfs || true
+fi
 CARD_MODEL="${CARD_MODEL:-gc573}"
+# The Hub opens the card prepared here.
+if [ -n "$CARD_PCI" ]; then
+    export EVERLIVE_CARD_PCI="$CARD_PCI"
+fi
 
 if [ "$CARD_MODEL" = "gc570d" ]; then
     USERD_DIR="${GC570D_DIR}"
@@ -70,6 +164,12 @@ if [ "$CARD_MODEL" = "gc570d" ]; then
     BIND_SCRIPT="${USERD_DIR}/gc570d-vfio-bind.sh"
     LOOPBACK_LABEL="EverLive Capture"
     LOOPBACK_LABEL_2="EverLive Capture HDMI 2"
+elif [ "$CARD_MODEL" = "hwsuhd" ]; then
+    USERD_DIR="${HWS_DIR}"
+    STREAMER_BIN="${USERD_DIR}/hws_user_streamer"
+    BIND_SCRIPT="${USERD_DIR}/hws-vfio-bind.sh"
+    LOOPBACK_LABEL="EverLive Capture"
+    LOOPBACK_LABEL_2=""
 else
     USERD_DIR="${GC573_DIR}"
     STREAMER_BIN="${USERD_DIR}/gc573_user_streamer"
@@ -80,6 +180,10 @@ fi
 if [ ! -x "${STREAMER_BIN}" ]; then
     if [ "$CARD_MODEL" = "gc570d" ] && command -v opengc570d-userd >/dev/null 2>&1; then
         STREAMER_BIN="$(command -v opengc570d-userd)"
+    elif [ "$CARD_MODEL" = "hwsuhd" ]; then
+        if command -v hws_user_streamer >/dev/null 2>&1; then
+            STREAMER_BIN="$(command -v hws_user_streamer)"
+        fi
     elif command -v gc573_user_streamer >/dev/null 2>&1; then
         STREAMER_BIN="$(command -v gc573_user_streamer)"
     fi
@@ -87,6 +191,10 @@ fi
 if [ ! -x "${BIND_SCRIPT}" ]; then
     if [ "$CARD_MODEL" = "gc570d" ] && command -v gc570d-vfio-bind.sh >/dev/null 2>&1; then
         BIND_SCRIPT="$(command -v gc570d-vfio-bind.sh)"
+    elif [ "$CARD_MODEL" = "hwsuhd" ]; then
+        for cand in /usr/local/libexec/hws-vfio-bind.sh /usr/libexec/hws-vfio-bind.sh; do
+            [ -x "$cand" ] && BIND_SCRIPT="$cand" && break
+        done
     elif command -v vfio_pci_bind.sh >/dev/null 2>&1; then
         BIND_SCRIPT="$(command -v vfio_pci_bind.sh)"
     fi
@@ -141,6 +249,8 @@ if [ "$IS_VFIO" -eq 0 ]; then
     if [ -x "${BIND_SCRIPT}" ]; then
         if [ "$CARD_MODEL" = "gc570d" ]; then
             echo "[!] GC570D ist noch nicht an vfio-pci gebunden. Binde an Userspace-Treiber..."
+        elif [ "$CARD_MODEL" = "hwsuhd" ]; then
+            echo "[!] HWS-UHD-Karte ist noch nicht an vfio-pci gebunden. Binde an Userspace-Treiber..."
         else
             echo "[!] GC573 ist noch nicht an vfio-pci gebunden. Binde an Userspace-Treiber..."
         fi

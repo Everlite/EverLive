@@ -22,6 +22,7 @@ from typing import FrozenSet, Iterable, Optional, Tuple
 
 MODEL_GC573 = "gc573"
 MODEL_GC570D = "gc570d"
+MODEL_HWSUHD = "hwsuhd"
 
 CAP_VIDEO = "video"
 CAP_AUDIO = "audio"
@@ -142,9 +143,22 @@ GC570D_PROFILE = _profile(
     "libgc570d-v4l2.so",
 )
 
+# ACASIS VS2583 / AVMatrix VC12-4K class card (openhws-userd).  Only selected
+# explicitly (EVERLIVE_CARD=hwsuhd) or when no AVerMedia card is installed.
+HWSUHD_PROFILE = _profile(
+    MODEL_HWSUHD,
+    "HWS UHD · 4K60 Capture",
+    (CAP_VIDEO, CAP_AUDIO, CAP_PASSTHROUGH, CAP_4K60, CAP_1080P60),
+    1,
+    ("/dev/video10",),
+    ("/dev/video64",),
+    "libhwsuhd-v4l2.so",
+)
+
 _STATIC_PROFILES = {
     MODEL_GC573: GC573_PROFILE,
     MODEL_GC570D: GC570D_PROFILE,
+    MODEL_HWSUHD: HWSUHD_PROFILE,
 }
 
 

@@ -386,6 +386,8 @@ def _shm_v4l2_node(model: str, duo_input: int, v4l2_device: Optional[str]) -> st
         return v4l2_device
     if str(model).lower() == "gc570d":
         return "/dev/video61" if int(duo_input) == 1 else "/dev/video60"
+    if str(model).lower() == "hwsuhd":
+        return "/dev/video64"
     return "/dev/video63"
 
 

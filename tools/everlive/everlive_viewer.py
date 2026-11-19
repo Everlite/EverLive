@@ -15,7 +15,7 @@ import re
 import json
 import shutil
 from pathlib import Path
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, List
 
 if os.environ.get("DISPLAY") and "--cli" not in sys.argv:
     os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
@@ -27,7 +27,7 @@ try:
     import service_manager
     import ui_theme
     import ui_widgets
-    from card_profile import detect_card_profile
+    from card_profile import detect_card_profile, CAP_EDID
     from ui_widgets import (IconButton, SegmentedControl, StatusChip,
                             ToggleRow)
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
@@ -40,7 +40,7 @@ except ImportError:  # imported as a module from another working directory
     import service_manager
     import ui_theme
     import ui_widgets
-    from card_profile import detect_card_profile
+    from card_profile import detect_card_profile, CAP_EDID
     from ui_widgets import (IconButton, SegmentedControl, StatusChip,
                             ToggleRow)
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
@@ -57,10 +57,16 @@ GC570D_SUBSYSTEM_ID = "0x5700"
 GC573_SUBSYSTEM_ID = "0x5730"
 MODEL_GC573 = "gc573"
 MODEL_GC570D = "gc570d"
+MODEL_HWSUHD = "hwsuhd"
 MODEL_NAMES = {
     MODEL_GC573: "GC573 • LIVE GAMER 4K",
     MODEL_GC570D: "GC570D • LIVE GAMER DUO",
+    MODEL_HWSUHD: "HWS UHD • 4K60 CAPTURE",
 }
+# HWS UHD family (ACASIS VS2583): its own engine in tools/openhws-userd.
+HWSUHD_PCI_IDS = {("0x8888", "0x8581"), ("0x8888", "0x85a1"),
+                  ("0x8888", "0x8591"), ("0x1f33", "0x8581")}
+HWSUHD_SUBSYSTEM_ID = "0x0007"
 ENGINE_VFIO_TEXT = "● Userspace VFIO"
 V4L2_DEFAULT_DEVICE = "/dev/video10"
 V4L2_DUO_SECOND_DEVICE = "/dev/video11"
@@ -415,17 +421,102 @@ def _read_sysfs(path: str) -> str:
         return ""
 
 
-def detect_gc573_driver() -> Dict[str, Optional[str]]:
-    """Return the capture card binding and model: vfio, kernel, or unknown.
+def _identify_card(dev: str) -> Optional[str]:
+    """Model slug for a supported capture card at sysfs path ``dev``."""
+    vendor = _read_sysfs(os.path.join(dev, "vendor")).lower()
+    device = _read_sysfs(os.path.join(dev, "device")).lower()
+    subsystem = _read_sysfs(os.path.join(dev, "subsystem_device")).lower()
+    if vendor == GC573_VENDOR_ID and device in GC573_DEVICE_IDS:
+        if device == "0x0054" and subsystem == GC570D_SUBSYSTEM_ID:
+            return MODEL_GC570D
+        return MODEL_GC573
+    if (vendor, device) in HWSUHD_PCI_IDS and subsystem == HWSUHD_SUBSYSTEM_ID:
+        return MODEL_HWSUHD
+    return None
+
+
+def detect_capture_cards() -> List[Dict[str, Optional[str]]]:
+    """Every supported capture card, in PCI address order.
 
     GC573 (Live Gamer 4K) and GC570D (Live Gamer DUO) both use PCI device
     1461:0054.  Only ``subsystem_device`` separates them: 0x5730 is the GC573
     and 0x5700 is the GC570D.  The BOLT (1461:0055) is always a GC573-class
-    device.  In VFIO mode there is intentionally no /dev/video* node and no
-    ALSA card; the userspace engine owns the device instead.
+    device.  HWS UHD cards have no kernel-mode path in EverLive: they are
+    either on vfio-pci ("vfio") or still need binding ("unknown").
+    In VFIO mode there is intentionally no /dev/video* node and no ALSA card;
+    the userspace engine owns the device instead.
     """
     import glob
 
+    cards: List[Dict[str, Optional[str]]] = []
+    for dev in sorted(glob.glob("/sys/bus/pci/devices/*")):
+        model = _identify_card(dev)
+        if model is None:
+            continue
+        driver = None
+        mode = "unknown"
+        driver_link = os.path.join(dev, "driver")
+        try:
+            if os.path.islink(driver_link):
+                driver = os.path.basename(os.path.realpath(driver_link))
+                if driver == "vfio-pci":
+                    mode = "vfio"
+                elif model != MODEL_HWSUHD and driver in ("open_gc573", "gc570d"):
+                    mode = "kernel"
+        except OSError:
+            pass
+        subsystem = _read_sysfs(os.path.join(dev, "subsystem_device")).lower()
+        cards.append({
+            "mode": mode,
+            "driver": driver,
+            "pci": os.path.basename(dev),
+            "subsystem": subsystem or None,
+            "model": model,
+        })
+    return cards
+
+
+def card_display_name(card: Dict[str, Optional[str]]) -> str:
+    """Short selector label, e.g. "GC573 · 85:00.0"."""
+    short = {MODEL_GC573: "GC573", MODEL_GC570D: "GC570D",
+             MODEL_HWSUHD: "HWS UHD"}.get(card.get("model") or "", "Card")
+    pci = card.get("pci") or ""
+    if pci.startswith("0000:"):
+        pci = pci[5:]
+    return f"{short} · {pci}"
+
+
+def select_capture_card(cards: List[Dict[str, Optional[str]]]
+                        ) -> Optional[Dict[str, Optional[str]]]:
+    """Pick the card this session uses.
+
+    1. ``EVERLIVE_CARD_PCI`` (play.sh exports the card it prepared),
+    2. ``EVERLIVE_CARD`` model slug (gc573, gc570d, hwsuhd),
+    3. the card chosen in the Hub's card selector (``card_pci`` setting),
+    4. otherwise the first AVerMedia card, then an HWS UHD card.
+    A choice that names a card which is not installed is ignored.
+    """
+    if not cards:
+        return None
+    by_pci = {c["pci"]: c for c in cards}
+    pci = os.environ.get("EVERLIVE_CARD_PCI", "").strip()
+    if pci in by_pci:
+        return by_pci[pci]
+    want = os.environ.get("EVERLIVE_CARD", "").strip().lower()
+    for card in cards:
+        if want and card["model"] == want:
+            return card
+    saved = load_settings().get("card_pci")
+    if isinstance(saved, str) and saved in by_pci:
+        return by_pci[saved]
+    for card in cards:
+        if card["model"] != MODEL_HWSUHD:
+            return card
+    return cards[0]
+
+
+def detect_gc573_driver() -> Dict[str, Optional[str]]:
+    """Return the selected card's binding and model: vfio, kernel, or unknown."""
     result: Dict[str, Optional[str]] = {
         "mode": "unknown",
         "driver": None,
@@ -433,34 +524,9 @@ def detect_gc573_driver() -> Dict[str, Optional[str]]:
         "subsystem": None,
         "model": MODEL_GC573,
     }
-
-    for dev in sorted(glob.glob("/sys/bus/pci/devices/*")):
-        vendor = _read_sysfs(os.path.join(dev, "vendor")).lower()
-        device = _read_sysfs(os.path.join(dev, "device")).lower()
-        if vendor != GC573_VENDOR_ID or device not in GC573_DEVICE_IDS:
-            continue
-
-        subsystem = _read_sysfs(os.path.join(dev, "subsystem_device")).lower()
-        result["pci"] = os.path.basename(dev)
-        result["subsystem"] = subsystem or None
-        if device == "0x0054" and subsystem == GC570D_SUBSYSTEM_ID:
-            result["model"] = MODEL_GC570D
-        else:
-            result["model"] = MODEL_GC573
-
-        driver_link = os.path.join(dev, "driver")
-        try:
-            if os.path.islink(driver_link):
-                driver = os.path.basename(os.path.realpath(driver_link))
-                result["driver"] = driver
-                if driver == "vfio-pci":
-                    result["mode"] = "vfio"
-                elif driver in ("open_gc573", "gc570d"):
-                    result["mode"] = "kernel"
-        except OSError:
-            pass
-        break
-
+    card = select_capture_card(detect_capture_cards())
+    if card is not None:
+        result.update(card)
     return result
 
 
@@ -493,7 +559,8 @@ def _proc_running(name_prefix: str, any_user: bool = False) -> bool:
 
 
 def userd_dir(model: str = MODEL_GC573) -> str:
-    folder = "opengc570d-userd" if model == MODEL_GC570D else "opengc573-userd"
+    folder = ("opengc570d-userd" if model == MODEL_GC570D else
+              "openhws-userd" if model == MODEL_HWSUHD else "opengc573-userd")
     return os.path.normpath(
         os.path.join(os.path.dirname(os.path.abspath(__file__)),
                      "..", folder))
@@ -607,7 +674,7 @@ try:
         QTabWidget, QStackedWidget, QScrollArea, QDialog, QTextEdit,
         QGraphicsOpacityEffect
     )
-    from PySide6.QtCore import Qt, QTimer, QThread, Signal, QEvent, QUrl, QSize, QRectF, QPointF
+    from PySide6.QtCore import Qt, QTimer, QThread, Signal, QEvent, QUrl, QSize, QRectF, QPointF, QProcess
     from PySide6.QtGui import (
         QGuiApplication, QFont, QIcon, QColor, QPalette, QKeySequence, QShortcut,
         QDesktopServices, QPixmap, QPainter, QAction, QPen, QBrush,
@@ -1061,6 +1128,7 @@ def _is_everlive_audio_line(line: str) -> bool:
     """
     low = line.lower()
     if ("gc573_user_streamer" in low or "opengc570d-user" in low or
+            "hws_user_streamer" in low or
             "sdl application" in low):
         return True
     if "avermedia live gamer 4k pro" in low and "pro 1" not in low:
@@ -1220,8 +1288,11 @@ def default_sink_issue():
 
 class GameStreamer:
     """Manages low-latency video and audio child processes."""
-    def __init__(self, vdev: Optional[str] = None, adev: Optional[str] = None, force_mpv: bool = False):
-        self.hw_info = detect_gc573_driver()
+    def __init__(self, vdev: Optional[str] = None, adev: Optional[str] = None, force_mpv: bool = False,
+                 card: Optional[Dict[str, Optional[str]]] = None):
+        # ``card`` comes from detect_capture_cards() when the Hub's card
+        # selector switches cards; otherwise the usual selection applies.
+        self.hw_info = dict(card) if card else detect_gc573_driver()
         self.mode = self.hw_info.get("mode", "unknown")
         self.model = self.hw_info.get("model", MODEL_GC573)
         self.duo_mode = self.model == MODEL_GC570D
@@ -1254,6 +1325,11 @@ class GameStreamer:
             self.userd_bin = self.streamer_bin
             self.probe_bin = ""
             self.ctl_bin = userd_bin("gc570d-ctl", self.model)
+        elif self.model == MODEL_HWSUHD:
+            self.streamer_bin = userd_bin("hws_user_streamer", self.model)
+            self.userd_bin = self.streamer_bin
+            self.probe_bin = ""
+            self.ctl_bin = ""
         else:
             self.streamer_bin = userd_bin("gc573_user_streamer", self.model)
             self.userd_bin = userd_bin("everlive_userd", self.model)
@@ -1959,18 +2035,23 @@ class GameStreamer:
                 scale=scale, volume=volume,
                 parent_winid=parent_winid)
 
-        if _vfio_streamer_running():
+        if _vfio_streamer_running() or (
+                self.model == MODEL_HWSUHD and _proc_running("hws_user_stream")):
             print("[!] A userspace streamer is already running; refusing to start a second instance.")
             return False
 
         if not (os.path.isfile(self.streamer_bin) and
                 os.access(self.streamer_bin, os.X_OK)):
             print(f"[!] Userspace streamer not found: {self.streamer_bin}")
-            print("    Build it with: make -C tools/opengc573-userd")
+            print("    Build it with: make -C tools/"
+                  + os.path.basename(userd_dir(self.model)))
             return False
 
-        # everlive_userd holds BAR0/VFIO in standby; release it first.
-        _stop_vfio_daemon()
+        # everlive_userd holds the GC573's BAR0/VFIO in standby; release it
+        # first.  The HWS UHD card has no standby daemon, and another card's
+        # daemon is left alone.
+        if self.model != MODEL_HWSUHD:
+            _stop_vfio_daemon()
         _raise_memlock_limit()
 
         cmd = [self.streamer_bin]
@@ -3115,6 +3196,7 @@ if HAS_QT:
                 self.streamer.force_mpv = True
 
             self.init_ui()
+            self._apply_card_profile()
             self._refresh_service_config()
             self._refresh_service_status()
 
@@ -3234,6 +3316,7 @@ if HAS_QT:
                     self.model, MODEL_NAMES[MODEL_GC573])
                 self._card_short_label = (
                     "GC570D • DUO" if self.model == MODEL_GC570D
+                    else "HWS • 4K" if self.model == MODEL_HWSUHD
                     else "GC573 • 4K")
             else:
                 self._card_full_label = "NO CAPTURE CARD"
@@ -3257,23 +3340,43 @@ if HAS_QT:
                     "letter-spacing: 0.6px;")
             source_layout.addWidget(self.lbl_card_title, 0, Qt.AlignVCenter)
 
-            if self.duo_mode:
-                saved_input = load_settings().get("duo_input", 0)
-                self.combo_duo_input = QComboBox()
-                self.combo_duo_input.setObjectName("sourceInputCombo")
-                self.combo_duo_input.addItem("HDMI 1", 0)
-                self.combo_duo_input.addItem("HDMI 2", 1)
-                self.combo_duo_input.setCurrentIndex(
-                    1 if saved_input == 1 else 0)
-                self.combo_duo_input.setFixedHeight(ui_theme.CONTROL_H)
-                self.combo_duo_input.setMinimumWidth(108)
-                self.combo_duo_input.setToolTip(
-                    "Select which Live Gamer DUO HDMI input is shown in the "
-                    "gaming window and primary capture stream.")
-                self.combo_duo_input.currentIndexChanged.connect(
-                    self.on_duo_input_changed)
-                source_layout.addWidget(
-                    self.combo_duo_input, 0, Qt.AlignVCenter)
+            # Card selector: only when more than one supported card exists.
+            self._capture_cards = detect_capture_cards()
+            if len(self._capture_cards) > 1:
+                current_pci = getattr(self.streamer, "hw_info", {}).get("pci")
+                self.combo_card = QComboBox()
+                self.combo_card.setObjectName("sourceInputCombo")
+                for card in self._capture_cards:
+                    self.combo_card.addItem(card_display_name(card), card["pci"])
+                    if card["pci"] == current_pci:
+                        self.combo_card.setCurrentIndex(
+                            self.combo_card.count() - 1)
+                self.combo_card.setFixedHeight(ui_theme.CONTROL_H)
+                self.combo_card.setMinimumWidth(150)
+                self.combo_card.setToolTip(
+                    "Capture card used by the Console Hub. Switching restarts "
+                    "the Hub on the selected card and remembers the choice.")
+                self.combo_card.currentIndexChanged.connect(
+                    self.on_card_changed)
+                source_layout.addWidget(self.combo_card, 0, Qt.AlignVCenter)
+
+            # Built for every card; _apply_card_profile() shows it on the DUO.
+            saved_input = load_settings().get("duo_input", 0)
+            self.combo_duo_input = QComboBox()
+            self.combo_duo_input.setObjectName("sourceInputCombo")
+            self.combo_duo_input.addItem("HDMI 1", 0)
+            self.combo_duo_input.addItem("HDMI 2", 1)
+            self.combo_duo_input.setCurrentIndex(
+                1 if saved_input == 1 else 0)
+            self.combo_duo_input.setFixedHeight(ui_theme.CONTROL_H)
+            self.combo_duo_input.setMinimumWidth(108)
+            self.combo_duo_input.setToolTip(
+                "Select which Live Gamer DUO HDMI input is shown in the "
+                "gaming window and primary capture stream.")
+            self.combo_duo_input.currentIndexChanged.connect(
+                self.on_duo_input_changed)
+            source_layout.addWidget(
+                self.combo_duo_input, 0, Qt.AlignVCenter)
 
             top_bar.addWidget(self.source_group, 0, Qt.AlignVCenter)
 
@@ -3727,6 +3830,8 @@ if HAS_QT:
             # --- Pinned EDID & Handshake footer (always visible) ---
             card_edid, grid_edid = _section("EDID & HANDSHAKE", "#38BDF8")
             card_edid.setObjectName("edidCard")
+            self._card_edid = card_edid
+            self._grid_edid = grid_edid
             grid_edid.setColumnStretch(0, 1)
             grid_edid.setColumnStretch(1, 1)
 
@@ -3741,43 +3846,37 @@ if HAS_QT:
             self.lbl_edid_mode.setWordWrap(True)
             grid_edid.addWidget(self.lbl_edid_mode, 0, 0, 1, 2)
 
-            if self.duo_mode:
-                btn_bridge = QPushButton("Bridge EDID")
-                btn_bridge.setObjectName("btnGhost")
-                btn_bridge.setCursor(Qt.PointingHandCursor)
-                btn_bridge.setFixedHeight(ui_theme.BUTTON_H)
-                btn_bridge.setToolTip(
-                    "Advertise the internal 4K60 bridge EDID to HDMI IN 1.")
-                btn_bridge.clicked.connect(
-                    lambda: self._duo_edid_action(True))
-                grid_edid.addWidget(btn_bridge, 1, 0)
-                self.btn_edid_bridge = btn_bridge
+            # DUO bridge/copy buttons: built for every card, shown on the DUO.
+            btn_bridge = QPushButton("Bridge EDID")
+            btn_bridge.setObjectName("btnGhost")
+            btn_bridge.setCursor(Qt.PointingHandCursor)
+            btn_bridge.setFixedHeight(ui_theme.BUTTON_H)
+            btn_bridge.setToolTip(
+                "Advertise the internal 4K60 bridge EDID to HDMI IN 1.")
+            btn_bridge.clicked.connect(
+                lambda: self._duo_edid_action(True))
+            grid_edid.addWidget(btn_bridge, 1, 0)
+            self.btn_edid_bridge = btn_bridge
 
-                btn_copy = QPushButton("Copy Downstream EDID")
-                btn_copy.setObjectName("btnGhost")
-                btn_copy.setCursor(Qt.PointingHandCursor)
-                btn_copy.setFixedHeight(ui_theme.BUTTON_H)
-                btn_copy.setToolTip(
-                    "Copy the EDID of the display/AVR connected to HDMI OUT.")
-                btn_copy.clicked.connect(
-                    lambda: self._duo_edid_action(False))
-                grid_edid.addWidget(btn_copy, 1, 1)
-                self.btn_edid_copy = btn_copy
+            btn_copy = QPushButton("Copy Downstream EDID")
+            btn_copy.setObjectName("btnGhost")
+            btn_copy.setCursor(Qt.PointingHandCursor)
+            btn_copy.setFixedHeight(ui_theme.BUTTON_H)
+            btn_copy.setToolTip(
+                "Copy the EDID of the display/AVR connected to HDMI OUT.")
+            btn_copy.clicked.connect(
+                lambda: self._duo_edid_action(False))
+            grid_edid.addWidget(btn_copy, 1, 1)
+            self.btn_edid_copy = btn_copy
 
             btn_hpd = QPushButton("Pulse HPD")
             btn_hpd.setObjectName("btnGhost")
             btn_hpd.setCursor(Qt.PointingHandCursor)
             btn_hpd.setFixedHeight(ui_theme.BUTTON_H)
-            if self.duo_mode:
-                btn_hpd.setToolTip(
-                    "Re-trigger the HDMI hot-plug handshake on the selected input.")
-                btn_hpd.clicked.connect(self._duo_hpd_action)
-                grid_edid.addWidget(btn_hpd, 2, 0, 1, 2)
-            else:
-                btn_hpd.setToolTip(
-                    "Trigger a hardware HDMI handshake (HPD pulse).")
-                btn_hpd.clicked.connect(self.force_resync)
-                grid_edid.addWidget(btn_hpd, 1, 0, 1, 2)
+            # Tooltip, action and grid row follow the card
+            # (_apply_card_profile / _on_hpd_clicked).
+            btn_hpd.clicked.connect(self._on_hpd_clicked)
+            grid_edid.addWidget(btn_hpd, 1, 0, 1, 2)
             self.btn_edid_hpd = btn_hpd
 
             dock_layout.addWidget(card_edid)
@@ -3807,24 +3906,21 @@ if HAS_QT:
                 idx = self.combo_presets.findData(saved_profile)
                 if idx >= 0:
                     self.combo_presets.setCurrentIndex(idx)
-                self.combo_presets.setToolTip(
+                self._presets_tooltip = (
                     "256-byte EDID advertised to the console. Every profile "
                     "supports L-PCM, Dolby Digital (AC-3) and DTS 5.1; "
                     "compressed audio is decoded automatically. "
                     "Applies live over IPC when the engine is running.")
+                self.combo_presets.setToolTip(self._presets_tooltip)
             else:
                 self.combo_presets.addItems(list(PRESETS.keys()))
                 if "preset" in self.saved_cfg and self.saved_cfg["preset"] in PRESETS:
                     self.combo_presets.setCurrentText(self.saved_cfg["preset"])
             self.combo_presets.activated.connect(self.on_preset_changed)
-            if self.duo_mode:
-                self.combo_presets.setEnabled(False)
-                self.combo_presets.setToolTip(
-                    "The Live Gamer DUO selects the EDID policy with the "
-                    "EDID: Bridge / Copy buttons in the transport bar.")
-            grid_video.addWidget(_stacked_field(
+            self._presets_field = _stacked_field(
                 "EDID Profile" if self.vfio_mode else "Format / Preset",
-                self.combo_presets), 0, 0, 1, 2)
+                self.combo_presets)
+            grid_video.addWidget(self._presets_field, 0, 0, 1, 2)
             self._update_edid_port_label()
 
             self.combo_aspect = _shrinkable(QComboBox())
@@ -3936,6 +4032,7 @@ if HAS_QT:
             self.slider_hdr_exposure.valueChanged.connect(_on_exposure_slider)
             self.spin_hdr_exposure.valueChanged.connect(_on_exposure_value)
             grid_video.addWidget(exposure_box, 4, 0, 1, 2)
+            self._hdr_exposure_box = exposure_box
             lay_video.addWidget(card_video)
 
             # --- Frame Generation Card ---
@@ -4045,8 +4142,7 @@ if HAS_QT:
             grid_fg.addWidget(_toggle(self.chk_fg_ll), 4, 0, 1, 2)
 
             self._refresh_idle_fg_status()
-            if self.duo_mode:
-                card_fg.setVisible(False)
+            self._card_fg = card_fg
             lay_video.addWidget(card_fg)
             lay_video.addStretch(1)
 
@@ -4064,10 +4160,6 @@ if HAS_QT:
             self.combo_audio_channels.setCurrentIndex(idx if idx >= 0 else 0)
             self.combo_audio_channels.currentIndexChanged.connect(
                 self.on_audio_channels_changed)
-            if self.duo_mode:
-                self.combo_audio_channels.setEnabled(False)
-                self.combo_audio_channels.setToolTip(
-                    "The Live Gamer DUO engine publishes stereo only.")
             grid_audio.addWidget(_stacked_field(
                 "Audio Layout", self.combo_audio_channels,
                 "Playback channel layout. Auto follows the HDMI source; "
@@ -4328,6 +4420,7 @@ if HAS_QT:
             # =============================================================
             card_hw, grid_hw = _section("HARDWARE RGB LED", "#F287A7")
             grid_hw.setColumnStretch(0, 1)
+            self._card_led = card_hw
 
             self.combo_led = _shrinkable(QComboBox())
             self.combo_led.setIconSize(QSize(14, 14))
@@ -4349,7 +4442,9 @@ if HAS_QT:
                     if self.duo_mode:
                         if _vfio_streamer_running():
                             set_gc570d_led(saved_led)
-                    else:
+                    elif self.model == MODEL_GC573:
+                        # everlive_userd is the GC573's standby daemon; other
+                        # cards must not start it.
                         set_vfio_led(saved_led)
             else:
                 if saved_led is not None and isinstance(saved_led, int) and 0 <= saved_led <= 7:
@@ -4510,9 +4605,7 @@ if HAS_QT:
                 f"Publish clean HDMI audio to the '{AUDIO_TAP_NODE}' "
                 "PipeWire source for OBS.")
             grid_int.addWidget(_toggle(self.chk_service_audio_tap), 3, 0, 1, 2)
-            if self.card_profile.model != MODEL_GC573:
-                self.chk_service_audio_tap.setVisible(False)
-                self._toggle_rows[self.chk_service_audio_tap].setVisible(False)
+            # Shown for the GC573 only (_apply_card_profile).
 
             self.chk_service_v4l2.toggled.connect(
                 lambda _checked: self._service_config_changed())
@@ -5509,8 +5602,7 @@ if HAS_QT:
                 return False
             if not (os.path.isfile(self.streamer.streamer_bin) and
                     os.access(self.streamer.streamer_bin, os.X_OK)):
-                folder = ("opengc570d-userd" if self.duo_mode
-                          else "opengc573-userd")
+                folder = os.path.basename(userd_dir(self.streamer.model))
                 self._set_vfio_notice(
                     "Userspace Engine Missing",
                     f"Build it with: make -C tools/{folder}")
@@ -5525,8 +5617,7 @@ if HAS_QT:
                     seconds=8.0)
                 return False
             if _vfio_streamer_running():
-                engine = ("opengc570d-userd" if self.duo_mode
-                          else "gc573_user_streamer")
+                engine = os.path.basename(self.streamer.streamer_bin)
                 self._set_vfio_notice(
                     "Userspace Engine Active",
                     f"An external {engine} instance already owns the device")
@@ -5778,12 +5869,11 @@ if HAS_QT:
                         f"V4L2 {v4l2.get('width', 0)}×{v4l2.get('height', 0)}")
                 self.lbl_hero_meta.setText(" • ".join(parts))
                 if hasattr(self, "lbl_kv_color"):
-                    hdr_state = "HDR Tonemap" if self.chk_hdr.isChecked() else "SDR / Bypass"
+                    hdr_state = self._kv_hdr_text("HDR Tonemap", "SDR / Bypass")
                     self.lbl_kv_color.setText(f"YUV 4:2:2 · {hdr_state}")
                 if hasattr(self, "lbl_kv_pclk"):
-                    self.lbl_kv_pclk.setText(
-                        f"Ring {video.get('ring_buffers', 0)}/{video.get('ring_channels', 0)}ch · "
-                        f"EDID: {self._edid_profile_label()}")
+                    self.lbl_kv_pclk.setText(self._kv_link_text(
+                        f"Ring {video.get('ring_buffers', 0)}/{video.get('ring_channels', 0)}ch"))
                 if hasattr(self, "lbl_kv_audio"):
                     self.lbl_kv_audio.setText(audio.get("label") or "HDMI LPCM")
             else:
@@ -5906,9 +5996,10 @@ if HAS_QT:
             """The streamer hands off; restore the hub's saved colour."""
             if not self.vfio_mode:
                 return
-            if self.duo_mode:
+            if self.duo_mode or self.model != MODEL_GC573:
                 # The DUO engine keeps the last LED effect in hardware; there
                 # is no separate standby daemon to hand the colour back to.
+                # Cards without LEDs have nothing to restore.
                 return
             mode = load_settings().get("led_mode",
                                        self.saved_cfg.get("led_mode"))
@@ -5926,6 +6017,8 @@ if HAS_QT:
             mode = int(mode)
             self.saved_cfg["led_mode"] = mode
             save_settings({"led_mode": mode})
+            if not self.card_profile.supports_rgb_led:
+                return True
             if self._ipc is not None and self._ipc.connected:
                 return self._send_ipc_led(mode)
             if self.vfio_mode:
@@ -6681,6 +6774,245 @@ if HAS_QT:
                      else "Default (4K60 / 1440p120)")
             self.combo_presets.setItemText(index, label)
 
+        def _apply_card_profile(self):
+            """Show, hide and rewire the card-specific controls.
+
+            Runs once after init_ui() and again whenever the card selector
+            switches cards in place.  Every card-specific widget is built
+            for all cards; this decides what the current card shows.  The
+            GC573 and GC570D keep exactly the controls they always had.
+            """
+            duo = self.duo_mode
+            gc573 = self.model == MODEL_GC573
+            avermedia = self.model in (MODEL_GC573, MODEL_GC570D)
+            profile = self.card_profile
+
+            # Header: card name and the DUO input selector.
+            hw = getattr(self.streamer, "hw_info", {}) or {}
+            if getattr(self.streamer, "mode", "unknown") != "unknown" or hw.get("pci"):
+                self._card_full_label = MODEL_NAMES.get(
+                    self.model, MODEL_NAMES[MODEL_GC573])
+                self._card_short_label = (
+                    "GC570D • DUO" if duo
+                    else "HWS • 4K" if self.model == MODEL_HWSUHD
+                    else "GC573 • 4K")
+                self.lbl_card_title.setStyleSheet("")
+            self.combo_duo_input.setVisible(duo)
+            if hasattr(self, "combo_card"):
+                self.combo_card.blockSignals(True)
+                for i in range(self.combo_card.count()):
+                    if self.combo_card.itemData(i) == hw.get("pci"):
+                        self.combo_card.setCurrentIndex(i)
+                self.combo_card.blockSignals(False)
+
+            # EDID & handshake (the HWS UHD card has no host-side EDID).
+            self._card_edid.setVisible(profile.supports(CAP_EDID) or avermedia)
+            self._set_edid_mode_text(
+                "Downstream Copy" if duo else self._edid_profile_label())
+            self.btn_edid_bridge.setVisible(duo)
+            self.btn_edid_copy.setVisible(duo)
+            self._grid_edid.removeWidget(self.btn_edid_hpd)
+            self._grid_edid.addWidget(self.btn_edid_hpd, 2 if duo else 1, 0, 1, 2)
+            self.btn_edid_hpd.setToolTip(
+                "Re-trigger the HDMI hot-plug handshake on the selected input."
+                if duo else "Trigger a hardware HDMI handshake (HPD pulse).")
+
+            # EDID profile / preset.
+            self._presets_field.setVisible(
+                not self.vfio_mode or profile.supports(CAP_EDID) or avermedia)
+            self.combo_presets.setEnabled(not duo)
+            if duo:
+                self.combo_presets.setToolTip(
+                    "The Live Gamer DUO selects the EDID policy with the "
+                    "EDID: Bridge / Copy buttons in the transport bar.")
+            elif self.vfio_mode:
+                self.combo_presets.setToolTip(
+                    getattr(self, "_presets_tooltip", ""))
+            self._update_edid_port_label()
+
+            # HDR tonemapping (the DUO keeps the controls it always showed).
+            show_hdr = profile.supports_hdr or avermedia
+            self._toggle_rows[self.chk_hdr].setVisible(show_hdr)
+            self._hdr_exposure_box.setVisible(show_hdr)
+
+            # Frame generation: GC573 only, as before.
+            self._card_fg.setVisible(not duo and profile.supports_framegen)
+
+            # Audio layout: both other cards publish stereo only.
+            if duo:
+                self.combo_audio_channels.setEnabled(False)
+                self.combo_audio_channels.setToolTip(
+                    "The Live Gamer DUO engine publishes stereo only.")
+            elif self.model == MODEL_HWSUHD:
+                self.combo_audio_channels.setEnabled(False)
+                self.combo_audio_channels.setToolTip(
+                    "This card delivers 48 kHz stereo only.")
+            else:
+                self.combo_audio_channels.setEnabled(True)
+                self.combo_audio_channels.setToolTip("")
+
+            # RGB LED and the GC573-only service audio tap.
+            self._card_led.setVisible(profile.supports_rgb_led or avermedia)
+            self._toggle_rows[self.chk_service_audio_tap].setVisible(gc573)
+
+            self._update_vdev_label()
+            self._apply_responsive_chrome()
+
+        def _card_has_hdr(self) -> bool:
+            # The DUO keeps the HDR wording it always showed.
+            return (self.card_profile.supports_hdr
+                    or self.model in (MODEL_GC573, MODEL_GC570D))
+
+        def _card_has_edid(self) -> bool:
+            return (self.card_profile.supports(CAP_EDID)
+                    or self.model in (MODEL_GC573, MODEL_GC570D))
+
+        def _kv_hdr_text(self, tonemap_on: str, tonemap_off: str) -> str:
+            if not self._card_has_hdr():
+                return "SDR"
+            return tonemap_on if self.chk_hdr.isChecked() else tonemap_off
+
+        def _kv_link_text(self, first: str) -> str:
+            if not self._card_has_edid():
+                return first
+            return f"{first} · EDID: {self._edid_profile_label()}"
+
+        def _preload_node(self) -> str:
+            nodes = getattr(self.card_profile, "preload_nodes", ()) or ()
+            return nodes[0] if nodes else "/dev/video63"
+
+        def _on_hpd_clicked(self, *_):
+            if self.duo_mode:
+                self._duo_hpd_action()
+            else:
+                self.force_resync()
+
+        def _select_card_combo(self, pci: Optional[str]):
+            if not hasattr(self, "combo_card"):
+                return
+            self.combo_card.blockSignals(True)
+            for i in range(self.combo_card.count()):
+                if self.combo_card.itemData(i) == pci:
+                    self.combo_card.setCurrentIndex(i)
+            self.combo_card.blockSignals(False)
+
+        def on_card_changed(self, index: int):
+            pci = self.combo_card.itemData(index)
+            label = self.combo_card.itemText(index)
+            current = getattr(self.streamer, "hw_info", {}).get("pci")
+            if not pci or pci == current or getattr(self, "_card_switching", False):
+                return
+            if self._remote:
+                self._select_card_combo(current)
+                self._set_vfio_notice(
+                    "Remote Session",
+                    "Take back capture before switching cards.", seconds=6.0)
+                return
+            busy = self.streamer.is_running or bool(
+                getattr(self, "recorder", None) and self.recorder.is_recording)
+            if busy:
+                answer = QMessageBox.question(
+                    self, "Switch Capture Card",
+                    f"Switch to {label}?\n\n"
+                    "The current capture and any recording stop.")
+                if answer != QMessageBox.Yes:
+                    self._select_card_combo(current)
+                    return
+            if not self.vfio_mode:
+                # A kernel-driver session builds a different UI; restart.
+                save_settings({"card_pci": pci})
+                self._card_restart = pci
+                self.close()
+                return
+            self._switch_card(pci, label)
+
+        def _switch_card(self, pci: str, label: str):
+            """Move the Hub to another capture card without restarting."""
+            self._card_switching = True
+            self._switch_pending = None
+            if getattr(self, "recorder", None) and self.recorder.is_recording:
+                self.recorder.stop()
+                self._sync_recording_ui()
+            was_running = self.streamer.is_running
+            if was_running:
+                self.streamer.stop()
+                self._set_launch_running(False)
+                self._restore_led_after_stream()
+            self._restore_headless_service()
+
+            card = next((c for c in detect_capture_cards() if c["pci"] == pci), None)
+            if card is None:
+                self._card_switch_failed(f"{label} is no longer present.")
+                return
+            if card["mode"] == "vfio":
+                self._finish_card_switch(card, label)
+                return
+            self._bind_card(card, label)
+
+        def _bind_card(self, card: Dict[str, Optional[str]], label: str):
+            """Hand ``card`` to vfio-pci with its bind script (pkexec)."""
+            scripts = {
+                MODEL_GC573: ("opengc573-userd", "vfio_pci_bind.sh"),
+                MODEL_GC570D: ("opengc570d-userd", "gc570d-vfio-bind.sh"),
+                MODEL_HWSUHD: ("openhws-userd", "hws-vfio-bind.sh"),
+            }
+            folder, name = scripts.get(card["model"], ("", ""))
+            here = os.path.dirname(os.path.abspath(__file__))
+            candidates = [os.path.join(here, "..", folder, name),
+                          f"/usr/local/libexec/{name}", f"/usr/libexec/{name}"]
+            script = next((os.path.normpath(c) for c in candidates
+                           if folder and os.access(c, os.X_OK)), None)
+            if script is None or not shutil.which("pkexec"):
+                self._card_switch_failed(
+                    f"{label} is not bound to vfio-pci; run ./play.sh once.")
+                return
+            args = [script, "--bind"]
+            if card["model"] == MODEL_HWSUHD:
+                args.append(card["pci"])
+            self._set_vfio_notice(
+                "Preparing Capture Card",
+                f"Binding {label} to vfio-pci…", seconds=30.0)
+            proc = QProcess(self)
+            proc.setProcessChannelMode(QProcess.MergedChannels)
+
+            def _done(*_):
+                out = bytes(proc.readAll()).decode(errors="replace").strip()
+                if out:
+                    print(out)
+                fresh = next((c for c in detect_capture_cards()
+                              if c["pci"] == card["pci"]), None)
+                if fresh is not None and fresh["mode"] == "vfio":
+                    self._finish_card_switch(fresh, label)
+                else:
+                    self._card_switch_failed(
+                        f"Could not bind {label} to vfio-pci.")
+                proc.deleteLater()
+
+            proc.finished.connect(_done)
+            proc.start("pkexec", args)
+
+        def _finish_card_switch(self, card: Dict[str, Optional[str]], label: str):
+            old = self.streamer
+            new = GameStreamer(card=card)
+            new.aspect = getattr(old, "aspect", "auto")
+            new.ipc = self._ipc
+            self.streamer = new
+            self.vfio_mode = new.vfio_mode
+            self.duo_mode = new.duo_mode
+            self.model = new.model
+            self.card_profile = detect_card_profile(self.model)
+            save_settings({"card_pci": card["pci"]})
+            self._apply_card_profile()
+            self._card_switching = False
+            print(f"[*] Console Hub switched to {label} ({new.model_label}).")
+            self._set_vfio_notice("Capture Card", f"Switched to {label}", seconds=5.0)
+            self.update_status()
+
+        def _card_switch_failed(self, detail: str):
+            self._card_switching = False
+            self._select_card_combo(getattr(self.streamer, "hw_info", {}).get("pci"))
+            self._set_vfio_notice("Card Switch Failed", detail, seconds=8.0)
+
         def on_duo_input_changed(self, index: int):
             if not self.duo_mode:
                 return
@@ -7223,7 +7555,8 @@ if HAS_QT:
             if hasattr(self, "lbl_kv_route"):
                 want_v4l2 = hasattr(self, "chk_v4l2") and self.chk_v4l2.isChecked()
                 want_tap = hasattr(self, "chk_audio_tap") and self.chk_audio_tap.isChecked()
-                route_txt = f"V4L2 ({V4L2_DEFAULT_DEVICE})" if want_v4l2 else "SHM (/dev/video63)"
+                route_txt = (f"V4L2 ({V4L2_DEFAULT_DEVICE})" if want_v4l2
+                             else f"SHM ({self._preload_node()})")
                 if want_tap:
                     route_txt += " · Tap"
                 self.lbl_kv_route.setText(route_txt)
@@ -7445,9 +7778,8 @@ if HAS_QT:
                 return
             loop = (f" • Out: {self.streamer.v4l2_device}"
                     if getattr(self.streamer, "v4l2_device", None)
-                    else " • Out: SHM (/dev/video63) & PipeWire")
-            self.lbl_vdev.setText(
-                f"PCI: {pci} • EDID: {self._edid_profile_label()}{loop}")
+                    else f" • Out: SHM ({self._preload_node()}) & PipeWire")
+            self.lbl_vdev.setText(self._kv_link_text(f"PCI: {pci}").replace(" · ", " • ") + loop)
             if hasattr(self, "bottom_box"):
                 self.bottom_box.setToolTip(self.lbl_vdev.text())
 
@@ -7642,15 +7974,14 @@ if HAS_QT:
                     audio_kv = "48 kHz LPCM"
                 pclk_khz = int((getattr(self.streamer, "_vfio_metrics", {}) or {}).get("pclk_khz") or 0)
                 pclk_str = f" • {pclk_khz / 1000.0:.1f} MHz PCLK" if pclk_khz > 0 else ""
-                hdr_state = ("HDR Tonemap" if self.chk_hdr.isChecked()
-                             else "HDR Bypass")
+                hdr_state = self._kv_hdr_text("HDR Tonemap", "HDR Bypass")
                 self.lbl_hero_meta.setText(
                     f"{chroma_val}{pclk_str} • {hdr_state} • {audio_str}")
                 if hasattr(self, "lbl_kv_color"):
                     self.lbl_kv_color.setText(f"{chroma_val} · {hdr_state}")
                 if hasattr(self, "lbl_kv_pclk"):
                     pclk_kv = f"{pclk_khz / 1000.0:.1f} MHz" if pclk_khz > 0 else "Locked"
-                    self.lbl_kv_pclk.setText(f"{pclk_kv} · EDID: {self._edid_profile_label()}")
+                    self.lbl_kv_pclk.setText(self._kv_link_text(pclk_kv))
                 if hasattr(self, "lbl_kv_audio"):
                     self.lbl_kv_audio.setText(audio_kv)
                 if hasattr(self, "lbl_audio_fmt"):
@@ -7687,16 +8018,18 @@ if HAS_QT:
                 res_clean = re.sub(r"(\d+)x(\d+)([pi]?)", r"\1 × \2\3", res)
                 self.lbl_hero_signal.setText(f"{res_clean} @ {fps}".strip())
                 self.lbl_hero_meta.setText(
-                    f"Standby • EDID: {self._edid_profile_label()} • Waiting for HDMI input")
+                    self._kv_link_text("Standby").replace(" · ", " • ")
+                    + " • Waiting for HDMI input")
             else:
                 self.lbl_hero_signal.setText("Ready for Gaming")
                 self.lbl_hero_meta.setText(
-                    f"Standby • EDID: {self._edid_profile_label()} • Waiting for HDMI input")
+                    self._kv_link_text("Standby").replace(" · ", " • ")
+                    + " • Waiting for HDMI input")
             if hasattr(self, "lbl_kv_color"):
-                hdr_state = "HDR Tonemap" if self.chk_hdr.isChecked() else "SDR / Bypass"
+                hdr_state = self._kv_hdr_text("HDR Tonemap", "SDR / Bypass")
                 self.lbl_kv_color.setText(f"YUV 4:2:2 · {hdr_state}")
             if hasattr(self, "lbl_kv_pclk"):
-                self.lbl_kv_pclk.setText(f"— MHz · EDID: {self._edid_profile_label()}")
+                self.lbl_kv_pclk.setText(self._kv_link_text("— MHz"))
             if hasattr(self, "lbl_kv_audio"):
                 self.lbl_kv_audio.setText("Standby")
             if hasattr(self, "lbl_audio_fmt"):
@@ -7964,7 +8297,8 @@ if HAS_QT:
             was_running = self.streamer.is_running
 
             # Close to Tray: clicking [X] hides the window into the system tray
-            if getattr(self, "chk_tray", None) and self.chk_tray.isChecked() and getattr(self, "tray_icon", None):
+            # (not when closing to restart on another capture card).
+            if not getattr(self, "_card_restart", None) and getattr(self, "chk_tray", None) and self.chk_tray.isChecked() and getattr(self, "tray_icon", None):
                 event.ignore()
                 self.hide()
                 if not getattr(self, "_tray_notified", False):
@@ -8008,6 +8342,30 @@ def _destroy_qt_objects(app, window):
         app.processEvents()
     except Exception:
         pass
+
+
+def _restart_on_card(pci: str):
+    """Re-launch the Hub on another capture card (card selector).
+
+    In a git checkout this goes through play.sh, which builds the card's
+    engine and binds it to vfio-pci first; an installed Hub re-executes
+    itself.
+    """
+    env = dict(os.environ)
+    env["EVERLIVE_CARD_PCI"] = pci
+    env.pop("EVERLIVE_CARD", None)
+    play = os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "play.sh"))
+    print(f"[*] Restarting the Console Hub on capture card {pci}...")
+    sys.stdout.flush()
+    try:
+        if os.access(play, os.X_OK):
+            os.execve(play, [play], env)
+        args = [a for a in sys.argv[1:] if a not in ("--tray", "--minimized")]
+        os.execve(sys.executable,
+                  [sys.executable, os.path.abspath(__file__)] + args, env)
+    except OSError as exc:
+        print(f"[!] Restart failed ({exc}); start EverLive again to use {pci}.")
 
 
 def main():
@@ -8082,7 +8440,9 @@ def main():
             hw = detect_gc573_driver()
             model = hw.get("model", MODEL_GC573)
             model_name = "GC570D" if model == MODEL_GC570D else "GC573"
-            if hw.get("mode") == "vfio":
+            if model == MODEL_HWSUHD:
+                print("[*] The selected HWS UHD card has no LEDs; nothing to set.")
+            elif hw.get("mode") == "vfio":
                 save_settings({"led_mode": val})
                 is_launching = args.cli or args.tray or any(
                     arg in sys.argv for arg in [
@@ -8144,8 +8504,7 @@ def main():
     if args.cli or not HAS_QT:
         print("[*] Launching Gaming Screen in low-latency mode...")
         if streamer.vfio_mode:
-            engine = ("opengc570d-userd" if streamer.duo_mode
-                      else "gc573_user_streamer")
+            engine = os.path.basename(streamer.streamer_bin)
             print(f"[*] Userspace VFIO engine: video and HDMI audio run inside {engine}.")
         else:
             info = streamer.get_signal_info()
@@ -8167,7 +8526,7 @@ def main():
         while streamer.poll():
             time.sleep(0.5)
         streamer.stop()
-        if streamer.vfio_mode and not streamer.duo_mode:
+        if streamer.vfio_mode and streamer.model == MODEL_GC573:
             saved_led = load_settings().get("led_mode")
             mode = saved_led if isinstance(saved_led, int) and 0 <= saved_led <= 9 else 4
             if not (_proc_running("everlive_userd") and mode == 4):
@@ -8186,8 +8545,11 @@ def main():
         if not args.tray:
             window.show()
         code = app.exec()
+        restart_pci = getattr(window, "_card_restart", None)
         _destroy_qt_objects(app, window)
         del window
+        if restart_pci:
+            _restart_on_card(restart_pci)
         sys.exit(code)
 
 
