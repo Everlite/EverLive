@@ -501,8 +501,6 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 		content_w = chip_row_w;
 
 	width = content_w + pad * 2;
-	if (width < iscale(1000.0f * s))
-		width = iscale(1000.0f * s);
 	if (width > viewport_w - pad * 2)
 		width = viewport_w - pad * 2;
 	if (width < 1)

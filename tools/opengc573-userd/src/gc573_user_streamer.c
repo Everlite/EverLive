@@ -2016,7 +2016,7 @@ static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
 	snap.pip = false;
 	snap.muted = __atomic_load_n(&g_audio_mute_flag, __ATOMIC_RELAXED) != 0;
 	snap.fullscreen = osd_window_is_fullscreen(window);
-	snap.interactive = g_parent_winid == 0 && !g_headless;
+	snap.interactive = !g_headless;
 	snap.volume_pct = (int)(gain * 100.0f + 0.5f);
 
 	if (!everlive_osd_build_card(renderer, &snap, scale, win_w, win_h,
@@ -2283,9 +2283,16 @@ static void osd_apply_mute(bool muted)
 
 static void osd_toggle_fullscreen(SDL_Window *window)
 {
-	uint32_t flags = SDL_GetWindowFlags(window);
-	bool enable = !(flags & SDL_WINDOW_FULLSCREEN_DESKTOP);
+	uint32_t flags;
+	bool enable;
 
+	if (g_parent_winid != 0) {
+		printf("[HUB] TOGGLE_FULLSCREEN\n");
+		fflush(stdout);
+		return;
+	}
+	flags = SDL_GetWindowFlags(window);
+	enable = !(flags & SDL_WINDOW_FULLSCREEN_DESKTOP);
 	SDL_SetWindowFullscreen(window, enable ?
 				SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 	osd_card_invalidate();
@@ -2380,7 +2387,7 @@ static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 	int x;
 	int y;
 
-	if (!window || g_parent_winid != 0 || g_headless || !g_osd_enabled)
+	if (!window || g_headless || !g_osd_enabled)
 		return false;
 	if (!osd_card_active(window) || !g_card.texture)
 		return false;

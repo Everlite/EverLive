@@ -1241,7 +1241,7 @@ static void sdl_card_update(struct everlive_state *st,
 	snap.fullscreen = sdl->fullscreen ||
 		(SDL_GetWindowFlags(sdl->window) &
 		 (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP));
-	snap.interactive = sdl->parent_winid == 0;
+	snap.interactive = true;
 	snap.volume_pct = vol;
 	everlive_osd_build_card(sdl->renderer, &snap,
 				(float)win_h / 1080.0f, win_w, win_h,
@@ -1349,6 +1349,11 @@ static void sdl_apply_mute(struct everlive_state *st,
 
 static void sdl_toggle_fullscreen(struct everlive_sdl *sdl)
 {
+	if (sdl->parent_winid != 0) {
+		printf("[HUB] TOGGLE_FULLSCREEN\n");
+		fflush(stdout);
+		return;
+	}
 	sdl->fullscreen = !sdl->fullscreen;
 	SDL_SetWindowFullscreen(sdl->window, sdl->fullscreen ?
 				SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
@@ -1443,8 +1448,7 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 			event->type == SDL_MOUSEMOTION ? event->motion.y : event->button.y,
 			sdl->card_dest.x, sdl->card_dest.y,
 			sdl->card_dest.w, sdl->card_dest.h);
-	if (sdl->parent_winid != 0 ||
-	    !atomic_load_explicit(&st->osd, __ATOMIC_RELAXED) ||
+	if (!atomic_load_explicit(&st->osd, __ATOMIC_RELAXED) ||
 	    !sdl_card_mode_active(st, sdl))
 		return false;
 
