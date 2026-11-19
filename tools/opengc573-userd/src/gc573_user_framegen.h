@@ -36,107 +36,112 @@
 
 /* Frame generation modes.  The values are shared with the IPC wire format. */
 enum gc573_fg_mode {
-	GC573_FG_OFF = 0,
-	GC573_FG_60_TO_120 = 1,
-	GC573_FG_30_TO_60 = 2,
+  GC573_FG_OFF = 0,
+  GC573_FG_60_TO_120 = 1,
+  GC573_FG_30_TO_60 = 2,
 };
 
 /* Cadence classification result of one captured YUYV frame. */
 enum gc573_fg_frame_class {
-	GC573_FG_DUPLICATE = 0,	/* HDMI repeat inside the 60 Hz container */
-	GC573_FG_UNIQUE = 1,	/* genuine new game frame */
-	GC573_FG_SCENE_CUT = 2,	/* reserved; the parity lock needs no cut */
+  GC573_FG_DUPLICATE = 0, /* HDMI repeat inside the 60 Hz container */
+  GC573_FG_UNIQUE = 1,    /* genuine new game frame */
+  GC573_FG_SCENE_CUT = 2, /* reserved; the parity lock needs no cut */
 };
 
 /*
  * Deduplicator tuning.  mad values are Mean Absolute Luma Differences in 8-bit
  * code values over the 4x2 box-filtered 64x36 grid (0 .. 255).
  */
-#define GC573_FG_GRID_W			64
-#define GC573_FG_GRID_H			36
-#define GC573_FG_GRID_MARGIN_PCT	12	/* skip letterbox/ticker bars */
+#define GC573_FG_GRID_W 64
+#define GC573_FG_GRID_H 36
+#define GC573_FG_GRID_MARGIN_PCT 12 /* skip letterbox/ticker bars */
 
 /* A source faster than this is treated as a duplicated 60 Hz container. */
-#define GC573_FG_DEDUP_MIN_HZ_X100	4500U
+#define GC573_FG_DEDUP_MIN_HZ_X100 4500U
 /* Parity EMA smoothing and the lock separation. */
-#define GC573_FG_MAD_EMA_ALPHA		0.20f
-#define GC573_FG_LOCK_RATIO		1.60f
-#define GC573_FG_LOCK_BIAS		0.15f
+#define GC573_FG_MAD_EMA_ALPHA 0.20f
+#define GC573_FG_LOCK_RATIO 1.60f
+#define GC573_FG_LOCK_BIAS 0.15f
 /* Instantaneous phase-slip recovery (A, A, A, B, B). */
-#define GC573_FG_SLIP_MAD_FACTOR	2.0f
-#define GC573_FG_SLIP_MAD_MIN		2.0f
+#define GC573_FG_SLIP_MAD_FACTOR 2.0f
+#define GC573_FG_SLIP_MAD_MIN 2.0f
 
 struct gc573_fg_cadence {
-	uint32_t width;
-	uint32_t height;
-	uint8_t *prev_raw;	/* 4x2-filtered grid of raw HDMI frame k-1 */
-	uint8_t *scratch;	/* grid of the frame being classified */
-	bool have_prev;
+  uint32_t width;
+  uint32_t height;
+  uint8_t *prev_raw; /* 4x2-filtered grid of raw HDMI frame k-1 */
+  uint8_t *scratch;  /* grid of the frame being classified */
+  bool have_prev;
 
-	uint32_t raw_frames;
-	uint32_t unique_frames;
-	uint32_t duplicates;
-	uint32_t parity_flips;
+  uint32_t raw_frames;
+  uint32_t unique_frames;
+  uint32_t duplicates;
+  uint32_t parity_flips;
 
-	/* EMA of the transition MAD by raw-frame parity. */
-	float even_mad_ema;
-	float odd_mad_ema;
-	/* Parity on which genuine new frames arrive (0 or 1). */
-	int active_parity;
-	bool locked;
+  /* EMA of the transition MAD by raw-frame parity. */
+  float even_mad_ema;
+  float odd_mad_ema;
+  /* Parity on which genuine new frames arrive (0 or 1). */
+  int active_parity;
+  bool locked;
+  bool auto_locked;
+  uint32_t consecutive_60p;
 
-	float last_mad;
-	float prev_raw_mad;
+  float last_mad;
+  float prev_raw_mad;
 
-	uint64_t last_unique_us;
-	uint64_t dt_unique_us;
-	double smoothed_dt_us;
+  uint64_t last_unique_us;
+  uint64_t dt_unique_us;
+  double smoothed_dt_us;
 };
 
 struct gc573_fg_config {
-	int mode;		/* enum gc573_fg_mode */
-	int multiplier;		/* 2, 3, or 4 (0 defaults to 2) */
-	float flow_scale;	/* 0.50 .. 1.00 (LSFGVK_FLOW_SCALE) */
-	bool perf_mode;		/* LSFGVK_PERFORMANCE_MODE */
-	/*
-	 * Keep lsfg-vk from enlarging the Vulkan swapchain.  EverLive only
-	 * uploads a 2D capture texture plus OSD, so the default 1-2 extra
-	 * buffered frames are pure input latency.  Maps to
-	 * LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT=1.
-	 */
-	bool low_latency;
+  int mode;            /* enum gc573_fg_mode */
+  int multiplier;      /* 2, 3, or 4 (0 defaults to 2) */
+  bool native_backend; /* true = built-in GPL-2.0 CPU+YUYV flow; false = lsfg-vk
+                        */
+  float flow_scale;    /* 0.50 .. 1.00 (LSFGVK_FLOW_SCALE) */
+  bool perf_mode;      /* LSFGVK_PERFORMANCE_MODE */
+  /*
+   * Keep lsfg-vk from enlarging the Vulkan swapchain.  EverLive only
+   * uploads a 2D capture texture plus OSD, so the default 1-2 extra
+   * buffered frames are pure input latency.  Maps to
+   * LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT=1.
+   */
+  bool low_latency;
 };
 
 /* Result of the lsfg-vk installation probe. */
 struct gc573_fg_probe {
-	bool layer_found;
-	bool dll_found;
-	char layer_dir[PATH_MAX];
-	char dll_path[PATH_MAX];
+  bool layer_found;
+  bool dll_found;
+  char layer_dir[PATH_MAX];
+  char dll_path[PATH_MAX];
 };
 
 struct gc573_fg_stats {
-	int mode;
-	int multiplier;
-	bool layer_found;
-	bool dll_found;
-	char dll_path[PATH_MAX];
-	bool vulkan_active;	/* renderer really is the Vulkan/lsfg-vk path */
-	bool deduplicator_active;
-	float flow_scale;
-	bool perf_mode;
-	bool low_latency;
+  int mode;
+  int multiplier;
+  bool layer_found;
+  bool dll_found;
+  char dll_path[PATH_MAX];
+  bool vulkan_active;  /* renderer really is the Vulkan/lsfg-vk path */
+  bool native_backend; /* true = built-in GPL-2.0 engine */
+  bool deduplicator_active;
+  float flow_scale;
+  bool perf_mode;
+  bool low_latency;
 
-	double present_fps;	/* real SDL_RenderPresent calls per second */
-	double output_fps;	/* present_fps * 2 when lsfg-vk is usable */
-	double raw_fps;		/* captured HDMI frames per second */
-	double unique_fps;	/* deduplicated game frames per second */
+  double present_fps; /* real SDL_RenderPresent calls per second */
+  double output_fps;  /* present_fps * 2 when lsfg-vk is usable */
+  double raw_fps;     /* captured HDMI frames per second */
+  double unique_fps;  /* deduplicated game frames per second */
 
-	uint32_t unique_frames;
-	uint32_t duplicates;
-	uint32_t parity_flips;
-	uint32_t input_dropped;
-	unsigned int queued;
+  uint32_t unique_frames;
+  uint32_t duplicates;
+  uint32_t parity_flips;
+  uint32_t input_dropped;
+  unsigned int queued;
 };
 
 /* ------------------------------------------------------------------ */
@@ -164,7 +169,7 @@ void gc573_fg_probe_system(struct gc573_fg_probe *out);
  * when both the layer and the DLL are present, i.e. lsfg-vk will actually work.
  */
 bool gc573_fg_apply_env(const struct gc573_fg_config *cfg,
-			struct gc573_fg_probe *out);
+                        struct gc573_fg_probe *out);
 
 /**
  * gc573_fg_write_toml - Write the diagnostic lsfg.toml profile
@@ -174,7 +179,7 @@ bool gc573_fg_apply_env(const struct gc573_fg_config *cfg,
  * dll path when known, [[profile]] name = "everlive").
  */
 void gc573_fg_write_toml(const struct gc573_fg_config *cfg,
-			 const struct gc573_fg_probe *probe);
+                         const struct gc573_fg_probe *probe);
 
 /** Locale-independent "0.85" formatting used for the env and TOML. */
 void gc573_fg_format_scale(float flow_scale, char *buf, size_t len);
@@ -191,12 +196,39 @@ bool gc573_fg_parse_spec(const char *name, int *mode_out, int *mult_out);
 /** Clamps a multiplier to [2, 4] (treating <=1 as 2). */
 int gc573_fg_clamp_multiplier(int multiplier);
 
+/**
+ * gc573_fg_target_output_hz - Compute target output refresh rate for LSFG
+ * @cfg: Current frame generation configuration
+ * @source_hz: Measured HDMI capture frame rate (0 if not locked yet -> 60.0)
+ *
+ * Returns 0.0 when frame generation is disabled or running the Native backend.
+ */
+double gc573_fg_target_output_hz(const struct gc573_fg_config *cfg,
+                                 double source_hz);
+
+/**
+ * gc573_fg_prepare_pacer - Emit VkLayer_EVERLIVE_pacer.json and configure env
+ * @cfg: Current frame generation configuration
+ * @source_hz: Measured HDMI capture frame rate (0 -> assume 60.0)
+ *
+ * Configures VK_ADD_LAYER_PATH, VK_INSTANCE_LAYERS, and EVERLIVE_VK_PACER_HZ
+ * before Vulkan instance creation so lsfg-vk presents are paced smoothly on
+ * high-refresh FIFO monitors (e.g. 120 FPS output on a 240 Hz display).
+ */
+bool gc573_fg_prepare_pacer(const struct gc573_fg_config *cfg,
+                            double source_hz);
+
+/**
+ * gc573_fg_update_pacer_hz - Update Vulkan pacer target Hz live and in env
+ */
+void gc573_fg_update_pacer_hz(double target_hz);
+
 /* ------------------------------------------------------------------ */
 /* Phase-locked 2:1 HDMI parity deduplicator                           */
 /* ------------------------------------------------------------------ */
 
-void gc573_fg_cadence_init(struct gc573_fg_cadence *cad,
-			   uint32_t width, uint32_t height);
+void gc573_fg_cadence_init(struct gc573_fg_cadence *cad, uint32_t width,
+                           uint32_t height);
 void gc573_fg_cadence_reset(struct gc573_fg_cadence *cad);
 void gc573_fg_cadence_free(struct gc573_fg_cadence *cad);
 
@@ -210,8 +242,8 @@ void gc573_fg_cadence_free(struct gc573_fg_cadence *cad);
  * motion EMAs and emits on the locked parity only.  Returns
  * GC573_FG_UNIQUE or GC573_FG_DUPLICATE.
  */
-int gc573_fg_cadence_classify(struct gc573_fg_cadence *cad,
-			      const uint8_t *yuyv, uint64_t now_us);
+int gc573_fg_cadence_classify(struct gc573_fg_cadence *cad, const uint8_t *yuyv,
+                              uint64_t now_us);
 
 /** Smoothed unique (game) frame rate; 0.0 until two frames were accepted. */
 double gc573_fg_cadence_unique_fps(const struct gc573_fg_cadence *cad);
@@ -225,7 +257,7 @@ double gc573_fg_cadence_unique_fps(const struct gc573_fg_cadence *cad);
  * the ring.  The streamer uses it to run the HDR tonemapper on the ring copy.
  */
 typedef void (*gc573_fg_frame_filter)(uint8_t *yuyv, uint32_t width,
-				      uint32_t height, void *opaque);
+                                      uint32_t height, void *opaque);
 
 struct gc573_framegen;
 
@@ -234,19 +266,19 @@ struct gc573_framegen *gc573_framegen_create(const struct gc573_fg_config *cfg);
 void gc573_framegen_destroy(struct gc573_framegen *fg);
 
 void gc573_framegen_set_config(struct gc573_framegen *fg,
-			       const struct gc573_fg_config *cfg);
+                               const struct gc573_fg_config *cfg);
 void gc573_framegen_get_config(const struct gc573_framegen *fg,
-			       struct gc573_fg_config *cfg);
+                               struct gc573_fg_config *cfg);
 void gc573_framegen_set_frame_filter(struct gc573_framegen *fg,
-				     gc573_fg_frame_filter fn, void *opaque);
+                                     gc573_fg_frame_filter fn, void *opaque);
 
 /**
  * gc573_framegen_resize - Match the capture geometry
  *
  * Reallocates the 3-slot ring; cheap no-op when unchanged.
  */
-int gc573_framegen_resize(struct gc573_framegen *fg,
-			  uint32_t width, uint32_t height);
+int gc573_framegen_resize(struct gc573_framegen *fg, uint32_t width,
+                          uint32_t height);
 
 /**
  * gc573_framegen_set_source_hz - Tell the module the HDMI input rate
@@ -256,10 +288,10 @@ int gc573_framegen_resize(struct gc573_framegen *fg,
  * 30 Hz signal is passed through 1:1.
  */
 void gc573_framegen_set_source_hz(struct gc573_framegen *fg,
-				  unsigned int hz_x100);
+                                  unsigned int hz_x100);
 
 void gc573_framegen_set_probe(struct gc573_framegen *fg,
-			      const struct gc573_fg_probe *probe);
+                              const struct gc573_fg_probe *probe);
 void gc573_framegen_set_vulkan_active(struct gc573_framegen *fg, bool active);
 
 /**
@@ -269,7 +301,7 @@ void gc573_framegen_set_vulkan_active(struct gc573_framegen *fg, bool active);
  * <=45 Hz), otherwise runs the parity deduplicator.  Thread-safe.
  */
 void gc573_framegen_input(struct gc573_framegen *fg, const uint8_t *yuyv,
-			  uint64_t frame_us);
+                          uint64_t frame_us);
 
 /**
  * gc573_framegen_take - Pop the newest queued frame for presentation
@@ -284,6 +316,9 @@ bool gc573_framegen_take(struct gc573_framegen *fg, const uint8_t **pixels);
 
 /** Release the slot returned by the last successful take. */
 void gc573_framegen_release(struct gc573_framegen *fg);
+
+/** Return true if at least one accepted frame is queued for presentation. */
+bool gc573_framegen_has_unread(struct gc573_framegen *fg);
 
 /**
  * gc573_framegen_wait - Block until an unread frame exists (or timeout)
@@ -300,6 +335,6 @@ bool gc573_framegen_wait(struct gc573_framegen *fg, unsigned int timeout_us);
 
 /** Snapshot of the live counters (thread-safe). */
 void gc573_framegen_get_stats(struct gc573_framegen *fg,
-			      struct gc573_fg_stats *out);
+                              struct gc573_fg_stats *out);
 
 #endif /* GC573_USER_FRAMEGEN_H */

@@ -407,7 +407,8 @@ if QSocketNotifier is not None:
                          perf_mode: bool = False,
                          low_latency: bool = True,
                          multiplier: Optional[int] = None,
-                         dedup: Optional[bool] = None) -> bool:
+                         dedup: Optional[bool] = None,
+                         backend: Optional[str] = None) -> bool:
             """Toggle lsfg-vk frame generation on a running engine.
 
             ``mode`` is ``off`` | ``2x`` | ``3x`` | ``4x`` | ``60to120`` |
@@ -432,6 +433,8 @@ if QSocketNotifier is not None:
                 params["multiplier"] = max(2, min(4, int(multiplier)))
             if dedup is not None:
                 params["dedup"] = bool(dedup)
+            if backend is not None:
+                params["backend"] = "native" if str(backend).lower() == "native" else "lsfg"
             return self.request("framegen.set", params)
 
         # -- wire ------------------------------------------------------

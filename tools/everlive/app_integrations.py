@@ -179,6 +179,7 @@ def find_preload_library(profile, extra_dirs: Sequence[str] = ()) -> Optional[st
     candidates = [
         here.parent / "opengc573-userd" / library,
         here.parent / "opengc570d-userd" / library,
+        here.parent / "openhws-userd" / library,
         Path("/usr/local/lib") / library,
         Path("/usr/lib") / library,
         Path("/usr/lib64") / library,

@@ -150,12 +150,18 @@ static void hdr_build_lut(enum gc573_hdr_type type, double exposure)
 		if (n > 1.0)
 			n = 1.0;
 
-		if (type == GC573_HDR_PQ)
-			linear = pq_eotf(n) / 203.0; /* ITU-R BT.2408 reference white: 203 cd/m^2 */
-		else
-			linear = hlg_eotf(n) * 3.5;
+		if (type == GC573_HDR_SDR) {
+			linear = pow(n, 2.2) * exposure;
+			out = linear <= 0.0 ? 0.0 :
+			      pow(linear > 1.0 ? 1.0 : linear, 1.0 / 2.2);
+		} else {
+			if (type == GC573_HDR_PQ)
+				linear = pq_eotf(n) / 203.0; /* ITU-R BT.2408 reference white: 203 cd/m^2 */
+			else
+				linear = hlg_eotf(n) * 3.5;
 
-		out = tonemap_encode(linear, exposure);
+			out = tonemap_encode(linear, exposure);
+		}
 		if (out < 0.0)
 			out = 0.0;
 		if (out > 1.0)
@@ -206,6 +212,8 @@ void gc573_hdr_init(void)
 
 void gc573_hdr_set_mode(enum gc573_hdr_type type, float exposure)
 {
+	bool active;
+
 	if (!g_init_done)
 		gc573_hdr_init();
 
@@ -214,14 +222,16 @@ void gc573_hdr_set_mode(enum gc573_hdr_type type, float exposure)
 	if (exposure > 4.0f)
 		exposure = 4.0f;
 
+	active = (type != GC573_HDR_SDR) || (fabsf(exposure - 1.0f) > 0.01f);
+
 	if (type == g_type && exposure == g_exposure) {
-		g_active = type != GC573_HDR_SDR;
+		g_active = active ? 1 : 0;
 		return;
 	}
 
 	g_type = type;
 	g_exposure = exposure;
-	g_active = type != GC573_HDR_SDR;
+	g_active = active ? 1 : 0;
 
 	if (g_active)
 		hdr_build_lut(type, (double)exposure);
@@ -269,6 +279,14 @@ void gc573_hdr_tonemap_yuyv(void *frame, unsigned int width,
 
 	/* Width is always even for YUYV; a trailing odd pixel is not reachable. */
 	macropixels = (size_t)(width / 2U) * height;
+
+	if (g_type == GC573_HDR_SDR) {
+		for (size_t i = 0; i < macropixels; i++, p += 4) {
+			p[0] = g_y_lut[p[0]];
+			p[2] = g_y_lut[p[2]];
+		}
+		return;
+	}
 
 	for (size_t i = 0; i < macropixels; i++, p += 4) {
 		float cb = (float)p[1] - HDR_C_OFFSET;

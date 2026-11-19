@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Capture card selector:** when more than one supported card is installed (GC573, GC570D, HWS UHD), the Console Hub header shows a card dropdown next to the card name. Choosing a card switches in place: the running capture and any recording stop, the card is bound to vfio-pci through its bind script (pkexec) if needed, and the card-specific controls (DUO input, EDID & handshake, HDR, frame generation, audio layout, RGB LED, service audio tap) are shown, hidden or rewired for the new card. The choice is saved as `card_pci` in `settings.json`. `play.sh`, `everlive-service.sh` and the Hub share one selection order: `EVERLIVE_CARD_PCI`, then `EVERLIVE_CARD=gc573|gc570d|hwsuhd`, then the saved choice, then the previous auto-detection (first AVerMedia card in PCI order). With a single card nothing changes, and the GC573 and GC570D show exactly the controls they had before.
+- **HWS UHD card in the Hub:** controls the card does not have (RGB LED, EDID, HDR tonemapping, frame generation, surround layouts) are hidden, the LED paths no longer start the GC573 standby daemon when the HWS card is selected, and recordings read its own `/dev/video64` frame store.
+- **HWS UHD capture card engine (`hwsuhd`, ACASIS VS2583 / AVMatrix VC12-4K, PCI `8888:8581` subsystem `0007`):** a separate userspace VFIO engine in `tools/openhws-userd` with zero-copy 4K60 capture, HDMI audio (SDL + PipeWire tap), SDL window with Hub embedding, v4l2loopback output, an `LD_PRELOAD` camera on `/dev/video64`, and the JSON-RPC control socket. `hws-vfio-bind.sh` binds only this card and keeps it powered with bus reset disabled, so opening it no longer drops HDMI for ~3 s. `play.sh`, `everlive-service.sh` and the Console Hub use it only with `EVERLIVE_CARD=hwsuhd` or when no AVerMedia card is installed; `make hwsuhd` and the optional udev rule are opt-in, so GC573/GC570D builds, installs and defaults are unchanged.
 - **Optional LD_PRELOAD app launchers in the installer:** `install.sh --with-preload` (or the interactive prompt) creates reversible `<App> (EverLive Camera)` menu entries for native Discord, OBS, Chrome, Chromium, Brave, Firefox and Zoom installs. Each entry launches that process with the card-specific `LD_PRELOAD` library and the shared `X-EverLive-Preload` marker, so the Console Hub recognizes the shortcut and `uninstall.sh` removes it. Existing launchers, user overrides and Flatpak/Snap sandboxes are left untouched.
 - **Console Hub shell refresh (Simple / Advanced):**
   - Fresh installs open in **Simple** mode: a full-width video stage with no inspector or telemetry deck, a `Local Capture Active` status chip in the bottom bar while running, and a full-width bottom audio/status bar. The choice persists as `ui_mode`.
@@ -46,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.7.0] - 2026-11-17
+## [2.0.0] - 2026-11-19
 
 ### Added
 - **Embedded Gaming Viewport & Cinema Fullscreen:**

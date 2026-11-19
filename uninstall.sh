@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive - Deinstaller (v1.6.0)
+# EverLive - Deinstaller (v2.0.0)
 # ==============================================================================
 set -euo pipefail
 
@@ -46,6 +46,7 @@ rm -f /etc/gc570d.conf.example
 rm -f /usr/local/bin/opengc570d-userd /usr/local/bin/gc570d-ctl
 rm -f /usr/local/lib/libgc570d-v4l2.so
 rm -f /usr/local/lib/libgc573-v4l2.so
+rm -f /usr/local/lib/libeverlive-vk-pacer.so
 rm -f /usr/local/libexec/gc570d-vfio-bind.sh /usr/local/libexec/gc570d-sleep.sh
 rm -f /usr/local/lib/systemd/user/opengc570d-userd.service
 rm -f /etc/udev/rules.d/99-gc570d-vfio.rules

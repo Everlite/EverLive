@@ -22,6 +22,8 @@ from typing import FrozenSet, Iterable, Optional, Tuple
 
 MODEL_GC573 = "gc573"
 MODEL_GC570D = "gc570d"
+MODEL_HWSUHD = "hwsuhd"
+MODEL_GC553G2 = "gc553g2"
 
 CAP_VIDEO = "video"
 CAP_AUDIO = "audio"
@@ -92,6 +94,10 @@ class CardProfile:
     def is_duo(self) -> bool:
         return self.model == MODEL_GC570D
 
+    @property
+    def is_uvc(self) -> bool:
+        return self.model == MODEL_GC553G2
+
 
 def _profile(
     model: str,
@@ -142,10 +148,57 @@ GC570D_PROFILE = _profile(
     "libgc570d-v4l2.so",
 )
 
+# ACASIS VS2583 / AVMatrix VC12-4K class card (openhws-userd).  Only selected
+# explicitly (EVERLIVE_CARD=hwsuhd) or when no AVerMedia card is installed.
+HWSUHD_PROFILE = _profile(
+    MODEL_HWSUHD,
+    "HWS UHD · 4K60 Capture",
+    (CAP_VIDEO, CAP_AUDIO, CAP_PASSTHROUGH, CAP_4K60, CAP_1080P60),
+    1,
+    ("/dev/video10",),
+    ("/dev/video64",),
+    "libhwsuhd-v4l2.so",
+)
+
+GC553G2_PROFILE = _profile(
+    MODEL_GC553G2,
+    "GC553G2 · Live Gamer ULTRA 2.1",
+    (
+        CAP_VIDEO, CAP_AUDIO, CAP_PASSTHROUGH, CAP_EDID,
+        CAP_4K60, CAP_4K120, CAP_1440P120, CAP_1080P240, CAP_1080P60,
+        CAP_HDR, CAP_RGB_LED,
+    ),
+    1,
+    (),
+    (),
+    "",
+)
+
 _STATIC_PROFILES = {
     MODEL_GC573: GC573_PROFILE,
     MODEL_GC570D: GC570D_PROFILE,
+    MODEL_HWSUHD: HWSUHD_PROFILE,
+    MODEL_GC553G2: GC553G2_PROFILE,
 }
+
+
+def _detect_usb_from_sysfs(base: str = "/sys/bus/usb/devices") -> Optional[str]:
+    try:
+        entries = os.listdir(base)
+    except OSError:
+        return None
+    for entry in sorted(entries):
+        dev = os.path.join(base, entry)
+        try:
+            with open(os.path.join(dev, "idVendor")) as f:
+                vendor = f.read().strip().lower()
+            with open(os.path.join(dev, "idProduct")) as f:
+                product = f.read().strip().lower()
+        except OSError:
+            continue
+        if vendor == "07ca" and product == "2553":
+            return MODEL_GC553G2
+    return None
 
 
 def _detect_from_sysfs() -> Optional[str]:
@@ -153,7 +206,7 @@ def _detect_from_sysfs() -> Optional[str]:
     try:
         entries = os.listdir(base)
     except OSError:
-        return None
+        entries = []
     for entry in entries:
         dev = os.path.join(base, entry)
         try:
@@ -175,7 +228,7 @@ def _detect_from_sysfs() -> Optional[str]:
         except OSError:
             subsystem = ""
         return MODEL_GC570D if subsystem == "0x5700" else MODEL_GC573
-    return None
+    return _detect_usb_from_sysfs()
 
 
 def _parse_ctl_detect(text: str) -> Optional[CardProfile]:

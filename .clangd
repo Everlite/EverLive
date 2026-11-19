@@ -1,0 +1,110 @@
+---
+If:
+  PathMatch: (tools|tests)/.*\.h
+CompileFlags:
+  Remove:
+    - -xobjective-c++-header
+  Add:
+    - -xc-header
+---
+If:
+  PathMatch: tools/libeverlive-core/[^/]+
+CompileFlags:
+  Add:
+    - -std=gnu11
+    - -D_GNU_SOURCE
+    - -Wall
+    - -Wextra
+    - -Wno-unused-parameter
+    - -I.
+    - -Iv4l2
+---
+If:
+  PathMatch: tools/libeverlive-core/third_party/[^/]+
+CompileFlags:
+  Add:
+    - -std=gnu11
+    - -D_GNU_SOURCE
+    - -I.
+    - -I..
+---
+If:
+  PathMatch: tools/libeverlive-core/v4l2/[^/]+
+CompileFlags:
+  Add:
+    - -std=gnu11
+    - -D_GNU_SOURCE
+    - -Wall
+    - -Wextra
+    - -Wno-unused-parameter
+    - -I.
+    - -I..
+---
+If:
+  PathMatch: tools/opengc573-userd/src/[^/]+
+CompileFlags:
+  Add:
+    - -std=gnu11
+    - -D_GNU_SOURCE
+    - -Wall
+    - -Wextra
+    - -Wno-unused-parameter
+    - -Wno-sign-compare
+    - -I.
+    - -I../../libeverlive-core
+    - -I../../libeverlive-core/v4l2
+    - -I/usr/include/SDL2
+    - -I/usr/include/pipewire-0.3
+    - -I/usr/include/spa-0.2
+---
+If:
+  PathMatch: tools/opengc570d-userd/src/[^/]+
+CompileFlags:
+  Add:
+    - -std=gnu11
+    - -D_GNU_SOURCE
+    - -DGC570D_USERSPACE
+    - -DGC570D_DEVELOPER_DEBUGFS
+    - -DHAVE_SDL2
+    - -DHAVE_LIBPIPEWIRE
+    - -Wall
+    - -Wextra
+    - -Wno-unused-parameter
+    - -Wno-sign-compare
+    - -I.
+    - -I..
+    - -I../../libeverlive-core
+    - -I../../libeverlive-core/v4l2
+    - -I/usr/include/SDL2
+    - -I/usr/include/pipewire-0.3
+    - -I/usr/include/spa-0.2
+---
+If:
+  PathMatch: tools/everlive/[^/]+
+CompileFlags:
+  Add:
+    - -std=gnu11
+    - -D_GNU_SOURCE
+    - -Wall
+    - -Wextra
+    - -Wno-unused-parameter
+    - -I.
+    - -I/usr/include/SDL2
+---
+If:
+  PathMatch: tests/[^/]+
+CompileFlags:
+  Add:
+    - -std=gnu11
+    - -D_GNU_SOURCE
+    - -DGC570D_USERSPACE
+    - -Wall
+    - -Wextra
+    - -Wno-unused-parameter
+    - -Wno-sign-compare
+    - -I../tools/libeverlive-core
+    - -I../tools/libeverlive-core/v4l2
+    - -I../tools/opengc570d-userd/src
+    - -I../tools/opengc570d-userd
+    - -I../tools/opengc573-userd/src
+    - -I/usr/include/SDL2

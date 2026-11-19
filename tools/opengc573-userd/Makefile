@@ -49,7 +49,8 @@ STREAM_OBJS := \
 	src/gc573_user_audio_tap.o \
 	src/gc573_user_hdr.o \
 	src/gc573_camera.o \
-	src/gc573_user_framegen.o
+	src/gc573_user_framegen.o \
+	src/gc573_user_fg_native.o
 
 ENTRY_OBJS := \
 	src/gc573_user_probe.o \
@@ -58,7 +59,7 @@ ENTRY_OBJS := \
 	src/gc573_user_diag.o
 
 TARGETS := gc573_user_probe gc573_user_streamer everlive_userd gc573_user_diag \
-           libgc573-v4l2.so
+           libgc573-v4l2.so libeverlive-vk-pacer.so
 
 all: $(TARGETS)
 
@@ -66,7 +67,7 @@ gc573_user_probe: src/gc573_user_probe.o $(HW_OBJS) $(CORE_LIB)
 	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS)
 
 gc573_user_streamer: src/gc573_user_streamer.o $(HW_OBJS) $(STREAM_OBJS) $(CORE_LIB)
-	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS) $(SDL_LIBS) $(X11_LIBS) $(AV_LIBS) $(PW_LIBS) -lm
+	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS) $(SDL_LIBS) $(X11_LIBS) $(AV_LIBS) $(PW_LIBS) -lm -ldl
 
 everlive_userd: src/everlive_userd.o $(HW_OBJS) $(CORE_LIB)
 	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -88,6 +89,12 @@ libgc573-v4l2.so: src/gc573-v4l2.c \
 		$(CORE_V4L2_DIR)/everlive_v4l2_state.c \
 		$(CORE_V4L2_DIR)/everlive_v4l2_preload.c \
 		$(CORE_LIB) -ldl -lrt -pthread
+	@chmod 0644 $@
+
+libeverlive-vk-pacer.so: src/everlive_vk_pacer.c
+	$(CC) -O2 -g -Wall -Wextra -Wno-unused-parameter \
+		-std=gnu11 -D_GNU_SOURCE -shared -fPIC \
+		-o $@ $< -pthread
 	@chmod 0644 $@
 
 $(CORE_LIB):
@@ -112,7 +119,7 @@ test selftest:
 
 framegen-selftest:
 	$(MAKE) -C ../../tests test_framegen
-	../../tests/test_framegen
+	cd ../../tests && ./test_framegen
 
 -include $(HW_OBJS:.o=.d) $(STREAM_OBJS:.o=.d) $(ENTRY_OBJS:.o=.d)
 
@@ -127,11 +134,11 @@ LIBDIR := $(DESTDIR)$(PREFIX)/lib
 install: all
 	install -d $(BINDIR) $(LIBDIR)
 	install -m 0755 gc573_user_streamer everlive_userd gc573_user_probe $(BINDIR)/
-	install -m 0644 libgc573-v4l2.so $(LIBDIR)/
+	install -m 0644 libgc573-v4l2.so libeverlive-vk-pacer.so $(LIBDIR)/
 	command -v setcap >/dev/null 2>&1 && setcap cap_ipc_lock=+ep $(BINDIR)/gc573_user_streamer 2>/dev/null || true
 
 uninstall:
 	rm -f $(BINDIR)/gc573_user_streamer $(BINDIR)/everlive_userd $(BINDIR)/gc573_user_probe
-	rm -f $(LIBDIR)/libgc573-v4l2.so
+	rm -f $(LIBDIR)/libgc573-v4l2.so $(LIBDIR)/libeverlive-vk-pacer.so
 
-.PHONY: all test selftest clean install uninstall
+.PHONY: all test selftest framegen-selftest clean install uninstall

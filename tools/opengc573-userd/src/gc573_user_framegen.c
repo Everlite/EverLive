@@ -24,6 +24,7 @@
 
 #include <ctype.h>
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <math.h>
 #include <pthread.h>
@@ -626,6 +627,186 @@ void gc573_fg_write_toml(const struct gc573_fg_config *cfg,
 	fclose(f);
 }
 
+static void fg_env_append_token(const char *env_name, const char *token)
+{
+	const char *cur = getenv(env_name);
+	size_t tlen;
+
+	if (!env_name || !token || !*token)
+		return;
+	tlen = strlen(token);
+	if (!cur || !*cur) {
+		setenv(env_name, token, 1);
+		return;
+	}
+
+	const char *p = cur;
+
+	while (*p) {
+		const char *sep = strchr(p, ':');
+		size_t flen = sep ? (size_t)(sep - p) : strlen(p);
+
+		if (flen == tlen && strncmp(p, token, tlen) == 0)
+			return;
+		if (!sep)
+			break;
+		p = sep + 1;
+	}
+
+	size_t clen = strlen(cur);
+	char *joined = malloc(clen + tlen + 2);
+
+	if (!joined)
+		return;
+	memcpy(joined, cur, clen);
+	joined[clen] = ':';
+	memcpy(joined + clen + 1, token, tlen + 1);
+	setenv(env_name, joined, 1);
+	free(joined);
+}
+
+static bool fg_resolve_pacer_lib(char *out, size_t out_len)
+{
+	char exe_path[PATH_MAX];
+	char exe_dir[PATH_MAX] = "";
+	ssize_t n = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+
+	if (n > 0) {
+		exe_path[n] = '\0';
+		char *slash = strrchr(exe_path, '/');
+
+		if (slash) {
+			*slash = '\0';
+			fg_copy(exe_dir, sizeof(exe_dir), exe_path);
+		}
+	}
+
+	char cand1[PATH_MAX] = "";
+	char cand2[PATH_MAX] = "";
+
+	if (exe_dir[0]) {
+		fg_path(cand1, sizeof(cand1), exe_dir, "/libeverlive-vk-pacer.so", NULL);
+		fg_path(cand2, sizeof(cand2), exe_dir, "/../lib/libeverlive-vk-pacer.so", NULL);
+	}
+
+	const char *candidates[] = {
+		cand1[0] ? cand1 : NULL,
+		cand2[0] ? cand2 : NULL,
+		"/usr/local/lib/libeverlive-vk-pacer.so",
+		"/usr/lib/libeverlive-vk-pacer.so",
+	};
+
+	for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+		char resolved[PATH_MAX];
+
+		if (!candidates[i] || !fg_readable(candidates[i]))
+			continue;
+		if (realpath(candidates[i], resolved)) {
+			fg_copy(out, out_len, resolved);
+			return true;
+		}
+	}
+	return false;
+}
+
+static void fg_write_json_escaped(FILE *f, const char *s)
+{
+	for (const char *p = s; *p; p++) {
+		if (*p == '\\' || *p == '"')
+			fputc('\\', f);
+		fputc(*p, f);
+	}
+}
+
+double gc573_fg_target_output_hz(const struct gc573_fg_config *cfg,
+				 double source_hz)
+{
+	double base_hz;
+
+	if (!cfg || cfg->mode == GC573_FG_OFF || cfg->native_backend)
+		return 0.0;
+
+	base_hz = (source_hz >= 20.0 && source_hz <= 250.0) ? source_hz : 60.0;
+	if (cfg->mode == GC573_FG_30_TO_60 && base_hz > 45.0)
+		base_hz *= 0.5;
+	return base_hz * (double)gc573_fg_clamp_multiplier(cfg->multiplier);
+}
+
+void gc573_fg_update_pacer_hz(double target_hz)
+{
+	char buf[32];
+
+	if (target_hz > 10.0 && target_hz < 235.0) {
+		int centihz = (int)(target_hz * 100.0 + 0.5);
+
+		snprintf(buf, sizeof(buf), "%d.%02d",
+			 centihz / 100, centihz % 100);
+	} else {
+		snprintf(buf, sizeof(buf), "0");
+	}
+	setenv("EVERLIVE_VK_PACER_HZ", buf, 1);
+
+	void (*set_hz)(double) =
+		(void (*)(double))dlsym(RTLD_DEFAULT, "everlive_vk_pacer_set_hz");
+	if (set_hz)
+		set_hz(target_hz);
+}
+
+bool gc573_fg_prepare_pacer(const struct gc573_fg_config *cfg,
+			    double source_hz)
+{
+	char lib_path[PATH_MAX];
+	char layer_dir[PATH_MAX];
+	char json_path[PATH_MAX];
+	char xdg_fallback[PATH_MAX];
+	const char *xdg_cfg = getenv("XDG_CONFIG_HOME");
+	double target_hz = gc573_fg_target_output_hz(cfg, source_hz);
+	FILE *f;
+
+	gc573_fg_update_pacer_hz(target_hz);
+	if (target_hz <= 0.0)
+		return false;
+
+	if (!fg_resolve_pacer_lib(lib_path, sizeof(lib_path)))
+		return false;
+
+	if (!xdg_cfg || !*xdg_cfg) {
+		char home[PATH_MAX];
+
+		fg_home_dir(home, sizeof(home));
+		fg_path(xdg_fallback, sizeof(xdg_fallback), home, "/.config", NULL);
+		xdg_cfg = xdg_fallback;
+	}
+
+	fg_path(layer_dir, sizeof(layer_dir), xdg_cfg, "/everlive/vk_layers", NULL);
+	fg_mkdir_p(layer_dir);
+	fg_path(json_path, sizeof(json_path), layer_dir,
+		"/VkLayer_EVERLIVE_pacer.json", NULL);
+
+	f = fopen(json_path, "w");
+	if (!f)
+		return false;
+
+	fprintf(f, "{\n");
+	fprintf(f, "  \"file_format_version\": \"1.1.0\",\n");
+	fprintf(f, "  \"layer\": {\n");
+	fprintf(f, "    \"name\": \"VK_LAYER_EVERLIVE_pacer\",\n");
+	fprintf(f, "    \"description\": \"EverLive Vulkan framegen present pacer\",\n");
+	fprintf(f, "    \"implementation_version\": \"1\",\n");
+	fprintf(f, "    \"library_path\": \"");
+	fg_write_json_escaped(f, lib_path);
+	fprintf(f, "\",\n");
+	fprintf(f, "    \"type\": \"GLOBAL\",\n");
+	fprintf(f, "    \"api_version\": \"1.4.0\"\n");
+	fprintf(f, "  }\n");
+	fprintf(f, "}\n");
+	fclose(f);
+
+	fg_env_append_token("VK_ADD_LAYER_PATH", layer_dir);
+	fg_env_append_token("VK_INSTANCE_LAYERS", "VK_LAYER_EVERLIVE_pacer");
+	return true;
+}
+
 /* ------------------------------------------------------------------ */
 /* Phase-locked 2:1 HDMI parity deduplicator                           */
 /* ------------------------------------------------------------------ */
@@ -727,6 +908,8 @@ void gc573_fg_cadence_reset(struct gc573_fg_cadence *cad)
 	cad->odd_mad_ema = 0.0f;
 	cad->active_parity = 0;
 	cad->locked = false;
+	cad->auto_locked = false;
+	cad->consecutive_60p = 0;
 	cad->last_mad = 0.0f;
 	cad->prev_raw_mad = 0.0f;
 	cad->last_unique_us = 0;
@@ -794,6 +977,22 @@ int gc573_fg_cadence_classify(struct gc573_fg_cadence *cad,
 	cad->last_mad = mad;
 
 	/*
+	 * In true 60p, adjacent transitions have comparable motion:
+	 * max_m < min_m * 2.5f + 0.6f.
+	 * In 30-in-60 (A, A, B, B), one transition is high motion and the other is
+	 * a duplicate frame with noise/water (ratio max/min >> 3.0).
+	 */
+	{
+		float min_m = fminf(mad, cad->prev_raw_mad);
+		float max_m = fmaxf(mad, cad->prev_raw_mad);
+
+		if (min_m > 1.1f && max_m < min_m * 2.5f + 0.6f)
+			cad->consecutive_60p++;
+		else if (max_m > min_m * 3.0f + 0.8f || max_m < 0.6f)
+			cad->consecutive_60p = 0;
+	}
+
+	/*
 	 * Instantaneous phase slip (A, A, A, B, B): a frame that arrives on the
 	 * expected-duplicate parity but is clearly more different than the
 	 * previous transition means the console dropped/reordered a frame.
@@ -825,6 +1024,21 @@ int gc573_fg_cadence_classify(struct gc573_fg_cadence *cad,
 				   mad * GC573_FG_MAD_EMA_ALPHA;
 
 	fg_cadence_relock(cad);
+
+	{
+		float hi = fmaxf(cad->even_mad_ema, cad->odd_mad_ema);
+		float lo = fminf(cad->even_mad_ema, cad->odd_mad_ema);
+
+		if (!cad->auto_locked) {
+			if (cad->raw_frames >= 8U && cad->consecutive_60p == 0U &&
+			    hi > lo * 3.0f + 0.55f)
+				cad->auto_locked = true;
+		} else if (cad->consecutive_60p >= 10U && hi < lo * 2.0f + 0.8f) {
+			cad->auto_locked = false;
+			cad->last_unique_us = 0;
+			cad->smoothed_dt_us = 0.0;
+		}
+	}
 
 	/*
 	 * Emit strictly on the locked parity - also when the scene is frozen
@@ -1198,9 +1412,15 @@ void gc573_framegen_input(struct gc573_framegen *fg, const uint8_t *yuyv,
 
 	fg->source_fast = fg_source_is_fast(fg, now);
 
-	if (fg->cfg.mode == GC573_FG_30_TO_60 && fg->source_fast)
-		accept = gc573_fg_cadence_classify(&fg->cadence, yuyv, now) ==
-			 GC573_FG_UNIQUE;
+	if (fg->source_fast &&
+	    (fg->cfg.mode == GC573_FG_30_TO_60 ||
+	     fg->cfg.mode == GC573_FG_60_TO_120)) {
+		int cls = gc573_fg_cadence_classify(&fg->cadence, yuyv, now);
+
+		if (fg->cfg.mode == GC573_FG_30_TO_60 ||
+		    fg->cadence.auto_locked)
+			accept = (cls == GC573_FG_UNIQUE);
+	}
 
 	if (!accept) {
 		pthread_mutex_unlock(&fg->lock);
@@ -1308,6 +1528,19 @@ void gc573_framegen_release(struct gc573_framegen *fg)
 	pthread_mutex_unlock(&fg->lock);
 }
 
+bool gc573_framegen_has_unread(struct gc573_framegen *fg)
+{
+	bool unread;
+
+	if (!fg || !fg->lock_ready)
+		return false;
+
+	pthread_mutex_lock(&fg->lock);
+	unread = fg->count > 0U;
+	pthread_mutex_unlock(&fg->lock);
+	return unread;
+}
+
 bool gc573_framegen_wait(struct gc573_framegen *fg, unsigned int timeout_us)
 {
 	struct timespec deadline;
@@ -1361,8 +1594,9 @@ void gc573_framegen_get_stats(struct gc573_framegen *fg,
 	out->dll_found = fg->probe.dll_found;
 	snprintf(out->dll_path, sizeof(out->dll_path), "%s", fg->probe.dll_path);
 	out->vulkan_active = fg->vulkan_active;
-	out->deduplicator_active = (fg->cfg.mode == GC573_FG_30_TO_60) &&
-				   fg->source_fast;
+	out->deduplicator_active = fg->source_fast &&
+				   (fg->cfg.mode == GC573_FG_30_TO_60 ||
+				    fg->cadence.auto_locked);
 	out->flow_scale = fg->cfg.flow_scale;
 	out->perf_mode = fg->cfg.perf_mode;
 	out->low_latency = fg->cfg.low_latency;

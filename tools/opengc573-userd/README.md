@@ -40,7 +40,9 @@ As of **EverLive v1.0.0**, this userspace engine is the default, primary driver 
 | **`gc573_user_probe`** | Diagnostic tool for testing MMIO, I2C discovery, and DMA mappings. |
 | **`gc573_user_edid.[ch]`** | Hardware EDID profile generator (4K60, 1440p60/120 SDR & HDR, 1080p240) and I2C programmer. |
 | **`gc573_user_hdr.[ch]`** | Real-time HDR10 (PQ) & HLG to SDR Hable filmic tonemapper and BT.2020-to-BT.709 chroma matrix. |
-| **`gc573_user_framegen.[ch]`** | Vulkan LSFG-VK 2x frame generation integration, phase-locked 2:1 cadence deduplication, and low-latency swapchain. |
+| **`gc573_user_framegen.[ch]`** | Vulkan LSFG-VK (2×/3×/4×) frame generation integration, phase-locked 2:1 cadence deduplication, and low-latency swapchain. |
+| **`gc573_user_fg_native.[ch]`** | Open-source native GPU optical-flow frame generation engine (GL 120 luma pyramid, 3-level dense flow, bilateral smoothing, continuous static HUD lock). |
+| **`everlive_vk_pacer.c`** | Vulkan present pacing layer (`libeverlive-vk-pacer.so`) downstream of LSFG-VK for smooth presentation pacing on 240 Hz+ displays. |
 | **`gc573_user_ipc.[ch]`** | Lock-free JSON-RPC 2.0 Unix control socket (`everlive.sock`) for zero-interrupt runtime mutations. |
 | **`gc573_user_audio_tap.[ch]`** | Dynamic 2/6/8-channel PipeWire virtual audio tap (`EverLive Capture Audio`) for isolated stereo and 5.1 surround OBS recording. |
 | **`gc573_user_audio.[ch]`** | PCIe DMA audio ring buffer, IEC 61937 scan/mute guard, audio worker thread and SDL2 playback. |
@@ -143,7 +145,7 @@ render loop through a seqlock, so remote queries never touch the DMA path.
 ```console
 $ printf '{"jsonrpc":"2.0","id":1,"method":"status.get"}\n' \
     | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/everlive.sock"
-{"jsonrpc":"2.0","id":1,"result":{"proto":1,"version":"1.6.0",...}}
+{"jsonrpc":"2.0","id":1,"result":{"proto":1,"version":"2.0.0",...}}
 ```
 
 ## Sharing the Card Between Users
