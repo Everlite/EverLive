@@ -3193,11 +3193,15 @@ if HAS_QT:
                 getattr(self.streamer, "mode", "unknown") != "unknown"
                 or bool(getattr(self.streamer, "hw_info", {}).get("pci"))
             )
-            self._card_full_label = MODEL_NAMES.get(
-                self.model, MODEL_NAMES[MODEL_GC573])
-            self._card_short_label = (
-                "GC570D • DUO" if self.model == MODEL_GC570D
-                else "GC573 • 4K")
+            if card_detected:
+                self._card_full_label = MODEL_NAMES.get(
+                    self.model, MODEL_NAMES[MODEL_GC573])
+                self._card_short_label = (
+                    "GC570D • DUO" if self.model == MODEL_GC570D
+                    else "GC573 • 4K")
+            else:
+                self._card_full_label = "NO CAPTURE CARD"
+                self._card_short_label = "NO CAPTURE CARD"
 
             self.source_group = QFrame()
             self.source_group.setObjectName("sourceGroup")
@@ -3206,8 +3210,7 @@ if HAS_QT:
             source_layout.setContentsMargins(12, 0, 0, 0)
             source_layout.setSpacing(10)
 
-            self.lbl_card_title = QLabel(
-                self._card_full_label if card_detected else "NO CAPTURE CARD")
+            self.lbl_card_title = QLabel(self._card_full_label)
             self.lbl_card_title.setObjectName("sourceName")
             self.lbl_card_title.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
             self.lbl_card_title.setFixedHeight(ui_theme.CONTROL_H)
@@ -3906,16 +3909,22 @@ if HAS_QT:
             fg_hr_lay.setSpacing(6)
             self.lbl_fg_ready = QLabel("Checking…")
             self.lbl_fg_ready.setObjectName("fieldLabel")
-            fg_hr_lay.addWidget(self.lbl_fg_ready)
-            self.btn_fg_recheck = QPushButton("↻")
-            self.btn_fg_recheck.setObjectName("btnGhost")
-            self.btn_fg_recheck.setFixedSize(24, 20)
-            self.btn_fg_recheck.setStyleSheet("padding: 0px; font-size: 12px;")
-            self.btn_fg_recheck.setCursor(Qt.PointingHandCursor)
-            self.btn_fg_recheck.setToolTip(
-                "Re-scan for the lsfg-vk Vulkan layer and lsfg-vk.dll")
+            fg_hr_lay.addWidget(self.lbl_fg_ready, 0, Qt.AlignVCenter)
+            self.btn_fg_recheck = IconButton(
+                "rotate",
+                "Re-scan for the lsfg-vk Vulkan layer and lsfg-vk.dll",
+                size=24, icon_size=12)
+            self.btn_fg_recheck.setStyleSheet(
+                "QPushButton#iconButton {"
+                " min-height: 22px; min-width: 22px;"
+                " border: 1px solid #3F455C; border-radius: 6px;"
+                " background-color: transparent; padding: 0px;"
+                "}"
+                "QPushButton#iconButton:hover {"
+                " background-color: #262A3C; border-color: #3A3E54;"
+                "}")
             self.btn_fg_recheck.clicked.connect(self.on_fg_recheck)
-            fg_hr_lay.addWidget(self.btn_fg_recheck)
+            fg_hr_lay.addWidget(self.btn_fg_recheck, 0, Qt.AlignVCenter)
 
             card_fg, grid_fg = _section(
                 "FRAME GENERATION · LSFG", "#BB96F3", fg_head_right)
@@ -5404,7 +5413,8 @@ if HAS_QT:
 
         def _remote_dock(self):
             """Attach the external engine's SDL window to the Hub viewport."""
-            if self._ipc is None or not self._ipc.connected:
+            if (not self._remote or self._remote_docked or
+                    self._ipc is None or not self._ipc.connected):
                 return
             parent_wid = self._target_parent_winid()
             if parent_wid < 0:
