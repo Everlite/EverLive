@@ -41,7 +41,7 @@ ICON_SIZES  := 16 32 48 64 128 256 512
 # Python modules imported by everlive_viewer.py.
 VIEWER_PY := everlive_client.py card_profile.py service_manager.py \
              app_integrations.py everlive_recorder.py gc553g2_control.py \
-             ui_theme.py ui_widgets.py fa_icons.py
+             ui_theme.py ui_widgets.py fa_icons.py everlive_multi.py
 VIEWER_ASSETS := fonts/fa-solid-900.ttf fonts/fa-brands-400.ttf \
                  fonts/LICENSE.txt fonts/chevron-down.png
 

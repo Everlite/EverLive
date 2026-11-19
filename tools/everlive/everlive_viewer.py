@@ -27,7 +27,7 @@ try:
     import service_manager
     import ui_theme
     import ui_widgets
-    from card_profile import detect_card_profile, CAP_EDID
+    from card_profile import detect_card_profile, identify_pci_card, CAP_EDID
     from ui_widgets import (IconButton, SegmentedControl, StatusChip,
                             ToggleRow)
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
@@ -40,7 +40,7 @@ except ImportError:  # imported as a module from another working directory
     import service_manager
     import ui_theme
     import ui_widgets
-    from card_profile import detect_card_profile, CAP_EDID
+    from card_profile import detect_card_profile, identify_pci_card, CAP_EDID
     from ui_widgets import (IconButton, SegmentedControl, StatusChip,
                             ToggleRow)
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
@@ -439,16 +439,7 @@ def _read_sysfs(path: str) -> str:
 
 def _identify_card(dev: str) -> Optional[str]:
     """Model slug for a supported capture card at sysfs path ``dev``."""
-    vendor = _read_sysfs(os.path.join(dev, "vendor")).lower()
-    device = _read_sysfs(os.path.join(dev, "device")).lower()
-    subsystem = _read_sysfs(os.path.join(dev, "subsystem_device")).lower()
-    if vendor == GC573_VENDOR_ID and device in GC573_DEVICE_IDS:
-        if device == "0x0054" and subsystem == GC570D_SUBSYSTEM_ID:
-            return MODEL_GC570D
-        return MODEL_GC573
-    if (vendor, device) in HWSUHD_PCI_IDS and subsystem == HWSUHD_SUBSYSTEM_ID:
-        return MODEL_HWSUHD
-    return None
+    return identify_pci_card(dev)
 
 
 def detect_capture_cards() -> List[Dict[str, Optional[str]]]:

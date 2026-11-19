@@ -127,26 +127,32 @@ def paused_state():
     return {"pid": pid, "holder": fields.get("holder") or "another user"}
 
 
-def probe(timeout: float = 0.25):
-    """Synchronously ask a running streamer who it is.
+def call(method: str, params=None, *, path=None, timeout: float = 0.5):
+    """Synchronously run one JSON-RPC ``method`` on a streamer's socket.
 
-    Returns the ``hello`` result as a dict, or ``None`` when no streamer is
-    listening.  Never raises: a stale socket, a permission error or a malformed
-    reply all mean "no usable remote session".
+    ``path`` defaults to :func:`socket_path`; multi-card sessions pass the
+    per-card socket instead.  Returns the ``result`` dict, or ``None`` when
+    nothing is listening or the reply is unusable.  Never raises.
     """
-    path = socket_path()
+    path = path or socket_path()
     if not os.path.exists(path):
         return None
+
+    request = {"jsonrpc": "2.0", "id": 1, "method": method}
+    if params is not None:
+        request["params"] = params
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
         sock.connect(path)
-        sock.sendall(b'{"jsonrpc":"2.0","id":1,"method":"hello"}\n')
+        sock.sendall(json.dumps(request).encode() + b"\n")
 
         buf = b""
         deadline = time.monotonic() + timeout
         while b"\n" not in buf and time.monotonic() < deadline:
+            if len(buf) > MAX_FRAME:
+                return None
             chunk = sock.recv(4096)
             if not chunk:
                 return None
@@ -162,6 +168,16 @@ def probe(timeout: float = 0.25):
         return None
     finally:
         sock.close()
+
+
+def probe(timeout: float = 0.25, path=None):
+    """Synchronously ask a running streamer who it is.
+
+    Returns the ``hello`` result as a dict, or ``None`` when no streamer is
+    listening.  Never raises: a stale socket, a permission error or a malformed
+    reply all mean "no usable remote session".
+    """
+    return call("hello", path=path, timeout=timeout)
 
 
 if QSocketNotifier is not None:

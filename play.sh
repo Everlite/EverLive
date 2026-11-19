@@ -145,6 +145,39 @@ detect_card_usb_sysfs() {
     done
 }
 
+hub_python() {
+    if [ -x "${SCRIPT_DIR}/tools/everlive/.venv/bin/python3" ]; then
+        echo "${SCRIPT_DIR}/tools/everlive/.venv/bin/python3"
+    elif [ -x "${SCRIPT_DIR}/tools/everlive/.venv/bin/python" ]; then
+        echo "${SCRIPT_DIR}/tools/everlive/.venv/bin/python"
+    else
+        command -v python3
+    fi
+}
+
+# --all: prepare every supported PCIe card (build, cap_ipc_lock, vfio-pci)
+# by running this script once per card with --prepare-only, then start one
+# engine per card with everlive_multi.py (remaining arguments go to it,
+# e.g. --record, --headless, --cards 84:00.0,85:00.0).
+if [ "${1:-}" = "--all" ]; then
+    shift
+    ALL_FOUND=0
+    for dev in /sys/bus/pci/devices/*; do
+        bdf="$(basename "$dev")"
+        card_model_for_bdf "$bdf" >/dev/null || continue
+        ALL_FOUND=1
+        echo "[*] Bereite $(card_model_for_bdf "$bdf") (${bdf}) vor..."
+        EVERLIVE_CARD_PCI="$bdf" EVERLIVE_CARD="" "${BASH_SOURCE[0]}" --prepare-only || \
+            echo "[!] Vorbereitung von ${bdf} fehlgeschlagen." >&2
+    done
+    if [ "$ALL_FOUND" -eq 0 ]; then
+        echo "[!] Keine unterstützte PCIe-Capture-Karte gefunden." >&2
+        exit 1
+    fi
+    ulimit -S -l unlimited 2>/dev/null || ulimit -S -l "$(ulimit -H -l)" 2>/dev/null || true
+    exec "$(hub_python)" "${SCRIPT_DIR}/tools/everlive/everlive_multi.py" "$@"
+fi
+
 CARD_MODEL=""
 CARD_PCI=""
 select_card_explicit || true
@@ -289,6 +322,11 @@ if [ -n "$CARD_PCI" ] && [ "$IS_VFIO" -eq 0 ]; then
             "${BIND_SCRIPT}" --bind || true
         fi
     fi
+fi
+
+# --prepare-only (used by --all): the card is built, capable and bound.
+if [ "${1:-}" = "--prepare-only" ]; then
+    exit 0
 fi
 
 # 3b. Optional V4L2 loopback sink (--v4l2 / --loopback)

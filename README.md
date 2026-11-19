@@ -287,6 +287,22 @@ build, CLI and hotkey details.
 
 ---
 
+## Running Several Cards at Once
+
+`./play.sh --all` prepares every supported PCIe card (build, `cap_ipc_lock`, vfio-pci binding) and starts one engine per card, each in its own window. Each engine gets its own control socket (`$XDG_RUNTIME_DIR/everlive-<model>-<pci>.sock`) and, for the GC573 and HWS UHD, its own PipeWire audio sink (`everlive-<model>-<pci>-audio`), so the cards' audio never mixes. The default `everlive.sock` stays free, so close the Console Hub first.
+
+```bash
+./play.sh --all                          # one window per card
+./play.sh --all --record                 # ... and start recording all of them
+./play.sh --all --headless --record --duration 600   # record 10 minutes, no windows
+./play.sh --all --cards 84:00.0,85:00.0  # pick cards by PCI address or model
+python3 tools/everlive/everlive_multi.py --list      # show detected cards
+```
+
+While it runs, type `r` + Enter to start/stop recording, `s` for status and `q` to quit (or send `SIGUSR1` to toggle recording). Every input is recorded to its own file from its frame store; all files of one take share a timestamp, e.g. `EverLive_20261119_154557_GC573_85-00-0_60fps.mkv` and `EverLive_20261119_154557_HWSUHD_84-00-0_60fps.mkv`. A GC570D records both HDMI inputs. Engine and `ffmpeg` logs are written to `~/.config/everlive/multi/`. Two cards of the same model cannot run together yet, because they would share a frame store name.
+
+---
+
 <a id="frame-generation-2x--3x--4x--lsfg-vk"></a>
 
 ## Frame Generation (2× / 3× / 4× · LSFG-VK & EverLive Native)
