@@ -45,11 +45,14 @@ class TokenTests(unittest.TestCase):
         for needle in ("QFrame#videoStageFrame",
                        "QFrame#telemetryDeck",
                        "QFrame#cardFrame",
-                       "QFrame#sourceGroup",
-                       "\nQPushButton {"):
+                       "QFrame#sourceGroup"):
             start = stylesheet.index(needle)
             block = stylesheet[start:stylesheet.index("}", start)]
             self.assertIn("border-radius: 12px", block, needle)
+
+        start = stylesheet.index("\nQPushButton {")
+        block = stylesheet[start:stylesheet.index("}", start)]
+        self.assertIn("border-radius: 8px", block)
 
     def test_no_stray_pixel_radii(self):
         import re
@@ -107,7 +110,7 @@ class TokenTests(unittest.TestCase):
 
         start = stylesheet.index("QComboBox QAbstractItemView::item {")
         block = stylesheet[start:stylesheet.index("}", start)]
-        self.assertIn("min-height: 30px", block)
+        self.assertIn("min-height: 32px", block)
         self.assertIn("border-radius: 0px", block)
 
         start = stylesheet.index("QComboBox:hover")

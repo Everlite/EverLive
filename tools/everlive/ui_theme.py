@@ -60,14 +60,14 @@ GAP = 10
 RADIUS = 12
 RADIUS_CSS = "12px"
 SEGMENT_RADIUS_CSS = "6px"
-HEADER_HEIGHT = 56
-BOTTOM_BAR_HEIGHT = 44
+HEADER_HEIGHT = 64
+BOTTOM_BAR_HEIGHT = 56
 INSPECTOR_WIDTH = 372
 
 # One control rhythm across the header, inspector, dialogs and bottom bar.
-CONTROL_H = 32
-BUTTON_H = 32
-INPUT_H = 32
+CONTROL_H = 36
+BUTTON_H = 36
+INPUT_H = 36
 
 FONT_STACK = ('-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, '
               '"Helvetica Neue", Arial, sans-serif')
@@ -483,7 +483,7 @@ QPushButton#iconButton {
     background-color: transparent;
     color: @TEXT_MUTED@;
     border: 1px solid transparent;
-    border-radius: @RADIUS@;
+    border-radius: 8px;
     padding: 0px;
 }
 QPushButton#iconButton:hover {
@@ -504,8 +504,8 @@ QComboBox {
     border: 1px solid #334155;
     border-bottom: 1px solid #334155;
     border-radius: 6px;
-    min-height: 32px;
-    max-height: 32px;
+    min-height: 34px;
+    max-height: 34px;
     padding: 0px 8px 0px 12px;
     font-size: 14px;
 }
@@ -538,21 +538,28 @@ QComboBox QAbstractItemView {
     border-bottom-left-radius: 6px;
     border-bottom-right-radius: 6px;
     padding: 0px;
-    outline: 0px;
+    margin: 0px;
+    outline: none;
+    show-decoration-selected: 1;
 }
 QComboBox QAbstractItemView::item {
-    min-height: 30px;
-    padding: 4px 12px;
+    min-height: 32px;
+    padding: 5px 14px;
+    margin: 0px;
     border: none;
     border-radius: 0px;
+    outline: none;
+    background-color: transparent;
     color: @TEXT@;
 }
 QComboBox QAbstractItemView::item:hover,
-QComboBox QAbstractItemView::item:selected {
+QComboBox QAbstractItemView::item:selected,
+QComboBox QAbstractItemView::item:focus {
     background-color: @BLUE@;
     color: @BLUE_TEXT@;
     border: none;
     border-radius: 0px;
+    outline: none;
 }
 QDoubleSpinBox {
     min-height: 22px;
@@ -641,11 +648,11 @@ QPushButton#actionButton:disabled {
 
 /* Buttons */
 QPushButton {
-    padding: 4px 14px;
+    padding: 0px 14px;
     font-size: 14px;
     font-weight: 600;
-    border-radius: @RADIUS@;
-    min-height: 26px;
+    border-radius: 8px;
+    min-height: 36px;
     background-color: @SURFACE_RAISED@;
     color: @TEXT@;
     border: 1px solid @GROUP_BORDER@;

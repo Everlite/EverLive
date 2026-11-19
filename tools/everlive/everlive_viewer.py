@@ -3138,7 +3138,7 @@ if HAS_QT:
             self.header_widget.setObjectName("headerBar")
             self.header_widget.setFixedHeight(ui_theme.HEADER_HEIGHT)
             top_bar = QHBoxLayout(self.header_widget)
-            top_bar.setContentsMargins(16, 12, 16, 12)
+            top_bar.setContentsMargins(16, 14, 16, 14)
             top_bar.setSpacing(8)
             self.top_bar = top_bar
 
@@ -3192,12 +3192,13 @@ if HAS_QT:
 
             if self.duo_mode:
                 saved_input = load_settings().get("duo_input", 0)
-                self.combo_duo_input = SegmentedControl(
-                    [("HDMI 1", 0), ("HDMI 2", 1)],
-                    button_height=32, object_name="sourceSegments")
-                self.combo_duo_input.setFixedHeight(ui_theme.CONTROL_H)
-                self.combo_duo_input.setCurrentData(
+                self.combo_duo_input = QComboBox()
+                self.combo_duo_input.addItem("HDMI 1", 0)
+                self.combo_duo_input.addItem("HDMI 2", 1)
+                self.combo_duo_input.setCurrentIndex(
                     1 if saved_input == 1 else 0)
+                self.combo_duo_input.setFixedHeight(ui_theme.CONTROL_H)
+                self.combo_duo_input.setMinimumWidth(108)
                 self.combo_duo_input.setToolTip(
                     "Select which Live Gamer DUO HDMI input is shown in the "
                     "gaming window and primary capture stream.")
@@ -3261,15 +3262,22 @@ if HAS_QT:
 
             top_bar.addSpacing(6)
 
-            self.seg_mode = SegmentedControl(
-                [("Simple", "simple"), ("Advanced", "advanced")],
-                button_height=32)
-            self.seg_mode.setFixedHeight(ui_theme.CONTROL_H)
-            self.seg_mode.setToolTip(
+            self.combo_ui_mode = QComboBox()
+            self.combo_ui_mode.addItem("Simple", "simple")
+            self.combo_ui_mode.addItem("Advanced", "advanced")
+            saved_mode = ("advanced"
+                          if str(self.saved_cfg.get("ui_mode", "simple"))
+                          == "advanced" else "simple")
+            self.combo_ui_mode.setCurrentIndex(
+                self.combo_ui_mode.findData(saved_mode))
+            self.combo_ui_mode.setFixedHeight(ui_theme.CONTROL_H)
+            self.combo_ui_mode.setMinimumWidth(124)
+            self.combo_ui_mode.setToolTip(
                 "Simple hides the inspector and telemetry deck. Advanced "
                 "exposes the full control surface.")
-            self.seg_mode.currentDataChanged.connect(self.on_ui_mode_changed)
-            top_bar.addWidget(self.seg_mode, 0, Qt.AlignVCenter)
+            self.combo_ui_mode.currentIndexChanged.connect(
+                self.on_ui_mode_changed)
+            top_bar.addWidget(self.combo_ui_mode, 0, Qt.AlignVCenter)
 
             top_bar.addSpacing(4)
 
@@ -3286,7 +3294,7 @@ if HAS_QT:
                 size=ui_theme.CONTROL_H, icon_size=18)
             self.btn_github.clicked.connect(
                 lambda: QDesktopServices.openUrl(
-                    QUrl("https://github.com/PolygonPrincess/EverLive")))
+                    QUrl("https://github.com/everlite/everlive")))
             top_bar.addWidget(self.btn_github, 0, Qt.AlignVCenter)
 
             self.btn_help = IconButton(
@@ -3631,7 +3639,7 @@ if HAS_QT:
 
             self.inspector_tabbar = SegmentedControl(
                 [("Video", 0), ("Audio && Stream", 1), ("System", 2)],
-                button_height=32)
+                button_height=36)
             self.inspector_tabbar.setFixedHeight(ui_theme.CONTROL_H)
             dock_layout.addWidget(self.inspector_tabbar)
 
@@ -4320,7 +4328,7 @@ if HAS_QT:
             self.bottom_box.setObjectName("bottomBar")
             self.bottom_box.setFixedHeight(ui_theme.BOTTOM_BAR_HEIGHT)
             b_layout = QHBoxLayout(self.bottom_box)
-            b_layout.setContentsMargins(12, 8, 12, 8)
+            b_layout.setContentsMargins(16, 10, 16, 10)
             b_layout.setSpacing(10)
 
             initial_vol = int(self.saved_cfg.get("volume", 1.0) * 100)
@@ -4503,17 +4511,24 @@ if HAS_QT:
         # -----------------------------------------------------------------
         # Simple / Advanced shell modes
         # -----------------------------------------------------------------
-        def on_ui_mode_changed(self, mode):
+        def on_ui_mode_changed(self, index_or_mode):
+            mode = index_or_mode
+            if (hasattr(self, "combo_ui_mode")
+                    and isinstance(index_or_mode, int)):
+                mode = (self.combo_ui_mode.itemData(index_or_mode)
+                        or "simple")
             self._apply_ui_mode(str(mode))
 
         def _toggle_ui_mode(self):
             mode = ("advanced"
                     if getattr(self, "ui_mode", "simple") == "simple"
                     else "simple")
-            if hasattr(self, "seg_mode"):
-                self.seg_mode.setCurrentData(mode)
-            else:
-                self._apply_ui_mode(mode)
+            if hasattr(self, "combo_ui_mode"):
+                index = self.combo_ui_mode.findData(mode)
+                if index >= 0:
+                    self.combo_ui_mode.setCurrentIndex(index)
+                    return
+            self._apply_ui_mode(mode)
 
         def on_help_clicked(self):
             self._open_shortcuts_dialog()
@@ -4522,8 +4537,12 @@ if HAS_QT:
             mode = "advanced" if str(mode).lower() == "advanced" else "simple"
             self.ui_mode = mode
             advanced = mode == "advanced"
-            if hasattr(self, "seg_mode") and self.seg_mode.currentData() != mode:
-                self.seg_mode.setCurrentData(mode)
+            if hasattr(self, "combo_ui_mode"):
+                index = self.combo_ui_mode.findData(mode)
+                if index >= 0 and index != self.combo_ui_mode.currentIndex():
+                    self.combo_ui_mode.blockSignals(True)
+                    self.combo_ui_mode.setCurrentIndex(index)
+                    self.combo_ui_mode.blockSignals(False)
             if hasattr(self, "right_dock"):
                 self.right_dock.setVisible(
                     advanced and not self._cinema_fullscreen)
@@ -4546,15 +4565,11 @@ if HAS_QT:
                          else getattr(self, "_card_full_label", ""))
                 if label:
                     self.lbl_card_title.setText(label)
-            if hasattr(self, "btn_github"):
-                self.btn_github.setVisible(self.width() >= 1240)
-            if hasattr(self, "btn_discord"):
-                self.btn_discord.setVisible(self.width() >= 1220)
             if hasattr(self, "top_bar"):
                 self.top_bar.setSpacing(6 if narrow else 8)
                 self.top_bar.setContentsMargins(
-                    12 if narrow else 16, 12,
-                    12 if narrow else 16, 12)
+                    12 if narrow else 16, 14,
+                    12 if narrow else 16, 14)
             if hasattr(self, "lbl_hints"):
                 self.lbl_hints.setVisible(False)
             # The deck drops secondary readouts before they start clipping.
