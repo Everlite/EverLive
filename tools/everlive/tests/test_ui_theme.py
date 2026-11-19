@@ -95,6 +95,25 @@ class TokenTests(unittest.TestCase):
         self.assertIn("border-left: 1px solid #334155", block)
         self.assertIn("width: 28px", block)
 
+    def test_action_group_and_connected_combo_styles(self):
+        stylesheet = ui_theme.build_stylesheet()
+        self.assertIn("QWidget#actionGroup", stylesheet)
+        self.assertIn("QPushButton#actionStart", stylesheet)
+
+        start = stylesheet.index("QComboBox:on")
+        block = stylesheet[start:stylesheet.index("}", start)]
+        self.assertIn("border-bottom-left-radius: 0px", block)
+        self.assertIn("border-bottom-right-radius: 0px", block)
+
+        start = stylesheet.index("QComboBox QAbstractItemView::item {")
+        block = stylesheet[start:stylesheet.index("}", start)]
+        self.assertIn("min-height: 30px", block)
+        self.assertIn("border-radius: 0px", block)
+
+        start = stylesheet.index("QComboBox:hover")
+        block = stylesheet[start:stylesheet.index("}", start)]
+        self.assertIn("#4A6FA5", block)
+
     def test_missing_tokens_reports_typos(self):
         found = ui_theme.missing_tokens("color: @NOT_A_TOKEN@;")
         self.assertEqual(found, ["@NOT_A_TOKEN@"])

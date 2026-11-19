@@ -13,14 +13,12 @@ try:
     import fa_icons
     import ui_theme
     from PySide6.QtCore import (
-        Property, QEasingCurve, QEvent, QPropertyAnimation, QRectF, QSize, Qt,
-        Signal,
+        Property, QEasingCurve, QEvent, QPropertyAnimation, QSize, Qt, Signal,
     )
     from PySide6.QtGui import QColor, QIcon, QPainter, QPen
     from PySide6.QtWidgets import (
-        QAbstractButton, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel,
-        QPushButton, QSizePolicy, QStyle, QStyleOptionButton, QStylePainter,
-        QVBoxLayout, QWidget,
+        QAbstractButton, QButtonGroup, QHBoxLayout, QLabel, QPushButton,
+        QSizePolicy, QVBoxLayout, QWidget,
     )
     HAS_QT = True
 except ImportError:  # allows --cli and CI runs without PySide6 installed
@@ -198,10 +196,11 @@ if HAS_QT:
             # and group outline.
             self.setAttribute(Qt.WA_StyledBackground, True)
             self._button_height = int(button_height)
+            self.setFixedHeight(self._button_height)
             self._layout = QHBoxLayout(self)
             # No gutter between segments: adjacent edges stay square so the
             # selected slot fills its half of the control like the mockup.
-            self._layout.setContentsMargins(1, 1, 1, 1)
+            self._layout.setContentsMargins(0, 0, 0, 0)
             self._layout.setSpacing(0)
             self._group = QButtonGroup(self)
             self._group.setExclusive(True)
@@ -338,125 +337,6 @@ if HAS_QT:
 
         def state_text(self) -> str:
             return self._text
-
-    class IconTextButton(QPushButton):
-        """Text button with a fixed left icon slot, divider and label."""
-
-        SLOT = 28
-
-        def __init__(self, text: str, icon_name: str = "", parent=None, *,
-                     icon_size: int = 14, slot: int = SLOT,
-                     text_color: str = "#E7EBF2",
-                     divider_color: str = "#334155"):
-            super().__init__("", parent)
-            self._label_text = str(text)
-            self.setAccessibleName(self._label_text)
-            self._icon_name = icon_name
-            self._icon_size = int(icon_size)
-            self._slot = int(slot)
-            self._text_color = text_color
-            self._divider_color = divider_color
-            self.setMinimumHeight(32)
-
-            layout = QHBoxLayout(self)
-            layout.setContentsMargins(8, 0, 8, 0)
-            layout.setSpacing(0)
-
-            self._icon_label = QLabel(self)
-            self._icon_label.setFixedWidth(self._slot)
-            self._icon_label.setAlignment(Qt.AlignCenter)
-            self._icon_label.setAttribute(Qt.WA_TransparentForMouseEvents)
-            self._icon_label.setStyleSheet("background: transparent;")
-            layout.addWidget(self._icon_label, 0, Qt.AlignVCenter)
-
-            self._divider = QFrame(self)
-            self._divider.setFixedWidth(1)
-            self._divider.setFixedHeight(18)
-            self._divider.setStyleSheet(
-                f"background-color: {divider_color}; border: none;")
-            self._divider.setAttribute(Qt.WA_TransparentForMouseEvents)
-            layout.addWidget(self._divider, 0, Qt.AlignVCenter)
-
-            layout.addSpacing(8)
-
-            self._text_label = QLabel(self._label_text, self)
-            self._text_label.setAttribute(Qt.WA_TransparentForMouseEvents)
-            self._text_label.setStyleSheet(
-                f"color: {text_color}; background: transparent; "
-                "font-size: 14px; font-weight: 600;")
-            layout.addWidget(self._text_label, 1, Qt.AlignVCenter)
-
-            self._reload_icon()
-            self.toggled.connect(lambda _checked: self._sync_text_color())
-
-        def _reload_icon(self):
-            if (fa_icons is not None and fa_icons.available()
-                    and self._icon_name):
-                self._icon_label.setPixmap(
-                    fa_icons.icon(self._icon_name, self._text_color,
-                                  self._icon_size).pixmap(
-                                      self._icon_size, self._icon_size))
-            else:
-                self._icon_label.clear()
-
-        def _sync_text_color(self):
-            if not hasattr(self, "_text_label"):
-                return
-            if not self.isEnabled():
-                color = "#6E7485"
-            elif self.isChecked():
-                color = "#E4EEFF"
-            else:
-                color = self._text_color
-            self._text_label.setStyleSheet(
-                f"color: {color}; background: transparent; "
-                "font-size: 14px; font-weight: 600;")
-
-        def set_icon_name(self, name: str, color: str = ""):
-            self._icon_name = str(name)
-            if color:
-                self._text_color = color
-            self._reload_icon()
-            self._sync_text_color()
-
-        def icon_name(self) -> str:
-            return self._icon_name
-
-        def setText(self, text: str):  # noqa: N802 (Qt casing)
-            self._label_text = str(text)
-            self.setAccessibleName(self._label_text)
-            if hasattr(self, "_text_label"):
-                self._text_label.setText(self._label_text)
-                self.updateGeometry()
-
-        def text(self) -> str:
-            return self._label_text
-
-        def changeEvent(self, event):  # noqa: N802 (Qt casing)
-            super().changeEvent(event)
-            if event.type() == QEvent.EnabledChange:
-                self._sync_text_color()
-
-        def sizeHint(self):
-            advance = self._text_label.fontMetrics().horizontalAdvance(
-                self._label_text)
-            width = self._slot + 1 + 8 + advance + 16
-            return QSize(max(64, width), 32)
-
-        def minimumSizeHint(self):
-            return self.sizeHint()
-
-    class SwatchComboBox(QComboBox):
-        """Combo with a divider after the leading colour swatch."""
-
-        def paintEvent(self, event):  # noqa: N802 (Qt casing)
-            super().paintEvent(event)
-            index = self.currentIndex()
-            if index < 0 or self.itemIcon(index).isNull():
-                return
-            painter = QPainter(self)
-            painter.setPen(QPen(QColor("#334155"), 1))
-            painter.drawLine(29, 7, 29, self.height() - 8)
 
     class IconButton(QPushButton):
         """Square, borderless Font Awesome icon button."""

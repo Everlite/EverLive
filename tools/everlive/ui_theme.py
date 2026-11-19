@@ -60,7 +60,7 @@ GAP = 10
 RADIUS = 12
 RADIUS_CSS = "12px"
 SEGMENT_RADIUS_CSS = "6px"
-HEADER_HEIGHT = 48
+HEADER_HEIGHT = 56
 BOTTOM_BAR_HEIGHT = 44
 INSPECTOR_WIDTH = 372
 
@@ -504,13 +504,19 @@ QComboBox {
     border: 1px solid #334155;
     border-bottom: 1px solid #334155;
     border-radius: 6px;
-    min-height: 26px;
-    padding: 2px 9px 2px 12px;
+    min-height: 32px;
+    max-height: 32px;
+    padding: 0px 8px 0px 12px;
     font-size: 14px;
 }
-QComboBox:hover {
-    border-color: @ACCENT@;
+QComboBox:hover, QComboBox:focus {
+    border-color: @BLUE_HOVER@;
     background-color: @SURFACE_HOVER@;
+}
+QComboBox:on {
+    border-color: @BLUE_HOVER@;
+    border-bottom-left-radius: 0px;
+    border-bottom-right-radius: 0px;
 }
 QComboBox::drop-down {
     border: none;
@@ -525,9 +531,28 @@ QComboBox::down-arrow {
 QComboBox QAbstractItemView {
     background-color: @SURFACE_RAISED@;
     color: @TEXT@;
-    border: 1px solid @BORDER_STRONG@;
-    selection-background-color: @BLUE@;
-    selection-color: @BLUE_TEXT@;
+    border: 1px solid @BLUE_HOVER@;
+    border-top: none;
+    border-top-left-radius: 0px;
+    border-top-right-radius: 0px;
+    border-bottom-left-radius: 6px;
+    border-bottom-right-radius: 6px;
+    padding: 0px;
+    outline: 0px;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 30px;
+    padding: 4px 12px;
+    border: none;
+    border-radius: 0px;
+    color: @TEXT@;
+}
+QComboBox QAbstractItemView::item:hover,
+QComboBox QAbstractItemView::item:selected {
+    background-color: @BLUE@;
+    color: @BLUE_TEXT@;
+    border: none;
+    border-radius: 0px;
 }
 QDoubleSpinBox {
     min-height: 22px;
@@ -562,6 +587,56 @@ QTextEdit {
     border: 1px solid @BORDER@;
     border-radius: @RADIUS@;
     padding: 6px;
+}
+
+/* Fused header action group */
+QWidget#actionGroup {
+    background: transparent;
+    border: 1px solid @GROUP_BORDER@;
+    border-radius: 6px;
+}
+QPushButton#actionButton,
+QPushButton#actionStart {
+    border: none;
+    border-radius: 0px;
+    padding: 0px;
+}
+QPushButton#actionButton[actionPos="first"],
+QPushButton#actionStart[actionPos="first"] {
+    border-top-left-radius: 6px;
+    border-bottom-left-radius: 6px;
+}
+QPushButton#actionButton[actionPos="last"],
+QPushButton#actionStart[actionPos="last"] {
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+}
+QPushButton#actionButton[actionPos="only"],
+QPushButton#actionStart[actionPos="only"] {
+    border-radius: 6px;
+}
+QPushButton#actionButton[actionPos="first"],
+QPushButton#actionButton[actionPos="middle"],
+QPushButton#actionStart[actionPos="first"],
+QPushButton#actionStart[actionPos="middle"] {
+    border-right: 1px solid @GROUP_BORDER@;
+}
+QPushButton#actionStart {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #25856B, stop:1 #36A888);
+}
+QPushButton#actionStart:hover {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #2B9679, stop:1 #40BA98);
+}
+QPushButton#actionButton {
+    background-color: transparent;
+}
+QPushButton#actionButton:hover {
+    background-color: @SURFACE_HOVER@;
+}
+QPushButton#actionButton:disabled {
+    background-color: transparent;
 }
 
 /* Buttons */

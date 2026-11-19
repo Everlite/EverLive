@@ -151,6 +151,12 @@ class WidgetTests(unittest.TestCase):
         control = ui_widgets.SegmentedControl([("A", 1), ("B", 2)])
         self.assertTrue(control.testAttribute(Qt.WA_StyledBackground))
 
+    def test_segmented_control_default_height(self):
+        control = ui_widgets.SegmentedControl([("A", 1), ("B", 2)])
+        self.assertEqual(control.height(), 32)
+        self.assertEqual(control._buttons[0].height(), 32)
+        self.assertEqual(control._buttons[1].height(), 32)
+
     def test_segment_button_height(self):
         control = ui_widgets.SegmentedControl(
             [("A", 1), ("B", 2)], button_height=32)
@@ -169,19 +175,6 @@ class WidgetTests(unittest.TestCase):
     def test_status_chip_optional_dot(self):
         chip = ui_widgets.StatusChip("Live", "live", dot=True)
         self.assertTrue(chip.text().startswith("●"))
-
-    def test_icon_text_button_structure(self):
-        from PySide6.QtWidgets import QFrame, QLabel
-        button = ui_widgets.IconTextButton(
-            "Start Gaming", "play", text_color="#FFFFFF")
-        self.assertEqual(button.text(), "Start Gaming")
-        self.assertEqual(button.icon_name(), "play")
-        self.assertIsNotNone(button.findChild(QFrame))
-        labels = button.findChildren(QLabel)
-        self.assertGreaterEqual(len(labels), 2)
-        button.setText("Local Capture Active")
-        self.assertEqual(button.text(), "Local Capture Active")
-        self.assertEqual(button._text_label.text(), "Local Capture Active")
 
     def test_icon_button_geometry(self):
         button = ui_widgets.IconButton("help", "Help", size=30)
