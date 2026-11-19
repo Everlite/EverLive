@@ -456,23 +456,6 @@ struct dirent *readdir(DIR *dirp)
 		return ent;
 	}
 
-	if (tr->is_sysfs) {
-		if ((unsigned int)tr->step < c->port_count) {
-			unsigned int idx = (unsigned int)tr->step++;
-
-			pthread_mutex_unlock(&g_v4l2_lock);
-			memset(&tls_fake_dirent, 0, sizeof(tls_fake_dirent));
-			tls_fake_dirent.d_ino = 7000 + idx;
-			tls_fake_dirent.d_type = DT_DIR;
-			snprintf(tls_fake_dirent.d_name,
-				 sizeof(tls_fake_dirent.d_name),
-				 "video%u", c->node_base + idx);
-			return &tls_fake_dirent;
-		}
-		pthread_mutex_unlock(&g_v4l2_lock);
-		return NULL;
-	}
-
 	if (ent) {
 		if (is_virtual_node_name(ent->d_name)) {
 			pthread_mutex_unlock(&g_v4l2_lock);
@@ -483,11 +466,13 @@ struct dirent *readdir(DIR *dirp)
 	}
 	if ((unsigned int)tr->step < c->port_count) {
 		unsigned int idx = (unsigned int)tr->step++;
+		unsigned char dtype = tr->is_sysfs ? DT_LNK : DT_CHR;
+		ino_t ino = (tr->is_sysfs ? 7000 : 6000) + idx;
 
 		pthread_mutex_unlock(&g_v4l2_lock);
 		memset(&tls_fake_dirent, 0, sizeof(tls_fake_dirent));
-		tls_fake_dirent.d_ino = 6000 + idx;
-		tls_fake_dirent.d_type = DT_CHR;
+		tls_fake_dirent.d_ino = ino;
+		tls_fake_dirent.d_type = dtype;
 		snprintf(tls_fake_dirent.d_name, sizeof(tls_fake_dirent.d_name),
 			 "video%u", c->node_base + idx);
 		return &tls_fake_dirent;
