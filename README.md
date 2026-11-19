@@ -100,7 +100,7 @@ sudo make install          # optional system-wide install (PREFIX=/usr/local, in
 | <kbd>s</kbd> or <kbd>F10</kbd> *(GC573)* | Toggle overlay and mouse cursor (Streamer Mode toggle; `--streamer-mode` starts with both hidden) |
 | <kbd>Esc</kbd> or <kbd>q</kbd> | Exit Cinema Fullscreen (embedded mode) or exit pop-out window (or dismiss F1 help) |
 
-When the OSD is enabled, the identity/control card is the normal readout in the embedded Hub feed, pop-out window and fullscreen. It shows the card/input, source→output route, audio format and a GUI-style control strip. The HDMI, Aspect, Scale, PiP, volume, mute and fullscreen controls are clickable in the embedded Hub feed, pop-out window and fullscreen; fullscreen requests from the embedded card are forwarded to the Hub. <kbd>Tab</kbd>/<kbd>O</kbd> hides it; use `everlive-ctl runtime osd-mode compact` if you prefer the old compact stats line.
+When the OSD is enabled, the identity/control card is the normal readout in the embedded Hub feed, pop-out window and fullscreen. It shows the card/input, source→output route, audio format and a GUI-style control strip. The HDMI, Aspect, Scale, PiP, volume, mute and fullscreen controls are clickable in the embedded Hub feed, pop-out window and fullscreen; Aspect and Scale show their current values, actions raise OSD toasts, and fullscreen requests from the embedded card are forwarded to the Hub. <kbd>Tab</kbd>/<kbd>O</kbd> hides it; use `everlive-ctl runtime osd-mode compact` if you prefer the old compact stats line.
 
 *VSync is a launch option (`--vsync` / Hub checkbox) and cannot be toggled while streaming. Volume, mute, and scaling can also be controlled through the EverLive Console Hub GUI.*
 

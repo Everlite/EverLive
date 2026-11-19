@@ -538,6 +538,12 @@ struct everlive_sdl {
 	float popup_scale;
 	int popup_selected;
 	int popup_volume;
+	SDL_Texture *toast_texture;
+	char toast_text[96];
+	char toast_built[96];
+	uint64_t toast_until_ns;
+	int toast_w;
+	int toast_h;
 	SDL_AudioDeviceID audio_dev;
 	bool fullscreen;
 	unsigned long parent_winid;
@@ -888,6 +894,12 @@ static void sdl_presentation_close(struct everlive_sdl *sdl)
 	sdl->overlay_built_ns = 0;
 	everlive_osd_destroy_card(&sdl->card);
 	everlive_osd_destroy_popup(&sdl->popup);
+	if (sdl->toast_texture)
+		SDL_DestroyTexture(sdl->toast_texture);
+	sdl->toast_texture = NULL;
+	sdl->toast_text[0] = '\0';
+	sdl->toast_built[0] = '\0';
+	sdl->toast_until_ns = 0;
 	sdl->popup_open = false;
 	sdl->popup_dirty = false;
 	if (sdl->renderer)
@@ -1096,8 +1108,11 @@ static bool sdl_card_mode_active(struct everlive_state *st,
 				 struct everlive_sdl *sdl);
 static void sdl_place_osd(SDL_Rect *dst, int width, int height, float scale,
 			  int win_w, int win_h, int pos);
+static void sdl_scale_rect(SDL_Rect *dst, const SDL_Rect *src,
+			   SDL_Renderer *renderer, int win_w, int win_h);
 static void sdl_render_popup(struct everlive_sdl *sdl, int win_w, int win_h,
 			     float scale);
+static void sdl_render_toast(struct everlive_sdl *sdl, int win_w, int win_h);
 
 static void sdl_render_frame(struct everlive_state *st, struct everlive_sdl *sdl)
 {
@@ -1142,14 +1157,23 @@ static void sdl_render_frame(struct everlive_state *st, struct everlive_sdl *sdl
 		int pos = atomic_load_explicit(&st->osd_pos, __ATOMIC_RELAXED);
 
 		if (sdl_card_mode_active(st, sdl) && sdl->card.texture) {
-			float scale = (float)out_h / 1080.0f;
+			int win_w = 0;
+			int win_h = 0;
+			float scale;
+			SDL_Rect draw;
 
-			sdl_place_osd(&sdl->card_dest, sdl->card.width,
-				      sdl->card.height, scale, out_w, out_h,
-				      pos);
-			SDL_RenderCopy(sdl->renderer, sdl->card.texture, NULL,
-				       &sdl->card_dest);
-			sdl_render_popup(sdl, out_w, out_h, scale);
+			SDL_GetWindowSize(sdl->window, &win_w, &win_h);
+			if (win_w > 0 && win_h > 0) {
+				scale = (float)win_h / 1080.0f;
+				sdl_place_osd(&sdl->card_dest,
+					      sdl->card.width, sdl->card.height,
+					      scale, win_w, win_h, pos);
+				sdl_scale_rect(&draw, &sdl->card_dest,
+					       sdl->renderer, win_w, win_h);
+				SDL_RenderCopy(sdl->renderer,
+					       sdl->card.texture, NULL, &draw);
+				sdl_render_popup(sdl, win_w, win_h, scale);
+			}
 		} else if (sdl->overlay) {
 			const int margin = 24;
 			SDL_Rect overlay_dst = {
@@ -1174,6 +1198,14 @@ static void sdl_render_frame(struct everlive_state *st, struct everlive_sdl *sdl
 		}
 	}
 
+	if (atomic_load_explicit(&st->osd, __ATOMIC_RELAXED)) {
+		int win_w = 0;
+		int win_h = 0;
+
+		SDL_GetWindowSize(sdl->window, &win_w, &win_h);
+		if (win_w > 0 && win_h > 0)
+			sdl_render_toast(sdl, win_w, win_h);
+	}
 	SDL_RenderPresent(sdl->renderer);
 }
 
@@ -1206,6 +1238,9 @@ static void sdl_card_update(struct everlive_state *st,
 	char title[160];
 	char source[40];
 	char target[220];
+	char aspect_lbl[64];
+	char scale_lbl[64];
+	int scale_mode = atomic_load_explicit(&st->scale, __ATOMIC_RELAXED);
 	unsigned int rate = shm_port_rate(st, port);
 	int vol = atomic_load_explicit(&st->volume_pct, __ATOMIC_RELAXED);
 	bool muted = atomic_load_explicit(&st->muted, __ATOMIC_RELAXED);
@@ -1233,8 +1268,12 @@ static void sdl_card_update(struct everlive_state *st,
 	snap.route_source = source;
 	snap.route_target = target;
 	snap.input_label = shm_port_name(port);
-	snap.aspect_label = "Aspect";
-	snap.scale_label = "Scale";
+	snprintf(aspect_lbl, sizeof(aspect_lbl), "Aspect: %s",
+		 aspect_mode_label(aspect));
+	snprintf(scale_lbl, sizeof(scale_lbl), "Scale: %s",
+		 scale_mode == EVERLIVE_SCALE_INTEGER ? "Integer" : "Fit");
+	snap.aspect_label = aspect_lbl;
+	snap.scale_label = scale_lbl;
 	snap.show_input = true;
 	snap.pip = atomic_load_explicit(&st->pip, __ATOMIC_RELAXED);
 	snap.muted = muted;
@@ -1258,6 +1297,24 @@ static const struct everlive_osd_hitbox *sdl_card_hit(
 	return NULL;
 }
 
+static void sdl_scale_rect(SDL_Rect *dst, const SDL_Rect *src,
+			   SDL_Renderer *renderer, int win_w, int win_h)
+{
+	int out_w = 0;
+	int out_h = 0;
+
+	if (src->w <= 0 || src->h <= 0 || win_w <= 0 || win_h <= 0 ||
+	    !renderer || SDL_GetRendererOutputSize(renderer, &out_w, &out_h) < 0 ||
+	    out_w <= 0 || out_h <= 0) {
+		*dst = *src;
+		return;
+	}
+	dst->x = lroundf((float)src->x * (float)out_w / (float)win_w);
+	dst->y = lroundf((float)src->y * (float)out_h / (float)win_h);
+	dst->w = lroundf((float)src->w * (float)out_w / (float)win_w);
+	dst->h = lroundf((float)src->h * (float)out_h / (float)win_h);
+}
+
 static void sdl_place_osd(SDL_Rect *dst, int width, int height, float scale,
 			  int win_w, int win_h, int pos)
 {
@@ -1275,6 +1332,50 @@ static void sdl_place_osd(SDL_Rect *dst, int width, int height, float scale,
 		dst->x = 0;
 	if (dst->y < 0)
 		dst->y = 0;
+}
+
+static void sdl_toast(struct everlive_sdl *sdl, const char *message)
+{
+	if (!message || !*message)
+		return;
+	snprintf(sdl->toast_text, sizeof(sdl->toast_text), "%s", message);
+	sdl->toast_until_ns = now_ns() + 2200000000ULL;
+	sdl->toast_built[0] = '\0';
+	if (sdl->toast_texture) {
+		SDL_DestroyTexture(sdl->toast_texture);
+		sdl->toast_texture = NULL;
+	}
+}
+
+static void sdl_render_toast(struct everlive_sdl *sdl, int win_w, int win_h)
+{
+	SDL_Rect dst;
+	SDL_Rect draw;
+	float scale;
+
+	if (!sdl->toast_text[0] || now_ns() >= sdl->toast_until_ns)
+		return;
+	if (!sdl->toast_texture ||
+	    strcmp(sdl->toast_built, sdl->toast_text) != 0) {
+		if (!everlive_osd_build_text(sdl->renderer, sdl->toast_text,
+					     win_h, &sdl->toast_texture,
+					     &sdl->toast_w, &sdl->toast_h,
+					     NULL))
+			return;
+		snprintf(sdl->toast_built, sizeof(sdl->toast_built), "%s",
+			 sdl->toast_text);
+	}
+	scale = (float)win_h / 1080.0f;
+	dst.w = sdl->toast_w;
+	dst.h = sdl->toast_h;
+	dst.x = (win_w - dst.w) / 2;
+	dst.y = win_h - dst.h - (int)(24.0f * scale + 0.5f);
+	if (dst.x < 8)
+		dst.x = 8;
+	if (dst.y < 8)
+		dst.y = 8;
+	sdl_scale_rect(&draw, &dst, sdl->renderer, win_w, win_h);
+	SDL_RenderCopy(sdl->renderer, sdl->toast_texture, NULL, &draw);
 }
 
 static void sdl_popup_build(struct everlive_sdl *sdl, float scale)
@@ -1321,8 +1422,13 @@ static void sdl_render_popup(struct everlive_sdl *sdl, int win_w, int win_h,
 		if (sdl->popup_dest.y < 10)
 			sdl->popup_dest.y = 10;
 	}
-	SDL_RenderCopy(sdl->renderer, sdl->popup.texture, NULL,
-		       &sdl->popup_dest);
+	{
+		SDL_Rect draw;
+
+		sdl_scale_rect(&draw, &sdl->popup_dest, sdl->renderer,
+			       win_w, win_h);
+		SDL_RenderCopy(sdl->renderer, sdl->popup.texture, NULL, &draw);
+	}
 }
 
 static void sdl_apply_volume(struct everlive_state *st,
@@ -1344,6 +1450,7 @@ static void sdl_apply_mute(struct everlive_state *st,
 {
 	(void)st;
 	gc570d_everlive_set_mute(muted);
+	sdl_toast(sdl, muted ? "Mute: On" : "Mute: Off");
 	sdl_card_invalidate(sdl);
 }
 
@@ -1352,11 +1459,13 @@ static void sdl_toggle_fullscreen(struct everlive_sdl *sdl)
 	if (sdl->parent_winid != 0) {
 		printf("[HUB] TOGGLE_FULLSCREEN\n");
 		fflush(stdout);
+		sdl_toast(sdl, "Fullscreen requested");
 		return;
 	}
 	sdl->fullscreen = !sdl->fullscreen;
 	SDL_SetWindowFullscreen(sdl->window, sdl->fullscreen ?
 				SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+	sdl_toast(sdl, sdl->fullscreen ? "Fullscreen: On" : "Fullscreen: Off");
 	sdl_card_invalidate(sdl);
 }
 
@@ -1364,8 +1473,12 @@ static void sdl_cycle_aspect(struct everlive_state *st,
 			     struct everlive_sdl *sdl)
 {
 	int next = (atomic_load_explicit(&st->aspect, __ATOMIC_RELAXED) + 1) & 3;
+	char message[64];
 
 	atomic_store_explicit(&st->aspect, next, __ATOMIC_RELAXED);
+	snprintf(message, sizeof(message), "Aspect: %s",
+		 aspect_mode_label(next));
+	sdl_toast(sdl, message);
 	sdl_card_invalidate(sdl);
 }
 
@@ -1375,8 +1488,12 @@ static void sdl_cycle_scale(struct everlive_state *st,
 	int next = atomic_load_explicit(&st->scale, __ATOMIC_RELAXED) ==
 		EVERLIVE_SCALE_INTEGER ? EVERLIVE_SCALE_FIT :
 		EVERLIVE_SCALE_INTEGER;
+	char message[64];
 
 	atomic_store_explicit(&st->scale, next, __ATOMIC_RELAXED);
+	snprintf(message, sizeof(message), "Scale: %s",
+		 next == EVERLIVE_SCALE_INTEGER ? "Integer" : "Fit");
+	sdl_toast(sdl, message);
 	sdl_card_invalidate(sdl);
 }
 
@@ -1479,10 +1596,12 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 				if (SDL_PointInRect(&point,
 						    &sdl->popup.input_rows[0])) {
 					gc570d_everlive_set_port(0);
+					sdl_toast(sdl, "Input: HDMI 1");
 					sdl_card_invalidate(sdl);
 				} else if (SDL_PointInRect(&point,
 							   &sdl->popup.input_rows[1])) {
 					gc570d_everlive_set_port(1);
+					sdl_toast(sdl, "Input: HDMI 2");
 					sdl_card_invalidate(sdl);
 				}
 				sdl_close_popup(sdl);
@@ -1505,12 +1624,14 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 	case EVERLIVE_OSD_ACTION_SCALE:
 		sdl_cycle_scale(st, sdl);
 		break;
-	case EVERLIVE_OSD_ACTION_PIP:
-		atomic_store_explicit(&st->pip,
-			!atomic_load_explicit(&st->pip, __ATOMIC_RELAXED),
-			__ATOMIC_RELAXED);
+	case EVERLIVE_OSD_ACTION_PIP: {
+		bool next = !atomic_load_explicit(&st->pip, __ATOMIC_RELAXED);
+
+		atomic_store_explicit(&st->pip, next, __ATOMIC_RELAXED);
+		sdl_toast(sdl, next ? "PiP: On" : "PiP: Off");
 		sdl_card_invalidate(sdl);
 		break;
+	}
 	case EVERLIVE_OSD_ACTION_VOLUME:
 		sdl->popup_volume = atomic_load_explicit(&st->volume_pct,
 							 __ATOMIC_RELAXED);

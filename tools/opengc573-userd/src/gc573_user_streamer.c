@@ -1972,6 +1972,8 @@ static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
 	char target[220];
 	char output[32];
 	char audio[48];
+	char aspect_lbl[64];
+	char scale_lbl[64];
 	int win_w = 0;
 	int win_h = 0;
 	float scale;
@@ -1998,6 +2000,10 @@ static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
 	osd_audio_label(audio_text, audio, sizeof(audio));
 	snprintf(title, sizeof(title), "GC573 : HDMI (%s)",
 		 aspect_name(g_aspect));
+	snprintf(aspect_lbl, sizeof(aspect_lbl), "Aspect: %s",
+		 aspect_name(g_aspect));
+	snprintf(scale_lbl, sizeof(scale_lbl), "Scale: %s",
+		 scale_name(g_scale_mode));
 	snprintf(source, sizeof(source), "%ux%u", in_w, in_h);
 	snprintf(target, sizeof(target), "%s %s | %s", output,
 		 chroma_text && *chroma_text ? chroma_text : "YUV",
@@ -2010,8 +2016,8 @@ static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
 	snap.route_source = source;
 	snap.route_target = target;
 	snap.input_label = NULL;
-	snap.aspect_label = "Aspect";
-	snap.scale_label = "Scale";
+	snap.aspect_label = aspect_lbl;
+	snap.scale_label = scale_lbl;
 	snap.show_input = false;
 	snap.pip = false;
 	snap.muted = __atomic_load_n(&g_audio_mute_flag, __ATOMIC_RELAXED) != 0;
@@ -2145,6 +2151,24 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 	osd_rebuild(renderer, scale, text);
 }
 
+static void osd_scale_rect(SDL_Rect *dst, const SDL_Rect *src,
+			   SDL_Renderer *renderer, int win_w, int win_h)
+{
+	int out_w = 0;
+	int out_h = 0;
+
+	if (src->w <= 0 || src->h <= 0 || win_w <= 0 || win_h <= 0 ||
+	    !renderer || SDL_GetRendererOutputSize(renderer, &out_w, &out_h) < 0 ||
+	    out_w <= 0 || out_h <= 0) {
+		*dst = *src;
+		return;
+	}
+	dst->x = lroundf((float)src->x * (float)out_w / (float)win_w);
+	dst->y = lroundf((float)src->y * (float)out_h / (float)win_h);
+	dst->w = lroundf((float)src->w * (float)out_w / (float)win_w);
+	dst->h = lroundf((float)src->h * (float)out_h / (float)win_h);
+}
+
 static void osd_place(SDL_Rect *dst, int width, int height, float scale,
 		     int win_w, int win_h)
 {
@@ -2220,7 +2244,12 @@ static void osd_render_popup(SDL_Renderer *renderer, int win_w, int win_h,
 		if (g_popup_dest.y < 10)
 			g_popup_dest.y = 10;
 	}
-	SDL_RenderCopy(renderer, g_popup.texture, NULL, &g_popup_dest);
+	{
+		SDL_Rect draw;
+
+		osd_scale_rect(&draw, &g_popup_dest, renderer, win_w, win_h);
+		SDL_RenderCopy(renderer, g_popup.texture, NULL, &draw);
+	}
 }
 
 static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
@@ -2238,8 +2267,11 @@ static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
 
 		osd_place(&dst, g_card.width, g_card.height, scale,
 			  win_w, win_h);
+		SDL_Rect draw;
+
 		g_card_dest = dst;
-		SDL_RenderCopy(renderer, g_card.texture, NULL, &dst);
+		osd_scale_rect(&draw, &dst, renderer, win_w, win_h);
+		SDL_RenderCopy(renderer, g_card.texture, NULL, &draw);
 		osd_render_popup(renderer, win_w, win_h, scale);
 		return;
 	}
@@ -2247,7 +2279,12 @@ static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
 		return;
 	osd_place(&dst, g_osd.width, g_osd.height, (float)g_osd.scale,
 		  win_w, win_h);
-	SDL_RenderCopy(renderer, g_osd.texture, NULL, &dst);
+	{
+		SDL_Rect draw;
+
+		osd_scale_rect(&draw, &dst, renderer, win_w, win_h);
+		SDL_RenderCopy(renderer, g_osd.texture, NULL, &draw);
+	}
 }
 
 static int osd_volume_percent(void)
@@ -2429,13 +2466,17 @@ static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 	case EVERLIVE_OSD_ACTION_VOLUME:
 		osd_open_popup(EVERLIVE_OSD_POPUP_VOLUME);
 		break;
-	case EVERLIVE_OSD_ACTION_MUTE:
-		osd_apply_mute(__atomic_load_n(&g_audio_mute_flag,
-					       __ATOMIC_RELAXED) == 0);
-		toast_trigger("Audio muted");
+	case EVERLIVE_OSD_ACTION_MUTE: {
+		bool next = __atomic_load_n(&g_audio_mute_flag,
+					    __ATOMIC_RELAXED) == 0;
+
+		osd_apply_mute(next);
+		toast_trigger(next ? "Mute: On" : "Mute: Off");
 		break;
+	}
 	case EVERLIVE_OSD_ACTION_FULLSCREEN:
 		osd_toggle_fullscreen(window);
+		toast_trigger("Fullscreen toggled");
 		break;
 	default:
 		break;
