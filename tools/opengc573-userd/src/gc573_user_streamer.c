@@ -2429,6 +2429,17 @@ static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 	if (!osd_card_active(window) || !g_card.texture)
 		return false;
 
+	{
+		int win_w = 0;
+		int win_h = 0;
+
+		SDL_GetWindowSize(window, &win_w, &win_h);
+		if (win_w > 0 && win_h > 0) {
+			osd_place(&g_card_dest, g_card.width, g_card.height,
+				  (float)win_h / 1080.0f, win_w, win_h);
+		}
+	}
+
 	if (event->type == SDL_MOUSEBUTTONUP && event->button.button == SDL_BUTTON_LEFT) {
 		g_popup_dragging = false;
 		return true;
@@ -2456,6 +2467,12 @@ static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 	}
 
 	action = osd_hit_card(x, y);
+	if (event->button.clicks >= 2 &&
+	    action == EVERLIVE_OSD_ACTION_NONE) {
+		osd_toggle_fullscreen(window);
+		toast_trigger("Fullscreen toggled");
+		return true;
+	}
 	switch (action) {
 	case EVERLIVE_OSD_ACTION_ASPECT:
 		osd_cycle_aspect(window);
@@ -5957,7 +5974,6 @@ static void embed_window_attach(SDL_Window *window)
 	Window sdl_xwin;
 	Window parent_xwin;
 	XWindowAttributes attr;
-	XWindowAttributes self_attr;
 	int (*old_handler)(Display *, XErrorEvent *);
 
 	if (!window || !g_parent_winid)
@@ -5998,14 +6014,9 @@ static void embed_window_attach(SDL_Window *window)
 	 * the hosting Qt widget so UI controls, double-click fullscreen and
 	 * cursor visibility stay owned by the Control Hub.
 	 */
-	memset(&self_attr, 0, sizeof(self_attr));
-	if (XGetWindowAttributes(dpy, sdl_xwin, &self_attr)) {
-		long mask = self_attr.your_event_mask &
-			    ~(ButtonPressMask | ButtonReleaseMask |
-			      PointerMotionMask);
-		XSelectInput(dpy, sdl_xwin, mask);
-	}
-
+	/* Keep pointer events on the child so the OSD card stays clickable
+	 * inside the Hub viewport.  Double-click fullscreen is handled by the
+	 * engine and forwarded to the Hub when embedded. */
 	SDL_ShowWindow(window);
 	XMoveResizeWindow(dpy, sdl_xwin, 0, 0,
 			  (unsigned int)g_embed_last_w,

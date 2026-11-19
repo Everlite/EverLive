@@ -630,7 +630,6 @@ static void sdl_embed_attach(struct everlive_sdl *sdl)
 	Window sdl_xwin;
 	Window parent_xwin;
 	XWindowAttributes attr;
-	XWindowAttributes self_attr;
 	int (*old_handler)(Display *, XErrorEvent *);
 
 	if (!sdl->window || !sdl->parent_winid)
@@ -665,14 +664,9 @@ static void sdl_embed_attach(struct everlive_sdl *sdl)
 			  (unsigned int)sdl->embed_last_h);
 	SDL_SetWindowSize(sdl->window, sdl->embed_last_w, sdl->embed_last_h);
 
-	memset(&self_attr, 0, sizeof(self_attr));
-	if (XGetWindowAttributes(dpy, sdl_xwin, &self_attr)) {
-		long mask = self_attr.your_event_mask &
-			    ~(ButtonPressMask | ButtonReleaseMask |
-			      PointerMotionMask);
-		XSelectInput(dpy, sdl_xwin, mask);
-	}
-
+	/* Keep pointer events on the child so the OSD card stays clickable
+	 * inside the Hub viewport.  Double-click fullscreen is handled by the
+	 * engine and forwarded to the Hub when embedded. */
 	SDL_ShowWindow(sdl->window);
 	XMoveResizeWindow(dpy, sdl_xwin, 0, 0,
 			  (unsigned int)sdl->embed_last_w,
@@ -1569,6 +1563,21 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 	    !sdl_card_mode_active(st, sdl))
 		return false;
 
+	{
+		int win_w = 0;
+		int win_h = 0;
+
+		SDL_GetWindowSize(sdl->window, &win_w, &win_h);
+		if (win_w > 0 && win_h > 0) {
+			sdl_place_osd(&sdl->card_dest, sdl->card.width,
+				      sdl->card.height,
+				      (float)win_h / 1080.0f,
+				      win_w, win_h,
+				      atomic_load_explicit(&st->osd_pos,
+							   __ATOMIC_RELAXED));
+		}
+	}
+
 	if (event->type == SDL_MOUSEBUTTONUP &&
 	    event->button.button == SDL_BUTTON_LEFT) {
 		sdl->popup_dragging = false;
@@ -1612,6 +1621,11 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 	}
 
 	action = sdl_hit_card(sdl, x, y);
+	if (event->button.clicks >= 2 &&
+	    action == EVERLIVE_OSD_ACTION_NONE) {
+		sdl_toggle_fullscreen(sdl);
+		return true;
+	}
 	switch (action) {
 	case EVERLIVE_OSD_ACTION_INPUT:
 		sdl->popup_selected = atomic_load_explicit(&st->port,
