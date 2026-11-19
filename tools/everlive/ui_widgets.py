@@ -369,9 +369,20 @@ if HAS_QT:
                 self.setText("")
             else:
                 self.setIcon(QIcon())
-                self.setText(
+                QPushButton.setText(
+                    self,
                     fa_icons.fallback_text(self._icon_name)
                     if fa_icons is not None else "?")
+
+        def setText(self, text: str):  # noqa: N802
+            """Keep icon-only controls icon-only.
+
+            State code used to swap in labels such as ``Close Preview`` on the
+            capture button.  Action/state information belongs in the tooltip;
+            text here would render beside the glyph and break the 32/36 px
+            square geometry.
+            """
+            super().setText("")
 
         # Compatibility with earlier call sites.
         def set_icon_name(self, icon_name: str):

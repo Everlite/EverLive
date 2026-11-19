@@ -206,6 +206,11 @@ class WidgetTests(unittest.TestCase):
         button.set_icon_name("volume")
         self.assertEqual(button.icon_name(), "volume")
 
+    def test_icon_button_ignores_visible_text(self):
+        button = ui_widgets.IconButton("play", "Start Gaming")
+        button.setText("Close Preview")
+        self.assertEqual(button.text(), "")
+
     def test_icon_button_checkable(self):
         button = ui_widgets.IconButton("⧉", "Pop-out", checkable=True)
         self.assertTrue(button.isCheckable())

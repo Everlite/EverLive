@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **App Camera Shortcuts** creates reversible OBS/Discord/Chrome/Zoom launchers that set `LD_PRELOAD` for one process. Flatpak/Snap sandboxes are detected and Chrome's renderer sandbox is flagged.
   - The service keeps the shared frame store and optional virtual camera alive for OBS while the Hub is closed.
 
+### Fixed
+- Icon-only header actions no longer replace their glyph with text when taking back a background capture (or while docking, undocking and switching modes). Transient states now update the icon and tooltip only, and `IconButton` rejects visible text so the fixed square geometry cannot regress.
+
 ---
 
 ## [1.7.0] - 2026-11-17

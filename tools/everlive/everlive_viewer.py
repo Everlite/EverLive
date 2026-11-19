@@ -5440,9 +5440,10 @@ if HAS_QT:
             if hasattr(self, "video_standby_overlay"):
                 self.video_standby_overlay.setVisible(False)
             if hasattr(self, "btn_launch"):
-                self.btn_launch.setText("Close Preview")
+                self.btn_launch.set_icon("compress")
                 self.btn_launch.setToolTip(
-                    "Detach the preview and keep the engine capturing headless.")
+                    "Close Preview — detach the video and keep the engine "
+                    "capturing headless.")
             self._set_vfio_notice(
                 "Video Docked",
                 "Capture kept running — DMA, OBS and audio are uninterrupted",
@@ -5457,10 +5458,10 @@ if HAS_QT:
             self._launch_mode = "studio"
             self._last_launch_mode = "studio"
             if hasattr(self, "btn_launch"):
-                self.btn_launch.setText("Dock Video Here")
+                self.btn_launch.set_icon("display")
                 self.btn_launch.setToolTip(
-                    "Attach the running capture engine to the Hub viewport "
-                    "without interrupting DMA, OBS or audio.")
+                    "Dock Video Here — attach the running capture engine to "
+                    "the Hub viewport without interrupting DMA, OBS or audio.")
             self._refresh_stage_overlay()
             self._set_vfio_notice(
                 "Preview Closed",
@@ -5533,7 +5534,11 @@ if HAS_QT:
                     self._remote_docked = False
                     self._launch_mode = "studio"
                     if hasattr(self, "btn_launch"):
-                        self.btn_launch.setText("Dock Video Here")
+                        self.btn_launch.set_icon("display")
+                        self.btn_launch.setToolTip(
+                            "Dock Video Here — attach the running capture "
+                            "engine to the Hub viewport without interrupting "
+                            "DMA, OBS or audio.")
                     self._refresh_stage_overlay()
             self._update_framegen_status(status.get("framegen") or {},
                                          remote_headless)
@@ -5853,13 +5858,15 @@ if HAS_QT:
             self.btn_launch.setEnabled(False)
             self.btn_studio.setEnabled(False)
             if target == "studio":
-                self.btn_studio.setText("Switching to Studio…")
+                self.btn_studio.set_icon("rotate")
+                self.btn_studio.setToolTip("Switching to Studio…")
                 self._set_vfio_notice(
                     "Switching to Studio",
                     "Closing the gaming window; the OBS feed keeps running",
                     seconds=5.0)
             else:
-                self.btn_launch.setText("Switching to Gaming…")
+                self.btn_launch.set_icon("rotate")
+                self.btn_launch.setToolTip("Switching to Gaming…")
                 self._set_vfio_notice(
                     "Switching to Gaming Screen",
                     "Opening the interactive SDL2 window",
@@ -7076,7 +7083,9 @@ if HAS_QT:
             self._resyncing = True
             if hasattr(self, "btn_resync"):
                 self.btn_resync.setEnabled(False)
-                self.btn_resync.setText("Synchronizing...")
+                self.btn_resync.set_icon("rotate")
+                self.btn_resync.setToolTip(
+                    "Synchronizing HDMI handshake…")
             try:
                 was_running = self.streamer.is_running
                 if was_running:
@@ -7092,7 +7101,10 @@ if HAS_QT:
                 QTimer.singleShot(2500, lambda: (
                     setattr(self, "_resyncing", False),
                     hasattr(self, "btn_resync") and self.btn_resync.setEnabled(True),
-                    hasattr(self, "btn_resync") and self.btn_resync.setText("Re-sync Signal")
+                    hasattr(self, "btn_resync") and self.btn_resync.set_icon("rotate"),
+                    hasattr(self, "btn_resync") and self.btn_resync.setToolTip(
+                        "Trigger hardware HDMI handshake (HPD pulse) - also "
+                        "key 'H' in window")
                 ))
 
         def _wait_and_restart_after_resync(self, attempts=12):
