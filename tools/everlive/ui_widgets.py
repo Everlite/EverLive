@@ -390,3 +390,11 @@ if HAS_QT:
 
         def icon_name(self) -> str:
             return self._icon_name
+
+else:
+    ToggleSwitch = None  # type: ignore[misc,assignment]
+    ToggleRow = None  # type: ignore[misc,assignment]
+    SegmentedControl = None  # type: ignore[misc,assignment]
+    StatusChip = None  # type: ignore[misc,assignment]
+    IconButton = None  # type: ignore[misc,assignment]
+
