@@ -228,7 +228,41 @@ QLabel#logoVersion {
 QFrame#sourceGroup {
     background-color: @SURFACE@;
     border: 1px solid @GROUP_BORDER@;
-    border-radius: @RADIUS@;
+    border-radius: 8px;
+}
+QComboBox#sourceInputCombo {
+    background-color: #25334A;
+    color: @BLUE_TEXT@;
+    border: none;
+    border-left: 1px solid @GROUP_BORDER@;
+    border-top-left-radius: 0px;
+    border-bottom-left-radius: 0px;
+    border-top-right-radius: 7px;
+    border-bottom-right-radius: 7px;
+    min-height: 34px;
+    max-height: 34px;
+    padding: 0px 8px 0px 12px;
+    font-weight: 600;
+}
+QComboBox#sourceInputCombo:hover {
+    background-color: #2D3E5A;
+}
+QComboBox#sourceInputCombo:on {
+    border-bottom-right-radius: 0px;
+}
+QComboBox#sourceInputCombo::drop-down {
+    background-color: #25334A;
+    border: none;
+    border-left: 1px solid #354766;
+    border-top-right-radius: 7px;
+    border-bottom-right-radius: 7px;
+    width: 28px;
+}
+QComboBox#sourceInputCombo:hover::drop-down {
+    background-color: #2D3E5A;
+}
+QComboBox#sourceInputCombo:on::drop-down {
+    border-bottom-right-radius: 0px;
 }
 QLabel#sourceName {
     color: @TEXT@;
@@ -344,7 +378,7 @@ QLabel#audioFormat {
     color: @ACCENT_SOFT@;
     background-color: #211B36;
     border: 1px solid #382E5C;
-    border-radius: @RADIUS@;
+    border-radius: 8px;
     padding: 0px 12px;
     font-size: 12.5px;
     font-weight: 600;
@@ -652,7 +686,7 @@ QPushButton {
     font-size: 14px;
     font-weight: 600;
     border-radius: 8px;
-    min-height: 36px;
+    min-height: 34px;
     background-color: @SURFACE_RAISED@;
     color: @TEXT@;
     border: 1px solid @GROUP_BORDER@;

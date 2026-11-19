@@ -13,6 +13,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import ui_theme  # noqa: E402
 import ui_widgets  # noqa: E402
 
 
@@ -175,6 +176,15 @@ class WidgetTests(unittest.TestCase):
     def test_status_chip_optional_dot(self):
         chip = ui_widgets.StatusChip("Live", "live", dot=True)
         self.assertTrue(chip.text().startswith("●"))
+
+    def test_status_chip_matches_audio_pill(self):
+        chip = ui_widgets.StatusChip("Standby • No Signal", "idle")
+        self.assertEqual(chip.height(), ui_theme.BUTTON_H)
+        style = chip.styleSheet()
+        self.assertIn("border-radius: 8px", style)
+        self.assertIn("font-size: 12.5px", style)
+        self.assertIn("font-weight: 600", style)
+        self.assertIn("padding: 0px 12px", style)
 
     def test_icon_button_geometry(self):
         button = ui_widgets.IconButton("help", "Help", size=30)

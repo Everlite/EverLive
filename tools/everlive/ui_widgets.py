@@ -308,7 +308,7 @@ if HAS_QT:
             super().__init__(parent)
             self.setObjectName("statusChip")
             self.setAlignment(Qt.AlignCenter)
-            self.setFixedHeight(30)
+            self.setFixedHeight(ui_theme.BUTTON_H)
             self._dot = dot
             self._tone = "idle"
             self.set_state(text, tone)
@@ -324,11 +324,10 @@ if HAS_QT:
                 f"background-color: {background};"
                 f"color: {foreground};"
                 f"border: 1px solid {border};"
-                f"border-radius: {ui_theme.RADIUS_CSS};"
+                "border-radius: 8px;"
                 "padding: 0px 12px;"
-                "font-size: 11px;"
-                "font-weight: 700;"
-                "letter-spacing: 0.3px;"
+                "font-size: 12.5px;"
+                "font-weight: 600;"
                 "}")
             self.setToolTip(self._text)
 

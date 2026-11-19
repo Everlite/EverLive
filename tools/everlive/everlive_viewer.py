@@ -3176,7 +3176,7 @@ if HAS_QT:
             self.source_group.setFixedHeight(ui_theme.CONTROL_H)
             source_layout = QHBoxLayout(self.source_group)
             source_layout.setContentsMargins(12, 0, 0, 0)
-            source_layout.setSpacing(8)
+            source_layout.setSpacing(10)
 
             self.lbl_card_title = QLabel(
                 self._card_full_label if card_detected else "NO CAPTURE CARD")
@@ -3193,6 +3193,7 @@ if HAS_QT:
             if self.duo_mode:
                 saved_input = load_settings().get("duo_input", 0)
                 self.combo_duo_input = QComboBox()
+                self.combo_duo_input.setObjectName("sourceInputCombo")
                 self.combo_duo_input.addItem("HDMI 1", 0)
                 self.combo_duo_input.addItem("HDMI 2", 1)
                 self.combo_duo_input.setCurrentIndex(
@@ -3839,7 +3840,7 @@ if HAS_QT:
 
             exposure_box = QWidget()
             exposure_lay = QVBoxLayout(exposure_box)
-            exposure_lay.setContentsMargins(0, 0, 0, 0)
+            exposure_lay.setContentsMargins(0, 0, 0, 2)
             exposure_lay.setSpacing(6)
             exposure_head = QHBoxLayout()
             exposure_head.setContentsMargins(0, 0, 0, 0)

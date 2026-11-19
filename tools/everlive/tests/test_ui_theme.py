@@ -44,11 +44,14 @@ class TokenTests(unittest.TestCase):
         stylesheet = ui_theme.build_stylesheet()
         for needle in ("QFrame#videoStageFrame",
                        "QFrame#telemetryDeck",
-                       "QFrame#cardFrame",
-                       "QFrame#sourceGroup"):
+                       "QFrame#cardFrame"):
             start = stylesheet.index(needle)
             block = stylesheet[start:stylesheet.index("}", start)]
             self.assertIn("border-radius: 12px", block, needle)
+
+        start = stylesheet.index("QFrame#sourceGroup")
+        block = stylesheet[start:stylesheet.index("}", start)]
+        self.assertIn("border-radius: 8px", block)
 
         start = stylesheet.index("\nQPushButton {")
         block = stylesheet[start:stylesheet.index("}", start)]
@@ -116,6 +119,35 @@ class TokenTests(unittest.TestCase):
         start = stylesheet.index("QComboBox:hover")
         block = stylesheet[start:stylesheet.index("}", start)]
         self.assertIn("#4A6FA5", block)
+
+    def test_source_input_combo_is_flush_slate_segment(self):
+        stylesheet = ui_theme.build_stylesheet()
+        start = stylesheet.index("QComboBox#sourceInputCombo {")
+        block = stylesheet[start:stylesheet.index("}", start)]
+        self.assertIn("background-color: #25334A", block)
+        self.assertIn("border-left: 1px solid", block)
+        self.assertIn("border-top-right-radius: 7px", block)
+        self.assertIn("border-bottom-right-radius: 7px", block)
+        self.assertIn("min-height: 34px", block)
+        self.assertIn("max-height: 34px", block)
+
+        start = stylesheet.index("QComboBox#sourceInputCombo::drop-down")
+        block = stylesheet[start:stylesheet.index("}", start)]
+        self.assertIn("background-color: #25334A", block)
+        self.assertIn("width: 28px", block)
+
+    def test_audio_pill_matches_signal_chip_style(self):
+        stylesheet = ui_theme.build_stylesheet()
+        start = stylesheet.index("QLabel#audioFormat")
+        block = stylesheet[start:stylesheet.index("}", start)]
+        self.assertIn("border-radius: 8px", block)
+        self.assertIn("padding: 0px 12px", block)
+        self.assertIn("font-size: 12.5px", block)
+        self.assertIn("font-weight: 600", block)
+
+        start = stylesheet.index("\nQPushButton {")
+        block = stylesheet[start:stylesheet.index("}", start)]
+        self.assertIn("min-height: 34px", block)
 
     def test_missing_tokens_reports_typos(self):
         found = ui_theme.missing_tokens("color: @NOT_A_TOKEN@;")
