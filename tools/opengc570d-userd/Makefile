@@ -92,7 +92,7 @@ libgc570d-v4l2.so: src/gc570d-v4l2.c \
 		$(CORE_DIR)/everlive_framestore.h \
 		$(CORE_LIB)
 	$(CC) -O2 -g -Wall -Wextra -Wno-unused-parameter \
-		-std=gnu11 -D_GNU_SOURCE -shared -fPIC \
+		-std=gnu11 -D_GNU_SOURCE -shared -fPIC -Wl,-Bsymbolic \
 		-Isrc -I$(CORE_DIR) -I$(CORE_V4L2_DIR) \
 		-o $@ src/gc570d-v4l2.c \
 		$(CORE_V4L2_DIR)/everlive_v4l2_state.c \
