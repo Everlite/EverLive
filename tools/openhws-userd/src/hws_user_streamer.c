@@ -720,8 +720,13 @@ static void run_window(void)
 	Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 
 	g_mode_switch = false;
+	/*
+	 * Create the window GL-capable up front, as the GC573 engine does.
+	 * Otherwise SDL_CreateRenderer() may recreate it (SDL3/sdl2-compat),
+	 * and the replacement is a new top-level window outside the Hub.
+	 */
 	if (g_parent_winid)
-		flags |= SDL_WINDOW_HIDDEN | SDL_WINDOW_BORDERLESS;
+		flags |= SDL_WINDOW_HIDDEN | SDL_WINDOW_BORDERLESS | SDL_WINDOW_OPENGL;
 	else
 		flags |= SDL_WINDOW_SHOWN | (g_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 	win = SDL_CreateWindow(WINDOW_TITLE, g_parent_winid ? 0 : SDL_WINDOWPOS_CENTERED,
@@ -962,6 +967,7 @@ int main(int argc, char **argv)
 		{ "framegen", required_argument, NULL, OPT_IGNORE_ARG },
 		{ "fg-mult", required_argument, NULL, OPT_IGNORE_ARG },
 		{ "fg-flow-scale", required_argument, NULL, OPT_IGNORE_ARG },
+		{ "fg-backend", required_argument, NULL, OPT_IGNORE_ARG },
 		{ "hdr-exposure", required_argument, NULL, OPT_IGNORE_ARG },
 		{ "wave", no_argument, NULL, OPT_IGNORE },
 		{ "rainbow", no_argument, NULL, OPT_IGNORE },
