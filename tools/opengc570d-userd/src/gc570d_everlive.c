@@ -65,6 +65,12 @@ enum everlive_osd_pos {
 	EVERLIVE_OSD_TL = 3,
 };
 
+enum everlive_osd_mode {
+	EVERLIVE_OSD_MODE_AUTO = 0,
+	EVERLIVE_OSD_MODE_COMPACT = 1,
+	EVERLIVE_OSD_MODE_CARD = 2,
+};
+
 struct everlive_frame {
 	uint32_t width;
 	uint32_t height;
@@ -101,6 +107,7 @@ struct everlive_state {
 	atomic_bool pip;
 	atomic_bool osd;
 	atomic_int osd_pos;
+	atomic_int osd_mode;
 	atomic_int aspect;
 	atomic_int scale;
 	atomic_int volume_pct;
@@ -128,6 +135,7 @@ static struct everlive_state g_everlive = {
 	.pip = ATOMIC_VAR_INIT(false),
 	.osd = ATOMIC_VAR_INIT(true),
 	.osd_pos = ATOMIC_VAR_INIT(EVERLIVE_OSD_TR),
+	.osd_mode = ATOMIC_VAR_INIT(EVERLIVE_OSD_MODE_AUTO),
 	.aspect = ATOMIC_VAR_INIT(EVERLIVE_ASPECT_AUTO),
 	.scale = ATOMIC_VAR_INIT(EVERLIVE_SCALE_FIT),
 	.volume_pct = ATOMIC_VAR_INIT(100),
@@ -155,6 +163,17 @@ static int parse_aspect_mode(const char *aspect)
 	if (strcmp(aspect, "stretch") == 0)
 		return EVERLIVE_ASPECT_STRETCH;
 	return EVERLIVE_ASPECT_AUTO;
+}
+
+static int parse_osd_mode(const char *mode)
+{
+	if (!mode)
+		return EVERLIVE_OSD_MODE_AUTO;
+	if (strcasecmp(mode, "compact") == 0)
+		return EVERLIVE_OSD_MODE_COMPACT;
+	if (strcasecmp(mode, "card") == 0 || strcasecmp(mode, "full") == 0)
+		return EVERLIVE_OSD_MODE_CARD;
+	return EVERLIVE_OSD_MODE_AUTO;
 }
 
 static int parse_scale_mode(const char *scale)
@@ -646,6 +665,7 @@ static void sdl_build_card(struct everlive_sdl *sdl, const char *identity,
 		{ "L", "Scale" },
 		{ "M", "Mute" },
 		{ "Tab", "OSD" },
+		{ "F", "Exit" },
 	};
 	const uint32_t bg = 0xeb1e2230U;
 	const uint32_t border = 0xaa5a6278U;
@@ -1683,6 +1703,8 @@ static void *everlive_thread(void *arg)
 				char line2[160];
 				char line3[160];
 				Uint32 win_flags = SDL_GetWindowFlags(sdl.window);
+				int osd_mode = atomic_load_explicit(
+					&st->osd_mode, __ATOMIC_RELAXED);
 				bool fullscreen =
 					sdl.fullscreen ||
 					(win_flags &
@@ -1691,6 +1713,11 @@ static void *everlive_thread(void *arg)
 					(int)st->frame[port].width : 1920;
 				int out_h = st->frame[port].height ?
 					(int)st->frame[port].height : 1080;
+
+				if (osd_mode == EVERLIVE_OSD_MODE_CARD)
+					fullscreen = true;
+				else if (osd_mode == EVERLIVE_OSD_MODE_COMPACT)
+					fullscreen = false;
 
 				if (fullscreen) {
 					int win_w = 0;
@@ -1710,7 +1737,7 @@ static void *everlive_thread(void *arg)
 						 "%ux%u -> %dx%d YUYV | %u ch %u kHz%s",
 						 shm_port_source_width(st, port),
 						 shm_port_source_height(st, port),
-						 out_w, out_h,
+						 win_w, win_h,
 						 shm_port_channels(st, port),
 						 shm_port_rate(st, port),
 						 muted ? " | Muted" : "");
@@ -1921,6 +1948,14 @@ void gc570d_everlive_set_osd_pos(const char *pos)
 	if (!atomic_load_explicit(&g_everlive.started, __ATOMIC_ACQUIRE))
 		return;
 	atomic_store_explicit(&g_everlive.osd_pos, parse_osd_pos(pos),
+			      __ATOMIC_RELAXED);
+}
+
+void gc570d_everlive_set_osd_mode(const char *mode)
+{
+	if (!atomic_load_explicit(&g_everlive.started, __ATOMIC_ACQUIRE))
+		return;
+	atomic_store_explicit(&g_everlive.osd_mode, parse_osd_mode(mode),
 			      __ATOMIC_RELAXED);
 }
 

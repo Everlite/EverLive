@@ -343,6 +343,16 @@ if QSocketNotifier is not None:
             """pos: ``tr`` | ``br`` | ``bl`` | ``tl``."""
             return self.request("osd.position.set", {"pos": str(pos)})
 
+        def set_osd_mode(self, mode: str) -> bool:
+            """mode: ``auto`` | ``compact`` | ``card``.
+
+            ``auto`` follows the SDL window's fullscreen state, ``compact``
+            forces the stats readout, and ``card`` forces the fullscreen
+            identity card even when the engine is embedded in the Hub.
+            """
+            return self.request("osd.mode.set",
+                                {"mode": str(mode).strip().lower()})
+
         def set_aspect(self, mode: str) -> bool:
             """mode: ``auto`` | ``16:9`` | ``4:3`` | ``stretch``."""
             return self.request("aspect.set", {"mode": str(mode)})

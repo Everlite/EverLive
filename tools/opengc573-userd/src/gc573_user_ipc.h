@@ -47,6 +47,12 @@ enum gc573_ipc_osd_pos {
 	GC573_IPC_OSD_TL = 3,
 };
 
+enum gc573_ipc_osd_mode {
+	GC573_IPC_OSD_MODE_AUTO = 0,
+	GC573_IPC_OSD_MODE_COMPACT = 1,
+	GC573_IPC_OSD_MODE_CARD = 2,
+};
+
 enum gc573_ipc_aspect {
 	GC573_IPC_ASPECT_AUTO = 0,
 	GC573_IPC_ASPECT_16_9 = 1,
@@ -78,6 +84,7 @@ enum gc573_ipc_mode {
 	GC573_IPC_CMD_EDID,
 	GC573_IPC_CMD_HOTPLUG,
 	GC573_IPC_CMD_HDR_EV,
+	GC573_IPC_CMD_OSD_MODE,
 };
 
 /*

@@ -351,7 +351,7 @@ static void ipc_send_hello(struct ipc_server *s, struct ipc_client *c,
 		     "\"methods\":[\"hello\",\"ping\",\"status.get\","
 		     "\"led.set\",\"led.mode.set\",\"audio.volume.set\","
 		     "\"audio.mute.set\",\"audio.channels.set\","
-		     "\"osd.set\",\"osd.position.set\","
+		     "\"osd.set\",\"osd.position.set\",\"osd.mode.set\","
 		     "\"aspect.set\",\"mode.set\",\"v4l2.set\","
 		     "\"hdr.set\",\"hdr.passthrough\",\"hdr.exposure\","
 		     "\"scale.set\",\"framegen.set\",\"toast.show\","
@@ -391,6 +391,17 @@ static int parse_osd_position(const char *name)
 		return GC573_IPC_OSD_BL;
 	if (!strcasecmp(name, "tl") || !strcasecmp(name, "top-left"))
 		return GC573_IPC_OSD_TL;
+	return -1;
+}
+
+static int parse_osd_mode(const char *name)
+{
+	if (!strcasecmp(name, "auto"))
+		return GC573_IPC_OSD_MODE_AUTO;
+	if (!strcasecmp(name, "compact"))
+		return GC573_IPC_OSD_MODE_COMPACT;
+	if (!strcasecmp(name, "card") || !strcasecmp(name, "full"))
+		return GC573_IPC_OSD_MODE_CARD;
 	return -1;
 }
 
@@ -562,6 +573,28 @@ static void ipc_handle_osd_position(struct ipc_client *c, const char *id,
 	code = parse_osd_position(pos);
 	if (code < 0) {
 		ipc_error(c, id, -32602, "unknown pos: tr|br|bl|tl");
+		return;
+	}
+
+	cmd.a = code;
+	ipc_push_and_reply(c, id, &cmd);
+}
+
+static void ipc_handle_osd_mode(struct ipc_client *c, const char *id,
+				const char *line)
+{
+	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_OSD_MODE };
+	char mode[16];
+	int code;
+
+	if (!everlive_json_get_string(line, "mode", mode, sizeof(mode))) {
+		ipc_error(c, id, -32602, "invalid params: mode required");
+		return;
+	}
+
+	code = parse_osd_mode(mode);
+	if (code < 0) {
+		ipc_error(c, id, -32602, "unknown mode: auto|compact|card");
 		return;
 	}
 
@@ -938,6 +971,8 @@ static void ipc_handle_line(struct ipc_server *s, struct ipc_client *c,
 		ipc_handle_osd_enable(c, has_id ? id : NULL, line);
 	} else if (strcmp(method, "osd.position.set") == 0) {
 		ipc_handle_osd_position(c, has_id ? id : NULL, line);
+	} else if (strcmp(method, "osd.mode.set") == 0) {
+		ipc_handle_osd_mode(c, has_id ? id : NULL, line);
 	} else if (strcmp(method, "aspect.set") == 0) {
 		ipc_handle_aspect(c, has_id ? id : NULL, line);
 	} else if (strcmp(method, "mode.set") == 0) {

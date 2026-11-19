@@ -298,7 +298,8 @@ static void rpc_hello(int fd, const char *id)
 		     "\"methods\":[\"hello\",\"ping\",\"status.get\","
 		     "\"led.set\",\"led.mode.set\",\"audio.volume.set\","
 		     "\"audio.mute.set\",\"audio.channels.set\","
-		     "\"osd.set\",\"osd.position.set\",\"aspect.set\","
+		     "\"osd.set\",\"osd.position.set\",\"osd.mode.set\","
+		     "\"aspect.set\","
 		     "\"scale.set\",\"input.set\",\"pip.set\","
 		     "\"mode.set\",\"hotplug\",\"edid.set\"]}",
 		     g_version, (long)getpid(), path_esc);
@@ -453,6 +454,23 @@ static void rpc_osd_pos(int fd, const char *id, const char *line)
 		return;
 	}
 	gc570d_everlive_set_osd_pos(pos);
+	rpc_ok(fd, id);
+}
+
+static void rpc_osd_mode(int fd, const char *id, const char *line)
+{
+	char mode[16];
+
+	if (!everlive_json_get_string(line, "mode", mode, sizeof(mode))) {
+		rpc_error(fd, id, -32602, "invalid params: mode required");
+		return;
+	}
+	if (strcasecmp(mode, "auto") && strcasecmp(mode, "compact") &&
+	    strcasecmp(mode, "card") && strcasecmp(mode, "full")) {
+		rpc_error(fd, id, -32602, "unknown mode: auto|compact|card");
+		return;
+	}
+	gc570d_everlive_set_osd_mode(mode);
 	rpc_ok(fd, id);
 }
 
@@ -656,6 +674,8 @@ static void rpc_dispatch(int fd, const char *id, const char *method,
 		rpc_osd(fd, id, line);
 	else if (strcmp(method, "osd.position.set") == 0)
 		rpc_osd_pos(fd, id, line);
+	else if (strcmp(method, "osd.mode.set") == 0)
+		rpc_osd_mode(fd, id, line);
 	else if (strcmp(method, "aspect.set") == 0)
 		rpc_aspect(fd, id, line);
 	else if (strcmp(method, "scale.set") == 0)

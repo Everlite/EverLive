@@ -417,6 +417,15 @@ enum osd_position {
 
 static enum osd_position g_osd_pos = OSD_POS_TR;
 
+/* Auto follows the SDL window; Hub cinema fullscreen can force the card. */
+enum osd_mode {
+	OSD_MODE_AUTO,
+	OSD_MODE_COMPACT,
+	OSD_MODE_CARD,
+};
+
+static enum osd_mode g_osd_mode = OSD_MODE_AUTO;
+
 static const char *osd_pos_name(enum osd_position pos)
 {
 	switch (pos) {
@@ -1817,7 +1826,7 @@ struct osd_overlay {
 static struct osd_overlay g_osd;
 /* Fullscreen identity card; windowed mode keeps g_osd. */
 static struct osd_overlay g_card;
-static bool g_osd_was_fullscreen;
+static bool g_osd_card_was_active;
 
 /* Centred F1 help card; separate texture so the stats OSD stays intact. */
 static struct osd_overlay g_help;
@@ -2021,6 +2030,15 @@ static bool osd_window_is_fullscreen(SDL_Window *window)
 			 SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0;
 }
 
+static bool osd_card_active(SDL_Window *window)
+{
+	if (g_osd_mode == OSD_MODE_CARD)
+		return true;
+	if (g_osd_mode == OSD_MODE_COMPACT)
+		return false;
+	return osd_window_is_fullscreen(window);
+}
+
 static void osd_output_label(char *out, size_t n, int w, int h,
 			     uint32_t rate_x100)
 {
@@ -2084,6 +2102,7 @@ static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
 		{ "L", "Scale" },
 		{ "M", "Mute" },
 		{ "Tab", "Hide" },
+		{ "F", "Exit" },
 	};
 	char line1[128];
 	char line2[224];
@@ -2360,18 +2379,18 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 	if (!g_osd_enabled || !window)
 		return;
 
-	if (osd_window_is_fullscreen(window)) {
+	if (osd_card_active(window)) {
 		osd_card_update(renderer, window, in_w, in_h, rate_x100,
 				chroma_text, audio_text);
-		g_osd_was_fullscreen = true;
+		g_osd_card_was_active = true;
 		return;
 	}
 
 	/* Force the compact texture to refresh after leaving fullscreen. */
-	if (g_osd_was_fullscreen) {
+	if (g_osd_card_was_active) {
 		g_osd.scale = -1;
 		g_osd.text[0] = '\0';
-		g_osd_was_fullscreen = false;
+		g_osd_card_was_active = false;
 	}
 
 	if (hdr_text && *hdr_text)
@@ -2439,7 +2458,7 @@ static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
 	if (!g_osd_enabled)
 		return;
 
-	overlay = (osd_window_is_fullscreen(window) && g_card.texture)
+	overlay = (osd_card_active(window) && g_card.texture)
 		? &g_card : &g_osd;
 	if (!overlay->texture)
 		return;
@@ -6528,6 +6547,15 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		if (cmd->a >= 0 && cmd->a < (int32_t)OSD_POS_COUNT)
 			g_osd_pos = (enum osd_position)cmd->a;
 		printf("[IPC] OSD position: %s\n", osd_pos_name(g_osd_pos));
+		break;
+	case GC573_IPC_CMD_OSD_MODE:
+		if (cmd->a >= 0 && cmd->a <= OSD_MODE_CARD) {
+			g_osd_mode = (enum osd_mode)cmd->a;
+			g_card.scale = -1;
+			g_osd.scale = -1;
+			g_osd_card_was_active = true;
+		}
+		printf("[IPC] OSD mode: %d\n", cmd->a);
 		break;
 	case GC573_IPC_CMD_ASPECT:
 		if (cmd->a >= 0 && cmd->a < (int32_t)ASPECT_COUNT)
