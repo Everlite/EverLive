@@ -74,7 +74,8 @@ libhwsuhd-v4l2.so: src/hwsuhd-v4l2.c \
 $(CORE_LIB):
 	$(MAKE) -C $(CORE_DIR)
 
-$(OSD_OBJ): $(OSD_DIR)/everlive_osd.c $(OSD_DIR)/everlive_osd.h
+$(OSD_OBJ): $(OSD_DIR)/everlive_osd.c $(OSD_DIR)/everlive_osd.h \
+	    $(OSD_DIR)/everlive_osd_theme.h
 	$(CC) $(BASE_CFLAGS) $(SDL_CFLAGS) $(SDL_TTF_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 src/hws_user_streamer.o src/hws_audio_tap.o: CFLAGS_EXTRA = $(STREAMER_CFLAGS)

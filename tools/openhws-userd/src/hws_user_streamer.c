@@ -81,6 +81,7 @@ static unsigned long g_parent_winid;
 static bool g_play_audio = true;
 static char g_toast[128];
 static uint64_t g_toast_until_ms;
+static enum everlive_osd_tone g_toast_tone = EVERLIVE_OSD_TONE_NEUTRAL;
 
 static _Atomic float g_gain = 1.0f;	/* read by the capture thread */
 static atomic_bool g_muted;
@@ -109,6 +110,12 @@ static float g_popup_scale;
 static int g_popup_volume = 100;
 static SDL_Rect g_card_dest;
 static SDL_Rect g_popup_dest;
+static SDL_Texture *g_toast_texture;
+static char g_toast_built[128];
+static int g_toast_w;
+static int g_toast_h;
+static int g_toast_scale;
+static enum everlive_osd_tone g_toast_built_tone = EVERLIVE_OSD_TONE_NEUTRAL;
 #endif
 
 static uint64_t now_us(void)
@@ -130,11 +137,17 @@ static void on_signal(int sig)
 	g_quit = 1;
 }
 
-static void toast(const char *msg)
+static void toast_tone(const char *msg, enum everlive_osd_tone tone)
 {
 	snprintf(g_toast, sizeof(g_toast), "%s", msg);
+	g_toast_tone = tone;
 	g_toast_until_ms = now_ms() + 2500;
 	printf("[HWS-USER] %s\n", msg);
+}
+
+static void toast(const char *msg)
+{
+	toast_tone(msg, EVERLIVE_OSD_TONE_NEUTRAL);
 }
 
 /* ---- Audio (capture thread) ------------------------------------------- */
@@ -620,42 +633,59 @@ static bool hws_card_active(SDL_Window *win)
 			  SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0;
 }
 
+static void hws_scale_rect(SDL_Rect *dst, const SDL_Rect *src,
+			  SDL_Renderer *renderer, int win_w, int win_h);
+
 static void draw_toast_box(SDL_Renderer *r, SDL_Window *win,
 			   int win_w, int win_h)
 {
-	const char *line = g_toast;
-	int scale = win_h >= 1080 ? 2 : 1;
-	int pad = 8 * scale;
-	int lh = 10 * scale;
-	int bw = (int)strlen(line) * 8 * scale + 2 * pad;
-	int bh = lh + 2 * pad - 2 * scale;
-	int bx = (win_w - bw) / 2;
+	float s = (float)win_h / 1080.0f;
+	int scale_key = (int)(s * 1000.0f + 0.5f);
+	int bx;
 	int by;
-	int gap = 34 * scale;
+	int gap;
+	int edge;
+	SDL_Rect draw;
+	SDL_Rect scaled;
 
+	if (!g_toast[0] || now_ms() >= g_toast_until_ms)
+		return;
+	if (!g_toast_texture ||
+	    strcmp(g_toast_built, g_toast) != 0 ||
+	    g_toast_built_tone != g_toast_tone ||
+	    g_toast_scale != scale_key) {
+		if (!everlive_osd_build_toast(r, g_toast, g_toast_tone, win_h,
+					      &g_toast_texture, &g_toast_w,
+					      &g_toast_h, &g_toast_scale))
+			return;
+		snprintf(g_toast_built, sizeof(g_toast_built), "%s", g_toast);
+		g_toast_built_tone = g_toast_tone;
+	}
+	bx = (win_w - g_toast_w) / 2;
+	gap = (int)(EVERLIVE_OSD_NOTIFY_GAP * EVERLIVE_OSD_HUB_SCALE * s + 0.5f);
+	edge = (int)(EVERLIVE_OSD_BAR_PAD_X * EVERLIVE_OSD_HUB_SCALE * s + 0.5f);
+	if (gap < 6)
+		gap = 6;
+	if (edge < 8)
+		edge = 8;
 	if (g_osd && hws_card_active(win) && g_card.texture &&
 	    g_card_dest.h > 0) {
 		by = g_osd_pos == HWS_IPC_OSD_BOTTOM ?
-			g_card_dest.y - bh - gap :
+			g_card_dest.y - g_toast_h - gap :
 			g_card_dest.y + g_card_dest.h + gap;
 	} else {
 		by = g_osd_pos == HWS_IPC_OSD_BOTTOM ?
-			win_h - bh - 16 : 16;
+			win_h - g_toast_h - edge : edge;
 	}
 	if (bx < 8)
 		bx = 8;
 	if (by < 8)
 		by = 8;
-	if (by + bh > win_h - 8)
-		by = win_h - bh - 8;
-
-	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-	SDL_SetRenderDrawColor(r, 10, 12, 18, 190);
-	SDL_RenderFillRect(r, &(SDL_Rect){ bx, by, bw, bh });
-	SDL_SetRenderDrawColor(r, 34, 211, 238, 255);
-	SDL_RenderFillRect(r, &(SDL_Rect){ bx, by, 3 * scale, bh });
-	SDL_SetRenderDrawColor(r, 235, 240, 245, 255);
-	draw_text(r, bx + pad, by + pad, scale, line);
+	if (by + g_toast_h > win_h - 8)
+		by = win_h - g_toast_h - 8;
+	draw = (SDL_Rect){ bx, by, g_toast_w, g_toast_h };
+	hws_scale_rect(&scaled, &draw, r, win_w, win_h);
+	SDL_RenderCopy(r, g_toast_texture, NULL, &scaled);
 }
 
 static void hws_scale_rect(SDL_Rect *dst, const SDL_Rect *src,
@@ -741,6 +771,7 @@ static void hws_card_update(SDL_Renderer *r, SDL_Window *win,
 	memset(&snap, 0, sizeof(snap));
 	snap.title = title;
 	snap.details = details;
+	snap.signal_live = cs.signal && cs.width && cs.height;
 	snap.show_input = false;
 	snap.input_index = -1;
 	snap.aspect_index = g_aspect & 3;
@@ -762,9 +793,27 @@ static void hws_popup_build(SDL_Renderer *r, float scale)
 {
 	if (!g_popup_open)
 		return;
-	everlive_osd_build_popup(r, g_popup_kind, g_popup_selected,
-				 g_popup_hover, g_popup_volume, scale,
-				 &g_popup);
+	{
+		const struct everlive_osd_hitbox *anchor = NULL;
+		int min_width = 0;
+
+		if (g_popup_kind == EVERLIVE_OSD_POPUP_ASPECT) {
+			for (int i = 0; i < g_card.hit_count; i++) {
+				if (g_card.hits[i].action ==
+				    EVERLIVE_OSD_ACTION_ASPECT) {
+					anchor = &g_card.hits[i];
+					break;
+				}
+			}
+		}
+		if (anchor)
+			min_width = anchor->rect.w;
+		everlive_osd_build_popup(r, g_popup_kind, g_popup_selected,
+					 g_popup_hover, g_popup_volume,
+					 min_width,
+					 g_osd_pos == HWS_IPC_OSD_BOTTOM,
+					 scale, &g_popup);
+	}
 	g_popup_scale = scale;
 	g_popup_dirty = false;
 }
@@ -794,7 +843,8 @@ static void hws_render_popup(SDL_Renderer *r, int win_w, int win_h,
 	if (!anchor)
 		return;
 	g_popup_dest.x = g_card_dest.x + anchor->rect.x;
-	g_popup_dest.y = g_card_dest.y + anchor->rect.y + anchor->rect.h + 8;
+	g_popup_dest.y = g_card_dest.y + anchor->rect.y + anchor->rect.h +
+			 (g_popup_kind == EVERLIVE_OSD_POPUP_ASPECT ? 0 : 8);
 	g_popup_dest.w = g_popup.width;
 	g_popup_dest.h = g_popup.height;
 	if (g_popup_dest.x + g_popup_dest.w > win_w - 10)
@@ -803,7 +853,9 @@ static void hws_render_popup(SDL_Renderer *r, int win_w, int win_h,
 		g_popup_dest.x = 10;
 	if (g_popup_dest.y + g_popup_dest.h > win_h - 10) {
 		g_popup_dest.y = g_card_dest.y + anchor->rect.y -
-				 g_popup.height - 8;
+				 g_popup.height -
+				 (g_popup_kind == EVERLIVE_OSD_POPUP_ASPECT ?
+				  0 : 8);
 		if (g_popup_dest.y < 10)
 			g_popup_dest.y = 10;
 	}
@@ -1554,6 +1606,10 @@ static void run_window(void)
 		SDL_DestroyTexture(tex);
 	everlive_osd_destroy_card(&g_card);
 	everlive_osd_destroy_popup(&g_popup);
+	if (g_toast_texture) {
+		SDL_DestroyTexture(g_toast_texture);
+		g_toast_texture = NULL;
+	}
 	SDL_DestroyRenderer(ren);
 	SDL_DestroyWindow(win);
 }

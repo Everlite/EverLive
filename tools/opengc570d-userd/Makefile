@@ -84,7 +84,8 @@ $(CORE_LIB):
 src/%.o: src/%.c $(USER_HEADERS)
 	$(CC) $(USER_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-$(OSD_OBJ): $(OSD_DIR)/everlive_osd.c $(OSD_DIR)/everlive_osd.h
+$(OSD_OBJ): $(OSD_DIR)/everlive_osd.c $(OSD_DIR)/everlive_osd.h \
+	    $(OSD_DIR)/everlive_osd_theme.h
 	$(CC) $(USER_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 gc570d-ctl: src/gc570d-ctl.c

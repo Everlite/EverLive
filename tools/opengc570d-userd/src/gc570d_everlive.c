@@ -547,6 +547,7 @@ struct everlive_sdl {
 	bool popup_open;
 	bool popup_dragging;
 	bool popup_dirty;
+	bool popup_above;
 	float popup_scale;
 	int popup_selected;
 	int popup_hover;
@@ -557,6 +558,8 @@ struct everlive_sdl {
 	uint64_t toast_until_ns;
 	int toast_w;
 	int toast_h;
+	int toast_scale;
+	enum everlive_osd_tone toast_tone;
 	SDL_AudioDeviceID audio_dev;
 	bool fullscreen;
 	unsigned long parent_winid;
@@ -1252,7 +1255,13 @@ static void sdl_card_update(struct everlive_state *st,
 	bool interlaced = shm_port_source_interlaced(st, port);
 	int vol = atomic_load_explicit(&st->volume_pct, __ATOMIC_RELAXED);
 	bool muted = atomic_load_explicit(&st->muted, __ATOMIC_RELAXED);
+	struct gc570d_dev *gc = READ_ONCE(st->gc);
+	bool signal_live = src_w && src_h && !st->frame[port].no_signal;
 	struct everlive_osd_snapshot snap;
+
+	if (gc)
+		signal_live = port == 0 ? !READ_ONCE(gc->video0_no_signal) :
+					  !READ_ONCE(gc->video_no_signal);
 
 	if (!everlive_osd_available()) {
 		if (!g_osd_font_init_attempted) {
@@ -1275,6 +1284,7 @@ static void sdl_card_update(struct everlive_state *st,
 	memset(&snap, 0, sizeof(snap));
 	snap.title = title;
 	snap.details = details;
+	snap.signal_live = signal_live;
 	snap.show_input = true;
 	snap.input_index = port;
 	snap.aspect_index = aspect;
@@ -1339,17 +1349,24 @@ static void sdl_place_osd(SDL_Rect *dst, int width, int height, float scale,
 		dst->y = 0;
 }
 
-static void sdl_toast(struct everlive_sdl *sdl, const char *message)
+static void sdl_toast_tone(struct everlive_sdl *sdl, const char *message,
+			   enum everlive_osd_tone tone)
 {
 	if (!message || !*message)
 		return;
 	snprintf(sdl->toast_text, sizeof(sdl->toast_text), "%s", message);
+	sdl->toast_tone = tone;
 	sdl->toast_until_ns = now_ns() + 2200000000ULL;
 	sdl->toast_built[0] = '\0';
 	if (sdl->toast_texture) {
 		SDL_DestroyTexture(sdl->toast_texture);
 		sdl->toast_texture = NULL;
 	}
+}
+
+static void sdl_toast(struct everlive_sdl *sdl, const char *message)
+{
+	sdl_toast_tone(sdl, message, EVERLIVE_OSD_TONE_NEUTRAL);
 }
 
 static void sdl_render_toast(struct everlive_state *st,
@@ -1362,27 +1379,31 @@ static void sdl_render_toast(struct everlive_state *st,
 
 	if (!sdl->toast_text[0] || now_ns() >= sdl->toast_until_ns)
 		return;
+	scale = (float)win_h / 1080.0f;
 	if (!sdl->toast_texture ||
-	    strcmp(sdl->toast_built, sdl->toast_text) != 0) {
-		if (!everlive_osd_build_text(sdl->renderer, sdl->toast_text,
-					     win_h, &sdl->toast_texture,
-					     &sdl->toast_w, &sdl->toast_h,
-					     NULL))
+	    strcmp(sdl->toast_built, sdl->toast_text) != 0 ||
+	    sdl->toast_scale != (int)(scale * 1000.0f + 0.5f)) {
+		if (!everlive_osd_build_toast(sdl->renderer, sdl->toast_text,
+					      sdl->toast_tone, win_h,
+					      &sdl->toast_texture,
+					      &sdl->toast_w, &sdl->toast_h,
+					      &sdl->toast_scale))
 			return;
 		snprintf(sdl->toast_built, sizeof(sdl->toast_built), "%s",
 			 sdl->toast_text);
 	}
-	scale = (float)win_h / 1080.0f;
 	pos = atomic_load_explicit(&st->osd_pos, __ATOMIC_RELAXED);
 	dst.w = sdl->toast_w;
 	dst.h = sdl->toast_h;
 	dst.x = (win_w - dst.w) / 2;
 	{
-		int gap = (int)(44.0f * scale + 0.5f);
-		int edge = (int)(16.0f * scale + 0.5f);
+		int gap = (int)(EVERLIVE_OSD_NOTIFY_GAP *
+				EVERLIVE_OSD_HUB_SCALE * scale + 0.5f);
+		int edge = (int)(EVERLIVE_OSD_BAR_PAD_X *
+				 EVERLIVE_OSD_HUB_SCALE * scale + 0.5f);
 
-		if (gap < 20)
-			gap = 20;
+		if (gap < 6)
+			gap = 6;
 		if (edge < 8)
 			edge = 8;
 		if (sdl_card_mode_active(st, sdl) && sdl->card.texture &&
@@ -1411,9 +1432,19 @@ static void sdl_popup_build(struct everlive_sdl *sdl, float scale)
 {
 	if (!sdl->popup_open)
 		return;
-	everlive_osd_build_popup(sdl->renderer, sdl->popup_kind,
-				 sdl->popup_selected, sdl->popup_hover,
-				 sdl->popup_volume, scale, &sdl->popup);
+	{
+		const struct everlive_osd_hitbox *anchor =
+			sdl->popup_kind == EVERLIVE_OSD_POPUP_ASPECT
+				? sdl_card_hit(sdl, EVERLIVE_OSD_ACTION_ASPECT)
+				: NULL;
+		int min_width = anchor ? anchor->rect.w : 0;
+
+		everlive_osd_build_popup(sdl->renderer, sdl->popup_kind,
+					 sdl->popup_selected, sdl->popup_hover,
+					 sdl->popup_volume, min_width,
+					 sdl->popup_above, scale,
+					 &sdl->popup);
+	}
 	sdl->popup_scale = scale;
 	sdl->popup_dirty = false;
 }
@@ -1438,7 +1469,8 @@ static void sdl_render_popup(struct everlive_sdl *sdl, int win_w, int win_h,
 		return;
 	sdl->popup_dest.x = sdl->card_dest.x + anchor->rect.x;
 	sdl->popup_dest.y = sdl->card_dest.y + anchor->rect.y +
-			    anchor->rect.h + 8;
+			    anchor->rect.h +
+			    (sdl->popup_kind == EVERLIVE_OSD_POPUP_ASPECT ? 0 : 8);
 	sdl->popup_dest.w = sdl->popup.width;
 	sdl->popup_dest.h = sdl->popup.height;
 	if (sdl->popup_dest.x + sdl->popup_dest.w > win_w - 10)
@@ -1447,7 +1479,9 @@ static void sdl_render_popup(struct everlive_sdl *sdl, int win_w, int win_h,
 		sdl->popup_dest.x = 10;
 	if (sdl->popup_dest.y + sdl->popup_dest.h > win_h - 10) {
 		sdl->popup_dest.y = sdl->card_dest.y + anchor->rect.y -
-				    sdl->popup.height - 8;
+				    sdl->popup.height -
+				    (sdl->popup_kind == EVERLIVE_OSD_POPUP_ASPECT ?
+				     0 : 8);
 		if (sdl->popup_dest.y < 10)
 			sdl->popup_dest.y = 10;
 	}
@@ -1821,6 +1855,9 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 	case EVERLIVE_OSD_ACTION_ASPECT:
 		sdl->popup_selected = atomic_load_explicit(&st->aspect,
 							   __ATOMIC_RELAXED);
+		sdl->popup_above = atomic_load_explicit(&st->osd_pos,
+							__ATOMIC_RELAXED) ==
+				   EVERLIVE_OSD_BOTTOM;
 		sdl_open_popup(sdl, EVERLIVE_OSD_POPUP_ASPECT);
 		break;
 	case EVERLIVE_OSD_ACTION_SCALE:
@@ -1837,6 +1874,9 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 	case EVERLIVE_OSD_ACTION_VOLUME:
 		sdl->popup_volume = atomic_load_explicit(&st->volume_pct,
 							 __ATOMIC_RELAXED);
+		sdl->popup_above = atomic_load_explicit(&st->osd_pos,
+							__ATOMIC_RELAXED) ==
+				   EVERLIVE_OSD_BOTTOM;
 		sdl_open_popup(sdl, EVERLIVE_OSD_POPUP_VOLUME);
 		break;
 	case EVERLIVE_OSD_ACTION_MUTE:

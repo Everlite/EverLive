@@ -1829,6 +1829,8 @@ static bool g_help_overlay;
 static struct osd_overlay g_toast;
 static uint64_t g_toast_until_ms;
 static char g_toast_text[64];
+static enum everlive_osd_tone g_toast_tone = EVERLIVE_OSD_TONE_NEUTRAL;
+static int g_toast_scale;
 
 /* Filled by the render loop for the OSD latency readout. */
 static double g_osd_dma_ms;
@@ -1847,6 +1849,8 @@ static void toast_destroy(void)
 	g_toast.text[0] = '\0';
 	g_toast_until_ms = 0;
 	g_toast_text[0] = '\0';
+	g_toast_tone = EVERLIVE_OSD_TONE_NEUTRAL;
+	g_toast_scale = 0;
 }
 
 static void osd_destroy(void)
@@ -1982,6 +1986,7 @@ static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
 	memset(&snap, 0, sizeof(snap));
 	snap.title = title;
 	snap.details = details;
+	snap.signal_live = in_w > 0 && in_h > 0;
 	snap.show_input = false;
 	snap.input_index = -1;
 	snap.aspect_index = g_aspect;
@@ -2171,9 +2176,19 @@ static void osd_popup_build(SDL_Renderer *renderer, float scale)
 {
 	if (!g_popup_open)
 		return;
-	everlive_osd_build_popup(renderer, g_popup_kind, g_popup_selected,
-				 g_popup_hover, g_popup_volume, scale,
-				 &g_popup);
+	{
+		const struct everlive_osd_hitbox *anchor =
+			g_popup_kind == EVERLIVE_OSD_POPUP_ASPECT
+				? osd_card_hit(EVERLIVE_OSD_ACTION_ASPECT)
+				: NULL;
+		int min_width = anchor ? anchor->rect.w : 0;
+
+		everlive_osd_build_popup(renderer, g_popup_kind,
+					 g_popup_selected, g_popup_hover,
+					 g_popup_volume, min_width,
+					 g_osd_pos == OSD_POS_BOTTOM, scale,
+					 &g_popup);
+	}
 	g_popup_scale = scale;
 	g_popup_dirty = false;
 }
@@ -2197,7 +2212,8 @@ static void osd_render_popup(SDL_Renderer *renderer, int win_w, int win_h,
 	if (!anchor)
 		return;
 	g_popup_dest.x = g_card_dest.x + anchor->rect.x;
-	g_popup_dest.y = g_card_dest.y + anchor->rect.y + anchor->rect.h + 8;
+	g_popup_dest.y = g_card_dest.y + anchor->rect.y + anchor->rect.h +
+			 (g_popup_kind == EVERLIVE_OSD_POPUP_ASPECT ? 0 : 8);
 	g_popup_dest.w = g_popup.width;
 	g_popup_dest.h = g_popup.height;
 	if (g_popup_dest.x + g_popup_dest.w > win_w - 10)
@@ -2206,7 +2222,9 @@ static void osd_render_popup(SDL_Renderer *renderer, int win_w, int win_h,
 		g_popup_dest.x = 10;
 	if (g_popup_dest.y + g_popup_dest.h > win_h - 10) {
 		g_popup_dest.y = g_card_dest.y + anchor->rect.y -
-				 g_popup.height - 8;
+				 g_popup.height -
+				 (g_popup_kind == EVERLIVE_OSD_POPUP_ASPECT ?
+				  0 : 8);
 		if (g_popup_dest.y < 10)
 			g_popup_dest.y = 10;
 	}
@@ -2664,16 +2682,22 @@ static void help_render(SDL_Renderer *renderer, SDL_Window *window)
 	SDL_RenderCopy(renderer, g_help.texture, NULL, &dst);
 }
 
-static void toast_trigger(const char *msg)
+static void toast_trigger_tone(const char *msg, enum everlive_osd_tone tone)
 {
 	struct timespec ts;
 
 	if (!msg || !*msg)
 		return;
 	snprintf(g_toast_text, sizeof(g_toast_text), "%s", msg);
+	g_toast_tone = tone;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	g_toast_until_ms = (uint64_t)ts.tv_sec * 1000U +
 			   (uint64_t)(ts.tv_nsec / 1000000L) + 2500U;
+}
+
+static void toast_trigger(const char *msg)
+{
+	toast_trigger_tone(msg, EVERLIVE_OSD_TONE_NEUTRAL);
 }
 
 static void toast_render(SDL_Renderer *renderer, SDL_Window *window)
@@ -2686,6 +2710,7 @@ static void toast_render(SDL_Renderer *renderer, SDL_Window *window)
 	int win_w = 0;
 	int win_h = 0;
 	int scale;
+	int scale_key;
 	SDL_Rect dst;
 
 	if (!g_toast_text[0])
@@ -2701,8 +2726,19 @@ static void toast_render(SDL_Renderer *renderer, SDL_Window *window)
 		return;
 
 	scale = osd_scale_for_height(win_h);
-	if (scale != g_toast.scale || strcmp(g_toast.text, g_toast_text) != 0)
-		osd_build(renderer, scale, g_toast_text, &g_toast);
+	scale_key = (int)((float)win_h / 1080.0f * 1000.0f + 0.5f);
+	if (g_toast.texture &&
+	    g_toast_scale == scale_key &&
+	    strcmp(g_toast.text, g_toast_text) == 0)
+		goto have_toast;
+	if (!everlive_osd_build_toast(renderer, g_toast_text, g_toast_tone,
+				      win_h, &g_toast.texture,
+				      &g_toast.width, &g_toast.height,
+				      &g_toast_scale))
+		return;
+	g_toast.scale = scale;
+	snprintf(g_toast.text, sizeof(g_toast.text), "%s", g_toast_text);
+have_toast:
 	if (!g_toast.texture)
 		return;
 
@@ -2710,11 +2746,15 @@ static void toast_render(SDL_Renderer *renderer, SDL_Window *window)
 	dst.h = g_toast.height;
 	dst.x = (win_w - dst.w) / 2;
 	{
-		int gap = (int)(44.0f * (float)win_h / 1080.0f + 0.5f);
-		int edge = (int)(16.0f * (float)win_h / 1080.0f + 0.5f);
+		int gap = (int)(EVERLIVE_OSD_NOTIFY_GAP *
+				EVERLIVE_OSD_HUB_SCALE *
+				(float)win_h / 1080.0f + 0.5f);
+		int edge = (int)(EVERLIVE_OSD_BAR_PAD_X *
+				 EVERLIVE_OSD_HUB_SCALE *
+				 (float)win_h / 1080.0f + 0.5f);
 
-		if (gap < 20)
-			gap = 20;
+		if (gap < 6)
+			gap = 6;
 		if (edge < 8)
 			edge = 8;
 		if (g_osd_enabled && osd_card_active(window) &&

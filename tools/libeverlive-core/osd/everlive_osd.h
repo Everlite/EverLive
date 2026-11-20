@@ -14,27 +14,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Palette mirrored in tools/everlive/ui_theme.py. */
-#define EVERLIVE_OSD_CARD_BG	0x141724
-#define EVERLIVE_OSD_CARD_ALPHA	217	/* ~85% */
-#define EVERLIVE_OSD_BORDER	0x3F455C
-#define EVERLIVE_OSD_TITLE	0xE7EBF2
-#define EVERLIVE_OSD_ROUTE	0x94A3BB
-#define EVERLIVE_OSD_INPUT_BG	0x25334A
-#define EVERLIVE_OSD_CHIP_BG	0x202334
-#define EVERLIVE_OSD_HOVER_BORDER 0x3A3E54
-#define EVERLIVE_OSD_CHIP_BORDER 0x3A3650
-#define EVERLIVE_OSD_TOOLTIP_BG	0x161927
-#define EVERLIVE_OSD_DIVIDER	0x334155
-#define EVERLIVE_OSD_LIVE	0x19FF3B
-#define EVERLIVE_OSD_MINT_BG	0x23423B
-#define EVERLIVE_OSD_MINT	0x7FD8C0
-#define EVERLIVE_OSD_DANGER_BG	0x3B1D25
-#define EVERLIVE_OSD_DANGER_BORDER 0x7A2A38
-#define EVERLIVE_OSD_DANGER	0xFF6B7A
-#define EVERLIVE_OSD_BLUE	0x3B5B8C
-#define EVERLIVE_OSD_BLUE_BORDER 0x4A6FA5
-#define EVERLIVE_OSD_BLUE_TEXT	0xE4EEFF
+#include "everlive_osd_theme.h"
 
 /* Font Awesome Free 6 solid codepoints. */
 #define EVERLIVE_OSD_ICON_CHEVRON	0xF078
@@ -72,6 +52,7 @@ enum everlive_osd_action {
 struct everlive_osd_snapshot {
 	const char *title;
 	const char *details;		/* identity hover pill */
+	bool signal_live;
 	bool show_input;
 	int input_index;		/* 0/1 on DUO, -1 otherwise */
 	int aspect_index;		/* auto/16:9/4:3/stretch */
@@ -118,6 +99,13 @@ struct everlive_osd_card {
 	int hit_count;
 };
 
+enum everlive_osd_tone {
+	EVERLIVE_OSD_TONE_NEUTRAL = 0,
+	EVERLIVE_OSD_TONE_MINT,
+	EVERLIVE_OSD_TONE_WARN,
+	EVERLIVE_OSD_TONE_DANGER,
+};
+
 enum everlive_osd_popup_kind {
 	EVERLIVE_OSD_POPUP_NONE = 0,
 	EVERLIVE_OSD_POPUP_ASPECT,
@@ -145,8 +133,8 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 bool everlive_osd_build_popup(SDL_Renderer *renderer,
 			      enum everlive_osd_popup_kind kind,
 			      int selected_input, int hover_input,
-			      int volume_pct, float scale,
-			      struct everlive_osd_popup *out);
+			      int volume_pct, int min_width, bool above,
+			      float scale, struct everlive_osd_popup *out);
 bool everlive_osd_build_tooltip(SDL_Renderer *renderer,
 				struct everlive_osd_card *card,
 				enum everlive_osd_action action,
@@ -165,6 +153,10 @@ void everlive_osd_render_details(SDL_Renderer *renderer,
 bool everlive_osd_build_text(SDL_Renderer *renderer, const char *text,
 			     int viewport_h, SDL_Texture **texture,
 			     int *width, int *height, int *scale_out);
+bool everlive_osd_build_toast(SDL_Renderer *renderer, const char *text,
+			      enum everlive_osd_tone tone, int viewport_h,
+			      SDL_Texture **texture, int *width, int *height,
+			      int *scale_out);
 void everlive_osd_destroy_card(struct everlive_osd_card *card);
 void everlive_osd_destroy_popup(struct everlive_osd_popup *popup);
 

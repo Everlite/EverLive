@@ -117,7 +117,8 @@ $(STREAM_OBJS): src/%.o: src/%.c
 src/gc573_user_streamer.o: src/gc573_user_streamer.c
 	$(CC) $(BASE_CFLAGS) $(SDL_CFLAGS) $(SDL_TTF_CFLAGS) $(X11_CFLAGS) $(AV_CFLAGS) $(PW_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-$(OSD_OBJ): $(OSD_DIR)/everlive_osd.c $(OSD_DIR)/everlive_osd.h
+$(OSD_OBJ): $(OSD_DIR)/everlive_osd.c $(OSD_DIR)/everlive_osd.h \
+	    $(OSD_DIR)/everlive_osd_theme.h
 	$(CC) $(BASE_CFLAGS) $(SDL_CFLAGS) $(SDL_TTF_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 # The framegen cadence test now lives in tests/; forward the legacy target.
