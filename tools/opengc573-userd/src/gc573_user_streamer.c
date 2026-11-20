@@ -1814,6 +1814,8 @@ static bool g_popup_open;
 static bool g_popup_dragging;
 static bool g_popup_dirty;
 static float g_popup_scale;
+static int g_popup_selected;
+static int g_popup_hover = -1;
 static int g_popup_volume = 100;
 static bool g_osd_font_init_attempted;
 static SDL_Rect g_card_dest;
@@ -1861,6 +1863,7 @@ static void osd_destroy(void)
 	everlive_osd_destroy_popup(&g_popup);
 	g_popup_open = false;
 	g_popup_kind = EVERLIVE_OSD_POPUP_NONE;
+	g_popup_hover = -1;
 	toast_destroy();
 }
 
@@ -2168,8 +2171,9 @@ static void osd_popup_build(SDL_Renderer *renderer, float scale)
 {
 	if (!g_popup_open)
 		return;
-	everlive_osd_build_popup(renderer, g_popup_kind, 0, -1,
-				 g_popup_volume, scale, &g_popup);
+	everlive_osd_build_popup(renderer, g_popup_kind, g_popup_selected,
+				 g_popup_hover, g_popup_volume, scale,
+				 &g_popup);
 	g_popup_scale = scale;
 	g_popup_dirty = false;
 }
@@ -2178,7 +2182,9 @@ static void osd_render_popup(SDL_Renderer *renderer, int win_w, int win_h,
 			     float scale)
 {
 	const struct everlive_osd_hitbox *anchor;
-	enum everlive_osd_action action = EVERLIVE_OSD_ACTION_VOLUME;
+	enum everlive_osd_action action =
+		g_popup_kind == EVERLIVE_OSD_POPUP_ASPECT
+			? EVERLIVE_OSD_ACTION_ASPECT : EVERLIVE_OSD_ACTION_VOLUME;
 
 	if (!g_popup_open)
 		return;
@@ -2299,20 +2305,6 @@ static void osd_toggle_fullscreen(SDL_Window *window)
 	osd_card_invalidate();
 }
 
-static void osd_cycle_aspect(SDL_Window *window)
-{
-	char title[128];
-	char message[64];
-
-	g_aspect = (enum stream_aspect)((g_aspect + 1) % ASPECT_COUNT);
-	snprintf(title, sizeof(title), "EverLive — Aspect: %s",
-		 aspect_name(g_aspect));
-	snprintf(message, sizeof(message), "Aspect: %s", aspect_name(g_aspect));
-	SDL_SetWindowTitle(window, title);
-	toast_trigger(message);
-	osd_card_invalidate();
-}
-
 static void osd_cycle_scale(SDL_Window *window)
 {
 	char title[128];
@@ -2332,11 +2324,14 @@ static void osd_cycle_scale(SDL_Window *window)
 
 static void osd_open_popup(enum everlive_osd_popup_kind kind)
 {
+	g_popup_hover = -1;
 	g_popup_kind = kind;
 	g_popup_open = true;
 	g_popup_dirty = true;
 	if (kind == EVERLIVE_OSD_POPUP_VOLUME)
 		g_popup_volume = osd_volume_percent();
+	if (kind == EVERLIVE_OSD_POPUP_ASPECT)
+		g_popup_selected = g_aspect;
 	everlive_osd_destroy_popup(&g_popup);
 	osd_card_invalidate();
 }
@@ -2346,6 +2341,7 @@ static void osd_close_popup(void)
 	g_popup_open = false;
 	g_popup_dragging = false;
 	g_popup_kind = EVERLIVE_OSD_POPUP_NONE;
+	g_popup_hover = -1;
 	everlive_osd_destroy_popup(&g_popup);
 }
 
@@ -2463,6 +2459,34 @@ static bool osd_volume_track_event(int x, bool press)
 	return true;
 }
 
+static void osd_update_popup_hover(int x, int y)
+{
+	SDL_Point point = { x, y };
+	SDL_Point local;
+	int hover = -1;
+	int i;
+
+	if (!g_popup_open || g_popup.kind != EVERLIVE_OSD_POPUP_ASPECT) {
+		if (g_popup_hover != -1)
+			g_popup_hover = -1;
+		return;
+	}
+	if (g_popup_dest.w > 0 && SDL_PointInRect(&point, &g_popup_dest)) {
+		local.x = x - g_popup_dest.x;
+		local.y = y - g_popup_dest.y;
+		for (i = 0; i < 4; i++) {
+			if (SDL_PointInRect(&local, &g_popup.aspect_rows[i])) {
+				hover = i;
+				break;
+			}
+		}
+	}
+	if (hover != g_popup_hover) {
+		g_popup_hover = hover;
+		g_popup_dirty = true;
+	}
+}
+
 static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 {
 	enum everlive_osd_action action;
@@ -2490,6 +2514,13 @@ static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 	else if (event->type == SDL_MOUSEBUTTONDOWN ||
 		 event->type == SDL_MOUSEBUTTONUP)
 		osd_update_hover(window, event->button.x, event->button.y);
+	if (g_popup_open) {
+		if (event->type == SDL_MOUSEMOTION)
+			osd_update_popup_hover(event->motion.x, event->motion.y);
+		else if (event->type == SDL_MOUSEBUTTONDOWN ||
+			 event->type == SDL_MOUSEBUTTONUP)
+			osd_update_popup_hover(event->button.x, event->button.y);
+	}
 
 	if (event->type == SDL_MOUSEBUTTONUP && event->button.button == SDL_BUTTON_LEFT) {
 		g_popup_dragging = false;
@@ -2511,8 +2542,31 @@ static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 		point.x = x;
 		point.y = y;
 		if (g_popup_dest.w > 0 && SDL_PointInRect(&point, &g_popup_dest)) {
-			if (g_popup.kind == EVERLIVE_OSD_POPUP_VOLUME)
+			if (g_popup.kind == EVERLIVE_OSD_POPUP_VOLUME) {
 				osd_volume_track_event(x, true);
+			} else if (g_popup.kind == EVERLIVE_OSD_POPUP_ASPECT) {
+				static const char *const names[] = {
+					"Auto", "16:9", "4:3", "Stretch"
+				};
+				SDL_Point local = { x - g_popup_dest.x,
+						    y - g_popup_dest.y };
+				int i;
+
+				for (i = 0; i < 4; i++) {
+					if (SDL_PointInRect(&local,
+							    &g_popup.aspect_rows[i])) {
+						char msg[64];
+
+						g_aspect = (enum stream_aspect)i;
+						snprintf(msg, sizeof(msg),
+							 "Aspect: %s", names[i]);
+						toast_trigger(msg);
+						osd_card_invalidate();
+						break;
+					}
+				}
+				osd_close_popup();
+			}
 			return true;
 		}
 		osd_close_popup();
@@ -2527,7 +2581,7 @@ static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 	}
 	switch (action) {
 	case EVERLIVE_OSD_ACTION_ASPECT:
-		osd_cycle_aspect(window);
+		osd_open_popup(EVERLIVE_OSD_POPUP_ASPECT);
 		break;
 	case EVERLIVE_OSD_ACTION_SCALE:
 		osd_cycle_scale(window);
@@ -2625,6 +2679,9 @@ static void toast_trigger(const char *msg)
 static void toast_render(SDL_Renderer *renderer, SDL_Window *window)
 {
 	struct timespec ts;
+
+	if (g_popup_open)
+		return;
 	uint64_t now;
 	int win_w = 0;
 	int win_h = 0;
@@ -2744,6 +2801,8 @@ static void embed_poll_pointer(SDL_Window *window)
 	(void)win_x;
 	(void)win_y;
 	osd_update_hover(window, local_x, local_y);
+	if (g_popup_open)
+		osd_update_popup_hover(local_x, local_y);
 	down = (mask & Button1Mask) != 0;
 	if (down && !g_embed_mouse_down) {
 		SDL_Event event;

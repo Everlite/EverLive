@@ -55,7 +55,8 @@
 
 enum everlive_osd_action {
 	EVERLIVE_OSD_ACTION_NONE = 0,
-	EVERLIVE_OSD_ACTION_INPUT,
+	EVERLIVE_OSD_ACTION_INPUT_1,
+	EVERLIVE_OSD_ACTION_INPUT_2,
 	EVERLIVE_OSD_ACTION_ASPECT,
 	EVERLIVE_OSD_ACTION_SCALE,
 	EVERLIVE_OSD_ACTION_PIP,
@@ -119,7 +120,7 @@ struct everlive_osd_card {
 
 enum everlive_osd_popup_kind {
 	EVERLIVE_OSD_POPUP_NONE = 0,
-	EVERLIVE_OSD_POPUP_INPUT,
+	EVERLIVE_OSD_POPUP_ASPECT,
 	EVERLIVE_OSD_POPUP_VOLUME,
 };
 
@@ -128,7 +129,7 @@ struct everlive_osd_popup {
 	int width;
 	int height;
 	enum everlive_osd_popup_kind kind;
-	SDL_Rect input_rows[2];
+	SDL_Rect aspect_rows[4];
 	SDL_Rect volume_track;
 };
 

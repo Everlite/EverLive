@@ -1208,7 +1208,7 @@ static void sdl_render_frame(struct everlive_state *st, struct everlive_sdl *sdl
 		int win_h = 0;
 
 		SDL_GetWindowSize(sdl->window, &win_w, &win_h);
-		if (win_w > 0 && win_h > 0)
+		if (win_w > 0 && win_h > 0 && !sdl->popup_open)
 			sdl_render_toast(st, sdl, win_w, win_h);
 	}
 	SDL_RenderPresent(sdl->renderer);
@@ -1423,8 +1423,8 @@ static void sdl_render_popup(struct everlive_sdl *sdl, int win_w, int win_h,
 {
 	const struct everlive_osd_hitbox *anchor;
 	enum everlive_osd_action action =
-		sdl->popup_kind == EVERLIVE_OSD_POPUP_INPUT
-			? EVERLIVE_OSD_ACTION_INPUT : EVERLIVE_OSD_ACTION_VOLUME;
+		sdl->popup_kind == EVERLIVE_OSD_POPUP_ASPECT
+			? EVERLIVE_OSD_ACTION_ASPECT : EVERLIVE_OSD_ACTION_VOLUME;
 
 	if (!sdl->popup_open)
 		return;
@@ -1495,19 +1495,6 @@ static void sdl_toggle_fullscreen(struct everlive_sdl *sdl)
 	SDL_SetWindowFullscreen(sdl->window, sdl->fullscreen ?
 				SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 	sdl_toast(sdl, sdl->fullscreen ? "Fullscreen: On" : "Fullscreen: Off");
-	sdl_card_invalidate(sdl);
-}
-
-static void sdl_cycle_aspect(struct everlive_state *st,
-			     struct everlive_sdl *sdl)
-{
-	int next = (atomic_load_explicit(&st->aspect, __ATOMIC_RELAXED) + 1) & 3;
-	char message[64];
-
-	atomic_store_explicit(&st->aspect, next, __ATOMIC_RELAXED);
-	snprintf(message, sizeof(message), "Aspect: %s",
-		 aspect_mode_label(next));
-	sdl_toast(sdl, message);
 	sdl_card_invalidate(sdl);
 }
 
@@ -1678,8 +1665,9 @@ static void sdl_update_popup_hover(struct everlive_sdl *sdl, int x, int y)
 	SDL_Point point = { x, y };
 	SDL_Point local;
 	int hover = -1;
+	int i;
 
-	if (!sdl->popup_open || sdl->popup.kind != EVERLIVE_OSD_POPUP_INPUT) {
+	if (!sdl->popup_open || sdl->popup.kind != EVERLIVE_OSD_POPUP_ASPECT) {
 		if (sdl->popup_hover != -1)
 			sdl->popup_hover = -1;
 		return;
@@ -1687,10 +1675,12 @@ static void sdl_update_popup_hover(struct everlive_sdl *sdl, int x, int y)
 	if (sdl->popup_dest.w > 0 && SDL_PointInRect(&point, &sdl->popup_dest)) {
 		local.x = x - sdl->popup_dest.x;
 		local.y = y - sdl->popup_dest.y;
-		if (SDL_PointInRect(&local, &sdl->popup.input_rows[0]))
-			hover = 0;
-		else if (SDL_PointInRect(&local, &sdl->popup.input_rows[1]))
-			hover = 1;
+		for (i = 0; i < 4; i++) {
+			if (SDL_PointInRect(&local, &sdl->popup.aspect_rows[i])) {
+				hover = i;
+				break;
+			}
+		}
 	}
 	if (hover != sdl->popup_hover) {
 		sdl->popup_hover = hover;
@@ -1784,17 +1774,25 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 			point.y -= sdl->popup_dest.y;
 			if (sdl->popup.kind == EVERLIVE_OSD_POPUP_VOLUME) {
 				sdl_volume_track_event(st, sdl, x, true);
-			} else if (sdl->popup.kind == EVERLIVE_OSD_POPUP_INPUT) {
-				if (SDL_PointInRect(&point,
-						    &sdl->popup.input_rows[0])) {
-					gc570d_everlive_set_port(0);
-					sdl_toast(sdl, "Input: HDMI 1");
-					sdl_card_invalidate(sdl);
-				} else if (SDL_PointInRect(&point,
-							   &sdl->popup.input_rows[1])) {
-					gc570d_everlive_set_port(1);
-					sdl_toast(sdl, "Input: HDMI 2");
-					sdl_card_invalidate(sdl);
+			} else if (sdl->popup.kind == EVERLIVE_OSD_POPUP_ASPECT) {
+				static const char *const names[] = {
+					"Auto", "16:9", "4:3", "Stretch"
+				};
+				int i;
+
+				for (i = 0; i < 4; i++) {
+					if (SDL_PointInRect(&point,
+							    &sdl->popup.aspect_rows[i])) {
+						char msg[64];
+
+						atomic_store_explicit(&st->aspect, i,
+								      __ATOMIC_RELAXED);
+						snprintf(msg, sizeof(msg),
+							 "Aspect: %s", names[i]);
+						sdl_toast(sdl, msg);
+						sdl_card_invalidate(sdl);
+						break;
+					}
 				}
 				sdl_close_popup(sdl);
 			}
@@ -1810,13 +1808,20 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 		return true;
 	}
 	switch (action) {
-	case EVERLIVE_OSD_ACTION_INPUT:
-		sdl->popup_selected = atomic_load_explicit(&st->port,
-							   __ATOMIC_RELAXED);
-		sdl_open_popup(sdl, EVERLIVE_OSD_POPUP_INPUT);
+	case EVERLIVE_OSD_ACTION_INPUT_1:
+		gc570d_everlive_set_port(0);
+		sdl_toast(sdl, "Input: HDMI 1");
+		sdl_card_invalidate(sdl);
+		break;
+	case EVERLIVE_OSD_ACTION_INPUT_2:
+		gc570d_everlive_set_port(1);
+		sdl_toast(sdl, "Input: HDMI 2");
+		sdl_card_invalidate(sdl);
 		break;
 	case EVERLIVE_OSD_ACTION_ASPECT:
-		sdl_cycle_aspect(st, sdl);
+		sdl->popup_selected = atomic_load_explicit(&st->aspect,
+							   __ATOMIC_RELAXED);
+		sdl_open_popup(sdl, EVERLIVE_OSD_POPUP_ASPECT);
 		break;
 	case EVERLIVE_OSD_ACTION_SCALE:
 		sdl_cycle_scale(st, sdl);
