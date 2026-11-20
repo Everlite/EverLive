@@ -23,9 +23,6 @@
 static TTF_Font *g_font_regular;
 static TTF_Font *g_font_semibold;
 static TTF_Font *g_font_icons;
-static SDL_Surface *g_icon_hdmi[2];
-static SDL_Surface *g_icon_aspect[4];
-static SDL_Surface *g_icon_scale[2];
 static bool g_available;
 static bool g_initialised;
 static char g_font_dir[512];
@@ -323,420 +320,6 @@ static const char *action_detail(const struct everlive_osd_card *card,
 	}
 }
 
-static void fill_hexagon(SDL_Surface *surface, int x, int y, int w, int h,
-			 int cut, uint32_t color)
-{
-	int dy;
-
-	if (w < 1 || h < 1)
-		return;
-	if (cut < 1)
-		cut = 1;
-	if (cut * 2 >= w)
-		cut = (w - 1) / 2;
-	for (dy = 0; dy < h; dy++) {
-		int half = h / 2;
-		int inset;
-		int span;
-
-		if (half < 1)
-			half = 1;
-		if (dy < half)
-			inset = cut - (cut * dy) / half;
-		else
-			inset = cut - (cut * (h - 1 - dy)) / half;
-		if (inset < 0)
-			inset = 0;
-		span = w - inset * 2;
-		if (span < 1)
-			span = 1;
-		SDL_FillRect(surface, &(SDL_Rect){ x + inset, y + dy, span, 1 },
-			     color);
-	}
-}
-
-static void draw_hdmi_connector(SDL_Surface *surface, int x, int y, int w,
-				int h, const char *label, float s,
-				uint32_t color, uint32_t bg)
-{
-	int border = iscale(2.5f * s);
-	int cut = h / 3;
-	int text_size = iscale(12.0f * s);
-	int tw;
-	int th;
-
-	if (border < 2)
-		border = 2;
-	if (cut < 1)
-		cut = 1;
-	if (text_size < 7)
-		text_size = 7;
-	while (text_size > 6 &&
-	       text_width(label, g_font_semibold, text_size) > w - border * 4)
-		text_size--;
-	tw = text_width(label, g_font_semibold, text_size);
-	th = text_height(g_font_semibold, text_size);
-	fill_hexagon(surface, x, y, w, h, cut,
-		     surface_color(surface, color, 255));
-	fill_hexagon(surface, x + border, y + border, w - border * 2,
-		     h - border * 2, cut > border ? cut - border : 1,
-		     surface_color(surface, bg, 255));
-	draw_text(surface, label, g_font_semibold, text_size,
-		  x + (w - tw) / 2, y + (h - th) / 2, color, 255, NULL);
-}
-
-static void draw_port_icon(SDL_Surface *surface, int x, int y, int w, int h,
-			   uint32_t color, uint32_t bg)
-{
-	int border = h > 8 ? 2 : 1;
-
-	if (w < 3 || h < 4)
-		return;
-	fill_rounded(surface, x, y, w, h, 1, surface_color(surface, color, 255));
-	fill_rounded(surface, x + border, y + border, w - border * 2,
-		     h - border * 2, 0, surface_color(surface, bg, 255));
-}
-
-static void blit_icon_fit(SDL_Surface *dst, SDL_Surface *src, int box_x,
-			  int box_y, int box_w, int box_h, uint32_t tint,
-			  bool tinted)
-{
-	float sx;
-	float sy;
-	float scale;
-	int w;
-	int h;
-	int x;
-	int y;
-	int dy;
-	int dx;
-	Uint8 tr = tinted ? (Uint8)((tint >> 16) & 0xff) : 255;
-	Uint8 tg = tinted ? (Uint8)((tint >> 8) & 0xff) : 255;
-	Uint8 tb = tinted ? (Uint8)(tint & 0xff) : 255;
-
-	if (!dst || !src || src->w <= 0 || src->h <= 0 ||
-	    box_w <= 0 || box_h <= 0)
-		return;
-	sx = (float)box_w / (float)src->w;
-	sy = (float)box_h / (float)src->h;
-	scale = sx < sy ? sx : sy;
-	w = (int)(src->w * scale + 0.5f);
-	h = (int)(src->h * scale + 0.5f);
-	if (w < 1)
-		w = 1;
-	if (h < 1)
-		h = 1;
-	x = box_x + (box_w - w) / 2;
-	y = box_y + (box_h - h) / 2;
-	for (dy = 0; dy < h; dy++) {
-		int sy0 = dy * src->h / h;
-		int sy1 = (dy + 1) * src->h / h;
-
-		if (sy1 <= sy0)
-			sy1 = sy0 + 1;
-		if (sy1 > src->h)
-			sy1 = src->h;
-		for (dx = 0; dx < w; dx++) {
-			int sx0 = dx * src->w / w;
-			int sx1 = (dx + 1) * src->w / w;
-			unsigned int sum = 0;
-			int count;
-			int yy;
-			int xx;
-			Uint8 sa;
-			Uint8 *dp;
-
-			if (sx1 <= sx0)
-				sx1 = sx0 + 1;
-			if (sx1 > src->w)
-				sx1 = src->w;
-			for (yy = sy0; yy < sy1; yy++) {
-				const Uint8 *row = (const Uint8 *)src->pixels +
-						   yy * src->pitch;
-				for (xx = sx0; xx < sx1; xx++)
-					sum += row[xx * 4 + 3];
-			}
-			count = (sx1 - sx0) * (sy1 - sy0);
-			if (count < 1)
-				count = 1;
-			sa = (Uint8)(sum / count);
-			if (!sa)
-				continue;
-			dp = (Uint8 *)dst->pixels + (y + dy) * dst->pitch +
-			     (x + dx) * 4;
-			dp[0] = (Uint8)((tr * sa + dp[0] * (255 - sa)) / 255);
-			dp[1] = (Uint8)((tg * sa + dp[1] * (255 - sa)) / 255);
-			dp[2] = (Uint8)((tb * sa + dp[2] * (255 - sa)) / 255);
-		}
-	}
-}
-
-static void draw_input_icons(SDL_Surface *surface, int x, int y, int w, int h,
-			     int active, uint32_t bg, float s)
-{
-	int pad = iscale(5.0f * s);
-	int gap = iscale(4.0f * s);
-	int port_w = iscale(5.0f * s);
-	int port_gap = iscale(3.0f * s);
-	int conn_h = iscale(24.0f * s);
-	int cell_w;
-	int conn_w;
-	int i;
-
-	if (pad < 1)
-		pad = 1;
-	if (gap < 2)
-		gap = 2;
-	if (port_w < 3)
-		port_w = 3;
-	if (port_gap < 1)
-		port_gap = 1;
-	if (conn_h < 12)
-		conn_h = 12;
-	if (conn_h > h - pad * 2)
-		conn_h = h - pad * 2;
-	cell_w = (w - pad * 2 - gap) / 2;
-	if (cell_w < 1)
-		cell_w = 1;
-	if (g_icon_hdmi[0] && g_icon_hdmi[1]) {
-		for (i = 0; i < 2; i++) {
-			int cell_x = x + pad + i * (cell_w + gap);
-			uint32_t color = i == active ?
-				EVERLIVE_OSD_BLUE_TEXT : EVERLIVE_OSD_ROUTE;
-
-			blit_icon_fit(surface, g_icon_hdmi[i], cell_x, y,
-				      cell_w, h, color, true);
-		}
-		return;
-	}
-	conn_w = cell_w - port_w - port_gap;
-	if (conn_w > conn_h * 13 / 5)
-		conn_w = conn_h * 13 / 5;
-	if (conn_w < 8)
-		conn_w = 8;
-	for (i = 0; i < 2; i++) {
-		int cell_x = x + pad + i * (cell_w + gap);
-		int group_w = conn_w + port_gap + port_w;
-		int gx = cell_x + (cell_w - group_w) / 2;
-		int gy = y + (h - conn_h) / 2;
-		int port_h = conn_h * 2 / 3;
-		uint32_t color = i == active ? EVERLIVE_OSD_BLUE_TEXT :
-					       EVERLIVE_OSD_ROUTE;
-
-		draw_hdmi_connector(surface, gx, gy, conn_w, conn_h,
-				    i == 0 ? "HDMI 1" : "HDMI 2", s,
-				    color, bg);
-		draw_port_icon(surface, gx + conn_w + port_gap,
-			       gy + (conn_h - port_h) / 2, port_w, port_h,
-			       color, bg);
-	}
-}
-
-static void draw_aspect_icon(SDL_Surface *surface, int cx, int cy,
-			     int aspect, float s, uint32_t color)
-{
-	static const char *const labels[] = { "Auto", "16:9", "4:3", "Stretch" };
-	int shell_w = iscale(40.0f * s);
-	int shell_h = iscale(28.0f * s);
-	int border = iscale(2.0f * s);
-	int gap = iscale(2.0f * s);
-	int radius = iscale(3.0f * s);
-	int inner_x;
-	int inner_y;
-	int max_w;
-	int max_h;
-	int inner_w;
-	int inner_h;
-	int inner_border;
-	int text_size;
-	int tw;
-	int th;
-
-	if (shell_w < 20)
-		shell_w = 20;
-	if (shell_h < 16)
-		shell_h = 16;
-	if (border < 1)
-		border = 1;
-	if (gap < 1)
-		gap = 1;
-	if (radius < 1)
-		radius = 1;
-	if (g_icon_aspect[aspect]) {
-		int box = iscale(42.0f * s);
-
-		if (box < 24)
-			box = 24;
-		blit_icon_fit(surface, g_icon_aspect[aspect], cx - box / 2,
-			      cy - box / 2, box, box, EVERLIVE_OSD_TITLE,
-			      false);
-		return;
-	}
-	inner_x = cx - shell_w / 2 + border + gap;
-	inner_y = cy - shell_h / 2 + border + gap;
-	max_w = shell_w - (border + gap) * 2;
-	max_h = shell_h - (border + gap) * 2;
-	if (max_w < 4)
-		max_w = 4;
-	if (max_h < 4)
-		max_h = 4;
-
-	fill_rounded(surface, cx - shell_w / 2, cy - shell_h / 2, shell_w,
-		     shell_h, radius, surface_color(surface, color, 255));
-	fill_rounded(surface, cx - shell_w / 2 + border,
-		     cy - shell_h / 2 + border, shell_w - border * 2,
-		     shell_h - border * 2,
-		     radius > border ? radius - border : 0,
-		     surface_color(surface, EVERLIVE_OSD_TOOLTIP_BG, 255));
-
-	if (aspect == 3) {
-		int arm = iscale(6.0f * s);
-		int thick = border;
-		int move_size = iscale(20.0f * s);
-		int mw;
-		uint32_t bracket = EVERLIVE_OSD_ROUTE;
-
-		if (arm < 3)
-			arm = 3;
-		/* Four corner brackets. */
-		SDL_FillRect(surface, &(SDL_Rect){ inner_x, inner_y, arm,
-						   thick },
-			     surface_color(surface, bracket, 255));
-		SDL_FillRect(surface, &(SDL_Rect){ inner_x, inner_y, thick,
-						   arm },
-			     surface_color(surface, bracket, 255));
-		SDL_FillRect(surface,
-			     &(SDL_Rect){ inner_x + max_w - arm, inner_y, arm,
-					  thick },
-			     surface_color(surface, bracket, 255));
-		SDL_FillRect(surface,
-			     &(SDL_Rect){ inner_x + max_w - thick, inner_y,
-					  thick, arm },
-			     surface_color(surface, bracket, 255));
-		SDL_FillRect(surface,
-			     &(SDL_Rect){ inner_x, inner_y + max_h - thick,
-					  arm, thick },
-			     surface_color(surface, bracket, 255));
-		SDL_FillRect(surface,
-			     &(SDL_Rect){ inner_x, inner_y + max_h - arm,
-					  thick, arm },
-			     surface_color(surface, bracket, 255));
-		SDL_FillRect(surface,
-			     &(SDL_Rect){ inner_x + max_w - arm,
-					  inner_y + max_h - thick, arm, thick },
-			     surface_color(surface, bracket, 255));
-		SDL_FillRect(surface,
-			     &(SDL_Rect){ inner_x + max_w - thick,
-					  inner_y + max_h - arm, thick, arm },
-			     surface_color(surface, bracket, 255));
-		if (move_size < 12)
-			move_size = 12;
-		mw = glyph_width(EVERLIVE_OSD_ICON_MOVE, move_size);
-		draw_glyph(surface, EVERLIVE_OSD_ICON_MOVE, move_size,
-			   cx - mw / 2, cy - move_size / 2, color, 255);
-		return;
-	}
-
-	if (aspect == 2) {
-		inner_h = max_h;
-		inner_w = inner_h * 4 / 3;
-		if (inner_w > max_w) {
-			inner_w = max_w;
-			inner_h = inner_w * 3 / 4;
-		}
-	} else {
-		inner_w = max_w;
-		inner_h = inner_w * 9 / 16;
-		if (inner_h > max_h) {
-			inner_h = max_h;
-			inner_w = inner_h * 16 / 9;
-		}
-	}
-	inner_border = iscale(2.0f * s);
-	if (inner_border < 1)
-		inner_border = 1;
-	inner_x = cx - inner_w / 2;
-	inner_y = cy - inner_h / 2;
-	fill_rounded(surface, inner_x, inner_y, inner_w, inner_h, 2,
-		     surface_color(surface, EVERLIVE_OSD_ROUTE, 255));
-	fill_rounded(surface, inner_x + inner_border, inner_y + inner_border,
-		     inner_w - inner_border * 2, inner_h - inner_border * 2,
-		     1, surface_color(surface, EVERLIVE_OSD_TOOLTIP_BG, 255));
-
-	text_size = iscale(12.0f * s);
-	if (text_size < 7)
-		text_size = 7;
-	while (text_size > 6 &&
-	       text_width(labels[aspect], g_font_semibold, text_size) >
-	       inner_w - inner_border * 2 - 2)
-		text_size--;
-	tw = text_width(labels[aspect], g_font_semibold, text_size);
-	th = text_height(g_font_semibold, text_size);
-	draw_text(surface, labels[aspect], g_font_semibold, text_size,
-		  inner_x + (inner_w - tw) / 2, inner_y + (inner_h - th) / 2,
-		  EVERLIVE_OSD_TITLE, 255, NULL);
-}
-
-static void draw_scale_icon(SDL_Surface *surface, int cx, int cy, int size,
-			    bool integer, float s, uint32_t color)
-{
-	int border = iscale(2.0f * s);
-	int radius = iscale(2.0f * s);
-	int inner;
-	int x;
-	int y;
-
-	if (size < 12)
-		size = 12;
-	if (g_icon_scale[integer ? 1 : 0]) {
-		blit_icon_fit(surface, g_icon_scale[integer ? 1 : 0],
-			      cx - size / 2, cy - size / 2, size, size,
-			      EVERLIVE_OSD_TITLE, false);
-		return;
-	}
-	if (border < 1)
-		border = 1;
-	if (radius < 1)
-		radius = 1;
-	x = cx - size / 2;
-	y = cy - size / 2;
-	inner = size - border * 2;
-	if (inner < 2)
-		inner = 2;
-	fill_rounded(surface, x, y, size, size, radius,
-		     surface_color(surface, color, 255));
-	if (integer) {
-		fill_rounded(surface, x + border, y + border, inner, inner, 1,
-			     surface_color(surface, EVERLIVE_OSD_TOOLTIP_BG,
-					   255));
-		SDL_FillRect(surface,
-			     &(SDL_Rect){ x + size / 2 - border / 2,
-					  y + border, border, inner },
-			     surface_color(surface, color, 255));
-		SDL_FillRect(surface,
-			     &(SDL_Rect){ x + border, y + size / 2 - border / 2,
-					  inner, border },
-			     surface_color(surface, color, 255));
-	} else {
-		int px;
-		int py;
-
-		for (py = 0; py < inner; py++) {
-			for (px = 0; px < inner; px++) {
-				int total = inner * 2 > 2 ? inner * 2 - 2 : 1;
-				int pct = 100 - ((px + py) * 100) / total;
-				uint32_t c = mix_rgb(EVERLIVE_OSD_TOOLTIP_BG,
-						     EVERLIVE_OSD_TITLE, pct);
-
-				SDL_FillRect(surface,
-					     &(SDL_Rect){ x + border + px,
-							  y + border + py, 1, 1 },
-					     surface_color(surface, c, 255));
-			}
-		}
-	}
-}
-
 static bool file_exists(const char *path)
 {
 	return path && *path && access(path, R_OK) == 0;
@@ -798,71 +381,6 @@ void everlive_osd_set_font_dir(const char *dir)
 		snprintf(g_font_dir, sizeof(g_font_dir), "%s", dir);
 }
 
-static SDL_Surface *load_icon_asset(const char *dir, const char *name)
-{
-	char path[768];
-	SDL_Surface *raw;
-	SDL_Surface *rgba;
-
-	if (!dir || !*dir || !name)
-		return NULL;
-	if (snprintf(path, sizeof(path), "%s/%s", dir, name) >= (int)sizeof(path))
-		return NULL;
-	raw = SDL_LoadBMP(path);
-	if (!raw) {
-		if (getenv("EVERLIVE_OSD_DEBUG"))
-			fprintf(stderr, "[OSD] Cannot load icon %s: %s\n", path,
-				SDL_GetError());
-		return NULL;
-	}
-	rgba = SDL_ConvertSurfaceFormat(raw, SDL_PIXELFORMAT_RGBA32, 0);
-	SDL_FreeSurface(raw);
-	return rgba;
-}
-
-static void load_icon_assets(const char *dir)
-{
-	static const char *const hdmi[] = {
-		"osd_hdmi_1.bmp", "osd_hdmi_2.bmp"
-	};
-	static const char *const aspect[] = {
-		"osd_aspect_auto.bmp", "osd_aspect_16_9.bmp",
-		"osd_aspect_4_3.bmp", "osd_aspect_stretch.bmp"
-	};
-	static const char *const scale[] = {
-		"osd_scale_bilinear.bmp", "osd_scale_integer.bmp"
-	};
-	int i;
-
-	for (i = 0; i < 2; i++)
-		g_icon_hdmi[i] = load_icon_asset(dir, hdmi[i]);
-	for (i = 0; i < 4; i++)
-		g_icon_aspect[i] = load_icon_asset(dir, aspect[i]);
-	for (i = 0; i < 2; i++)
-		g_icon_scale[i] = load_icon_asset(dir, scale[i]);
-}
-
-static void free_icon_assets(void)
-{
-	int i;
-
-	for (i = 0; i < 2; i++) {
-		if (g_icon_hdmi[i])
-			SDL_FreeSurface(g_icon_hdmi[i]);
-		g_icon_hdmi[i] = NULL;
-	}
-	for (i = 0; i < 4; i++) {
-		if (g_icon_aspect[i])
-			SDL_FreeSurface(g_icon_aspect[i]);
-		g_icon_aspect[i] = NULL;
-	}
-	for (i = 0; i < 2; i++) {
-		if (g_icon_scale[i])
-			SDL_FreeSurface(g_icon_scale[i]);
-		g_icon_scale[i] = NULL;
-	}
-}
-
 int everlive_osd_init(void)
 {
 	const char *dir;
@@ -903,7 +421,6 @@ int everlive_osd_init(void)
 	TTF_SetFontHinting(g_font_regular, TTF_HINTING_LIGHT);
 	TTF_SetFontHinting(g_font_semibold, TTF_HINTING_LIGHT);
 	TTF_SetFontHinting(g_font_icons, TTF_HINTING_LIGHT);
-	load_icon_assets(dir);
 	g_available = true;
 	return 0;
 }
@@ -924,7 +441,6 @@ void everlive_osd_shutdown(void)
 	g_font_regular = NULL;
 	g_font_semibold = NULL;
 	g_font_icons = NULL;
-	free_icon_assets();
 	g_available = false;
 	if (g_initialised)
 		TTF_Quit();
@@ -988,25 +504,35 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 			     float scale, int viewport_w, int viewport_h,
 			     struct everlive_osd_card *out)
 {
+	static const char *const aspect_names[] = {
+		"Auto", "16:9", "4:3", "Stretch"
+	};
 	char key[768];
+	char input_label[32];
+	char aspect_label[64];
+	char scale_label[64];
 	SDL_Surface *surface;
 	SDL_Texture *texture;
 	Uint32 bg_color;
 	Uint32 border_color;
 	Uint32 divider_color;
 	int title_size;
-	int icon_size;
-	int mode_icon_size;
+	int chip_size;
+	int chip_icon_size;
 	int pad_x;
 	int pad_y;
 	int gap;
 	int chip_h;
+	int chip_pad;
+	int chip_gap;
 	int button;
 	int radius;
 	int dot;
 	int title_h;
 	int title_w;
 	int input_w = 0;
+	int aspect_w;
+	int scale_w;
 	int divider_w;
 	int info_gap;
 	int icon_count;
@@ -1017,6 +543,9 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 	int height;
 	int max_width;
 	int x;
+	int icon_x;
+	int text_x;
+	int text_y;
 	int title_x;
 	int title_y;
 	int chip_y;
@@ -1033,13 +562,13 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 	if (viewport_w <= 0 || viewport_h <= 0)
 		return false;
 
+	show_input = snap && snap->show_input;
 	input_index = show_input && snap && snap->input_index == 1 ? 1 : 0;
 	aspect_index = snap ? snap->aspect_index : 0;
 	if (aspect_index < 0 || aspect_index > 3)
 		aspect_index = 0;
 	scale_integer = snap && snap->scale_integer;
 
-	/* State used by the tooltip can change without changing the bar. */
 	snprintf(out->details_text, sizeof(out->details_text), "%s",
 		 snap && snap->details ? snap->details : "");
 	out->input_index = input_index;
@@ -1060,23 +589,26 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 	    out->viewport_h == viewport_h && strcmp(out->cache_key, key) == 0)
 		return true;
 
-	/* Hitboxes describe exactly one build.  Never append to stale ones. */
 	out->hit_count = 0;
 
 	title_size = iscale(32.0f * s);
-	icon_size = iscale(24.0f * s);
-	mode_icon_size = iscale(28.0f * s);
-	if (mode_icon_size < 14)
-		mode_icon_size = 14;
+	chip_size = iscale(19.0f * s);
+	chip_icon_size = iscale(18.0f * s);
 	pad_x = iscale(34.0f * s);
 	pad_y = iscale(15.0f * s);
 	gap = iscale(14.0f * s);
 	chip_h = iscale(48.0f * s);
+	chip_pad = iscale(14.0f * s);
+	chip_gap = iscale(8.0f * s);
 	button = iscale(48.0f * s);
 	radius = iscale(12.0f * s);
 	dot = iscale(9.0f * s);
 	if (title_size < 14)
 		title_size = 14;
+	if (chip_size < 11)
+		chip_size = 11;
+	if (chip_icon_size < 12)
+		chip_icon_size = 12;
 	if (pad_x < 12)
 		pad_x = 12;
 	if (pad_y < 8)
@@ -1085,6 +617,10 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 		gap = 6;
 	if (chip_h < 24)
 		chip_h = 24;
+	if (chip_pad < 6)
+		chip_pad = 6;
+	if (chip_gap < 4)
+		chip_gap = 4;
 	if (button < 24)
 		button = 24;
 	if (radius < 5)
@@ -1092,12 +628,45 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 	if (dot < 4)
 		dot = 4;
 
+	snprintf(input_label, sizeof(input_label), "HDMI IN %d",
+		 input_index + 1);
+	snprintf(aspect_label, sizeof(aspect_label), "Aspect: %s",
+		 aspect_names[aspect_index]);
+	snprintf(scale_label, sizeof(scale_label), "Scale: %s",
+		 scale_integer ? "Integer" : "Bilinear");
+
 	title_h = text_height(g_font_semibold, title_size);
 	title_w = text_width(title, g_font_semibold, title_size);
 	if (show_input) {
-		input_w = iscale(220.0f * s);
-		if (input_w < button)
-			input_w = button;
+		int icon_w = glyph_width(EVERLIVE_OSD_ICON_INPUT, chip_icon_size);
+		int chevron_w = glyph_width(EVERLIVE_OSD_ICON_CHEVRON,
+					    iscale(12.0f * s));
+
+		input_w = chip_pad * 2 + icon_w + chip_gap +
+			  text_width(input_label, g_font_regular, chip_size) +
+			  chip_gap + chevron_w;
+	}
+	{
+		int icon_w = glyph_width(EVERLIVE_OSD_ICON_EXPAND,
+					 chip_icon_size);
+		int label_w = text_width(aspect_label, g_font_regular, chip_size);
+		int longest = text_width("Aspect: Stretch", g_font_regular,
+					 chip_size);
+
+		if (longest > label_w)
+			label_w = longest;
+		aspect_w = chip_pad * 2 + icon_w + chip_gap + label_w;
+	}
+	{
+		int icon_w = glyph_width(EVERLIVE_OSD_ICON_TABLE_CELLS,
+					 chip_icon_size);
+		int label_w = text_width(scale_label, g_font_regular, chip_size);
+		int longest = text_width("Scale: Bilinear", g_font_regular,
+					 chip_size);
+
+		if (longest > label_w)
+			label_w = longest;
+		scale_w = chip_pad * 2 + icon_w + chip_gap + label_w;
 	}
 	divider_w = iscale(1.0f * s);
 	if (divider_w < 1)
@@ -1109,8 +678,8 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 	info_w = dot + gap + title_w;
 	content_w = info_w + info_gap +
 		    (show_input ? input_w + gap : 0) +
-		    button + gap +
-		    button + gap +
+		    aspect_w + gap +
+		    scale_w + gap +
 		    gap + divider_w + gap +
 		    icons_w;
 	width = pad_x * 2 + content_w;
@@ -1164,24 +733,34 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 	}
 	draw_text(surface, title, g_font_semibold, title_size,
 		  title_x, title_y, EVERLIVE_OSD_TITLE, 255, NULL);
-	{
-		SDL_Rect hit = { pad_x, chip_y, info_w, chip_h };
-
-		add_hit(out, hit, EVERLIVE_OSD_ACTION_INFO);
-	}
+	add_hit(out, (SDL_Rect){ pad_x, chip_y, info_w, chip_h },
+		EVERLIVE_OSD_ACTION_INFO);
 
 	x = pad_x + info_w + info_gap;
 	if (show_input) {
 		bool hot = snapshot_hover(snap, EVERLIVE_OSD_ACTION_INPUT);
-		uint32_t input_bg = hot ?
-			mix_rgb(EVERLIVE_OSD_INPUT_BG, 0xFFFFFF, 12) :
-			EVERLIVE_OSD_INPUT_BG;
+		int icon_w = glyph_width(EVERLIVE_OSD_ICON_INPUT,
+					 chip_icon_size);
+		int chevron_w = glyph_width(EVERLIVE_OSD_ICON_CHEVRON,
+					    iscale(12.0f * s));
 
 		draw_chip_hover(surface, x, chip_y, input_w, chip_h, radius,
 				EVERLIVE_OSD_INPUT_BG, EVERLIVE_OSD_BORDER,
 				hot);
-		draw_input_icons(surface, x, chip_y, input_w, chip_h,
-				 input_index, input_bg, s);
+		icon_x = x + chip_pad;
+		draw_glyph(surface, EVERLIVE_OSD_ICON_INPUT, chip_icon_size,
+			   icon_x, chip_y + (chip_h - chip_icon_size) / 2,
+			   EVERLIVE_OSD_TITLE, 255);
+		text_x = icon_x + icon_w + chip_gap;
+		text_y = chip_y + (chip_h - text_height(g_font_regular,
+						       chip_size)) / 2;
+		draw_text(surface, input_label, g_font_regular, chip_size,
+			  text_x, text_y, EVERLIVE_OSD_TITLE, 255, NULL);
+		draw_glyph(surface, EVERLIVE_OSD_ICON_CHEVRON,
+			   iscale(12.0f * s),
+			   x + input_w - chip_pad - chevron_w,
+			   chip_y + (chip_h - iscale(12.0f * s)) / 2,
+			   EVERLIVE_OSD_ROUTE, 255);
 		add_hit(out, (SDL_Rect){ x, chip_y, input_w, chip_h },
 			EVERLIVE_OSD_ACTION_INPUT);
 		x += input_w + gap;
@@ -1189,26 +768,47 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 
 	{
 		bool hot = snapshot_hover(snap, EVERLIVE_OSD_ACTION_ASPECT);
+		int icon_w = glyph_width(EVERLIVE_OSD_ICON_EXPAND,
+					 chip_icon_size);
 
-		draw_chip_hover(surface, x, chip_y, button, button, radius,
-				EVERLIVE_OSD_CHIP_BG, EVERLIVE_OSD_BORDER, hot);
-		draw_aspect_icon(surface, x + button / 2, chip_y + button / 2,
-				 aspect_index, s, EVERLIVE_OSD_TITLE);
-		add_hit(out, (SDL_Rect){ x, chip_y, button, button },
+		draw_chip_hover(surface, x, chip_y, aspect_w, chip_h, radius,
+				EVERLIVE_OSD_CHIP_BG, EVERLIVE_OSD_BORDER,
+				hot);
+		icon_x = x + chip_pad;
+		draw_glyph(surface, EVERLIVE_OSD_ICON_EXPAND, chip_icon_size,
+			   icon_x, chip_y + (chip_h - chip_icon_size) / 2,
+			   EVERLIVE_OSD_TITLE, 255);
+		text_x = icon_x + icon_w + chip_gap;
+		text_y = chip_y + (chip_h - text_height(g_font_regular,
+						       chip_size)) / 2;
+		draw_text(surface, aspect_label, g_font_regular, chip_size,
+			  text_x, text_y, EVERLIVE_OSD_TITLE, 255, NULL);
+		add_hit(out, (SDL_Rect){ x, chip_y, aspect_w, chip_h },
 			EVERLIVE_OSD_ACTION_ASPECT);
-		x += button + gap;
+		x += aspect_w + gap;
 	}
+
 	{
 		bool hot = snapshot_hover(snap, EVERLIVE_OSD_ACTION_SCALE);
+		int icon_w = glyph_width(EVERLIVE_OSD_ICON_TABLE_CELLS,
+					 chip_icon_size);
 
-		draw_chip_hover(surface, x, chip_y, button, button, radius,
-				EVERLIVE_OSD_CHIP_BG, EVERLIVE_OSD_BORDER, hot);
-		draw_scale_icon(surface, x + button / 2, chip_y + button / 2,
-				mode_icon_size, scale_integer, s,
-				EVERLIVE_OSD_TITLE);
-		add_hit(out, (SDL_Rect){ x, chip_y, button, button },
+		draw_chip_hover(surface, x, chip_y, scale_w, chip_h, radius,
+				EVERLIVE_OSD_CHIP_BG, EVERLIVE_OSD_BORDER,
+				hot);
+		icon_x = x + chip_pad;
+		draw_glyph(surface, EVERLIVE_OSD_ICON_TABLE_CELLS,
+			   chip_icon_size, icon_x,
+			   chip_y + (chip_h - chip_icon_size) / 2,
+			   EVERLIVE_OSD_TITLE, 255);
+		text_x = icon_x + icon_w + chip_gap;
+		text_y = chip_y + (chip_h - text_height(g_font_regular,
+						       chip_size)) / 2;
+		draw_text(surface, scale_label, g_font_regular, chip_size,
+			  text_x, text_y, EVERLIVE_OSD_TITLE, 255, NULL);
+		add_hit(out, (SDL_Rect){ x, chip_y, scale_w, chip_h },
 			EVERLIVE_OSD_ACTION_SCALE);
-		x += button + gap + gap;
+		x += scale_w + gap + gap;
 	}
 
 	{
@@ -1222,14 +822,14 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 #define DRAW_ICON_BUTTON(action, glyph, fill, border, color)		\
 	do {								\
 		SDL_Rect hit = { x, chip_y, button, button };		\
-		int glyph_w = glyph_width((glyph), icon_size);		\
-		int glyph_h = icon_size;					\
+		int glyph_w = glyph_width((glyph), iscale(24.0f * s));	\
 		draw_chip_hover(surface, x, chip_y, button, button, radius, \
 				(fill), (border),			\
 				snapshot_hover(snap, (action)));	\
-		draw_glyph(surface, (glyph), icon_size,			\
+		draw_glyph(surface, (glyph), iscale(24.0f * s),		\
 			   x + (button - glyph_w) / 2,			\
-			   chip_y + (button - glyph_h) / 2, (color), 255); \
+			   chip_y + (button - iscale(24.0f * s)) / 2,	\
+			   (color), 255);				\
 		add_hit(out, hit, (action));				\
 		x += button + iscale(9.0f * s);				\
 	} while (0)
@@ -1256,7 +856,7 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 			 snap && snap->muted ? EVERLIVE_OSD_DANGER_BORDER : EVERLIVE_OSD_BORDER,
 			 snap && snap->muted ? EVERLIVE_OSD_DANGER : EVERLIVE_OSD_TITLE);
 	DRAW_ICON_BUTTON(EVERLIVE_OSD_ACTION_FULLSCREEN,
-			 snap && snap->fullscreen ? EVERLIVE_OSD_ICON_COMPRESS : EVERLIVE_OSD_ICON_EXPAND,
+			 snap && snap->fullscreen ? EVERLIVE_OSD_ICON_MINIMIZE : EVERLIVE_OSD_ICON_MAXIMIZE,
 			 snap && snap->fullscreen ? EVERLIVE_OSD_DANGER_BG : EVERLIVE_OSD_CHIP_BG,
 			 snap && snap->fullscreen ? EVERLIVE_OSD_DANGER_BORDER : EVERLIVE_OSD_BORDER,
 			 snap && snap->fullscreen ? EVERLIVE_OSD_DANGER : EVERLIVE_OSD_TITLE);
@@ -1595,29 +1195,34 @@ void everlive_osd_render_details(SDL_Renderer *renderer,
 
 bool everlive_osd_build_popup(SDL_Renderer *renderer,
 			      enum everlive_osd_popup_kind kind,
+			      int selected_input, int hover_input,
 			      int volume_pct, float scale,
 			      struct everlive_osd_popup *out)
 {
 	SDL_Surface *surface;
 	SDL_Texture *texture;
 	float s = clamp_scale(scale);
-	/* Supersample the popup, then let the renderer downscale with a
-	 * linear filter.  The track and thumb stay smooth at 720p where a
-	 * native-size surface is visibly aliased. */
 	const float ss = 4.0f;
 	float ps = s * ss;
 	int radius = iscale(8.0f * ps);
 	int pad = iscale(10.0f * ps);
+	int row_h = iscale(38.0f * ps);
+	int label_size = iscale(17.0f * ps);
 	int width;
 	int height;
+	int i;
 
 	if (!renderer || !out || !g_available || kind == EVERLIVE_OSD_POPUP_NONE)
 		return false;
-	if (kind != EVERLIVE_OSD_POPUP_VOLUME)
-		return false;
 
-	width = iscale(250.0f * ps);
-	height = iscale(62.0f * ps);
+	if (kind == EVERLIVE_OSD_POPUP_INPUT) {
+		int text_w = text_width("HDMI 1", g_font_regular, label_size);
+		width = text_w + pad * 2 + iscale(16.0f * ps);
+		height = pad * 2 + row_h * 2;
+	} else {
+		width = iscale(250.0f * ps);
+		height = iscale(62.0f * ps);
+	}
 	if (width < 1 || height < 1)
 		return false;
 
@@ -1646,7 +1251,34 @@ bool everlive_osd_build_popup(SDL_Renderer *renderer,
 		out->width = 1;
 	if (out->height < 1)
 		out->height = 1;
-	{
+	if (kind == EVERLIVE_OSD_POPUP_INPUT) {
+		for (i = 0; i < 2; i++) {
+			SDL_Rect row = { pad, pad + i * row_h, width - pad * 2,
+					 row_h };
+			bool selected = (i == selected_input);
+			bool hovered = (i == hover_input);
+			const char *label = i == 0 ? "HDMI 1" : "HDMI 2";
+
+			if (selected || hovered) {
+				fill_rounded(surface, row.x, row.y, row.w, row.h,
+					     radius / 2,
+					     surface_color(surface,
+							   EVERLIVE_OSD_BLUE,
+							   255));
+			}
+			draw_text(surface, label, g_font_regular, label_size,
+				  row.x + iscale(10.0f * ps),
+				  row.y + (row_h - text_height(g_font_regular,
+							       label_size)) / 2,
+				  (selected || hovered) ?
+					  EVERLIVE_OSD_BLUE_TEXT :
+					  EVERLIVE_OSD_TITLE, 255, NULL);
+			out->input_rows[i].x = row.x / (int)ss;
+			out->input_rows[i].y = row.y / (int)ss;
+			out->input_rows[i].w = (row.w + (int)ss / 2) / (int)ss;
+			out->input_rows[i].h = (row.h + (int)ss / 2) / (int)ss;
+		}
+	} else {
 		SDL_Rect track = { pad + iscale(8.0f * ps),
 				   height / 2 - iscale(4.0f * ps),
 				   width - pad * 2 - iscale(16.0f * ps),

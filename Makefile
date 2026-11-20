@@ -47,11 +47,7 @@ VIEWER_PY := everlive_client.py card_profile.py service_manager.py \
 VIEWER_ASSETS := fonts/fa-solid-900.ttf fonts/fa-brands-400.ttf \
                  fonts/LICENSE.txt fonts/chevron-down.png \
                  fonts/NotoSans-Regular.ttf fonts/NotoSans-SemiBold.ttf \
-                 fonts/NotoSans-LICENSE.txt \
-                 fonts/osd_hdmi_1.bmp fonts/osd_hdmi_2.bmp \
-                 fonts/osd_aspect_auto.bmp fonts/osd_aspect_16_9.bmp \
-                 fonts/osd_aspect_4_3.bmp fonts/osd_aspect_stretch.bmp \
-                 fonts/osd_scale_integer.bmp fonts/osd_scale_bilinear.bmp
+                 fonts/NotoSans-LICENSE.txt
 
 GC570D_RUNDIR := $(EVERLIVE_LIBDIR)/$(GC570D_DIR)
 GC570D_SED := sed -e 's|/usr/local/libexec/|$(GC570D_RUNDIR)/|g' \

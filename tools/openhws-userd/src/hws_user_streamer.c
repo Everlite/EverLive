@@ -759,7 +759,7 @@ static void hws_popup_build(SDL_Renderer *r, float scale)
 {
 	if (!g_popup_open)
 		return;
-	everlive_osd_build_popup(r, EVERLIVE_OSD_POPUP_VOLUME,
+	everlive_osd_build_popup(r, EVERLIVE_OSD_POPUP_VOLUME, 0, -1,
 				 g_popup_volume, scale, &g_popup);
 	g_popup_scale = scale;
 	g_popup_dirty = false;
