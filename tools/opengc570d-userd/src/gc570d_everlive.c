@@ -543,6 +543,7 @@ struct everlive_sdl {
 	bool popup_dirty;
 	float popup_scale;
 	int popup_selected;
+	int popup_hover;
 	int popup_volume;
 	SDL_Texture *toast_texture;
 	char toast_text[96];
@@ -902,6 +903,7 @@ static void sdl_presentation_close(struct everlive_sdl *sdl)
 	sdl->toast_until_ns = 0;
 	sdl->popup_open = false;
 	sdl->popup_dirty = false;
+	sdl->popup_hover = -1;
 	if (sdl->renderer)
 		SDL_DestroyRenderer(sdl->renderer);
 	if (sdl->window)
@@ -1388,8 +1390,8 @@ static void sdl_popup_build(struct everlive_sdl *sdl, float scale)
 	if (!sdl->popup_open)
 		return;
 	everlive_osd_build_popup(sdl->renderer, sdl->popup_kind,
-				 sdl->popup_selected, sdl->popup_volume,
-				 scale, &sdl->popup);
+				 sdl->popup_selected, sdl->popup_hover,
+				 sdl->popup_volume, scale, &sdl->popup);
 	sdl->popup_scale = scale;
 	sdl->popup_dirty = false;
 }
@@ -1509,6 +1511,7 @@ static void sdl_open_popup(struct everlive_sdl *sdl,
 		g_hover_action = EVERLIVE_OSD_ACTION_NONE;
 		sdl_card_invalidate(sdl);
 	}
+	sdl->popup_hover = -1;
 	sdl->popup_kind = kind;
 	sdl->popup_open = true;
 	sdl->popup_dirty = true;
@@ -1519,6 +1522,7 @@ static void sdl_close_popup(struct everlive_sdl *sdl)
 {
 	sdl->popup_open = false;
 	sdl->popup_dragging = false;
+	sdl->popup_hover = -1;
 	sdl->popup_kind = EVERLIVE_OSD_POPUP_NONE;
 	everlive_osd_destroy_popup(&sdl->popup);
 }
@@ -1630,6 +1634,33 @@ static void sdl_volume_track_event(struct everlive_state *st,
 		sdl_apply_volume(st, sdl, pct);
 }
 
+static void sdl_update_popup_hover(struct everlive_sdl *sdl, int x, int y)
+{
+	SDL_Point point = { x, y };
+	SDL_Point local;
+	int hover = -1;
+
+	if (!sdl->popup_open || sdl->popup.kind != EVERLIVE_OSD_POPUP_INPUT) {
+		if (sdl->popup_hover != -1)
+			sdl->popup_hover = -1;
+		return;
+	}
+	if (sdl->popup_dest.w > 0 && SDL_PointInRect(&point, &sdl->popup_dest)) {
+		local.x = x - sdl->popup_dest.x;
+		local.y = y - sdl->popup_dest.y;
+		if (SDL_PointInRect(&local, &sdl->popup.input_rows[0]))
+			hover = 0;
+		else if (SDL_PointInRect(&local, &sdl->popup.input_rows[1]))
+			hover = 1;
+	}
+	if (hover != sdl->popup_hover) {
+		sdl->popup_hover = hover;
+		sdl->popup_dirty = true;
+		if (getenv("EVERLIVE_OSD_DEBUG"))
+			fprintf(stderr, "[OSD] popup hover=%d\n", hover);
+	}
+}
+
 static bool sdl_handle_mouse(struct everlive_state *st,
 			     struct everlive_sdl *sdl, const SDL_Event *event)
 {
@@ -1671,6 +1702,15 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 	else if (event->type == SDL_MOUSEBUTTONDOWN ||
 		 event->type == SDL_MOUSEBUTTONUP)
 		sdl_update_hover(st, sdl, event->button.x, event->button.y);
+	if (sdl->popup_open) {
+		if (event->type == SDL_MOUSEMOTION)
+			sdl_update_popup_hover(sdl, event->motion.x,
+					       event->motion.y);
+		else if (event->type == SDL_MOUSEBUTTONDOWN ||
+			 event->type == SDL_MOUSEBUTTONUP)
+			sdl_update_popup_hover(sdl, event->button.x,
+					       event->button.y);
+	}
 
 	if (event->type == SDL_MOUSEBUTTONUP &&
 	    event->button.button == SDL_BUTTON_LEFT) {
@@ -1836,6 +1876,8 @@ static void sdl_poll_embedded_pointer(struct everlive_state *st,
 	(void)win_x;
 	(void)win_y;
 	sdl_update_hover(st, sdl, local_x, local_y);
+	if (sdl->popup_open)
+		sdl_update_popup_hover(sdl, local_x, local_y);
 	down = (mask & Button1Mask) != 0;
 	if (down && !g_embed_mouse_down) {
 		SDL_Event event;

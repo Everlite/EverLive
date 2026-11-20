@@ -2212,7 +2212,7 @@ static void osd_popup_build(SDL_Renderer *renderer, float scale)
 		return;
 	if (g_popup_kind == EVERLIVE_OSD_POPUP_VOLUME)
 		selected = g_popup_volume;
-	everlive_osd_build_popup(renderer, g_popup_kind, selected,
+	everlive_osd_build_popup(renderer, g_popup_kind, selected, -1,
 				 g_popup_volume, scale, &g_popup);
 	g_popup_scale = scale;
 	g_popup_dirty = false;

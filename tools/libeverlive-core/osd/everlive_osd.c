@@ -474,7 +474,6 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 	Uint32 bg_color;
 	Uint32 border_color;
 	Uint32 divider_color;
-	Uint32 live_color;
 	int title_size;
 	int route_size;
 	int chip_size;
@@ -616,7 +615,6 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 				 EVERLIVE_OSD_CARD_ALPHA);
 	border_color = surface_color(surface, EVERLIVE_OSD_BORDER, 255);
 	divider_color = surface_color(surface, EVERLIVE_OSD_DIVIDER, 255);
-	live_color = surface_color(surface, EVERLIVE_OSD_LIVE, 255);
 
 	fill_rounded(surface, 0, 0, width, height, radius, border_color);
 	fill_rounded(surface, 1, 1, width - 2, height - 2,
@@ -626,11 +624,27 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 	route_y = title_y + title_h + gap;
 	chip_y = route_y + route_h + gap;
 
-	fill_circle(surface, pad + dot / 2, title_y + title_h / 2,
-		    dot / 2 + iscale(5.0f * s),
-		    surface_color(surface, EVERLIVE_OSD_LIVE, 60));
-	fill_circle(surface, pad + dot / 2, title_y + title_h / 2,
-		    dot / 2, live_color);
+	{
+		int cx = pad + dot / 2;
+		int cy = title_y + title_h / 2;
+		int glow_size = iscale(20.0f * s);
+		int core_size = iscale(11.0f * s);
+		int glow_w;
+		int core_w;
+
+		if (glow_size < 8)
+			glow_size = 8;
+		if (core_size < 6)
+			core_size = 6;
+		glow_w = glyph_width(EVERLIVE_OSD_ICON_DOT, glow_size);
+		core_w = glyph_width(EVERLIVE_OSD_ICON_DOT, core_size);
+		draw_glyph(surface, EVERLIVE_OSD_ICON_DOT, glow_size,
+			   cx - glow_w / 2, cy - glow_size / 2,
+			   EVERLIVE_OSD_LIVE, 60);
+		draw_glyph(surface, EVERLIVE_OSD_ICON_DOT, core_size,
+			   cx - core_w / 2, cy - core_size / 2,
+			   EVERLIVE_OSD_LIVE, 255);
+	}
 	draw_text(surface, title, g_font_semibold, title_size,
 		  pad + dot + gap, title_y, EVERLIVE_OSD_TITLE, 255, NULL);
 	if (snap && snap->route_source && snap->route_target) {
@@ -934,16 +948,22 @@ void everlive_osd_render_tooltip(SDL_Renderer *renderer,
 
 bool everlive_osd_build_popup(SDL_Renderer *renderer,
 			      enum everlive_osd_popup_kind kind,
-			      int selected_input, int volume_pct,
-			      float scale,
+			      int selected_input, int hover_input,
+			      int volume_pct, float scale,
 			      struct everlive_osd_popup *out)
 {
 	SDL_Surface *surface;
 	SDL_Texture *texture;
 	float s = clamp_scale(scale);
-	int radius = iscale(8.0f * s);
-	int pad = iscale(10.0f * s);
-	int row_h = iscale(38.0f * s);
+	/* Supersample small popups, then let the renderer downscale with a
+	 * linear filter.  The track, thumb and rounded rows stay smooth at
+	 * 720p where a native-size surface is visibly aliased. */
+	const float ss = 4.0f;
+	float ps = s * ss;
+	int radius = iscale(8.0f * ps);
+	int pad = iscale(10.0f * ps);
+	int row_h = iscale(38.0f * ps);
+	int label_size = iscale(17.0f * ps);
 	int width;
 	int height;
 	int i;
@@ -952,12 +972,12 @@ bool everlive_osd_build_popup(SDL_Renderer *renderer,
 		return false;
 
 	if (kind == EVERLIVE_OSD_POPUP_INPUT) {
-		int text_w = text_width("HDMI 1", g_font_regular, iscale(17.0f * s));
-		width = text_w + pad * 2 + iscale(16.0f * s);
+		int text_w = text_width("HDMI 1", g_font_regular, label_size);
+		width = text_w + pad * 2 + iscale(16.0f * ps);
 		height = pad * 2 + row_h * 2;
 	} else {
-		width = iscale(250.0f * s);
-		height = iscale(62.0f * s);
+		width = iscale(250.0f * ps);
+		height = iscale(62.0f * ps);
 	}
 	if (width < 1 || height < 1)
 		return false;
@@ -969,42 +989,56 @@ bool everlive_osd_build_popup(SDL_Renderer *renderer,
 	SDL_FillRect(surface, NULL, 0);
 	fill_rounded(surface, 0, 0, width, height, radius,
 		     surface_color(surface, EVERLIVE_OSD_BLUE_BORDER, 255));
-	fill_rounded(surface, 1, 1, width - 2, height - 2,
-		     radius > 1 ? radius - 1 : 0,
-		     surface_color(surface, EVERLIVE_OSD_CHIP_BG, 255));
+	{
+		int border = (int)ss;
+
+		if (border < 1)
+			border = 1;
+		fill_rounded(surface, border, border, width - border * 2,
+			     height - border * 2,
+			     radius > border ? radius - border : 0,
+			     surface_color(surface, EVERLIVE_OSD_CHIP_BG, 255));
+	}
 
 	out->kind = kind;
-	out->width = width;
-	out->height = height;
+	out->width = (width + (int)ss / 2) / (int)ss;
+	out->height = (height + (int)ss / 2) / (int)ss;
+	if (out->width < 1)
+		out->width = 1;
+	if (out->height < 1)
+		out->height = 1;
 	if (kind == EVERLIVE_OSD_POPUP_INPUT) {
 		for (i = 0; i < 2; i++) {
 			SDL_Rect row = { pad, pad + i * row_h, width - pad * 2,
 					 row_h };
 			bool selected = (i == selected_input);
+			bool hovered = (i == hover_input);
 			const char *label = i == 0 ? "HDMI 1" : "HDMI 2";
 
-			if (selected) {
+			if (selected || hovered) {
 				fill_rounded(surface, row.x, row.y, row.w, row.h,
 					     radius / 2,
 					     surface_color(surface,
 							   EVERLIVE_OSD_BLUE,
 							   255));
 			}
-			draw_text(surface, label, g_font_regular,
-				  iscale(17.0f * s),
-				  row.x + iscale(10.0f * s),
-				  row.y + (row_h -
-					   text_height(g_font_regular,
-						       iscale(17.0f * s))) / 2,
-				  selected ? EVERLIVE_OSD_BLUE_TEXT :
-					     EVERLIVE_OSD_TITLE, 255, NULL);
-			out->input_rows[i] = row;
+			draw_text(surface, label, g_font_regular, label_size,
+				  row.x + iscale(10.0f * ps),
+				  row.y + (row_h - text_height(g_font_regular,
+							       label_size)) / 2,
+				  (selected || hovered) ?
+					  EVERLIVE_OSD_BLUE_TEXT :
+					  EVERLIVE_OSD_TITLE, 255, NULL);
+			out->input_rows[i].x = row.x / (int)ss;
+			out->input_rows[i].y = row.y / (int)ss;
+			out->input_rows[i].w = (row.w + (int)ss / 2) / (int)ss;
+			out->input_rows[i].h = (row.h + (int)ss / 2) / (int)ss;
 		}
 	} else {
-		SDL_Rect track = { pad + iscale(8.0f * s),
-				   height / 2 - iscale(4.0f * s),
-				   width - pad * 2 - iscale(16.0f * s),
-				   iscale(7.0f * s) };
+		SDL_Rect track = { pad + iscale(8.0f * ps),
+				   height / 2 - iscale(4.0f * ps),
+				   width - pad * 2 - iscale(16.0f * ps),
+				   iscale(7.0f * ps) };
 		int fill_w = (track.w * (volume_pct < 0 ? 0 :
 					 (volume_pct > 150 ? 150 : volume_pct))) / 150;
 
@@ -1018,9 +1052,12 @@ bool everlive_osd_build_popup(SDL_Renderer *renderer,
 						   255));
 		}
 		fill_circle(surface, track.x + fill_w,
-			    track.y + track.h / 2, iscale(8.0f * s),
+			    track.y + track.h / 2, iscale(8.0f * ps),
 			    surface_color(surface, EVERLIVE_OSD_TITLE, 255));
-		out->volume_track = track;
+		out->volume_track.x = track.x / (int)ss;
+		out->volume_track.y = track.y / (int)ss;
+		out->volume_track.w = (track.w + (int)ss / 2) / (int)ss;
+		out->volume_track.h = (track.h + (int)ss / 2) / (int)ss;
 	}
 
 	texture = SDL_CreateTextureFromSurface(renderer, surface);
@@ -1028,6 +1065,7 @@ bool everlive_osd_build_popup(SDL_Renderer *renderer,
 	if (!texture)
 		return false;
 	SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+	SDL_SetTextureScaleMode(texture, SDL_ScaleModeLinear);
 	if (out->texture)
 		SDL_DestroyTexture(out->texture);
 	out->texture = texture;

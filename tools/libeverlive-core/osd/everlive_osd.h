@@ -45,6 +45,7 @@
 #define EVERLIVE_OSD_ICON_ARROW_RIGHT	0xF061
 #define EVERLIVE_OSD_ICON_RECORD		0xF111 /* solid circle */
 #define EVERLIVE_OSD_ICON_STOP		0xF04D
+#define EVERLIVE_OSD_ICON_DOT		0xF111
 
 enum everlive_osd_action {
 	EVERLIVE_OSD_ACTION_NONE = 0,
@@ -126,8 +127,8 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 			     struct everlive_osd_card *out);
 bool everlive_osd_build_popup(SDL_Renderer *renderer,
 			      enum everlive_osd_popup_kind kind,
-			      int selected_input, int volume_pct,
-			      float scale,
+			      int selected_input, int hover_input,
+			      int volume_pct, float scale,
 			      struct everlive_osd_popup *out);
 bool everlive_osd_build_tooltip(SDL_Renderer *renderer,
 				struct everlive_osd_card *card,
