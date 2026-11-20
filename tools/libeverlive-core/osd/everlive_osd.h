@@ -51,6 +51,7 @@
 #define EVERLIVE_OSD_ICON_DISPLAY	0xF390
 #define EVERLIVE_OSD_ICON_AUTO		0xF2F1 /* rotate */
 #define EVERLIVE_OSD_ICON_STRETCH	0xF337 /* arrows-left-right */
+#define EVERLIVE_OSD_ICON_MOVE		0xF0B2 /* up-down-left-right */
 
 enum everlive_osd_action {
 	EVERLIVE_OSD_ACTION_NONE = 0,
