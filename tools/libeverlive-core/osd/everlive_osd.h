@@ -23,6 +23,7 @@
 #define EVERLIVE_OSD_INPUT_BG	0x25334A
 #define EVERLIVE_OSD_CHIP_BG	0x202334
 #define EVERLIVE_OSD_HOVER_BORDER 0x3A3E54
+#define EVERLIVE_OSD_CHIP_BORDER 0x3A3650
 #define EVERLIVE_OSD_TOOLTIP_BG	0x161927
 #define EVERLIVE_OSD_DIVIDER	0x334155
 #define EVERLIVE_OSD_LIVE	0x19FF3B
@@ -57,14 +58,13 @@ enum everlive_osd_action {
 	EVERLIVE_OSD_ACTION_MUTE,
 	EVERLIVE_OSD_ACTION_FULLSCREEN,
 	EVERLIVE_OSD_ACTION_RECORD,
+	EVERLIVE_OSD_ACTION_INFO,
 	EVERLIVE_OSD_ACTION_COUNT,
 };
 
 struct everlive_osd_snapshot {
 	const char *title;
-	const char *route;
-	const char *route_source;
-	const char *route_target;
+	const char *details;		/* identity hover pill */
 	const char *input_label;	/* "HDMI 1" on DUO, NULL on GC573 */
 	const char *aspect_label;	/* "Aspect" */
 	const char *scale_label;	/* "Scale" */
@@ -97,6 +97,12 @@ struct everlive_osd_card {
 	int tooltip_height;
 	enum everlive_osd_action tooltip_action;
 	float tooltip_scale;
+	SDL_Texture *details;
+	int details_width;
+	int details_height;
+	float details_scale;
+	char details_text[192];
+	char details_key[224];
 	struct everlive_osd_hitbox hits[EVERLIVE_OSD_ACTION_COUNT];
 	int hit_count;
 };
@@ -135,6 +141,13 @@ bool everlive_osd_build_tooltip(SDL_Renderer *renderer,
 				enum everlive_osd_action action,
 				float scale);
 void everlive_osd_render_tooltip(SDL_Renderer *renderer,
+				 const struct everlive_osd_card *card,
+				 const SDL_Rect *anchor,
+				 int viewport_w, int viewport_h);
+bool everlive_osd_build_details(SDL_Renderer *renderer,
+				struct everlive_osd_card *card,
+				float scale);
+void everlive_osd_render_details(SDL_Renderer *renderer,
 				 const struct everlive_osd_card *card,
 				 const SDL_Rect *anchor,
 				 int viewport_w, int viewport_h);

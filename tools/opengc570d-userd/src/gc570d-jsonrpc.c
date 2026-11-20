@@ -446,11 +446,13 @@ static void rpc_osd_pos(int fd, const char *id, const char *line)
 		rpc_error(fd, id, -32602, "invalid params: pos required");
 		return;
 	}
-	if (strcasecmp(pos, "tr") && strcasecmp(pos, "br") &&
+	if (strcasecmp(pos, "top") && strcasecmp(pos, "bottom") &&
+	    strcasecmp(pos, "tr") && strcasecmp(pos, "br") &&
 	    strcasecmp(pos, "bl") && strcasecmp(pos, "tl") &&
 	    strcasecmp(pos, "top-right") && strcasecmp(pos, "bottom-right") &&
 	    strcasecmp(pos, "bottom-left") && strcasecmp(pos, "top-left")) {
-		rpc_error(fd, id, -32602, "unknown pos: tr|br|bl|tl");
+		rpc_error(fd, id, -32602,
+			  "unknown pos: top|bottom (legacy corners accepted)");
 		return;
 	}
 	gc570d_everlive_set_osd_pos(pos);

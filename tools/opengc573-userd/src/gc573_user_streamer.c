@@ -410,14 +410,12 @@ static float g_hdr_exposure_ev;
 static enum gc573_hdr_type g_hdr_announced = GC573_HDR_SDR;
 
 enum osd_position {
-	OSD_POS_TR,
-	OSD_POS_BR,
-	OSD_POS_BL,
-	OSD_POS_TL,
+	OSD_POS_TOP,
+	OSD_POS_BOTTOM,
 	OSD_POS_COUNT,
 };
 
-static enum osd_position g_osd_pos = OSD_POS_TR;
+static enum osd_position g_osd_pos = OSD_POS_TOP;
 
 /* Auto follows the SDL window; Hub cinema fullscreen can force the card. */
 enum osd_mode {
@@ -432,36 +430,23 @@ static enum everlive_osd_action g_hover_action = EVERLIVE_OSD_ACTION_NONE;
 
 static const char *osd_pos_name(enum osd_position pos)
 {
-	switch (pos) {
-	case OSD_POS_BR:
-		return "bottom-right";
-	case OSD_POS_BL:
-		return "bottom-left";
-	case OSD_POS_TL:
-		return "top-left";
-	default:
-		return "top-right";
-	}
+	return pos == OSD_POS_BOTTOM ? "bottom" : "top";
 }
 
 static bool parse_osd_pos(const char *value, enum osd_position *out)
 {
 	if (!value || !*value)
 		return false;
-	if (!strcasecmp(value, "tr") || !strcasecmp(value, "top-right")) {
-		*out = OSD_POS_TR;
+	if (!strcasecmp(value, "top") || !strcasecmp(value, "tr") ||
+	    !strcasecmp(value, "tl") || !strcasecmp(value, "top-right") ||
+	    !strcasecmp(value, "top-left")) {
+		*out = OSD_POS_TOP;
 		return true;
 	}
-	if (!strcasecmp(value, "br") || !strcasecmp(value, "bottom-right")) {
-		*out = OSD_POS_BR;
-		return true;
-	}
-	if (!strcasecmp(value, "bl") || !strcasecmp(value, "bottom-left")) {
-		*out = OSD_POS_BL;
-		return true;
-	}
-	if (!strcasecmp(value, "tl") || !strcasecmp(value, "top-left")) {
-		*out = OSD_POS_TL;
+	if (!strcasecmp(value, "bottom") || !strcasecmp(value, "br") ||
+	    !strcasecmp(value, "bl") || !strcasecmp(value, "bottom-right") ||
+	    !strcasecmp(value, "bottom-left")) {
+		*out = OSD_POS_BOTTOM;
 		return true;
 	}
 	return false;
@@ -780,7 +765,7 @@ static void print_usage(const char *prog)
 	printf("  --integer-scale   Alias for --scale integer.\n");
 	printf("  --osd             Show the on-screen stats overlay (default).\n");
 	printf("  --no-osd          Hide the overlay (same as --streamer-mode).\n");
-	printf("  --osd-pos POS     tr|br|bl|tl (default: tr, 'p' cycles).\n");
+	printf("  --osd-pos POS     top|bottom (default: top, 'p' toggles).\n");
 	printf("  -s, --streamer-mode  Clean feed: no OSD, cursor hidden.\n");
 	printf("  --v4l2 DEVICE     Write native YUYV frames to a v4l2loopback output.\n");
 	printf("                    Example: --v4l2 /dev/video10\n");
@@ -1914,51 +1899,29 @@ static bool osd_card_active(SDL_Window *window)
 }
 
 static void osd_output_label(char *out, size_t n, int w, int h,
-			     uint32_t rate_x100)
+			     bool interlaced, uint32_t rate_x100)
 {
 	double rate = (double)rate_x100 / 100.0;
+	char scan = interlaced ? 'i' : 'p';
 
 	switch (h) {
 	case 2160:
-		snprintf(out, n, "2160p%.0f", rate);
+		snprintf(out, n, "2160%c%.0f", scan, rate);
 		break;
 	case 1440:
-		snprintf(out, n, "1440p%.0f", rate);
+		snprintf(out, n, "1440%c%.0f", scan, rate);
 		break;
 	case 1080:
-		snprintf(out, n, "1080p%.0f", rate);
+		snprintf(out, n, "1080%c%.0f", scan, rate);
 		break;
 	case 720:
-		snprintf(out, n, "720p%.0f", rate);
+		snprintf(out, n, "720%c%.0f", scan, rate);
 		break;
 	default:
-		snprintf(out, n, "%dx%d", w, h);
+		snprintf(out, n, "%ux%u%c%.0f", (unsigned)w, (unsigned)h,
+			 scan, rate);
 		break;
 	}
-}
-
-static void osd_audio_label(const char *audio_text, char *out, size_t n)
-{
-	const char *khz;
-	const char *start;
-
-	if (!audio_text || !*audio_text) {
-		snprintf(out, n, "audio");
-		return;
-	}
-
-	khz = strstr(audio_text, "kHz");
-	if (!khz) {
-		snprintf(out, n, "%s", audio_text);
-		return;
-	}
-	start = khz;
-	while (start > audio_text &&
-	       (isdigit((unsigned char)start[-1]) || start[-1] == '.'))
-		start--;
-	snprintf(out, n, "%.*s", (int)(khz - start) + 3, start);
-	if (strstr(audio_text, "Muted") && strlen(out) + 7 < n)
-		strncat(out, " Muted", n - strlen(out) - 1);
 }
 
 static void osd_card_invalidate(void)
@@ -1967,15 +1930,13 @@ static void osd_card_invalidate(void)
 }
 
 static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
-			    uint32_t in_w, uint32_t in_h,
+			    uint32_t in_w, uint32_t in_h, bool interlaced,
 			    uint32_t rate_x100, const char *chroma_text,
-			    const char *audio_text)
+			    unsigned audio_ch, uint32_t audio_rate)
 {
 	char title[128];
-	char source[40];
-	char target[220];
-	char output[32];
-	char audio[48];
+	char details[220];
+	char input_label[32];
 	char aspect_lbl[64];
 	char scale_lbl[64];
 	int win_w = 0;
@@ -2000,25 +1961,30 @@ static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
 	if (win_w <= 0 || win_h <= 0)
 		return;
 	scale = (float)win_h / 1080.0f;
-	osd_output_label(output, sizeof(output), win_w, win_h, rate_x100);
-	osd_audio_label(audio_text, audio, sizeof(audio));
-	snprintf(title, sizeof(title), "GC573 : HDMI (%s)",
-		 aspect_name(g_aspect));
+	if (in_w && in_h)
+		osd_output_label(input_label, sizeof(input_label), in_w, in_h,
+				 interlaced, rate_x100);
+	else
+		snprintf(input_label, sizeof(input_label), "No signal");
+	snprintf(title, sizeof(title), "GC573");
 	snprintf(aspect_lbl, sizeof(aspect_lbl), "Aspect: %s",
 		 aspect_name(g_aspect));
 	snprintf(scale_lbl, sizeof(scale_lbl), "Scale: %s",
 		 scale_name(g_scale_mode));
-	snprintf(source, sizeof(source), "%ux%u", in_w, in_h);
-	snprintf(target, sizeof(target), "%s %s | %s", output,
+	if (audio_ch == 0)
+		audio_ch = 2;
+	if (audio_rate == 0)
+		audio_rate = 48000;
+	snprintf(details, sizeof(details), "%s • %s • %u ch %u Hz",
+		 input_label,
 		 chroma_text && *chroma_text ? chroma_text : "YUV",
-		 audio);
+		 audio_ch, audio_rate);
 
 	gain = float_from_bits(__atomic_load_n(&g_audio_gain_bits,
 					      __ATOMIC_RELAXED));
 	memset(&snap, 0, sizeof(snap));
 	snap.title = title;
-	snap.route_source = source;
-	snap.route_target = target;
+	snap.details = details;
 	snap.input_label = NULL;
 	snap.aspect_label = aspect_lbl;
 	snap.scale_label = scale_lbl;
@@ -2090,6 +2056,7 @@ static void osd_note_dma_age(uint64_t age_us)
 static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 		       uint32_t in_w, uint32_t in_h, bool interlaced,
 		       uint32_t rate_x100, double fps, const char *audio_text,
+		       unsigned audio_ch, uint32_t audio_rate,
 		       const char *hdr_text, const char *chroma_text)
 {
 	char line2[384];
@@ -2107,8 +2074,8 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 		return;
 
 	if (osd_card_active(window)) {
-		osd_card_update(renderer, window, in_w, in_h, rate_x100,
-				chroma_text, audio_text);
+		osd_card_update(renderer, window, in_w, in_h, interlaced,
+				rate_x100, chroma_text, audio_ch, audio_rate);
 		g_osd_card_was_active = true;
 		return;
 	}
@@ -2178,15 +2145,14 @@ static void osd_scale_rect(SDL_Rect *dst, const SDL_Rect *src,
 static void osd_place(SDL_Rect *dst, int width, int height, float scale,
 		     int win_w, int win_h)
 {
-	int margin = (int)(28.0f * scale + 0.5f);
-	bool right = g_osd_pos == OSD_POS_TR || g_osd_pos == OSD_POS_BR;
-	bool bottom = g_osd_pos == OSD_POS_BR || g_osd_pos == OSD_POS_BL;
+	int margin = (int)(34.0f * scale + 0.5f);
+	bool bottom = g_osd_pos == OSD_POS_BOTTOM;
 
 	if (margin < 10)
 		margin = 10;
 	dst->w = width;
 	dst->h = height;
-	dst->x = right ? win_w - margin - width : margin;
+	dst->x = (win_w - width) / 2;
 	dst->y = bottom ? win_h - margin - height : margin;
 	if (dst->x < 0)
 		dst->x = 0;
@@ -2421,10 +2387,19 @@ static enum everlive_osd_action osd_hit_card(int x, int y)
 
 static void osd_set_hover(enum everlive_osd_action action)
 {
-	if (g_hover_action == action)
+	enum everlive_osd_action old = g_hover_action;
+	bool visual_old;
+	bool visual_new;
+
+	if (old == action)
 		return;
 	g_hover_action = action;
-	osd_card_invalidate();
+	visual_old = old != EVERLIVE_OSD_ACTION_NONE &&
+		     old != EVERLIVE_OSD_ACTION_INFO;
+	visual_new = action != EVERLIVE_OSD_ACTION_NONE &&
+		     action != EVERLIVE_OSD_ACTION_INFO;
+	if (visual_old || visual_new)
+		osd_card_invalidate();
 	if (getenv("EVERLIVE_OSD_DEBUG"))
 		fprintf(stderr, "[OSD] hover=%d\n", action);
 }
@@ -2465,6 +2440,12 @@ static void osd_render_tooltip(SDL_Renderer *renderer, int win_w, int win_h,
 	screen.y = g_card_dest.y + anchor->rect.y;
 	screen.w = anchor->rect.w;
 	screen.h = anchor->rect.h;
+	if (g_hover_action == EVERLIVE_OSD_ACTION_INFO) {
+		if (everlive_osd_build_details(renderer, &g_card, scale))
+			everlive_osd_render_details(renderer, &g_card, &screen,
+						    win_w, win_h);
+		return;
+	}
 	if (everlive_osd_build_tooltip(renderer, &g_card, g_hover_action,
 				       scale))
 		everlive_osd_render_tooltip(renderer, &g_card, &screen,
@@ -7623,9 +7604,9 @@ int main(int argc, char *argv[])
 	}
 
 	if (osd_pos_spec && !parse_osd_pos(osd_pos_spec, &g_osd_pos)) {
-		fprintf(stderr, "[OSD] Unknown position '%s'; using top-right\n",
+		fprintf(stderr, "[OSD] Unknown position '%s'; using top\n",
 			osd_pos_spec);
-		g_osd_pos = OSD_POS_TR;
+		g_osd_pos = OSD_POS_TOP;
 	}
 
 	gc573_user_log_init();
@@ -7932,7 +7913,7 @@ int main(int argc, char *argv[])
 		printf("[*] Userspace streamer active (headless). Send SIGINT/SIGTERM to exit.\n");
 	} else {
 		printf("[*] Userspace streamer active. Press 'q' or ESC to exit, F1 for the hotkey list,\n");
-		printf("    'f' fullscreen, 'a' aspect, '1'/'l' scaling, 'p' OSD position, Tab/'o' OSD,\n");
+		printf("    'f' fullscreen, 'a' aspect, '1'/'l' scaling, 'p' OSD top/bottom, Tab/'o' OSD,\n");
 		printf("    '↑'/'↓'/'+'/'-' volume, 'm' mute, 'g' frame generation.\n");
 		printf("[OSD] Start: fullscreen=%s vsync=%s aspect=%s scale=%s overlay=%s pos=%s framegen=%s flow=%d%% perf=%s\n",
 		       g_fullscreen ? "on" : "off",
@@ -8965,6 +8946,10 @@ int main(int argc, char *argv[])
 							input_rate_x100,
 							displayed_fps,
 							audio_desc,
+							audio.playback.channels ?
+								audio.playback.channels : 2,
+							audio.format_rate ?
+								audio.format_rate : 48000,
 							gc573_hdr_active() ?
 							gc573_hdr_label() :
 							NULL,
@@ -9123,6 +9108,10 @@ int main(int argc, char *argv[])
 						   current_sig.interlaced,
 						   input_rate_x100,
 						   displayed_fps, audio_desc,
+						   audio.playback.channels ?
+							audio.playback.channels : 2,
+						   audio.format_rate ?
+							audio.format_rate : 48000,
 						   gc573_hdr_active() ?
 						   gc573_hdr_label() : NULL,
 						   colorspace_short(

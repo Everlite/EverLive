@@ -111,7 +111,7 @@ ignored. `--help` lists the rest.
   can own the default socket at a time; use `--ipc-socket` to run this one
   next to another card's engine.
 - Hotkeys: `f` fullscreen, `a` aspect, `l` scaling, Up/Down volume, `m` mute,
-  `o` OSD, `p` OSD corner, `s` streamer mode, `F1` help, `q` quit.
+  `o` OSD, `p` OSD top/bottom, `s` streamer mode, `F1` help, `q` quit.
 
 ### Probe
 

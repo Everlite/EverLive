@@ -31,7 +31,7 @@ struct gc570d_everlive_options {
 	int volume_pct;           /* 0..150 (default 100) */
 	const char *aspect;       /* auto|16:9|4:3|stretch */
 	const char *scale;        /* fit|integer */
-	const char *osd_pos;      /* tr|br|bl|tl */
+	const char *osd_pos;      /* top|bottom */
 	const char *v4l2[2];      /* optional /dev/video10 and /dev/video11 */
 	const char *title;
 };

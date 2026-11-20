@@ -59,10 +59,8 @@ enum everlive_scale_mode {
 };
 
 enum everlive_osd_pos {
-	EVERLIVE_OSD_TR = 0,
-	EVERLIVE_OSD_BR = 1,
-	EVERLIVE_OSD_BL = 2,
-	EVERLIVE_OSD_TL = 3,
+	EVERLIVE_OSD_TOP = 0,
+	EVERLIVE_OSD_BOTTOM = 1,
 };
 
 enum everlive_osd_mode {
@@ -138,7 +136,7 @@ static struct everlive_state g_everlive = {
 	.port = ATOMIC_VAR_INIT(0),
 	.pip = ATOMIC_VAR_INIT(false),
 	.osd = ATOMIC_VAR_INIT(true),
-	.osd_pos = ATOMIC_VAR_INIT(EVERLIVE_OSD_TR),
+	.osd_pos = ATOMIC_VAR_INIT(EVERLIVE_OSD_TOP),
 	.osd_mode = ATOMIC_VAR_INIT(EVERLIVE_OSD_MODE_CARD),
 	.recording = ATOMIC_VAR_INIT(false),
 	.osd_dirty = ATOMIC_VAR_INIT(false),
@@ -192,14 +190,12 @@ static int parse_scale_mode(const char *scale)
 static int parse_osd_pos(const char *pos)
 {
 	if (!pos)
-		return EVERLIVE_OSD_TR;
-	if (strcmp(pos, "br") == 0)
-		return EVERLIVE_OSD_BR;
-	if (strcmp(pos, "bl") == 0)
-		return EVERLIVE_OSD_BL;
-	if (strcmp(pos, "tl") == 0)
-		return EVERLIVE_OSD_TL;
-	return EVERLIVE_OSD_TR;
+		return EVERLIVE_OSD_TOP;
+	if (!strcasecmp(pos, "bottom") || !strcasecmp(pos, "br") ||
+	    !strcasecmp(pos, "bl") || !strcasecmp(pos, "bottom-right") ||
+	    !strcasecmp(pos, "bottom-left"))
+		return EVERLIVE_OSD_BOTTOM;
+	return EVERLIVE_OSD_TOP;
 }
 
 static uint64_t now_ns(void)
@@ -302,6 +298,16 @@ static unsigned int shm_port_source_fps(const struct everlive_state *st, int por
 	if (port == 0)
 		return gc->video0_source_fps ? gc->video0_source_fps : 60;
 	return gc->video_source_fps ? gc->video_source_fps : 60;
+}
+
+static bool shm_port_source_interlaced(const struct everlive_state *st, int port)
+{
+	struct gc570d_dev *gc = READ_ONCE(st->gc);
+
+	if (!gc)
+		return false;
+	return port == 0 ? gc->video0_input_interlaced :
+			   gc->video_input_interlaced;
 }
 
 static unsigned int shm_port_profile(const struct everlive_state *st, int port)
@@ -1188,16 +1194,9 @@ static void sdl_render_frame(struct everlive_state *st, struct everlive_sdl *sdl
 				.h = (int)sdl->overlay_h,
 			};
 
-			if (pos == EVERLIVE_OSD_BR) {
-				overlay_dst.x = out_w - overlay_dst.w - margin;
-				overlay_dst.y = out_h - overlay_dst.h - margin;
-			} else if (pos == EVERLIVE_OSD_BL) {
-				overlay_dst.x = margin;
-				overlay_dst.y = out_h - overlay_dst.h - margin;
-			} else if (pos != EVERLIVE_OSD_TL) {
-				overlay_dst.x = out_w - overlay_dst.w - margin;
-				overlay_dst.y = margin;
-			}
+			overlay_dst.x = (out_w - overlay_dst.w) / 2;
+			overlay_dst.y = pos == EVERLIVE_OSD_BOTTOM ?
+				out_h - overlay_dst.h - margin : margin;
 			SDL_RenderCopy(sdl->renderer, sdl->overlay, NULL,
 				       &overlay_dst);
 		}
@@ -1241,12 +1240,17 @@ static void sdl_card_update(struct everlive_state *st,
 			    int win_w, int win_h)
 {
 	char title[160];
-	char source[40];
-	char target[220];
+	char details[220];
+	char source_label[40];
 	char aspect_lbl[64];
 	char scale_lbl[64];
 	int scale_mode = atomic_load_explicit(&st->scale, __ATOMIC_RELAXED);
 	unsigned int rate = shm_port_rate(st, port);
+	unsigned int channels = shm_port_channels(st, port);
+	unsigned int src_w = shm_port_source_width(st, port);
+	unsigned int src_h = shm_port_source_height(st, port);
+	unsigned int src_fps = shm_port_source_fps(st, port);
+	bool interlaced = shm_port_source_interlaced(st, port);
 	int vol = atomic_load_explicit(&st->volume_pct, __ATOMIC_RELAXED);
 	bool muted = atomic_load_explicit(&st->muted, __ATOMIC_RELAXED);
 	struct everlive_osd_snapshot snap;
@@ -1259,19 +1263,19 @@ static void sdl_card_update(struct everlive_state *st,
 		if (!everlive_osd_available())
 			return;
 	}
-	snprintf(title, sizeof(title), "GC570D : %s (%s)",
-		 shm_port_name(port), aspect_mode_label(aspect));
-	snprintf(source, sizeof(source), "%ux%u",
-		 shm_port_source_width(st, port),
-		 shm_port_source_height(st, port));
-	snprintf(target, sizeof(target), "%dx%d YUYV | %u ch %u Hz%s",
-		 win_w, win_h, shm_port_channels(st, port), rate,
-		 muted ? " | Muted" : "");
+	snprintf(title, sizeof(title), "GC570D");
+	if (src_w && src_h)
+		snprintf(source_label, sizeof(source_label), "%u%c%u", src_h,
+			 interlaced ? 'i' : 'p', src_fps ? src_fps : 60);
+	else
+		snprintf(source_label, sizeof(source_label), "No signal");
+	snprintf(details, sizeof(details), "%s • YUYV • %u ch %u Hz",
+		 source_label, channels ? channels : 2,
+		 rate ? rate : 48000);
 
 	memset(&snap, 0, sizeof(snap));
 	snap.title = title;
-	snap.route_source = source;
-	snap.route_target = target;
+	snap.details = details;
 	snap.input_label = shm_port_name(port);
 	snprintf(aspect_lbl, sizeof(aspect_lbl), "Aspect: %s",
 		 aspect_mode_label(aspect));
@@ -1325,15 +1329,14 @@ static void sdl_scale_rect(SDL_Rect *dst, const SDL_Rect *src,
 static void sdl_place_osd(SDL_Rect *dst, int width, int height, float scale,
 			  int win_w, int win_h, int pos)
 {
-	int margin = (int)(28.0f * scale + 0.5f);
-	bool right = pos == EVERLIVE_OSD_TR || pos == EVERLIVE_OSD_BR;
-	bool bottom = pos == EVERLIVE_OSD_BR || pos == EVERLIVE_OSD_BL;
+	int margin = (int)(34.0f * scale + 0.5f);
+	bool bottom = pos == EVERLIVE_OSD_BOTTOM;
 
 	if (margin < 10)
 		margin = 10;
 	dst->w = width;
 	dst->h = height;
-	dst->x = right ? win_w - margin - width : margin;
+	dst->x = (win_w - width) / 2;
 	dst->y = bottom ? win_h - margin - height : margin;
 	if (dst->x < 0)
 		dst->x = 0;
@@ -1559,10 +1562,19 @@ static enum everlive_osd_action sdl_hit_card(struct everlive_sdl *sdl,
 static void sdl_set_hover(struct everlive_sdl *sdl,
 			  enum everlive_osd_action action)
 {
-	if (g_hover_action == action)
+	enum everlive_osd_action old = g_hover_action;
+	bool visual_old;
+	bool visual_new;
+
+	if (old == action)
 		return;
 	g_hover_action = action;
-	sdl_card_invalidate(sdl);
+	visual_old = old != EVERLIVE_OSD_ACTION_NONE &&
+		     old != EVERLIVE_OSD_ACTION_INFO;
+	visual_new = action != EVERLIVE_OSD_ACTION_NONE &&
+		     action != EVERLIVE_OSD_ACTION_INFO;
+	if (visual_old || visual_new)
+		sdl_card_invalidate(sdl);
 	if (getenv("EVERLIVE_OSD_DEBUG"))
 		fprintf(stderr, "[OSD] hover=%d\n", action);
 }
@@ -1607,6 +1619,14 @@ static void sdl_render_tooltip(struct everlive_sdl *sdl, int win_w, int win_h,
 	screen.y = sdl->card_dest.y + anchor->rect.y;
 	screen.w = anchor->rect.w;
 	screen.h = anchor->rect.h;
+	if (g_hover_action == EVERLIVE_OSD_ACTION_INFO) {
+		if (everlive_osd_build_details(sdl->renderer, &sdl->card,
+					       scale))
+			everlive_osd_render_details(sdl->renderer,
+						    &sdl->card, &screen,
+						    win_w, win_h);
+		return;
+	}
 	if (everlive_osd_build_tooltip(sdl->renderer, &sdl->card,
 				       g_hover_action, scale))
 		everlive_osd_render_tooltip(sdl->renderer, &sdl->card,
@@ -1971,8 +1991,8 @@ static bool sdl_handle_events(struct everlive_state *st,
 				__ATOMIC_RELAXED);
 			break;
 		case SDL_SCANCODE_C: {
-			int next_pos = (atomic_load_explicit(&st->osd_pos,
-							     __ATOMIC_RELAXED) + 1) & 3;
+			int next_pos = atomic_load_explicit(&st->osd_pos,
+							    __ATOMIC_RELAXED) ^ 1;
 			atomic_store_explicit(&st->osd_pos, next_pos,
 					      __ATOMIC_RELAXED);
 			break;
@@ -2589,17 +2609,7 @@ void gc570d_everlive_push_audio(int port, const uint8_t *pcm, size_t bytes)
 
 static const char *everlive_osd_pos_name(int pos)
 {
-	switch (pos) {
-	case EVERLIVE_OSD_BR:
-		return "br";
-	case EVERLIVE_OSD_BL:
-		return "bl";
-	case EVERLIVE_OSD_TL:
-		return "tl";
-	case EVERLIVE_OSD_TR:
-	default:
-		return "tr";
-	}
+	return pos == EVERLIVE_OSD_BOTTOM ? "bottom" : "top";
 }
 
 static const char *everlive_aspect_name(int aspect)

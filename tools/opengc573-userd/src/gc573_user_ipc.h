@@ -41,10 +41,8 @@ enum gc573_ipc_led_mode {
 };
 
 enum gc573_ipc_osd_pos {
-	GC573_IPC_OSD_TR = 0,
-	GC573_IPC_OSD_BR = 1,
-	GC573_IPC_OSD_BL = 2,
-	GC573_IPC_OSD_TL = 3,
+	GC573_IPC_OSD_TOP = 0,
+	GC573_IPC_OSD_BOTTOM = 1,
 };
 
 enum gc573_ipc_osd_mode {

@@ -356,7 +356,7 @@ if QSocketNotifier is not None:
             return self.request("osd.set", {"enabled": bool(enabled)})
 
         def set_osd_position(self, pos: str) -> bool:
-            """pos: ``tr`` | ``br`` | ``bl`` | ``tl``."""
+            """pos: ``top`` | ``bottom`` (legacy corner names are mapped)."""
             return self.request("osd.position.set", {"pos": str(pos)})
 
         def set_osd_mode(self, mode: str) -> bool:

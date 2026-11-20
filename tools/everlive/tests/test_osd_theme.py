@@ -49,6 +49,7 @@ class OsdThemeTests(unittest.TestCase):
             "TITLE": ui_theme.TEXT,
             "CHIP_BG": ui_theme.SURFACE_RAISED,
             "HOVER_BORDER": ui_theme.BORDER_STRONG,
+            "CHIP_BORDER": ui_theme.CHIP_BORDER,
             "TOOLTIP_BG": ui_theme.SURFACE_SUNKEN,
             "DANGER_BG": ui_theme.DANGER_BG,
             "DANGER_BORDER": ui_theme.DANGER_BORDER,

@@ -370,14 +370,14 @@ static void ipc_send_hello(struct ipc_server *s, struct ipc_client *c,
 
 static int parse_osd_position(const char *name)
 {
-	if (!strcasecmp(name, "tr") || !strcasecmp(name, "top-right"))
-		return HWS_IPC_OSD_TR;
-	if (!strcasecmp(name, "br") || !strcasecmp(name, "bottom-right"))
-		return HWS_IPC_OSD_BR;
-	if (!strcasecmp(name, "bl") || !strcasecmp(name, "bottom-left"))
-		return HWS_IPC_OSD_BL;
-	if (!strcasecmp(name, "tl") || !strcasecmp(name, "top-left"))
-		return HWS_IPC_OSD_TL;
+	if (!strcasecmp(name, "top") || !strcasecmp(name, "tr") ||
+	    !strcasecmp(name, "tl") || !strcasecmp(name, "top-right") ||
+	    !strcasecmp(name, "top-left"))
+		return HWS_IPC_OSD_TOP;
+	if (!strcasecmp(name, "bottom") || !strcasecmp(name, "br") ||
+	    !strcasecmp(name, "bl") || !strcasecmp(name, "bottom-right") ||
+	    !strcasecmp(name, "bottom-left"))
+		return HWS_IPC_OSD_BOTTOM;
 	return -1;
 }
 
@@ -514,7 +514,7 @@ static void ipc_handle_osd_position(struct ipc_client *c, const char *id,
 
 	code = parse_osd_position(pos);
 	if (code < 0) {
-		ipc_error(c, id, -32602, "unknown pos: tr|br|bl|tl");
+		ipc_error(c, id, -32602, "unknown pos: top|bottom");
 		return;
 	}
 

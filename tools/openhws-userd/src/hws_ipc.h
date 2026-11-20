@@ -41,10 +41,8 @@ enum hws_ipc_led_mode {
 };
 
 enum hws_ipc_osd_pos {
-	HWS_IPC_OSD_TR = 0,
-	HWS_IPC_OSD_BR = 1,
-	HWS_IPC_OSD_BL = 2,
-	HWS_IPC_OSD_TL = 3,
+	HWS_IPC_OSD_TOP = 0,
+	HWS_IPC_OSD_BOTTOM = 1,
 };
 
 enum hws_ipc_osd_mode {

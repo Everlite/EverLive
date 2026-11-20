@@ -58,7 +58,7 @@
 enum { CONSUMER_PRESENT = 0, CONSUMER_OUTPUT = 1 };
 enum aspect_mode { ASPECT_AUTO, ASPECT_16_9, ASPECT_4_3, ASPECT_STRETCH };
 static const char *const kAspectNames[] = { "auto", "16:9", "4:3", "stretch" };
-static const char *const kOsdPosNames[] = { "top-right", "bottom-right", "bottom-left", "top-left" };
+static const char *const kOsdPosNames[] = { "top", "bottom" };
 
 /* ---- Settings (main thread unless noted) ------------------------------ */
 
@@ -261,7 +261,7 @@ static void apply_cmd(const struct hws_ipc_cmd *cmd)
 		g_osd = cmd->a != 0;
 		break;
 	case HWS_IPC_CMD_OSD_POSITION:
-		g_osd_pos = cmd->a & 3;
+		g_osd_pos = cmd->a & 1;
 		break;
 	case HWS_IPC_CMD_RECORD_STATE:
 		atomic_store(&g_recording, cmd->a != 0);
@@ -418,7 +418,7 @@ static void publish_stats(int win_w, int win_h)
 	st.v4l2_frames = g_v4l2.frames;
 	st.v4l2_dropped = g_v4l2.dropped;
 	st.osd_enabled = g_osd;
-	snprintf(st.osd_position, sizeof(st.osd_position), "%s", kOsdPosNames[g_osd_pos & 3]);
+	snprintf(st.osd_position, sizeof(st.osd_position), "%s", kOsdPosNames[g_osd_pos & 1]);
 	snprintf(st.aspect, sizeof(st.aspect), "%s", kAspectNames[g_aspect & 3]);
 	snprintf(st.scale, sizeof(st.scale), "%s", g_scale_integer ? "integer" : "fit");
 	st.vsync = g_vsync;
@@ -588,8 +588,8 @@ static void draw_box_text(SDL_Renderer *r, int win_w, int win_h, int pos,
 			maxlen = (int)strlen(lines[i]);
 	bw = maxlen * 8 * scale + 2 * pad;
 	bh = nlines * lh + 2 * pad - 2 * scale;
-	bx = (pos == HWS_IPC_OSD_TL || pos == HWS_IPC_OSD_BL) ? 16 : win_w - bw - 16;
-	by = (pos == HWS_IPC_OSD_TR || pos == HWS_IPC_OSD_TL) ? 16 : win_h - bh - 16;
+	bx = (win_w - bw) / 2;
+	by = pos == HWS_IPC_OSD_BOTTOM ? win_h - bh - 16 : 16;
 
 	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
 	SDL_SetRenderDrawColor(r, 10, 12, 18, 190);
@@ -638,15 +638,14 @@ static void hws_scale_rect(SDL_Rect *dst, const SDL_Rect *src,
 static void hws_place_osd(SDL_Rect *dst, int width, int height, float scale,
 			  int win_w, int win_h)
 {
-	int margin = (int)(28.0f * scale + 0.5f);
-	bool right = g_osd_pos == HWS_IPC_OSD_TR || g_osd_pos == HWS_IPC_OSD_BR;
-	bool bottom = g_osd_pos == HWS_IPC_OSD_BR || g_osd_pos == HWS_IPC_OSD_BL;
+	int margin = (int)(34.0f * scale + 0.5f);
+	bool bottom = g_osd_pos == HWS_IPC_OSD_BOTTOM;
 
 	if (margin < 10)
 		margin = 10;
 	dst->w = width;
 	dst->h = height;
-	dst->x = right ? win_w - margin - width : margin;
+	dst->x = (win_w - width) / 2;
 	dst->y = bottom ? win_h - margin - height : margin;
 	if (dst->x < 0)
 		dst->x = 0;
@@ -676,8 +675,8 @@ static void hws_card_update(SDL_Renderer *r, SDL_Window *win,
 	struct hws_capture_status cs;
 	struct everlive_osd_snapshot snap;
 	char title[128];
-	char source[48];
-	char target[220];
+	char details[220];
+	char source_label[48];
 	char aspect_lbl[64];
 	char scale_lbl[64];
 	float gain = atomic_load(&g_gain);
@@ -687,14 +686,18 @@ static void hws_card_update(SDL_Renderer *r, SDL_Window *win,
 	if (!hws_ensure_osd_fonts())
 		return;
 	hws_capture_get_status(g_cap, &cs);
-	snprintf(title, sizeof(title), "HWS UHD : HDMI (%s)",
-		 kAspectNames[g_aspect & 3]);
-	if (cs.signal)
-		snprintf(source, sizeof(source), "%ux%u", cs.width, cs.height);
-	else
-		snprintf(source, sizeof(source), "No signal");
-	snprintf(target, sizeof(target), "%dx%d YUYV | 2 ch 48000 Hz%s",
-		 win_w, win_h, muted ? " | Muted" : "");
+	snprintf(title, sizeof(title), "HWS UHD");
+	if (cs.signal && cs.width && cs.height) {
+		unsigned int fps = cs.input_fps ? cs.input_fps :
+			(unsigned int)(cs.fps + 0.5);
+		snprintf(source_label, sizeof(source_label), "%u%c%u",
+			 cs.height, cs.interlaced ? 'i' : 'p',
+			 fps ? fps : 60);
+	} else {
+		snprintf(source_label, sizeof(source_label), "No signal");
+	}
+	snprintf(details, sizeof(details), "%s • YUYV • 2 ch 48000 Hz",
+		 source_label);
 	snprintf(aspect_lbl, sizeof(aspect_lbl), "Aspect: %s",
 		 kAspectNames[g_aspect & 3]);
 	snprintf(scale_lbl, sizeof(scale_lbl), "Scale: %s",
@@ -702,8 +705,7 @@ static void hws_card_update(SDL_Renderer *r, SDL_Window *win,
 	flags = SDL_GetWindowFlags(win);
 	memset(&snap, 0, sizeof(snap));
 	snap.title = title;
-	snap.route_source = source;
-	snap.route_target = target;
+	snap.details = details;
 	snap.input_label = NULL;
 	snap.aspect_label = aspect_lbl;
 	snap.scale_label = scale_lbl;
@@ -854,10 +856,19 @@ static const struct everlive_osd_hitbox *hws_card_hit(
 
 static void hws_set_hover(enum everlive_osd_action action)
 {
-	if (g_hover_action == action)
+	enum everlive_osd_action old = g_hover_action;
+	bool visual_old;
+	bool visual_new;
+
+	if (old == action)
 		return;
 	g_hover_action = action;
-	hws_card_invalidate();
+	visual_old = old != EVERLIVE_OSD_ACTION_NONE &&
+		     old != EVERLIVE_OSD_ACTION_INFO;
+	visual_new = action != EVERLIVE_OSD_ACTION_NONE &&
+		     action != EVERLIVE_OSD_ACTION_INFO;
+	if (visual_old || visual_new)
+		hws_card_invalidate();
 	if (getenv("EVERLIVE_OSD_DEBUG"))
 		fprintf(stderr, "[OSD] hover=%d\n", action);
 }
@@ -898,6 +909,12 @@ static void hws_render_tooltip(SDL_Renderer *r, int win_w, int win_h,
 	screen.y = g_card_dest.y + anchor->rect.y;
 	screen.w = anchor->rect.w;
 	screen.h = anchor->rect.h;
+	if (g_hover_action == EVERLIVE_OSD_ACTION_INFO) {
+		if (everlive_osd_build_details(r, &g_card, scale))
+			everlive_osd_render_details(r, &g_card, &screen,
+						    win_w, win_h);
+		return;
+	}
 	if (everlive_osd_build_tooltip(r, &g_card, g_hover_action, scale))
 		everlive_osd_render_tooltip(r, &g_card, &screen,
 					    win_w, win_h);
@@ -1247,7 +1264,7 @@ static void handle_key(SDL_Window *win, SDL_Keycode k)
 		g_osd = !g_osd;
 		break;
 	case SDLK_p:
-		g_osd_pos = (g_osd_pos + 1) & 3;
+		g_osd_pos ^= 1;
 		break;
 	case SDLK_s:
 	case SDLK_F10:
@@ -1407,7 +1424,7 @@ static void run_window(void)
 		if (now_ms() < g_toast_until_ms) {
 			const char *line = g_toast;
 
-			draw_box_text(ren, win_w, win_h, HWS_IPC_OSD_BL, &line, 1);
+			draw_box_text(ren, win_w, win_h, HWS_IPC_OSD_BOTTOM, &line, 1);
 		}
 		SDL_RenderPresent(ren);
 
@@ -1463,7 +1480,7 @@ static void usage(const char *argv0)
 	       "  -v, --volume GAIN      0.0..1.5 (default 1.0)\n"
 	       "  --mute                 start muted\n"
 	       "  --osd / --no-osd       stats overlay (default on)\n"
-	       "  --osd-pos POS          tr|br|bl|tl\n"
+	       "  --osd-pos POS          top|bottom\n"
 	       "  --streamer-mode        hide overlay and cursor\n"
 	       "  --v4l2 DEVICE          write frames to a v4l2loopback node\n"
 	       "  --loopback [DEVICE]    same, default /dev/video10\n"
@@ -1476,19 +1493,17 @@ static void usage(const char *argv0)
 	       "  --parent-winid ID      embed into an X11 window (Console Hub)\n"
 	       "  --slots N              DMA frame slots (default %d)\n"
 	       "Hotkeys: f fullscreen, a aspect, l scale, up/down volume, m mute,\n"
-	       "         o OSD, p OSD corner, s streamer mode, F1 help, q quit\n",
+	       "         o OSD, p OSD top/bottom, s streamer mode, F1 help, q quit\n",
 	       argv0, HWS_CAMERA_SHM_NAME, HWS_CAPTURE_DEFAULT_SLOTS);
 }
 
 static int parse_osd_pos(const char *s)
 {
-	if (!strcasecmp(s, "br") || !strcasecmp(s, "bottom-right"))
-		return HWS_IPC_OSD_BR;
-	if (!strcasecmp(s, "bl") || !strcasecmp(s, "bottom-left"))
-		return HWS_IPC_OSD_BL;
-	if (!strcasecmp(s, "tl") || !strcasecmp(s, "top-left"))
-		return HWS_IPC_OSD_TL;
-	return HWS_IPC_OSD_TR;
+	if (!strcasecmp(s, "bottom") || !strcasecmp(s, "br") ||
+	    !strcasecmp(s, "bl") || !strcasecmp(s, "bottom-right") ||
+	    !strcasecmp(s, "bottom-left"))
+		return HWS_IPC_OSD_BOTTOM;
+	return HWS_IPC_OSD_TOP;
 }
 
 static int parse_aspect(const char *s)

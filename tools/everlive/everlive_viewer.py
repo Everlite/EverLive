@@ -96,13 +96,21 @@ ASPECT_OPTIONS = [
 ]
 ASPECT_KEYS = {key for _, key in ASPECT_OPTIONS}
 
-OSD_POSITIONS = ("tr", "br", "bl", "tl")
+OSD_POSITIONS = ("top", "bottom")
 OSD_POSITION_OPTIONS = [
-    ("Top Right", "tr"),
-    ("Bottom Right", "br"),
-    ("Bottom Left", "bl"),
-    ("Top Left", "tl"),
+    ("Top", "top"),
+    ("Bottom", "bottom"),
 ]
+OSD_POSITION_ALIASES = {
+    "tr": "top", "tl": "top", "top-right": "top", "top-left": "top",
+    "br": "bottom", "bl": "bottom", "bottom-right": "bottom",
+    "bottom-left": "bottom",
+}
+
+
+def normalize_osd_position(pos: str) -> str:
+    pos = OSD_POSITION_ALIASES.get(pos, pos)
+    return pos if pos in OSD_POSITIONS else "top"
 
 SCALE_OPTIONS = [
     ("Aspect Fit (Bilinear)", "fit"),
@@ -148,7 +156,7 @@ DEFAULT_SETTINGS = {
     "v4l2_loopback": False,
     "aspect_ratio": "auto",
     "osd_enabled": True,
-    "osd_position": "tr",
+    "osd_position": "top",
     "audio_tap": False,
     "hdr_tonemap": True,
     "hdr_exposure": 0.0,
@@ -197,8 +205,8 @@ def load_settings() -> dict:
         settings["aspect_ratio"] = "auto"
     if not isinstance(settings.get("osd_enabled"), bool):
         settings["osd_enabled"] = True
-    if settings.get("osd_position") not in OSD_POSITIONS:
-        settings["osd_position"] = "tr"
+    settings["osd_position"] = normalize_osd_position(
+        settings.get("osd_position"))
     if not isinstance(settings.get("audio_tap"), bool):
         settings["audio_tap"] = False
     if not isinstance(settings.get("hdr_tonemap"), bool):
@@ -1966,8 +1974,7 @@ class GameStreamer:
                 cmd.append("--streamer-mode")
             else:
                 cmd.append("--osd" if osd else "--no-osd")
-        if osd_pos not in ("tr", "br", "bl", "tl"):
-            osd_pos = "tr"
+        osd_pos = normalize_osd_position(osd_pos)
         cmd.extend(["--osd-pos", osd_pos])
 
         if aspect is None:
@@ -2077,7 +2084,7 @@ class GameStreamer:
                     headless: bool = False,
                     aspect: Optional[str] = None,
                     osd: bool = True,
-                    osd_pos: str = "tr",
+                    osd_pos: str = "top",
                     audio_tap: Optional[str] = None,
                     hdr: bool = True,
                     hdr_exposure: float = 0.0,
@@ -2163,8 +2170,7 @@ class GameStreamer:
                 cmd.append("--streamer-mode")
             else:
                 cmd.append("--osd" if osd else "--no-osd")
-        if osd_pos not in ("tr", "br", "bl", "tl"):
-            osd_pos = "tr"
+        osd_pos = normalize_osd_position(osd_pos)
         cmd.extend(["--osd-pos", osd_pos])
 
         if aspect is None:
@@ -2294,7 +2300,7 @@ class GameStreamer:
             return False
         return True
 
-    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None, osd: bool = True, osd_pos: str = "tr", audio_tap: Optional[str] = None, hdr: bool = True, hdr_exposure: float = 0.0, scale: str = "fit", framegen: str = "off", fg_multiplier: int = 2, fg_backend: str = "lsfg", fg_dedup: bool = False, fg_flow_scale: float = 1.0, fg_perf_mode: bool = False, fg_low_latency: bool = True, parent_winid: Optional[int] = None) -> bool:
+    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None, osd: bool = True, osd_pos: str = "top", audio_tap: Optional[str] = None, hdr: bool = True, hdr_exposure: float = 0.0, scale: str = "fit", framegen: str = "off", fg_multiplier: int = 2, fg_backend: str = "lsfg", fg_dedup: bool = False, fg_flow_scale: float = 1.0, fg_perf_mode: bool = False, fg_low_latency: bool = True, parent_winid: Optional[int] = None) -> bool:
         if self.is_running:
             return True
 
@@ -4578,18 +4584,18 @@ if HAS_QT:
             self.combo_osd_pos = _shrinkable(QComboBox())
             for text, key in OSD_POSITION_OPTIONS:
                 self.combo_osd_pos.addItem(text, key)
-            saved_pos = self.saved_cfg.get("osd_position", "tr")
+            saved_pos = self.saved_cfg.get("osd_position", "top")
             pos_idx = self.combo_osd_pos.findData(saved_pos)
             if pos_idx >= 0:
                 self.combo_osd_pos.setCurrentIndex(pos_idx)
             self.combo_osd_pos.setToolTip(
-                "Forwarded as --osd-pos. Top Right is the default so the "
-                "overlay never covers console navigation.")
+                "Forwarded as --osd-pos. Top is the default; the bar is "
+                "centered on the chosen screen edge.")
             self.combo_osd_pos.setEnabled(self.chk_osd.isChecked())
             self.combo_osd_pos.currentIndexChanged.connect(self.on_osd_pos_changed)
             self.osd_pos_field = _stacked_field(
                 "OSD Position", self.combo_osd_pos,
-                "Screen corner for the On-Screen Stats overlay (Hotkey: P).")
+                "Top or bottom screen edge for the OSD bar (Hotkey: P).")
             self.osd_pos_effect = QGraphicsOpacityEffect(self.osd_pos_field)
             self.osd_pos_effect.setOpacity(1.0)
             self.osd_pos_field.setGraphicsEffect(self.osd_pos_effect)
@@ -6214,7 +6220,7 @@ if HAS_QT:
                 f"HDR tonemap: {'on' if self.chk_hdr.isChecked() else 'off'}",
                 f"Exposure: {self.spin_hdr_exposure.value():+.1f} EV",
                 f"OSD: {'on' if self.chk_osd.isChecked() else 'off'}"
-                f" ({_value(self.saved_cfg.get('osd_position'), 'tr')})",
+                f" ({_value(self.saved_cfg.get('osd_position'), 'top')})",
                 f"Background service: {service_state}",
                 f"Service unit: {unit_path}",
                 f"Video node: {_value(getattr(self.streamer, 'vdev', None))}",
@@ -6590,6 +6596,7 @@ if HAS_QT:
                 self.chk_osd.blockSignals(False)
 
             pos = osd.get("position")
+            pos = OSD_POSITION_ALIASES.get(pos, pos)
             if pos in OSD_POSITIONS:
                 idx = self.combo_osd_pos.findData(pos)
                 if idx >= 0 and idx != self.combo_osd_pos.currentIndex():
@@ -7741,9 +7748,8 @@ if HAS_QT:
                 if aspect not in ASPECT_KEYS:
                     aspect = "auto"
                 want_osd = self.chk_osd.isChecked()
-                osd_pos = self.combo_osd_pos.currentData() or "tr"
-                if osd_pos not in OSD_POSITIONS:
-                    osd_pos = "tr"
+                osd_pos = normalize_osd_position(
+                    self.combo_osd_pos.currentData() or "top")
                 want_isolated_rec_tap = (
                     not self.duo_mode
                     and hasattr(self, "combo_rec_audio")
@@ -8319,9 +8325,8 @@ if HAS_QT:
                       "to toggle the running overlay.")
 
         def on_osd_pos_changed(self, *_):
-            pos = self.combo_osd_pos.currentData() or "tr"
-            if pos not in OSD_POSITIONS:
-                pos = "tr"
+            pos = normalize_osd_position(
+                self.combo_osd_pos.currentData() or "top")
             self.saved_cfg["osd_position"] = pos
             save_settings({"osd_position": pos})
             if self._ipc is not None and self._ipc.connected:
