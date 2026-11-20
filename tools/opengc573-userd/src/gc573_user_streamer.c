@@ -2536,8 +2536,9 @@ static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 	y = event->button.y;
 
 	if (g_popup_open) {
-		point.x = x - g_popup_dest.x;
-		point.y = y - g_popup_dest.y;
+		/* Window-space first; popup internals use local space. */
+		point.x = x;
+		point.y = y;
 		if (g_popup_dest.w > 0 && SDL_PointInRect(&point, &g_popup_dest)) {
 			if (g_popup.kind == EVERLIVE_OSD_POPUP_VOLUME)
 				osd_volume_track_event(x, true);

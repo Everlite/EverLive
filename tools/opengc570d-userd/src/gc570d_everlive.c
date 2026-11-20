@@ -1689,10 +1689,20 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 	y = event->button.y;
 
 	if (sdl->popup_open) {
-		point.x = x - sdl->popup_dest.x;
-		point.y = y - sdl->popup_dest.y;
+		/* Window-space first; input rows below use popup-local space. */
+		point.x = x;
+		point.y = y;
+		if (getenv("EVERLIVE_OSD_DEBUG"))
+			fprintf(stderr,
+				"[OSD] popup kind=%d dest=%d,%d %dx%d point=%d,%d inside=%d\n",
+				(int)sdl->popup.kind, sdl->popup_dest.x,
+				sdl->popup_dest.y, sdl->popup_dest.w,
+				sdl->popup_dest.h, point.x, point.y,
+				SDL_PointInRect(&point, &sdl->popup_dest));
 		if (sdl->popup_dest.w > 0 &&
 		    SDL_PointInRect(&point, &sdl->popup_dest)) {
+			point.x -= sdl->popup_dest.x;
+			point.y -= sdl->popup_dest.y;
 			if (sdl->popup.kind == EVERLIVE_OSD_POPUP_VOLUME) {
 				sdl_volume_track_event(st, sdl, x, true);
 			} else if (sdl->popup.kind == EVERLIVE_OSD_POPUP_INPUT) {

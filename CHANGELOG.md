@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **OSD popups (volume slider and HDMI input dropdown):** the engines compared a popup-relative click position against the absolute popup rectangle, so every click looked like it landed outside, closed the popup and fell through to the card. GC573, GC570D and HWS UHD now hit-test the absolute pointer position first and only convert to popup-local coordinates for the input rows. The volume slider also accepts pressed drag events again.
 - **Recording with FFmpeg 9:** the recorder only passes `-thread_queue_size` before an input when the installed FFmpeg still accepts it as an input option. FFmpeg 9 moved it to the muxer and otherwise rejected every v4l2/pulse recording at startup.
 - **HWS UHD in the Console Hub:** the engine accepts (and ignores) the Hub's `--fg-backend` option; since the dev merge of the card selector it exited at startup with "unrecognized option".
 - **Recording with the HWS UHD card:** the Hub's "Capture Inactive" check now also recognizes the HWS frame store.
