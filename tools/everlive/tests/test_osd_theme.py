@@ -37,6 +37,19 @@ class OsdThemeTests(unittest.TestCase):
             if name.startswith("ICON_"):
                 self.assertIn(chr(value), available, name)
 
+    def test_bespoke_icon_assets_exist(self):
+        font_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "fonts")
+        for name in (
+                "osd_hdmi_1.bmp", "osd_hdmi_2.bmp",
+                "osd_aspect_auto.bmp", "osd_aspect_16_9.bmp",
+                "osd_aspect_4_3.bmp", "osd_aspect_stretch.bmp",
+                "osd_scale_integer.bmp", "osd_scale_bilinear.bmp"):
+            path = os.path.join(font_dir, name)
+            self.assertTrue(os.path.isfile(path), name)
+            self.assertGreater(os.path.getsize(path), 1000, name)
+
     def test_shared_colors_match_gui(self):
         values = _defines()
         expected = {

@@ -23,6 +23,9 @@
 static TTF_Font *g_font_regular;
 static TTF_Font *g_font_semibold;
 static TTF_Font *g_font_icons;
+static SDL_Surface *g_icon_hdmi[2];
+static SDL_Surface *g_icon_aspect[4];
+static SDL_Surface *g_icon_scale[2];
 static bool g_available;
 static bool g_initialised;
 static char g_font_dir[512];
@@ -394,6 +397,80 @@ static void draw_port_icon(SDL_Surface *surface, int x, int y, int w, int h,
 		     h - border * 2, 0, surface_color(surface, bg, 255));
 }
 
+static void blit_icon_fit(SDL_Surface *dst, SDL_Surface *src, int box_x,
+			  int box_y, int box_w, int box_h, uint32_t tint,
+			  bool tinted)
+{
+	float sx;
+	float sy;
+	float scale;
+	int w;
+	int h;
+	int x;
+	int y;
+	int dy;
+	int dx;
+	Uint8 tr = tinted ? (Uint8)((tint >> 16) & 0xff) : 255;
+	Uint8 tg = tinted ? (Uint8)((tint >> 8) & 0xff) : 255;
+	Uint8 tb = tinted ? (Uint8)(tint & 0xff) : 255;
+
+	if (!dst || !src || src->w <= 0 || src->h <= 0 ||
+	    box_w <= 0 || box_h <= 0)
+		return;
+	sx = (float)box_w / (float)src->w;
+	sy = (float)box_h / (float)src->h;
+	scale = sx < sy ? sx : sy;
+	w = (int)(src->w * scale + 0.5f);
+	h = (int)(src->h * scale + 0.5f);
+	if (w < 1)
+		w = 1;
+	if (h < 1)
+		h = 1;
+	x = box_x + (box_w - w) / 2;
+	y = box_y + (box_h - h) / 2;
+	for (dy = 0; dy < h; dy++) {
+		int sy0 = dy * src->h / h;
+		int sy1 = (dy + 1) * src->h / h;
+
+		if (sy1 <= sy0)
+			sy1 = sy0 + 1;
+		if (sy1 > src->h)
+			sy1 = src->h;
+		for (dx = 0; dx < w; dx++) {
+			int sx0 = dx * src->w / w;
+			int sx1 = (dx + 1) * src->w / w;
+			unsigned int sum = 0;
+			int count;
+			int yy;
+			int xx;
+			Uint8 sa;
+			Uint8 *dp;
+
+			if (sx1 <= sx0)
+				sx1 = sx0 + 1;
+			if (sx1 > src->w)
+				sx1 = src->w;
+			for (yy = sy0; yy < sy1; yy++) {
+				const Uint8 *row = (const Uint8 *)src->pixels +
+						   yy * src->pitch;
+				for (xx = sx0; xx < sx1; xx++)
+					sum += row[xx * 4 + 3];
+			}
+			count = (sx1 - sx0) * (sy1 - sy0);
+			if (count < 1)
+				count = 1;
+			sa = (Uint8)(sum / count);
+			if (!sa)
+				continue;
+			dp = (Uint8 *)dst->pixels + (y + dy) * dst->pitch +
+			     (x + dx) * 4;
+			dp[0] = (Uint8)((tr * sa + dp[0] * (255 - sa)) / 255);
+			dp[1] = (Uint8)((tg * sa + dp[1] * (255 - sa)) / 255);
+			dp[2] = (Uint8)((tb * sa + dp[2] * (255 - sa)) / 255);
+		}
+	}
+}
+
 static void draw_input_icons(SDL_Surface *surface, int x, int y, int w, int h,
 			     int active, uint32_t bg, float s)
 {
@@ -421,6 +498,17 @@ static void draw_input_icons(SDL_Surface *surface, int x, int y, int w, int h,
 	cell_w = (w - pad * 2 - gap) / 2;
 	if (cell_w < 1)
 		cell_w = 1;
+	if (g_icon_hdmi[0] && g_icon_hdmi[1]) {
+		for (i = 0; i < 2; i++) {
+			int cell_x = x + pad + i * (cell_w + gap);
+			uint32_t color = i == active ?
+				EVERLIVE_OSD_BLUE_TEXT : EVERLIVE_OSD_ROUTE;
+
+			blit_icon_fit(surface, g_icon_hdmi[i], cell_x, y,
+				      cell_w, h, color, true);
+		}
+		return;
+	}
 	conn_w = cell_w - port_w - port_gap;
 	if (conn_w > conn_h * 13 / 5)
 		conn_w = conn_h * 13 / 5;
@@ -474,6 +562,16 @@ static void draw_aspect_icon(SDL_Surface *surface, int cx, int cy,
 		gap = 1;
 	if (radius < 1)
 		radius = 1;
+	if (g_icon_aspect[aspect]) {
+		int box = iscale(42.0f * s);
+
+		if (box < 24)
+			box = 24;
+		blit_icon_fit(surface, g_icon_aspect[aspect], cx - box / 2,
+			      cy - box / 2, box, box, EVERLIVE_OSD_TITLE,
+			      false);
+		return;
+	}
 	inner_x = cx - shell_w / 2 + border + gap;
 	inner_y = cy - shell_h / 2 + border + gap;
 	max_w = shell_w - (border + gap) * 2;
@@ -590,6 +688,12 @@ static void draw_scale_icon(SDL_Surface *surface, int cx, int cy, int size,
 
 	if (size < 12)
 		size = 12;
+	if (g_icon_scale[integer ? 1 : 0]) {
+		blit_icon_fit(surface, g_icon_scale[integer ? 1 : 0],
+			      cx - size / 2, cy - size / 2, size, size,
+			      EVERLIVE_OSD_TITLE, false);
+		return;
+	}
 	if (border < 1)
 		border = 1;
 	if (radius < 1)
@@ -694,6 +798,71 @@ void everlive_osd_set_font_dir(const char *dir)
 		snprintf(g_font_dir, sizeof(g_font_dir), "%s", dir);
 }
 
+static SDL_Surface *load_icon_asset(const char *dir, const char *name)
+{
+	char path[768];
+	SDL_Surface *raw;
+	SDL_Surface *rgba;
+
+	if (!dir || !*dir || !name)
+		return NULL;
+	if (snprintf(path, sizeof(path), "%s/%s", dir, name) >= (int)sizeof(path))
+		return NULL;
+	raw = SDL_LoadBMP(path);
+	if (!raw) {
+		if (getenv("EVERLIVE_OSD_DEBUG"))
+			fprintf(stderr, "[OSD] Cannot load icon %s: %s\n", path,
+				SDL_GetError());
+		return NULL;
+	}
+	rgba = SDL_ConvertSurfaceFormat(raw, SDL_PIXELFORMAT_RGBA32, 0);
+	SDL_FreeSurface(raw);
+	return rgba;
+}
+
+static void load_icon_assets(const char *dir)
+{
+	static const char *const hdmi[] = {
+		"osd_hdmi_1.bmp", "osd_hdmi_2.bmp"
+	};
+	static const char *const aspect[] = {
+		"osd_aspect_auto.bmp", "osd_aspect_16_9.bmp",
+		"osd_aspect_4_3.bmp", "osd_aspect_stretch.bmp"
+	};
+	static const char *const scale[] = {
+		"osd_scale_bilinear.bmp", "osd_scale_integer.bmp"
+	};
+	int i;
+
+	for (i = 0; i < 2; i++)
+		g_icon_hdmi[i] = load_icon_asset(dir, hdmi[i]);
+	for (i = 0; i < 4; i++)
+		g_icon_aspect[i] = load_icon_asset(dir, aspect[i]);
+	for (i = 0; i < 2; i++)
+		g_icon_scale[i] = load_icon_asset(dir, scale[i]);
+}
+
+static void free_icon_assets(void)
+{
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		if (g_icon_hdmi[i])
+			SDL_FreeSurface(g_icon_hdmi[i]);
+		g_icon_hdmi[i] = NULL;
+	}
+	for (i = 0; i < 4; i++) {
+		if (g_icon_aspect[i])
+			SDL_FreeSurface(g_icon_aspect[i]);
+		g_icon_aspect[i] = NULL;
+	}
+	for (i = 0; i < 2; i++) {
+		if (g_icon_scale[i])
+			SDL_FreeSurface(g_icon_scale[i]);
+		g_icon_scale[i] = NULL;
+	}
+}
+
 int everlive_osd_init(void)
 {
 	const char *dir;
@@ -734,6 +903,7 @@ int everlive_osd_init(void)
 	TTF_SetFontHinting(g_font_regular, TTF_HINTING_LIGHT);
 	TTF_SetFontHinting(g_font_semibold, TTF_HINTING_LIGHT);
 	TTF_SetFontHinting(g_font_icons, TTF_HINTING_LIGHT);
+	load_icon_assets(dir);
 	g_available = true;
 	return 0;
 }
@@ -754,6 +924,7 @@ void everlive_osd_shutdown(void)
 	g_font_regular = NULL;
 	g_font_semibold = NULL;
 	g_font_icons = NULL;
+	free_icon_assets();
 	g_available = false;
 	if (g_initialised)
 		TTF_Quit();
@@ -924,7 +1095,7 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 	title_h = text_height(g_font_semibold, title_size);
 	title_w = text_width(title, g_font_semibold, title_size);
 	if (show_input) {
-		input_w = iscale(150.0f * s);
+		input_w = iscale(220.0f * s);
 		if (input_w < button)
 			input_w = button;
 	}

@@ -54,7 +54,7 @@ jobs:
           for module in everlive_client.py card_profile.py service_manager.py app_integrations.py everlive_recorder.py gc553g2_control.py ui_theme.py ui_widgets.py fa_icons.py everlive_multi.py everlive_cam.py; do
             test -f "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive/$module"
           done
-          for asset in fonts/fa-solid-900.ttf fonts/fa-brands-400.ttf fonts/LICENSE.txt fonts/chevron-down.png fonts/NotoSans-Regular.ttf fonts/NotoSans-SemiBold.ttf fonts/NotoSans-LICENSE.txt; do
+          for asset in fonts/fa-solid-900.ttf fonts/fa-brands-400.ttf fonts/LICENSE.txt fonts/chevron-down.png fonts/NotoSans-Regular.ttf fonts/NotoSans-SemiBold.ttf fonts/NotoSans-LICENSE.txt fonts/osd_hdmi_1.bmp fonts/osd_hdmi_2.bmp fonts/osd_aspect_auto.bmp fonts/osd_aspect_16_9.bmp fonts/osd_aspect_4_3.bmp fonts/osd_aspect_stretch.bmp fonts/osd_scale_integer.bmp fonts/osd_scale_bilinear.bmp; do
             test -f "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive/$asset"
           done
           test -f "$RUNNER_TEMP/stage/usr/lib/libeverlive-vk-pacer.so"
