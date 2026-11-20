@@ -1937,8 +1937,6 @@ static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
 	char title[128];
 	char details[220];
 	char input_label[32];
-	char aspect_lbl[64];
-	char scale_lbl[64];
 	int win_w = 0;
 	int win_h = 0;
 	float scale;
@@ -1967,10 +1965,6 @@ static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
 	else
 		snprintf(input_label, sizeof(input_label), "No signal");
 	snprintf(title, sizeof(title), "GC573");
-	snprintf(aspect_lbl, sizeof(aspect_lbl), "Aspect: %s",
-		 aspect_name(g_aspect));
-	snprintf(scale_lbl, sizeof(scale_lbl), "Scale: %s",
-		 scale_name(g_scale_mode));
 	if (audio_ch == 0)
 		audio_ch = 2;
 	if (audio_rate == 0)
@@ -1985,10 +1979,10 @@ static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
 	memset(&snap, 0, sizeof(snap));
 	snap.title = title;
 	snap.details = details;
-	snap.input_label = NULL;
-	snap.aspect_label = aspect_lbl;
-	snap.scale_label = scale_lbl;
 	snap.show_input = false;
+	snap.input_index = -1;
+	snap.aspect_index = g_aspect;
+	snap.scale_integer = g_scale_mode == SCALE_INTEGER;
 	snap.pip = false;
 	snap.muted = __atomic_load_n(&g_audio_mute_flag, __ATOMIC_RELAXED) != 0;
 	snap.fullscreen = osd_window_is_fullscreen(window);
@@ -2172,14 +2166,10 @@ static const struct everlive_osd_hitbox *osd_card_hit(
 
 static void osd_popup_build(SDL_Renderer *renderer, float scale)
 {
-	int selected = 0;
-
 	if (!g_popup_open)
 		return;
-	if (g_popup_kind == EVERLIVE_OSD_POPUP_VOLUME)
-		selected = g_popup_volume;
-	everlive_osd_build_popup(renderer, g_popup_kind, selected, -1,
-				 g_popup_volume, scale, &g_popup);
+	everlive_osd_build_popup(renderer, g_popup_kind, g_popup_volume,
+				 scale, &g_popup);
 	g_popup_scale = scale;
 	g_popup_dirty = false;
 }
@@ -2188,9 +2178,7 @@ static void osd_render_popup(SDL_Renderer *renderer, int win_w, int win_h,
 			     float scale)
 {
 	const struct everlive_osd_hitbox *anchor;
-	enum everlive_osd_action action =
-		g_popup_kind == EVERLIVE_OSD_POPUP_INPUT
-			? EVERLIVE_OSD_ACTION_INPUT : EVERLIVE_OSD_ACTION_VOLUME;
+	enum everlive_osd_action action = EVERLIVE_OSD_ACTION_VOLUME;
 
 	if (!g_popup_open)
 		return;
@@ -2329,12 +2317,14 @@ static void osd_cycle_scale(SDL_Window *window)
 {
 	char title[128];
 	char message[64];
+	const char *label = g_scale_mode == SCALE_INTEGER ?
+		"Integer" : "Bilinear";
 
 	g_scale_mode = (enum stream_scale)
 		((g_scale_mode + 1) % SCALE_COUNT);
-	snprintf(title, sizeof(title), "EverLive — Scaling: %s",
-		 scale_name(g_scale_mode));
-	snprintf(message, sizeof(message), "Scale: %s", scale_name(g_scale_mode));
+	label = g_scale_mode == SCALE_INTEGER ? "Integer" : "Bilinear";
+	snprintf(title, sizeof(title), "EverLive — Scaling: %s", label);
+	snprintf(message, sizeof(message), "Scale: %s", label);
 	SDL_SetWindowTitle(window, title);
 	toast_trigger(message);
 	osd_card_invalidate();
@@ -2663,11 +2653,11 @@ static void toast_render(SDL_Renderer *renderer, SDL_Window *window)
 	dst.h = g_toast.height;
 	dst.x = (win_w - dst.w) / 2;
 	{
-		int gap = (int)(10.0f * (float)win_h / 1080.0f + 0.5f);
+		int gap = (int)(44.0f * (float)win_h / 1080.0f + 0.5f);
 		int edge = (int)(16.0f * (float)win_h / 1080.0f + 0.5f);
 
-		if (gap < 6)
-			gap = 6;
+		if (gap < 20)
+			gap = 20;
 		if (edge < 8)
 			edge = 8;
 		if (g_osd_enabled && osd_card_active(window) &&

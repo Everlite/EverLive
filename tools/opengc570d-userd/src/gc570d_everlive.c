@@ -548,8 +548,6 @@ struct everlive_sdl {
 	bool popup_dragging;
 	bool popup_dirty;
 	float popup_scale;
-	int popup_selected;
-	int popup_hover;
 	int popup_volume;
 	SDL_Texture *toast_texture;
 	char toast_text[96];
@@ -909,7 +907,6 @@ static void sdl_presentation_close(struct everlive_sdl *sdl)
 	sdl->toast_until_ns = 0;
 	sdl->popup_open = false;
 	sdl->popup_dirty = false;
-	sdl->popup_hover = -1;
 	if (sdl->renderer)
 		SDL_DestroyRenderer(sdl->renderer);
 	if (sdl->window)
@@ -1243,8 +1240,6 @@ static void sdl_card_update(struct everlive_state *st,
 	char title[160];
 	char details[220];
 	char source_label[40];
-	char aspect_lbl[64];
-	char scale_lbl[64];
 	int scale_mode = atomic_load_explicit(&st->scale, __ATOMIC_RELAXED);
 	unsigned int rate = shm_port_rate(st, port);
 	unsigned int channels = shm_port_channels(st, port);
@@ -1277,14 +1272,10 @@ static void sdl_card_update(struct everlive_state *st,
 	memset(&snap, 0, sizeof(snap));
 	snap.title = title;
 	snap.details = details;
-	snap.input_label = shm_port_name(port);
-	snprintf(aspect_lbl, sizeof(aspect_lbl), "Aspect: %s",
-		 aspect_mode_label(aspect));
-	snprintf(scale_lbl, sizeof(scale_lbl), "Scale: %s",
-		 scale_mode == EVERLIVE_SCALE_INTEGER ? "Integer" : "Fit");
-	snap.aspect_label = aspect_lbl;
-	snap.scale_label = scale_lbl;
 	snap.show_input = true;
+	snap.input_index = port;
+	snap.aspect_index = aspect;
+	snap.scale_integer = scale_mode == EVERLIVE_SCALE_INTEGER;
 	snap.pip = atomic_load_explicit(&st->pip, __ATOMIC_RELAXED);
 	snap.muted = muted;
 	snap.fullscreen = sdl->fullscreen ||
@@ -1384,11 +1375,11 @@ static void sdl_render_toast(struct everlive_state *st,
 	dst.h = sdl->toast_h;
 	dst.x = (win_w - dst.w) / 2;
 	{
-		int gap = (int)(10.0f * scale + 0.5f);
+		int gap = (int)(44.0f * scale + 0.5f);
 		int edge = (int)(16.0f * scale + 0.5f);
 
-		if (gap < 6)
-			gap = 6;
+		if (gap < 20)
+			gap = 20;
 		if (edge < 8)
 			edge = 8;
 		if (sdl_card_mode_active(st, sdl) && sdl->card.texture &&
@@ -1418,7 +1409,6 @@ static void sdl_popup_build(struct everlive_sdl *sdl, float scale)
 	if (!sdl->popup_open)
 		return;
 	everlive_osd_build_popup(sdl->renderer, sdl->popup_kind,
-				 sdl->popup_selected, sdl->popup_hover,
 				 sdl->popup_volume, scale, &sdl->popup);
 	sdl->popup_scale = scale;
 	sdl->popup_dirty = false;
@@ -1428,9 +1418,7 @@ static void sdl_render_popup(struct everlive_sdl *sdl, int win_w, int win_h,
 			     float scale)
 {
 	const struct everlive_osd_hitbox *anchor;
-	enum everlive_osd_action action =
-		sdl->popup_kind == EVERLIVE_OSD_POPUP_INPUT
-			? EVERLIVE_OSD_ACTION_INPUT : EVERLIVE_OSD_ACTION_VOLUME;
+	enum everlive_osd_action action = EVERLIVE_OSD_ACTION_VOLUME;
 
 	if (!sdl->popup_open)
 		return;
@@ -1527,7 +1515,7 @@ static void sdl_cycle_scale(struct everlive_state *st,
 
 	atomic_store_explicit(&st->scale, next, __ATOMIC_RELAXED);
 	snprintf(message, sizeof(message), "Scale: %s",
-		 next == EVERLIVE_SCALE_INTEGER ? "Integer" : "Fit");
+		 next == EVERLIVE_SCALE_INTEGER ? "Integer" : "Bilinear");
 	sdl_toast(sdl, message);
 	sdl_card_invalidate(sdl);
 }
@@ -1539,7 +1527,6 @@ static void sdl_open_popup(struct everlive_sdl *sdl,
 		g_hover_action = EVERLIVE_OSD_ACTION_NONE;
 		sdl_card_invalidate(sdl);
 	}
-	sdl->popup_hover = -1;
 	sdl->popup_kind = kind;
 	sdl->popup_open = true;
 	sdl->popup_dirty = true;
@@ -1550,7 +1537,6 @@ static void sdl_close_popup(struct everlive_sdl *sdl)
 {
 	sdl->popup_open = false;
 	sdl->popup_dragging = false;
-	sdl->popup_hover = -1;
 	sdl->popup_kind = EVERLIVE_OSD_POPUP_NONE;
 	everlive_osd_destroy_popup(&sdl->popup);
 }
@@ -1679,33 +1665,6 @@ static void sdl_volume_track_event(struct everlive_state *st,
 		sdl_apply_volume(st, sdl, pct);
 }
 
-static void sdl_update_popup_hover(struct everlive_sdl *sdl, int x, int y)
-{
-	SDL_Point point = { x, y };
-	SDL_Point local;
-	int hover = -1;
-
-	if (!sdl->popup_open || sdl->popup.kind != EVERLIVE_OSD_POPUP_INPUT) {
-		if (sdl->popup_hover != -1)
-			sdl->popup_hover = -1;
-		return;
-	}
-	if (sdl->popup_dest.w > 0 && SDL_PointInRect(&point, &sdl->popup_dest)) {
-		local.x = x - sdl->popup_dest.x;
-		local.y = y - sdl->popup_dest.y;
-		if (SDL_PointInRect(&local, &sdl->popup.input_rows[0]))
-			hover = 0;
-		else if (SDL_PointInRect(&local, &sdl->popup.input_rows[1]))
-			hover = 1;
-	}
-	if (hover != sdl->popup_hover) {
-		sdl->popup_hover = hover;
-		sdl->popup_dirty = true;
-		if (getenv("EVERLIVE_OSD_DEBUG"))
-			fprintf(stderr, "[OSD] popup hover=%d\n", hover);
-	}
-}
-
 static bool sdl_handle_mouse(struct everlive_state *st,
 			     struct everlive_sdl *sdl, const SDL_Event *event)
 {
@@ -1747,15 +1706,6 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 	else if (event->type == SDL_MOUSEBUTTONDOWN ||
 		 event->type == SDL_MOUSEBUTTONUP)
 		sdl_update_hover(st, sdl, event->button.x, event->button.y);
-	if (sdl->popup_open) {
-		if (event->type == SDL_MOUSEMOTION)
-			sdl_update_popup_hover(sdl, event->motion.x,
-					       event->motion.y);
-		else if (event->type == SDL_MOUSEBUTTONDOWN ||
-			 event->type == SDL_MOUSEBUTTONUP)
-			sdl_update_popup_hover(sdl, event->button.x,
-					       event->button.y);
-	}
 
 	if (event->type == SDL_MOUSEBUTTONUP &&
 	    event->button.button == SDL_BUTTON_LEFT) {
@@ -1786,24 +1736,7 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 				SDL_PointInRect(&point, &sdl->popup_dest));
 		if (sdl->popup_dest.w > 0 &&
 		    SDL_PointInRect(&point, &sdl->popup_dest)) {
-			point.x -= sdl->popup_dest.x;
-			point.y -= sdl->popup_dest.y;
-			if (sdl->popup.kind == EVERLIVE_OSD_POPUP_VOLUME) {
-				sdl_volume_track_event(st, sdl, x, true);
-			} else if (sdl->popup.kind == EVERLIVE_OSD_POPUP_INPUT) {
-				if (SDL_PointInRect(&point,
-						    &sdl->popup.input_rows[0])) {
-					gc570d_everlive_set_port(0);
-					sdl_toast(sdl, "Input: HDMI 1");
-					sdl_card_invalidate(sdl);
-				} else if (SDL_PointInRect(&point,
-							   &sdl->popup.input_rows[1])) {
-					gc570d_everlive_set_port(1);
-					sdl_toast(sdl, "Input: HDMI 2");
-					sdl_card_invalidate(sdl);
-				}
-				sdl_close_popup(sdl);
-			}
+			sdl_volume_track_event(st, sdl, x, true);
 			return true;
 		}
 		sdl_close_popup(sdl);
@@ -1816,11 +1749,15 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 		return true;
 	}
 	switch (action) {
-	case EVERLIVE_OSD_ACTION_INPUT:
-		sdl->popup_selected = atomic_load_explicit(&st->port,
-							   __ATOMIC_RELAXED);
-		sdl_open_popup(sdl, EVERLIVE_OSD_POPUP_INPUT);
+	case EVERLIVE_OSD_ACTION_INPUT: {
+		int next = atomic_load_explicit(&st->port,
+						__ATOMIC_RELAXED) ? 0 : 1;
+
+		gc570d_everlive_set_port(next);
+		sdl_toast(sdl, next ? "Input: HDMI 2" : "Input: HDMI 1");
+		sdl_card_invalidate(sdl);
 		break;
+	}
 	case EVERLIVE_OSD_ACTION_ASPECT:
 		sdl_cycle_aspect(st, sdl);
 		break;
@@ -1924,8 +1861,6 @@ static void sdl_poll_embedded_pointer(struct everlive_state *st,
 	(void)win_x;
 	(void)win_y;
 	sdl_update_hover(st, sdl, local_x, local_y);
-	if (sdl->popup_open)
-		sdl_update_popup_hover(sdl, local_x, local_y);
 	down = (mask & Button1Mask) != 0;
 	if (down && !g_embed_mouse_down) {
 		SDL_Event event;

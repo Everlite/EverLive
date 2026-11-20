@@ -628,7 +628,7 @@ static void draw_toast_box(SDL_Renderer *r, SDL_Window *win,
 	int bh = lh + 2 * pad - 2 * scale;
 	int bx = (win_w - bw) / 2;
 	int by;
-	int gap = 6 * scale;
+	int gap = 34 * scale;
 
 	if (g_osd && hws_card_active(win) && g_card.texture &&
 	    g_card_dest.h > 0) {
@@ -715,8 +715,6 @@ static void hws_card_update(SDL_Renderer *r, SDL_Window *win,
 	char title[128];
 	char details[220];
 	char source_label[48];
-	char aspect_lbl[64];
-	char scale_lbl[64];
 	float gain = atomic_load(&g_gain);
 	bool muted = atomic_load(&g_muted);
 	Uint32 flags;
@@ -736,18 +734,14 @@ static void hws_card_update(SDL_Renderer *r, SDL_Window *win,
 	}
 	snprintf(details, sizeof(details), "%s • YUYV • 2 ch 48000 Hz",
 		 source_label);
-	snprintf(aspect_lbl, sizeof(aspect_lbl), "Aspect: %s",
-		 kAspectNames[g_aspect & 3]);
-	snprintf(scale_lbl, sizeof(scale_lbl), "Scale: %s",
-		 g_scale_integer ? "Integer" : "Fit");
 	flags = SDL_GetWindowFlags(win);
 	memset(&snap, 0, sizeof(snap));
 	snap.title = title;
 	snap.details = details;
-	snap.input_label = NULL;
-	snap.aspect_label = aspect_lbl;
-	snap.scale_label = scale_lbl;
 	snap.show_input = false;
+	snap.input_index = -1;
+	snap.aspect_index = g_aspect & 3;
+	snap.scale_integer = g_scale_integer;
 	snap.pip = false;
 	snap.muted = muted;
 	snap.fullscreen = g_fullscreen ||
@@ -766,7 +760,7 @@ static void hws_popup_build(SDL_Renderer *r, float scale)
 	if (!g_popup_open)
 		return;
 	everlive_osd_build_popup(r, EVERLIVE_OSD_POPUP_VOLUME,
-				 0, -1, g_popup_volume, scale, &g_popup);
+				 g_popup_volume, scale, &g_popup);
 	g_popup_scale = scale;
 	g_popup_dirty = false;
 }
@@ -1282,7 +1276,7 @@ static void handle_key(SDL_Window *win, SDL_Keycode k)
 	case SDLK_1:
 	case SDLK_l:
 		g_scale_integer = !g_scale_integer;
-		toast(g_scale_integer ? "Scaling: integer" : "Scaling: fit");
+		toast(g_scale_integer ? "Scaling: integer" : "Scaling: bilinear");
 		break;
 	case SDLK_UP:
 	case SDLK_PLUS:
