@@ -512,6 +512,17 @@ QPushButton#segmentButton:disabled {
     color: @TEXT_DIM@;
 }
 
+QWidget#inspectorTabbar {
+    background-color: @SURFACE@;
+    border: 1px solid @GROUP_BORDER@;
+    border-radius: @SEGMENT_RADIUS@;
+}
+QWidget#inspectorTabbar QPushButton#segmentButton {
+    padding: 0px 4px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
 /* Icon buttons */
 QPushButton#iconButton {
     background-color: transparent;

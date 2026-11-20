@@ -3280,10 +3280,10 @@ if HAS_QT:
 
         A native child (so it can sit above the engine's embedded window)
         that paints RGB24 frames read from the bridge's preview pipe on a
-        background thread.  Only the newest frame is kept.
+        background thread.  Only the newest frame is kept to ensure zero latency.
         """
 
-        frameReady = Signal(object)
+        frameReady = Signal()
 
         def __init__(self, parent=None):
             super().__init__(parent)
@@ -3294,6 +3294,8 @@ if HAS_QT:
             self._image: Optional[QImage] = None
             self._thread: Optional[threading.Thread] = None
             self._stream = None
+            self._lock = threading.Lock()
+            self._pending_frame = None
             self.frames = 0
             self.frameReady.connect(self._on_frame)
 
@@ -3310,6 +3312,8 @@ if HAS_QT:
             # The reader ends at EOF, when the preview process is stopped.
             self._stream = None
             self._thread = None
+            with self._lock:
+                self._pending_frame = None
             self._image = None
 
         def _reader(self, stream, width: int, height: int):
@@ -3327,14 +3331,19 @@ if HAS_QT:
                 except (OSError, ValueError):
                     return
                 if self._stream is stream:
-                    self.frameReady.emit((stream, bytes(buf), width, height))
+                    with self._lock:
+                        self._pending_frame = (bytes(buf), width, height)
+                    self.frameReady.emit()
 
-        def _on_frame(self, payload):
-            stream, data, width, height = payload
-            if stream is not self._stream:
+        def _on_frame(self):
+            with self._lock:
+                payload = self._pending_frame
+                self._pending_frame = None
+            if payload is None:
                 return
+            data, width, height = payload
             self._image = QImage(data, width, height, width * 3,
-                                 QImage.Format_RGB888).copy()
+                                 QImage.Format_RGB888)
             self.frames += 1
             self.update()
 
@@ -3685,12 +3694,12 @@ if HAS_QT:
                 self.btn_multiview.toggled.connect(self.on_multiview_toggled)
                 source_layout.addWidget(self.btn_multiview, 0, Qt.AlignVCenter)
 
-            # Webcam picture-in-picture over the main card's picture.
+            # Picture-in-picture overlay over the main card's picture.
             self.btn_pip = IconButton(
                 "camera",
-                "Webcam picture-in-picture: shows the webcam in a corner of "
-                "the picture and adds it to recordings. Settings: Audio & Stream "
-                "→ Webcam.",
+                "Picture-in-picture overlay: shows a webcam or 2nd capture source in a corner "
+                "of the picture and adds it to recordings. Settings: Record "
+                "→ Picture-in-Picture.",
                 checkable=True, size=ui_theme.CONTROL_H, icon_size=15)
             self.btn_pip.setChecked(
                 bool(everlive_cam.normalize_settings(load_settings())["pip_enabled"]))
@@ -4161,8 +4170,9 @@ if HAS_QT:
                 return row
 
             self.inspector_tabbar = SegmentedControl(
-                [("Video", 0), ("Audio && Stream", 1), ("System", 2)],
-                button_height=36)
+                [("Video", 0), ("Audio", 1), ("Record", 2), ("System", 3)],
+                button_height=36,
+                object_name="inspectorTabbar")
             self.inspector_tabbar.setFixedHeight(ui_theme.CONTROL_H)
             dock_layout.addWidget(self.inspector_tabbar)
 
@@ -4172,10 +4182,12 @@ if HAS_QT:
 
             tab_video, lay_video = _make_tab_page()
             tab_stream, lay_stream = _make_tab_page()
+            tab_rec, lay_rec = _make_tab_page()
             tab_app, lay_app = _make_tab_page()
 
             self.inspector_tabs.addWidget(tab_video)
             self.inspector_tabs.addWidget(tab_stream)
+            self.inspector_tabs.addWidget(tab_rec)
             self.inspector_tabs.addWidget(tab_app)
             self.inspector_tabbar.currentIndexChanged.connect(
                 self.inspector_tabs.setCurrentIndex)
@@ -4515,10 +4527,9 @@ if HAS_QT:
             if not self.card_profile.supports_framegen:
                 card_fg.setVisible(False)
             lay_video.addWidget(card_fg)
-            lay_video.addStretch(1)
 
             # =============================================================
-            # TAB 2: AUDIO, OVERLAY & STREAM ROUTING
+            # TAB 2: AUDIO & SOUND ROUTING
             # =============================================================
             card_audio, grid_audio = _section("AUDIO", "#38BDF8")
             grid_audio.setColumnStretch(0, 1)
@@ -4545,6 +4556,7 @@ if HAS_QT:
                 "5.1/7.1 fall back to an ITU-R BS.775 stereo downmix when "
                 "the audio sink cannot open them."), 0, 0, 1, 2)
             lay_stream.addWidget(card_audio)
+            lay_stream.addStretch(1)
 
             # --- On-Screen Overlay Card (grouped cleanly!) ---
             card_osd, grid_osd = _section("ON-SCREEN OVERLAY", "#F287A7")
@@ -4598,7 +4610,8 @@ if HAS_QT:
             self.chk_streamer.toggled.connect(
                 lambda _val: self._update_osd_controls())
             grid_osd.addWidget(_toggle(self.chk_streamer), 2, 0, 1, 2)
-            lay_stream.addWidget(card_osd)
+            lay_video.addWidget(card_osd)
+            lay_video.addStretch(1)
             self._update_osd_controls()
 
             # --- Video Recording Card ---
@@ -4740,26 +4753,26 @@ if HAS_QT:
             grid_rec.addWidget(_stacked_field(
                 "Output Folder", rec_dir_box), 5, 0, 1, 2)
 
-            lay_stream.addWidget(card_rec)
+            lay_rec.addWidget(card_rec)
 
-            # --- Webcam Picture-in-Picture Card ---
+            # --- Picture-in-Picture (PiP) Overlay Card ---
             pip_cfg = everlive_cam.normalize_settings(self.saved_cfg)
             self._ensure_cam()
-            card_pip, grid_pip = _section("WEBCAM", "#7AB8FF")
+            card_pip, grid_pip = _section("PICTURE-IN-PICTURE (PiP)", "#7AB8FF")
             grid_pip.setColumnStretch(0, 1)
             grid_pip.setColumnStretch(1, 1)
 
-            self.chk_pip = QCheckBox("Picture-in-Picture")
+            self.chk_pip = QCheckBox("Enable Overlay (PiP)")
             self.chk_pip.setToolTip(
-                "Shows the webcam in a corner of the main card's picture and "
-                "adds it to recordings. OBS can use it too: "
+                "Shows a webcam or 2nd capture source in a corner of the main card's picture "
+                "and adds it to recordings. OBS can use it too: "
                 f"LD_PRELOAD={everlive_cam.CAM_PRELOAD}, {everlive_cam.CAM_NODE}.")
             self.chk_pip.setChecked(bool(pip_cfg["pip_enabled"]))
             self.chk_pip.toggled.connect(self.on_pip_toggled)
             grid_pip.addWidget(_toggle(self.chk_pip), 0, 0, 1, 2)
 
             self.combo_pip_device = _shrinkable(QComboBox())
-            self.combo_pip_device.addItem("First webcam found", "")
+            self.combo_pip_device.addItem("First available capture device", "")
             for path, name in everlive_cam.list_webcams(self._cam.camd):
                 self.combo_pip_device.addItem(f"{name} ({path})", path)
             dev_idx = self.combo_pip_device.findData(pip_cfg["pip_device"])
@@ -4773,7 +4786,7 @@ if HAS_QT:
                     {"pip_device": self.combo_pip_device.currentData() or ""},
                     restart=True))
             grid_pip.addWidget(_stacked_field(
-                "Camera", self.combo_pip_device), 1, 0, 1, 2)
+                "Overlay Source", self.combo_pip_device), 1, 0, 1, 2)
 
             self.combo_pip_mode = _shrinkable(QComboBox())
             for text, key in everlive_cam.PIP_MODE_OPTIONS:
@@ -4781,8 +4794,8 @@ if HAS_QT:
             mode_idx = self.combo_pip_mode.findData(pip_cfg["pip_mode"])
             self.combo_pip_mode.setCurrentIndex(max(0, mode_idx))
             self.combo_pip_mode.setToolTip(
-                "Webcam capture mode. 720p is plenty for a corner overlay; "
-                "60 FPS halves the camera's frame delay.")
+                "Overlay capture mode. 720p is plenty for a corner overlay; "
+                "60 FPS halves the capture frame delay.")
             self.combo_pip_mode.currentIndexChanged.connect(
                 lambda *_: self._pip_setting_changed(
                     {"pip_mode": self.combo_pip_mode.currentData()},
@@ -4818,11 +4831,51 @@ if HAS_QT:
                           self.combo_pip_mode, self.btn_pip):
                     w.setEnabled(False)
                 self.chk_pip.setToolTip(
-                    "Webcam bridge not built: run 'make cam'.")
+                    "PiP overlay bridge not built: run 'make cam'.")
                 self.btn_pip.setToolTip(
-                    "Webcam bridge not built: run 'make cam'.")
+                    "PiP overlay bridge not built: run 'make cam'.")
 
-            lay_stream.addWidget(card_pip)
+            lay_rec.addWidget(card_pip)
+
+            # --- Device Hardware Controls Card ---
+            self.lbl_cam_ctrl_status = QLabel("")
+            self.lbl_cam_ctrl_status.setObjectName("fieldLabel")
+            card_cam_ctrl, grid_cam_ctrl = _section(
+                "DEVICE CONTROLS", "#F472B6", self.lbl_cam_ctrl_status)
+            grid_cam_ctrl.setColumnStretch(0, 1)
+            grid_cam_ctrl.setColumnStretch(1, 1)
+            self._card_cam_ctrl = card_cam_ctrl
+            self._grid_cam_ctrl = grid_cam_ctrl
+
+            cam_ctrl_bar = QHBoxLayout()
+            cam_ctrl_bar.setContentsMargins(0, 0, 0, 4)
+            self.btn_cam_reset = QPushButton("Reset Defaults")
+            self.btn_cam_reset.setObjectName("btnGhost")
+            self.btn_cam_reset.setFixedHeight(ui_theme.BUTTON_H)
+            self.btn_cam_reset.setCursor(Qt.PointingHandCursor)
+            self.btn_cam_reset.setToolTip(
+                "Reset all hardware settings to factory defaults")
+            self.btn_cam_reset.clicked.connect(self._reset_camera_controls)
+            cam_ctrl_bar.addWidget(self.btn_cam_reset, 1)
+
+            self.btn_cam_refresh = IconButton(
+                "arrow-rotate-right", "Reload hardware controls from device",
+                size=ui_theme.BUTTON_H, icon_size=15)
+            self.btn_cam_refresh.clicked.connect(self._refresh_camera_controls)
+            cam_ctrl_bar.addWidget(self.btn_cam_refresh, 0)
+            grid_cam_ctrl.addLayout(cam_ctrl_bar, 0, 0, 1, 2)
+
+            self._cam_ctrl_widgets = {}
+            self._cam_ctrl_container = QWidget()
+            self._cam_ctrl_layout = QGridLayout(self._cam_ctrl_container)
+            self._cam_ctrl_layout.setContentsMargins(0, 0, 0, 0)
+            self._cam_ctrl_layout.setSpacing(6)
+            self._cam_ctrl_layout.setColumnStretch(0, 1)
+            self._cam_ctrl_layout.setColumnStretch(1, 1)
+            grid_cam_ctrl.addWidget(self._cam_ctrl_container, 1, 0, 1, 2)
+
+            lay_rec.addWidget(card_cam_ctrl)
+            self._refresh_camera_controls()
 
             # --- OBS & Capture Routing Card ---
             card_obs, grid_obs = _section("OBS & CAPTURE ROUTING", "#5ED4B2")
@@ -4886,8 +4939,8 @@ if HAS_QT:
                 "DMA-BUF Zero-Copy are always active without kernel "
                 "modules.</div>")
             grid_obs.addWidget(note, 2, 0)
-            lay_stream.addWidget(card_obs)
-            lay_stream.addStretch(1)
+            lay_rec.addWidget(card_obs)
+            lay_rec.addStretch(1)
 
             # =============================================================
             # TAB 3: HARDWARE, APP BEHAVIOR & KEYBOARD SHORTCUTS
@@ -6998,6 +7051,8 @@ if HAS_QT:
 
         def _pip_setting_changed(self, values: dict, restart: bool = False):
             save_settings(values)
+            if "pip_device" in values:
+                self._refresh_camera_controls()
             if restart and self._cam.running:
                 self._cam.stop()
                 self._webcam_start()
@@ -7050,7 +7105,9 @@ if HAS_QT:
             host.raise_()
             if not self._cam.preview_running:
                 pw, ph = everlive_cam.PREVIEW_SIZE
-                if self._cam.start_preview(pw, ph):
+                cfg = self._pip_settings()
+                _mw, _mh, mfps = everlive_cam.parse_mode(str(cfg.get("pip_mode", "")))
+                if self._cam.start_preview(pw, ph, fps=mfps):
                     host.attach(self._cam.preview.stdout, pw, ph)
                 else:
                     host.hide()
@@ -7096,6 +7153,226 @@ if HAS_QT:
                     int(local.width() * ratio) & ~1,
                     int(local.height() * ratio) & ~1))
             return pip
+
+        def _on_camera_control_changed(self, ctrl_name: str, value: int):
+            dev = self.combo_pip_device.currentData() or ""
+            everlive_cam.set_camera_control(dev, ctrl_name, value)
+            widgets = getattr(self, "_cam_ctrl_widgets", {})
+            if ctrl_name == "auto_exposure" and "exposure_time_absolute" in widgets:
+                widgets["exposure_time_absolute"].setEnabled(value == 1)
+            elif ctrl_name == "white_balance_automatic" and "white_balance_temperature" in widgets:
+                widgets["white_balance_temperature"].setEnabled(not bool(value))
+            elif ctrl_name in ("focus_automatic_continuous", "focus_auto") and "focus_absolute" in widgets:
+                widgets["focus_absolute"].setEnabled(not bool(value))
+
+        def _reset_camera_controls(self):
+            dev = self.combo_pip_device.currentData() or ""
+            if everlive_cam.reset_camera_controls(dev):
+                self._set_vfio_notice("Camera Controls", "Reset camera hardware controls to defaults.", seconds=4.0)
+            self._refresh_camera_controls()
+
+        def _refresh_camera_controls(self):
+            if not hasattr(self, "_cam_ctrl_layout"):
+                return
+            while self._cam_ctrl_layout.count():
+                item = self._cam_ctrl_layout.takeAt(0)
+                w = item.widget()
+                if w:
+                    w.deleteLater()
+            self._cam_ctrl_widgets.clear()
+
+            dev = self.combo_pip_device.currentData() or ""
+            ctrls = everlive_cam.query_camera_controls(dev)
+            if not ctrls:
+                lbl = QLabel("No hardware V4L2 controls available for this camera (or camera disconnected).")
+                lbl.setObjectName("hintText")
+                lbl.setWordWrap(True)
+                self._cam_ctrl_layout.addWidget(lbl, 0, 0, 1, 2)
+                self.btn_cam_reset.setEnabled(False)
+                return
+
+            self.btn_cam_reset.setEnabled(True)
+
+            def _shrink(cb):
+                cb.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+                cb.setMinimumContentsLength(8)
+                cb.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+                cb.setMinimumWidth(0)
+                return cb
+
+            def _slider_row(name: str, title: str, info: dict):
+                w = QWidget()
+                lay = QVBoxLayout(w)
+                lay.setContentsMargins(0, 0, 0, 0)
+                lay.setSpacing(2)
+                h = QHBoxLayout()
+                h.setContentsMargins(0, 0, 0, 0)
+                lbl_title = QLabel(title)
+                lbl_title.setObjectName("fieldLabel")
+                lbl_val = QLabel(str(info.get("value", 0)))
+                lbl_val.setStyleSheet("color: #7AB8FF; font-weight: 600; font-size: 11px;")
+                h.addWidget(lbl_title, 1)
+                h.addWidget(lbl_val, 0)
+                lay.addLayout(h)
+
+                slider = QSlider(Qt.Horizontal)
+                slider.setRange(int(info.get("min", 0)), int(info.get("max", 100)))
+                slider.setSingleStep(max(1, int(info.get("step", 1))))
+                slider.setValue(int(info.get("value", 0)))
+                slider.valueChanged.connect(lambda v, lv=lbl_val: lv.setText(str(v)))
+                slider.sliderReleased.connect(lambda n=name, s=slider: self._on_camera_control_changed(n, s.value()))
+                lay.addWidget(slider)
+                self._cam_ctrl_widgets[name] = slider
+                return w
+
+            def _field_box(text: str, control: QWidget):
+                box = QWidget()
+                lay = QVBoxLayout(box)
+                lay.setContentsMargins(0, 0, 0, 0)
+                lay.setSpacing(4)
+                lbl = QLabel(text)
+                lbl.setObjectName("fieldLabel")
+                lay.addWidget(lbl)
+                lay.addWidget(control)
+                return box
+
+            row = 0
+
+            # 1. Exposure & Lighting
+            exp_group = QGroupBox("Exposure && Lighting")
+            exp_lay = QGridLayout(exp_group)
+            exp_lay.setContentsMargins(8, 10, 8, 8)
+            exp_lay.setSpacing(8)
+            exp_row = 0
+
+            if "auto_exposure" in ctrls:
+                info = ctrls["auto_exposure"]
+                cb = _shrink(QComboBox())
+                menu = info.get("menu", {})
+                for k, v in menu.items():
+                    cb.addItem(v, k)
+                if not menu:
+                    cb.addItem("Manual", 1)
+                    cb.addItem("Auto", 3)
+                idx = cb.findData(info.get("value", 3))
+                if idx >= 0:
+                    cb.setCurrentIndex(idx)
+                cb.currentIndexChanged.connect(
+                    lambda *_, c=cb: self._on_camera_control_changed("auto_exposure", c.currentData()))
+                exp_lay.addWidget(_field_box("Exposure Mode", cb), exp_row, 0, 1, 2)
+                exp_row += 1
+
+            if "exposure_time_absolute" in ctrls:
+                exp_lay.addWidget(_slider_row("exposure_time_absolute", "Shutter Speed / Exposure", ctrls["exposure_time_absolute"]), exp_row, 0, 1, 2)
+                auto_val = ctrls.get("auto_exposure", {}).get("value", 3)
+                if "exposure_time_absolute" in self._cam_ctrl_widgets:
+                    self._cam_ctrl_widgets["exposure_time_absolute"].setEnabled(auto_val == 1)
+                exp_row += 1
+
+            if "exposure_dynamic_framerate" in ctrls:
+                info = ctrls["exposure_dynamic_framerate"]
+                chk_dyn = QCheckBox("Dynamic Framerate in Low Light")
+                chk_dyn.setToolTip("When disabled, camera maintains full target FPS even in dimmer light (lower latency)")
+                chk_dyn.setChecked(bool(info.get("value", 1)))
+                chk_dyn.toggled.connect(lambda checked: self._on_camera_control_changed("exposure_dynamic_framerate", int(checked)))
+                exp_lay.addWidget(chk_dyn, exp_row, 0, 1, 2)
+                exp_row += 1
+
+            if "gain" in ctrls:
+                exp_lay.addWidget(_slider_row("gain", "Sensor Gain", ctrls["gain"]), exp_row, 0)
+            if "power_line_frequency" in ctrls:
+                info = ctrls["power_line_frequency"]
+                cb_flk = _shrink(QComboBox())
+                menu = info.get("menu", {})
+                for k, v in menu.items():
+                    cb_flk.addItem(v, k)
+                if not menu:
+                    cb_flk.addItem("Disabled", 0)
+                    cb_flk.addItem("50 Hz", 1)
+                    cb_flk.addItem("60 Hz", 2)
+                idx = cb_flk.findData(info.get("value", 2))
+                if idx >= 0:
+                    cb_flk.setCurrentIndex(idx)
+                cb_flk.currentIndexChanged.connect(
+                    lambda *_, c=cb_flk: self._on_camera_control_changed("power_line_frequency", c.currentData()))
+                exp_lay.addWidget(_field_box("Anti-Flicker", cb_flk), exp_row, 1)
+            exp_row += 1
+
+            self._cam_ctrl_layout.addWidget(exp_group, row, 0, 1, 2)
+            row += 1
+
+            # 2. Focus & Framing Group
+            if any(k in ctrls for k in ("focus_automatic_continuous", "focus_auto", "focus_absolute", "zoom_absolute", "pan_absolute", "tilt_absolute")):
+                foc_group = QGroupBox("Focus && Framing")
+                foc_lay = QGridLayout(foc_group)
+                foc_lay.setContentsMargins(8, 10, 8, 8)
+                foc_lay.setSpacing(8)
+                foc_row = 0
+
+                af_key = "focus_automatic_continuous" if "focus_automatic_continuous" in ctrls else "focus_auto" if "focus_auto" in ctrls else None
+                if af_key:
+                    chk_af = QCheckBox("Continuous Auto Focus")
+                    chk_af.setChecked(bool(ctrls[af_key].get("value", 1)))
+                    chk_af.toggled.connect(lambda checked, k=af_key: self._on_camera_control_changed(k, int(checked)))
+                    foc_lay.addWidget(chk_af, foc_row, 0, 1, 2)
+                    foc_row += 1
+
+                if "focus_absolute" in ctrls:
+                    foc_lay.addWidget(_slider_row("focus_absolute", "Manual Focus", ctrls["focus_absolute"]), foc_row, 0, 1, 2)
+                    if af_key and "focus_absolute" in self._cam_ctrl_widgets:
+                        self._cam_ctrl_widgets["focus_absolute"].setEnabled(not bool(ctrls[af_key].get("value", 1)))
+                    foc_row += 1
+
+                if "zoom_absolute" in ctrls:
+                    foc_lay.addWidget(_slider_row("zoom_absolute", "Digital Zoom", ctrls["zoom_absolute"]), foc_row, 0, 1, 2)
+                    foc_row += 1
+
+                if "pan_absolute" in ctrls and "tilt_absolute" in ctrls:
+                    foc_lay.addWidget(_slider_row("pan_absolute", "Pan", ctrls["pan_absolute"]), foc_row, 0)
+                    foc_lay.addWidget(_slider_row("tilt_absolute", "Tilt", ctrls["tilt_absolute"]), foc_row, 1)
+                    foc_row += 1
+
+                self._cam_ctrl_layout.addWidget(foc_group, row, 0, 1, 2)
+                row += 1
+
+            # 3. Image & Color Quality
+            col_group = QGroupBox("Color && Image Quality")
+            col_lay = QGridLayout(col_group)
+            col_lay.setContentsMargins(8, 10, 8, 8)
+            col_lay.setSpacing(8)
+            col_row = 0
+
+            if "white_balance_automatic" in ctrls:
+                chk_wb = QCheckBox("Auto White Balance")
+                chk_wb.setChecked(bool(ctrls["white_balance_automatic"].get("value", 1)))
+                chk_wb.toggled.connect(lambda checked: self._on_camera_control_changed("white_balance_automatic", int(checked)))
+                col_lay.addWidget(chk_wb, col_row, 0, 1, 2)
+                col_row += 1
+
+            if "white_balance_temperature" in ctrls:
+                col_lay.addWidget(_slider_row("white_balance_temperature", "Color Temperature (Kelvin)", ctrls["white_balance_temperature"]), col_row, 0, 1, 2)
+                if "white_balance_automatic" in ctrls and "white_balance_temperature" in self._cam_ctrl_widgets:
+                    self._cam_ctrl_widgets["white_balance_temperature"].setEnabled(not bool(ctrls["white_balance_automatic"].get("value", 1)))
+                col_row += 1
+
+            if "brightness" in ctrls:
+                col_lay.addWidget(_slider_row("brightness", "Brightness", ctrls["brightness"]), col_row, 0)
+            if "contrast" in ctrls:
+                col_lay.addWidget(_slider_row("contrast", "Contrast", ctrls["contrast"]), col_row, 1)
+            col_row += 1
+
+            if "saturation" in ctrls:
+                col_lay.addWidget(_slider_row("saturation", "Saturation", ctrls["saturation"]), col_row, 0)
+            if "sharpness" in ctrls:
+                col_lay.addWidget(_slider_row("sharpness", "Sharpness", ctrls["sharpness"]), col_row, 1)
+            col_row += 1
+
+            if "backlight_compensation" in ctrls:
+                col_lay.addWidget(_slider_row("backlight_compensation", "Backlight Compensation", ctrls["backlight_compensation"]), col_row, 0, 1, 2)
+                col_row += 1
+
+            self._cam_ctrl_layout.addWidget(col_group, row, 0, 1, 2)
+            row += 1
 
         def _multiview_stop(self):
             runner = getattr(self, "_mv_runner", None)

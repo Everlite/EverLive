@@ -70,6 +70,36 @@ class CommandTests(unittest.TestCase):
              "--device", "/dev/video0"])
         self.assertNotIn("--device", cam.build_camd_command("camd", "", "1280x720@30"))
 
+    def test_parse_v4l2_controls(self) -> None:
+        sample = """
+User Controls
+
+                     brightness 0x00980900 (int)    : min=0 max=255 step=1 default=128 value=140 flags=has-min-max
+        white_balance_automatic 0x0098090c (bool)   : default=1 value=1
+           power_line_frequency 0x00980918 (menu)   : min=0 max=2 default=2 value=2 (60 Hz)
+				0: Disabled
+				1: 50 Hz
+				2: 60 Hz
+      white_balance_temperature 0x0098091a (int)    : min=2800 max=6500 step=1 default=4600 value=4600 flags=inactive, has-min-max
+
+Camera Controls
+
+                  auto_exposure 0x009a0901 (menu)   : min=0 max=3 default=3 value=3 (Aperture Priority Mode)
+				1: Manual Mode
+				3: Aperture Priority Mode
+     exposure_dynamic_framerate 0x009a0903 (bool)   : default=0 value=1
+        """
+        ctrls = cam.parse_v4l2_controls(sample)
+        self.assertEqual(len(ctrls), 6)
+        self.assertEqual(ctrls["brightness"]["value"], 140)
+        self.assertEqual(ctrls["brightness"]["default"], 128)
+        self.assertEqual(ctrls["brightness"]["min"], 0)
+        self.assertEqual(ctrls["brightness"]["max"], 255)
+        self.assertEqual(ctrls["white_balance_automatic"]["type"], "bool")
+        self.assertTrue(ctrls["white_balance_temperature"].get("inactive"))
+        self.assertEqual(ctrls["power_line_frequency"]["menu"][1], "50 Hz")
+        self.assertEqual(ctrls["auto_exposure"]["menu"][1], "Manual Mode")
+
     def test_preview_command_pipes_rgb_frames(self) -> None:
         cmd, env = cam.build_preview_command(CAM_LIB, 640, 360, 30, ffmpeg="ffmpeg")
         self.assertEqual(cmd[0], "ffmpeg")

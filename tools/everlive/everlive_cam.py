@@ -13,12 +13,13 @@ Qt-free so it can be unit tested and reused by the CLI tools.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import everlive_recorder
 
@@ -157,6 +158,114 @@ def pip_overlay(settings: Dict[str, object],
     )
 
 
+def parse_v4l2_controls(text: str) -> Dict[str, dict]:
+    """Parse ``v4l2-ctl -L`` output into a dictionary of control metadata."""
+    controls: Dict[str, dict] = {}
+    current_ctrl: Optional[dict] = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if current_ctrl and current_ctrl.get("type") == "menu" and re.match(r"^\d+:\s+", line):
+            m_menu = re.match(r"^(\d+):\s+(.*)$", line)
+            if m_menu:
+                val, desc = int(m_menu.group(1)), m_menu.group(2).strip()
+                current_ctrl.setdefault("menu", {})[val] = desc
+            continue
+
+        m = re.match(r"^([a-z0-9_]+)\s+0x[0-9a-f]+\s+\(([a-z]+)\)\s*:\s*(.*)$", line)
+        if m:
+            name, ctype, rest = m.groups()
+            props: Dict[str, Any] = {"type": ctype, "name": name, "menu": {}}
+            if "inactive" in rest:
+                props["inactive"] = True
+            for part in rest.split():
+                part = part.rstrip(",")
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    v = v.rstrip(",")
+                    try:
+                        props[k] = int(v)
+                    except ValueError:
+                        props[k] = v
+            controls[name] = props
+            current_ctrl = props
+        else:
+            current_ctrl = None
+    return controls
+
+
+def query_camera_controls(device: str = "") -> Dict[str, dict]:
+    """Query available V4L2 hardware controls, ranges and current values."""
+    dev = device
+    if not dev:
+        cams = list_webcams()
+        if not cams:
+            return {}
+        dev = cams[0][0]
+    v4l2_ctl = shutil.which("v4l2-ctl")
+    if not v4l2_ctl or not os.path.exists(dev):
+        return {}
+    try:
+        res = subprocess.run(
+            [v4l2_ctl, "-d", dev, "-L"],
+            capture_output=True, text=True, timeout=2.0)
+        if res.returncode == 0:
+            return parse_v4l2_controls(res.stdout)
+    except Exception:
+        pass
+    return {}
+
+
+def set_camera_control(device: str, name: str, value: int) -> bool:
+    """Set a single V4L2 control on ``device`` via v4l2-ctl."""
+    dev = device
+    if not dev:
+        cams = list_webcams()
+        if not cams:
+            return False
+        dev = cams[0][0]
+    v4l2_ctl = shutil.which("v4l2-ctl")
+    if not v4l2_ctl or not os.path.exists(dev):
+        return False
+    try:
+        res = subprocess.run(
+            [v4l2_ctl, "-d", dev, f"--set-ctrl={name}={int(value)}"],
+            capture_output=True, text=True, timeout=2.0)
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def reset_camera_controls(device: str = "") -> bool:
+    """Reset all available controls on ``device`` to hardware defaults."""
+    ctrls = query_camera_controls(device)
+    if not ctrls:
+        return False
+    dev = device
+    if not dev:
+        cams = list_webcams()
+        if not cams:
+            return False
+        dev = cams[0][0]
+    v4l2_ctl = shutil.which("v4l2-ctl")
+    if not v4l2_ctl:
+        return False
+    args = []
+    for name, c in ctrls.items():
+        if "default" in c:
+            args.append(f"--set-ctrl={name}={c['default']}")
+    if not args:
+        return True
+    try:
+        res = subprocess.run(
+            [v4l2_ctl, "-d", dev] + args,
+            capture_output=True, text=True, timeout=3.0)
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
 PREVIEW_SIZE = (640, 360)
 # The shim hands out frames on its own timer, not when the bridge publishes;
 # polling at 60 Hz keeps a new camera frame's wait under ~17 ms.
@@ -166,7 +275,7 @@ PREVIEW_FPS = 60
 def build_preview_command(preload_library: str,
                           width: int = PREVIEW_SIZE[0],
                           height: int = PREVIEW_SIZE[1],
-                          fps: int = 30, ffmpeg: str = "ffmpeg"
+                          fps: int = PREVIEW_FPS, ffmpeg: str = "ffmpeg"
                           ) -> Tuple[List[str], Dict[str, str]]:
     """ffmpeg argv/env that writes the camera to stdout as raw RGB24 frames.
 
@@ -176,6 +285,7 @@ def build_preview_command(preload_library: str,
     """
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-probesize", "32", "-analyzeduration", "0",
         "-fflags", "nobuffer", "-flags", "low_delay",
         "-f", "v4l2", "-input_format", "yuyv422",
         "-video_size", f"{int(width)}x{int(height)}",

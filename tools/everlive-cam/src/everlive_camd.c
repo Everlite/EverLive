@@ -40,7 +40,7 @@
 #endif
 
 #define CAMD_DEFAULT_SHM	"/everlive_cam_v4l2_shm"
-#define CAMD_BUFFERS		4
+#define CAMD_BUFFERS		2
 #define CAMD_MAX_W		3840
 #define CAMD_MAX_H		2160
 
@@ -108,6 +108,8 @@ static bool is_capture_device(const char *path, char *name, size_t name_len)
 		uint32_t caps = (cap.capabilities & V4L2_CAP_DEVICE_CAPS) ?
 				cap.device_caps : cap.capabilities;
 
+		/* Only enumerate real hardware capture devices (webcams, USB capture cards, etc.);
+		 * exclude virtual v4l2 loopback dummy devices. */
 		ok = (caps & V4L2_CAP_VIDEO_CAPTURE) && (caps & V4L2_CAP_STREAMING) &&
 		     strcmp((const char *)cap.driver, "v4l2 loopback") != 0;
 		if (name)
@@ -535,6 +537,20 @@ int main(int argc, char **argv)
 			rc = 3;
 			break;
 		}
+
+		/* Drain queue: if newer frames arrived, skip older to keep latency minimal. */
+		struct v4l2_buffer next_b;
+		memset(&next_b, 0, sizeof(next_b));
+		next_b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		next_b.memory = V4L2_MEMORY_MMAP;
+		while (xioctl(c.fd, VIDIOC_DQBUF, &next_b) == 0) {
+			(void)xioctl(c.fd, VIDIOC_QBUF, &b);
+			b = next_b;
+			memset(&next_b, 0, sizeof(next_b));
+			next_b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			next_b.memory = V4L2_MEMORY_MMAP;
+		}
+
 		if (b.index < c.nbufs && !(b.flags & V4L2_BUF_FLAG_ERROR)) {
 			const uint8_t *src = c.bufs[b.index].start;
 
