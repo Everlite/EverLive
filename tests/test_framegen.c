@@ -13,7 +13,10 @@
 
 #include "gc573_user_framegen.h"
 
+#include <dlfcn.h>
+#include <math.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -493,6 +496,207 @@ int main(void)
 					gc573_framegen_release(fg);
 				}
 			}
+			gc573_framegen_destroy(fg);
+		}
+	}
+
+	/* ---------------------------------------------------------------- */
+	printf("\n8) Vulkan present pacer target Hz & layer ABI\n");
+	{
+		struct gc573_fg_config cfg = {
+			.mode = GC573_FG_OFF,
+			.multiplier = 2,
+			.native_backend = false,
+			.flow_scale = 1.0f,
+			.low_latency = true,
+		};
+
+		check(gc573_fg_target_output_hz(&cfg, 59.94) == 0.0,
+		      "OFF mode targets 0.0 Hz", NULL);
+
+		cfg.mode = GC573_FG_30_TO_60;
+		cfg.native_backend = true;
+		cfg.multiplier = 4;
+		check(gc573_fg_target_output_hz(&cfg, 59.94) == 0.0,
+		      "native_backend targets 0.0 Hz (CPU/GL pacer owns it)", NULL);
+
+		cfg.native_backend = false;
+		cfg.multiplier = 2;
+		check(fabs(gc573_fg_target_output_hz(&cfg, 59.94) - 59.94) < 0.05,
+		      "30to60 2x at 59.94 Hz targets ~59.94 Hz", NULL);
+		cfg.multiplier = 3;
+		check(fabs(gc573_fg_target_output_hz(&cfg, 59.94) - 89.91) < 0.05,
+		      "30to60 3x at 59.94 Hz targets ~89.91 Hz", NULL);
+		cfg.multiplier = 4;
+		check(fabs(gc573_fg_target_output_hz(&cfg, 59.94) - 119.88) < 0.05,
+		      "30to60 4x at 59.94 Hz targets ~119.88 Hz", NULL);
+
+		cfg.mode = GC573_FG_60_TO_120;
+		cfg.multiplier = 2;
+		check(fabs(gc573_fg_target_output_hz(&cfg, 60.0) - 120.0) < 0.05,
+		      "60to120 2x at 60.0 Hz targets 120.0 Hz", NULL);
+		cfg.multiplier = 4;
+		check(fabs(gc573_fg_target_output_hz(&cfg, 60.0) - 240.0) < 0.05,
+		      "60to120 4x at 60.0 Hz targets 240.0 Hz", NULL);
+
+		static const char *const pacer_paths[] = {
+			"../tools/opengc573-userd/libeverlive-vk-pacer.so",
+			"./libeverlive-vk-pacer.so",
+			"tools/opengc573-userd/libeverlive-vk-pacer.so",
+		};
+		void *lib = NULL;
+		const char *last_err = NULL;
+
+		for (size_t i = 0; i < sizeof(pacer_paths) / sizeof(pacer_paths[0]); i++) {
+			lib = dlopen(pacer_paths[i], RTLD_NOW | RTLD_LOCAL);
+			if (lib)
+				break;
+			last_err = dlerror();
+		}
+		check(lib != NULL, "dlopen libeverlive-vk-pacer.so", last_err);
+		if (lib) {
+			struct test_vk_negotiate {
+				uint32_t sType;
+				void *pNext;
+				uint32_t version;
+				void *gipa;
+				void *gdpa;
+				void *gpdpa;
+			};
+			typedef int32_t (*pfn_neg)(struct test_vk_negotiate *);
+			typedef void (*pfn_set_hz)(double);
+			typedef uint64_t (*pfn_get_period)(void);
+
+			pfn_neg neg = (pfn_neg)dlsym(lib, "vkNegotiateLoaderLayerInterfaceVersion");
+			pfn_set_hz set_hz = (pfn_set_hz)dlsym(lib, "everlive_vk_pacer_set_hz");
+			pfn_get_period get_period = (pfn_get_period)dlsym(lib, "everlive_vk_pacer_get_period_ns");
+
+			struct test_vk_negotiate iface = {
+				.sType = 1,
+				.pNext = NULL,
+				.version = 2,
+			};
+			check(neg && neg(&iface) == 0 && iface.version == 2 &&
+			      iface.gipa != NULL && iface.gdpa != NULL,
+			      "vkNegotiateLoaderLayerInterfaceVersion returns v2 proc addrs",
+			      NULL);
+
+			check(set_hz && get_period,
+			      "pacer exports set_hz and get_period_ns", NULL);
+			if (set_hz && get_period) {
+				uint64_t p;
+
+				set_hz(120.0);
+				p = get_period();
+				check(p >= 7900000ULL && p <= 8300000ULL,
+				      "120 Hz sets pacing period within [7.9, 8.3] ms",
+				      NULL);
+
+				set_hz(0.0);
+				check(get_period() == 0ULL,
+				      "0 Hz disables pacing period", NULL);
+
+				set_hz(240.0);
+				check(get_period() == 0ULL,
+				      "240 Hz disables pacing period (FIFO handles native)",
+				      NULL);
+			}
+			dlclose(lib);
+		}
+	}
+
+	/* ---------------------------------------------------------------- */
+	printf("\n9) Auto-detect 30-in-60 inside 60to120 and unlock on 60p\n");
+	{
+		struct gc573_fg_config cfg = {
+			.mode = GC573_FG_60_TO_120,
+			.multiplier = 4,
+			.native_backend = true,
+			.flow_scale = 1.0f,
+			.perf_mode = false,
+			.low_latency = true,
+		};
+		struct gc573_framegen *fg = gc573_framegen_create(&cfg);
+
+		if (!fg) {
+			check(0, "framegen ring for auto-dedup test", NULL);
+		} else {
+			struct gc573_fg_stats st;
+			const uint8_t *out = NULL;
+			int taken_30in60 = 0;
+			int taken_60p = 0;
+
+			gc573_framegen_resize(fg, TEST_W, TEST_H);
+			gc573_framegen_set_source_hz(fg, 5994);
+			check(!gc573_framegen_has_unread(fg),
+			      "has_unread() is false on empty ring", NULL);
+
+			for (int i = 0; i < 20; i++) {
+				for (int rep = 0; rep < 2; rep++) {
+					fill_yuyv(frame, 20 + (i * 9) % 240, 0);
+					gc573_framegen_input(fg, frame, t);
+					if (i == 0 && rep == 0)
+						check(gc573_framegen_has_unread(fg),
+						      "has_unread() becomes true after input",
+						      NULL);
+					if (gc573_framegen_take(fg, &out) && out) {
+						taken_30in60++;
+						gc573_framegen_release(fg);
+					}
+					t += TEST_FRAME_US;
+				}
+			}
+			gc573_framegen_get_stats(fg, &st);
+			printf("  30-in-60 phase: taken %d/40, dedup=%d, dup=%u, unique_fps=%.2f\n",
+			       taken_30in60, st.deduplicator_active, st.duplicates,
+			       st.unique_fps);
+			check(st.deduplicator_active,
+			      "60to120 auto-engages dedup on A,A,B,B cadence", NULL);
+			check(st.duplicates >= 12 && taken_30in60 < 30,
+			      "60to120 drops duplicate HDMI frames once locked", NULL);
+			check(st.unique_fps > 28.5 && st.unique_fps < 31.5,
+			      "auto-dedup measures ~30.0 unique FPS", NULL);
+
+			/* 30-in-60 with water/noise on repeat: must stay locked */
+			for (int i = 0; i < 15; i++) {
+				for (int rep = 0; rep < 2; rep++) {
+					/* rep == 1 has slight ripple (diff ~2-3 luma) */
+					fill_yuyv(frame, 20 + (i * 9) % 240 + (rep ? 2 : 0), 0);
+					gc573_framegen_input(fg, frame, t);
+					if (gc573_framegen_take(fg, &out) && out)
+						gc573_framegen_release(fg);
+					t += TEST_FRAME_US;
+				}
+			}
+			gc573_framegen_get_stats(fg, &st);
+			check(st.deduplicator_active,
+			      "30-in-60 stays locked under water/noise ripple on duplicate", NULL);
+
+			/* Switch to genuine 60p motion: unlock within <= 12 frames. */
+			for (int i = 0; i < 12; i++) {
+				fill_yuyv(frame, 20 + (i * 11) % 240, 0);
+				gc573_framegen_input(fg, frame, t);
+				if (gc573_framegen_take(fg, &out) && out)
+					gc573_framegen_release(fg);
+				t += TEST_FRAME_US;
+			}
+			for (int i = 0; i < 10; i++) {
+				fill_yuyv(frame, 30 + (i * 11) % 240, 0);
+				gc573_framegen_input(fg, frame, t);
+				if (gc573_framegen_take(fg, &out) && out) {
+					taken_60p++;
+					gc573_framegen_release(fg);
+				}
+				t += TEST_FRAME_US;
+			}
+			gc573_framegen_get_stats(fg, &st);
+			printf("  60p unlock phase: taken %d/10, dedup=%d\n",
+			       taken_60p, st.deduplicator_active);
+			check(!st.deduplicator_active,
+			      "60to120 unlocks dedup on sustained 60p motion", NULL);
+			check(taken_60p == 10,
+			      "60p stream passes all 10/10 frames after unlock", NULL);
+
 			gc573_framegen_destroy(fg);
 		}
 	}

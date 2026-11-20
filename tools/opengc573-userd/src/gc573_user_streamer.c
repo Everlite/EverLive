@@ -15,7 +15,6 @@
  */
 
 #include "gc573_vfio.h"
-#include "gc573_user_i2c.h"
 #include "gc573_user_hw.h"
 #include "gc573_user_edid.h"
 #include "gc573_user_it6664.h"
@@ -30,12 +29,15 @@
 #include "gc573_user_audio_tap.h"
 #include "gc573_user_hdr.h"
 #include "gc573_user_framegen.h"
+#include "gc573_user_fg_native.h"
 #include "gc573_camera.h"
 #include "gc573_user_log.h"
 #include "everlive_osd.h"
 #include "everlive_handoff.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_syswm.h>
+#include <X11/keysym.h>
+#include <X11/Xutil.h>
 #ifdef None
 #undef None
 #endif
@@ -66,7 +68,7 @@
  * tools/everlive/everlive_viewer.py.
  */
 #ifndef EVERLIVE_VERSION
-#define EVERLIVE_VERSION "1.6.0"
+#define EVERLIVE_VERSION "2.0.0"
 #endif
 
 /* Desktop identity: window title, Wayland/X11 WM class and PipeWire app name. */
@@ -804,7 +806,7 @@ static void print_usage(const char *prog)
 	printf("  --fg-low-latency  Preserve the minimal Vulkan swapchain image count\n");
 	printf("                    (LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT=1, default).\n");
 	printf("  --no-fg-low-latency  Let lsfg-vk add its default buffering.\n");
-	printf("  Hotkeys: g cycles frame generation Off -> 60->120 -> 30->60.\n");
+	printf("  Hotkeys: g cycles frame generation Off -> 2x -> 3x -> 4x -> Off.\n");
 	printf("  EVERLIVE_LED      fallback used when --led is not given.\n");
 }
 
@@ -2681,6 +2683,53 @@ static bool fit_destination_integer(SDL_Rect *dst, int win_w, int win_h,
 	 */
 	dst->x &= ~1;
 
+	return true;
+}
+
+static bool render_frame_native_gl(SDL_Window *window, SDL_Renderer *renderer,
+				   struct gc573_fg_native *fg_nat, float t,
+				   float src_aspect, int src_w, int src_h)
+{
+	SDL_Rect dst;
+	int win_w = 0, win_h = 0;
+	int draw_w = 0, draw_h = 0;
+
+	SDL_GetWindowSize(window, &win_w, &win_h);
+	if (win_w <= 0 || win_h <= 0)
+		return false;
+	SDL_GL_GetDrawableSize(window, &draw_w, &draw_h);
+	if (draw_w <= 0 || draw_h <= 0) {
+		draw_w = win_w;
+		draw_h = win_h;
+	}
+
+	if (g_scale_mode == SCALE_INTEGER &&
+	    fit_destination_integer(&dst, win_w, win_h, src_w, src_h, src_aspect))
+		g_integer_factor = src_h > 0 ? dst.h / src_h : 0;
+	else {
+		g_integer_factor = 0;
+		fit_destination(&dst, win_w, win_h, src_aspect);
+	}
+
+	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+	SDL_RenderClear(renderer);
+	SDL_RenderFlush(renderer);
+
+	{
+		int gx = (dst.x * draw_w) / win_w;
+		int gy = (dst.y * draw_h) / win_h;
+		int gw = (dst.w * draw_w) / win_w;
+		int gh = (dst.h * draw_h) / win_h;
+
+		if (!gc573_fg_native_gl_render(fg_nat, t, gx, gy, gw, gh,
+					       draw_w, draw_h))
+			return false;
+	}
+
+	osd_render(renderer, window);
+	help_render(renderer, window);
+	toast_render(renderer, window);
+	SDL_RenderPresent(renderer);
 	return true;
 }
 
@@ -5843,12 +5892,90 @@ static bool framegen_path_wanted(void)
 	return g_fg_config.mode != GC573_FG_OFF;
 }
 
+static struct gc573_fg_native *g_fg_native;
+static uint8_t *g_fg_native_buf;
+static size_t g_fg_native_buf_bytes;
+static uint64_t g_fg_native_last_ns;
+static uint64_t g_fg_native_present_ns;
+static double g_fg_native_period_ns = 16666667.0;
+static int g_fg_native_synth_step = 1;
+static uint32_t g_fg_native_present_count;
+static uint64_t g_fg_native_fps_win_ns;
+static double g_fg_native_measured_fps;
+
+static uint64_t fg_native_now_ns(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void fg_native_note_present(void)
+{
+	uint64_t now = fg_native_now_ns();
+
+	if (g_fg_native_fps_win_ns == 0)
+		g_fg_native_fps_win_ns = now;
+	g_fg_native_present_count++;
+	if (now - g_fg_native_fps_win_ns >= 1000000000ULL) {
+		double sec = (double)(now - g_fg_native_fps_win_ns) / 1e9;
+		g_fg_native_measured_fps = (double)g_fg_native_present_count / sec;
+		g_fg_native_present_count = 0;
+		g_fg_native_fps_win_ns = now;
+	}
+}
+
+static bool fg_native_ensure(uint32_t w, uint32_t h)
+{
+	size_t need = (size_t)w * h * 2U;
+
+	if (!g_fg_native)
+		g_fg_native = gc573_fg_native_create();
+	if (!g_fg_native || !need)
+		return false;
+	if (g_fg_native_buf_bytes < need) {
+		uint8_t *nb = realloc(g_fg_native_buf, need);
+		if (!nb)
+			return false;
+		g_fg_native_buf = nb;
+		g_fg_native_buf_bytes = need;
+	}
+	return true;
+}
+
 /* Driver the current mode asks for; a Vulkan failure pins us to OpenGL. */
 static enum present_driver framegen_desired_driver(void)
 {
-	if (!g_fg_fallback && framegen_path_wanted())
+	if (!g_fg_fallback && framegen_path_wanted() &&
+	    !g_fg_config.native_backend)
 		return PRESENT_DRIVER_VULKAN;
 	return PRESENT_DRIVER_OPENGL;
+}
+
+static unsigned int g_fg_source_hz_x100;
+
+static void framegen_sync_pacer(void)
+{
+	struct gc573_fg_config cfg;
+	struct gc573_fg_stats st;
+	double source_hz;
+	double target_hz;
+
+	pthread_mutex_lock(&g_framegen_lock);
+	cfg = g_fg_config;
+	if (g_framegen)
+		gc573_framegen_get_stats(g_framegen, &st);
+	else
+		memset(&st, 0, sizeof(st));
+	pthread_mutex_unlock(&g_framegen_lock);
+
+	source_hz = (double)g_fg_source_hz_x100 / 100.0;
+	if (st.deduplicator_active && cfg.mode != GC573_FG_30_TO_60 &&
+	    (source_hz <= 0.0 || source_hz > 45.0))
+		source_hz = (source_hz >= 20.0 ? source_hz : 60.0) * 0.5;
+	target_hz = gc573_fg_target_output_hz(&cfg, source_hz);
+	gc573_fg_update_pacer_hz(target_hz);
 }
 
 static void framegen_apply_config(void)
@@ -5857,6 +5984,7 @@ static void framegen_apply_config(void)
 	if (g_framegen)
 		gc573_framegen_set_config(g_framegen, &g_fg_config);
 	pthread_mutex_unlock(&g_framegen_lock);
+	framegen_sync_pacer();
 }
 
 /* Runs on the capture thread for every accepted frame copied into the ring. */
@@ -5882,6 +6010,19 @@ static void framegen_describe(char *out, size_t len)
 		return;
 
 	int mult = st.multiplier > 1 ? st.multiplier : 2;
+	if (g_fg_config.native_backend) {
+		double in_fps = (st.deduplicator_active && st.unique_fps > 0.5)
+				? st.unique_fps : st.present_fps;
+		double out_fps = g_fg_native_measured_fps > 0.5
+				 ? g_fg_native_measured_fps : in_fps * mult;
+		if (st.deduplicator_active)
+			snprintf(out, len, "Native %dx (30p): %.1f -> %.1f FPS",
+				 mult, in_fps, out_fps);
+		else
+			snprintf(out, len, "Native %dx: %.1f -> %.1f FPS",
+				 mult, in_fps, out_fps);
+		return;
+	}
 	ready = st.layer_found && st.dll_found && st.vulkan_active;
 	if (!ready) {
 		const char *why = !st.layer_found ? "LAYER" :
@@ -5891,9 +6032,11 @@ static void framegen_describe(char *out, size_t len)
 		return;
 	}
 
-	if (st.mode == GC573_FG_30_TO_60)
+	if (st.deduplicator_active)
 		snprintf(out, len, "LSFG %dx (30p): %.1f -> %.1f FPS | Flow %d%%",
-			 mult, st.present_fps, st.output_fps,
+			 mult,
+			 st.unique_fps > 0.5 ? st.unique_fps : st.present_fps,
+			 st.output_fps,
 			 (int)(st.flow_scale * 100.0f + 0.5f));
 	else
 		snprintf(out, len, "LSFG %dx: %.1f -> %.1f FPS",
@@ -5902,6 +6045,8 @@ static void framegen_describe(char *out, size_t len)
 
 static void framegen_teardown(void)
 {
+	if (g_fg_native)
+		gc573_fg_native_gl_teardown(g_fg_native);
 	pthread_mutex_lock(&g_framegen_lock);
 	if (g_framegen) {
 		gc573_framegen_destroy(g_framegen);
@@ -5928,6 +6073,15 @@ static bool framegen_prepare_vulkan(void)
 
 	ready = gc573_fg_apply_env(&cfg, &probe);
 	gc573_fg_write_toml(&cfg, &probe);
+	{
+		double src_hz = (double)g_fg_source_hz_x100 / 100.0;
+		double target_hz = gc573_fg_target_output_hz(&cfg, src_hz);
+		bool pacer_ok = gc573_fg_prepare_pacer(&cfg, src_hz);
+
+		if (pacer_ok && target_hz > 10.0 && target_hz < 235.0)
+			pr_info("Vulkan present pacer active (target %.1f Hz)",
+				target_hz);
+	}
 
 	if (g_framegen) {
 		gc573_framegen_set_probe(g_framegen, &probe);
@@ -5956,6 +6110,12 @@ static unsigned long g_parent_winid;
 static int g_embed_last_w;
 static int g_embed_last_h;
 static uint64_t g_embed_last_sync_ms;
+static bool g_has_saved_win;
+static int g_saved_win_x;
+static int g_saved_win_y;
+static int g_saved_win_w;
+static int g_saved_win_h;
+static bool g_saved_win_max;
 
 #if defined(SDL_VIDEO_DRIVER_X11)
 static int x11_ignore_error(Display *dpy, XErrorEvent *ev)
@@ -5963,6 +6123,85 @@ static int x11_ignore_error(Display *dpy, XErrorEvent *ev)
 	(void)dpy;
 	(void)ev;
 	return 0;
+}
+
+static void embed_revert_focus(SDL_Window *window)
+{
+	SDL_SysWMinfo wminfo;
+	SDL_VERSION(&wminfo.version);
+	if (!window || !g_parent_winid)
+		return;
+	if (SDL_GetWindowWMInfo(window, &wminfo) &&
+	    wminfo.subsystem == SDL_SYSWM_X11) {
+		Display *dpy = wminfo.info.x11.display;
+		int (*old_handler)(Display *, XErrorEvent *) =
+			XSetErrorHandler(x11_ignore_error);
+		XSetInputFocus(dpy, (Window)g_parent_winid, RevertToParent, CurrentTime);
+		XFlush(dpy);
+		XSetErrorHandler(old_handler);
+	}
+}
+
+static void embed_forward_key(SDL_Window *window, const SDL_Event *ev, KeySym fallback_sym)
+{
+	SDL_SysWMinfo wminfo;
+	SDL_VERSION(&wminfo.version);
+	if (!window || !g_parent_winid)
+		return;
+	if (!SDL_GetWindowWMInfo(window, &wminfo) ||
+	    wminfo.subsystem != SDL_SYSWM_X11)
+		return;
+
+	Display *dpy = wminfo.info.x11.display;
+	Window parent = (Window)g_parent_winid;
+	XKeyEvent xev;
+	int (*old_handler)(Display *, XErrorEvent *) =
+		XSetErrorHandler(x11_ignore_error);
+	KeySym sym = fallback_sym;
+
+	if (sym == NoSymbol && ev && (ev->type == SDL_KEYDOWN || ev->type == SDL_KEYUP)) {
+		switch (ev->key.keysym.sym) {
+		case SDLK_f: sym = XK_f; break;
+		case SDLK_F11: sym = XK_F11; break;
+		case SDLK_ESCAPE: sym = XK_Escape; break;
+		case SDLK_m: sym = XK_m; break;
+		case SDLK_TAB: sym = XK_Tab; break;
+		case SDLK_g: sym = XK_g; break;
+		case SDLK_q: sym = XK_Escape; break;
+		default: break;
+		}
+	}
+
+	memset(&xev, 0, sizeof(xev));
+	xev.type = (ev && ev->type == SDL_KEYUP) ? KeyRelease : KeyPress;
+	xev.display = dpy;
+	xev.window = parent;
+	xev.root = DefaultRootWindow(dpy);
+	xev.subwindow = 0L;
+	xev.time = CurrentTime;
+	xev.x = 1;
+	xev.y = 1;
+	xev.x_root = 1;
+	xev.y_root = 1;
+	xev.state = 0;
+	if (ev) {
+		if (ev->key.keysym.mod & KMOD_SHIFT)
+			xev.state |= ShiftMask;
+		if (ev->key.keysym.mod & KMOD_CTRL)
+			xev.state |= ControlMask;
+		if (ev->key.keysym.mod & KMOD_ALT)
+			xev.state |= Mod1Mask;
+	}
+
+	if (sym != NoSymbol) {
+		xev.keycode = XKeysymToKeycode(dpy, sym);
+		if (xev.keycode)
+			XSendEvent(dpy, parent, True, KeyPressMask | KeyReleaseMask,
+				   (XEvent *)&xev);
+	}
+	XSetInputFocus(dpy, parent, RevertToParent, CurrentTime);
+	XFlush(dpy);
+	XSetErrorHandler(old_handler);
 }
 #endif
 
@@ -5974,6 +6213,7 @@ static void embed_window_attach(SDL_Window *window)
 	Window sdl_xwin;
 	Window parent_xwin;
 	XWindowAttributes attr;
+	XWindowAttributes self_attr;
 	int (*old_handler)(Display *, XErrorEvent *);
 
 	if (!window || !g_parent_winid)
@@ -6010,13 +6250,28 @@ static void embed_window_attach(SDL_Window *window)
 	SDL_SetWindowSize(window, g_embed_last_w, g_embed_last_h);
 
 	/*
-	 * Let mouse clicks, double-clicks and pointer motion propagate up to
-	 * the hosting Qt widget so UI controls, double-click fullscreen and
-	 * cursor visibility stay owned by the Control Hub.
+	 * Let mouse clicks, double-clicks, pointer motion and key events
+	 * propagate up to the hosting Qt widget so UI controls, fullscreen
+	 * hotkeys, double-click fullscreen and cursor visibility stay owned
+	 * by the Control Hub.
 	 */
 	/* Keep pointer events on the child so the OSD card stays clickable
-	 * inside the Hub viewport.  Double-click fullscreen is handled by the
-	 * engine and forwarded to the Hub when embedded. */
+	 * inside the Hub viewport.  Keep keyboard focus with the Hub. */
+	memset(&self_attr, 0, sizeof(self_attr));
+	if (XGetWindowAttributes(dpy, sdl_xwin, &self_attr)) {
+		long mask = self_attr.your_event_mask &
+			    ~(KeyPressMask | KeyReleaseMask);
+		XSelectInput(dpy, sdl_xwin, mask);
+	}
+
+	{
+		XWMHints hints;
+		memset(&hints, 0, sizeof(hints));
+		hints.flags = InputHint;
+		hints.input = False;
+		XSetWMHints(dpy, sdl_xwin, &hints);
+	}
+
 	SDL_ShowWindow(window);
 	XMoveResizeWindow(dpy, sdl_xwin, 0, 0,
 			  (unsigned int)g_embed_last_w,
@@ -6041,10 +6296,6 @@ static void embed_window_sync_size(SDL_Window *window)
 	Display *dpy;
 	Window sdl_xwin;
 	Window parent_xwin;
-	Window root_ret = 0;
-	Window cur_parent = 0;
-	Window *children = NULL;
-	unsigned int nchildren = 0;
 	XWindowAttributes attr;
 	XWindowAttributes self_attr;
 	int (*old_handler)(Display *, XErrorEvent *);
@@ -6054,7 +6305,7 @@ static void embed_window_sync_size(SDL_Window *window)
 		return;
 
 	now = now_ms();
-	if (now - g_embed_last_sync_ms < 25)
+	if (now - g_embed_last_sync_ms < 250)
 		return;
 	g_embed_last_sync_ms = now;
 
@@ -6068,38 +6319,21 @@ static void embed_window_sync_size(SDL_Window *window)
 	parent_xwin = (Window)g_parent_winid;
 
 	old_handler = XSetErrorHandler(x11_ignore_error);
-	if (XQueryTree(dpy, sdl_xwin, &root_ret, &cur_parent,
-		       &children, &nchildren)) {
-		if (children)
-			XFree(children);
-		if (cur_parent != parent_xwin) {
-			XReparentWindow(dpy, sdl_xwin, parent_xwin, 0, 0);
-			XMapRaised(dpy, sdl_xwin);
-		}
-	}
-
 	memset(&attr, 0, sizeof(attr));
-	memset(&self_attr, 0, sizeof(self_attr));
 	if (XGetWindowAttributes(dpy, parent_xwin, &attr) &&
-	    attr.width > 1 && attr.height > 1) {
-		bool self_ok = XGetWindowAttributes(dpy, sdl_xwin, &self_attr) != 0;
-		bool geom_mismatch = !self_ok ||
-				     self_attr.x != 0 || self_attr.y != 0 ||
-				     self_attr.width != attr.width ||
-				     self_attr.height != attr.height;
-
-		if (attr.width != g_embed_last_w ||
-		    attr.height != g_embed_last_h || geom_mismatch) {
-			g_embed_last_w = attr.width;
-			g_embed_last_h = attr.height;
-			XMoveResizeWindow(dpy, sdl_xwin, 0, 0,
-					  (unsigned int)attr.width,
-					  (unsigned int)attr.height);
-			SDL_SetWindowSize(window, attr.width, attr.height);
-			if (self_ok && self_attr.map_state != IsViewable)
-				XMapRaised(dpy, sdl_xwin);
-			XFlush(dpy);
-		}
+	    attr.width > 1 && attr.height > 1 &&
+	    (attr.width != g_embed_last_w || attr.height != g_embed_last_h)) {
+		g_embed_last_w = attr.width;
+		g_embed_last_h = attr.height;
+		XMoveResizeWindow(dpy, sdl_xwin, 0, 0,
+				  (unsigned int)attr.width,
+				  (unsigned int)attr.height);
+		SDL_SetWindowSize(window, attr.width, attr.height);
+		memset(&self_attr, 0, sizeof(self_attr));
+		if (XGetWindowAttributes(dpy, sdl_xwin, &self_attr) &&
+		    self_attr.map_state != IsViewable)
+			XMapRaised(dpy, sdl_xwin);
+		XFlush(dpy);
 	}
 	XSetErrorHandler(old_handler);
 #else
@@ -6109,6 +6343,8 @@ static void embed_window_sync_size(SDL_Window *window)
 
 static int framegen_create_window(SDL_Window **window, Uint32 flags)
 {
+	int x = g_parent_winid ? 0 : SDL_WINDOWPOS_CENTERED;
+	int y = g_parent_winid ? 0 : SDL_WINDOWPOS_CENTERED;
 	int w = DEFAULT_WINDOW_WIDTH;
 	int h = DEFAULT_WINDOW_HEIGHT;
 
@@ -6119,12 +6355,16 @@ static int framegen_create_window(SDL_Window **window, Uint32 flags)
 			w = g_embed_last_w;
 			h = g_embed_last_h;
 		}
+	} else if (g_has_saved_win) {
+		x = g_saved_win_x;
+		y = g_saved_win_y;
+		if (g_saved_win_w > 1 && g_saved_win_h > 1) {
+			w = g_saved_win_w;
+			h = g_saved_win_h;
+		}
 	}
 
-	*window = SDL_CreateWindow(EVERLIVE_WINDOW_TITLE,
-				   g_parent_winid ? 0 : SDL_WINDOWPOS_CENTERED,
-				   g_parent_winid ? 0 : SDL_WINDOWPOS_CENTERED,
-				   w, h, flags);
+	*window = SDL_CreateWindow(EVERLIVE_WINDOW_TITLE, x, y, w, h, flags);
 	if (!*window) {
 		pr_err("SDL_CreateWindow failed: %s", SDL_GetError());
 		return -EIO;
@@ -6135,6 +6375,8 @@ static int framegen_create_window(SDL_Window **window, Uint32 flags)
 		set_window_icon(*window);
 		if (g_fullscreen)
 			SDL_SetWindowFullscreen(*window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+		else if (g_has_saved_win && g_saved_win_max)
+			SDL_MaximizeWindow(*window);
 	}
 	return 0;
 }
@@ -6154,6 +6396,10 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 	(void)tex_h;
 	*texture = NULL;
 
+	bool native_fg_active = framegen_path_wanted() &&
+				g_fg_config.native_backend;
+	bool use_gl_vsync = g_vsync && !native_fg_active;
+
 	if (want_vk) {
 		(void)framegen_prepare_vulkan();
 		SDL_SetHint(SDL_HINT_RENDER_DRIVER, "vulkan");
@@ -6161,9 +6407,9 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 		renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
 	} else {
 		SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
-		SDL_SetHint(SDL_HINT_RENDER_VSYNC, g_vsync ? "1" : "0");
+		SDL_SetHint(SDL_HINT_RENDER_VSYNC, use_gl_vsync ? "1" : "0");
 		flags |= SDL_WINDOW_OPENGL;
-		if (g_vsync)
+		if (use_gl_vsync)
 			renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
 	}
 
@@ -6233,8 +6479,8 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 			pr_warn("Vulkan renderer rejected VSync; lsfg-vk pacing may jitter");
 	} else {
 		g_present_driver = PRESENT_DRIVER_OPENGL;
-		if (SDL_RenderSetVSync(*renderer, g_vsync ? 1 : 0) < 0 &&
-		    g_vsync) {
+		if (SDL_RenderSetVSync(*renderer, use_gl_vsync ? 1 : 0) < 0 &&
+		    use_gl_vsync) {
 			pr_warn("VSync not available on this renderer; using present-on-new-frame pacing");
 			g_vsync = false;
 		}
@@ -6252,6 +6498,11 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 static void presentation_destroy(SDL_Window **window, SDL_Renderer **renderer,
 				 SDL_Texture **texture)
 {
+	g_fg_native_last_ns = 0;
+	g_fg_native_present_ns = 0;
+	g_fg_native_synth_step = 1;
+	if (g_fg_native)
+		gc573_fg_native_gl_teardown(g_fg_native);
 	if (*texture) {
 		SDL_DestroyTexture(*texture);
 		*texture = NULL;
@@ -6267,6 +6518,8 @@ static void presentation_destroy(SDL_Window **window, SDL_Renderer **renderer,
 	g_present_driver = PRESENT_DRIVER_OPENGL;
 	if (g_framegen)
 		gc573_framegen_set_vulkan_active(g_framegen, false);
+	if (!framegen_path_wanted())
+		gc573_fg_update_pacer_hz(0.0);
 }
 
 /*
@@ -6456,7 +6709,29 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 	st.framegen_layer_found = fgst.layer_found;
 	st.framegen_dll_found = fgst.dll_found;
 	st.framegen_vulkan_active = fgst.vulkan_active;
+	st.framegen_native_backend = g_fg_config.native_backend;
 	st.framegen_dedup_active = fgst.deduplicator_active;
+	if (fgst.deduplicator_active && fgst.unique_fps > 0.5) {
+		st.framegen_present_fps = fgst.unique_fps;
+		if (!g_fg_config.native_backend &&
+		    fgst.layer_found && fgst.dll_found && fgst.vulkan_active)
+			st.framegen_output_fps = fgst.unique_fps *
+						 (double)st.framegen_multiplier;
+	}
+	if (g_fg_config.native_backend && g_fg_config.mode != GC573_FG_OFF) {
+		int m = g_fg_config.multiplier > 1 ? g_fg_config.multiplier : 2;
+		st.framegen_output_fps = g_fg_native_measured_fps > 0.5
+					 ? g_fg_native_measured_fps
+					 : st.framegen_present_fps * (double)m;
+	}
+	{
+		static bool prev_dedup_active;
+
+		if (prev_dedup_active != st.framegen_dedup_active) {
+			prev_dedup_active = st.framegen_dedup_active;
+			framegen_sync_pacer();
+		}
+	}
 	snprintf(st.framegen_dll_path, sizeof(st.framegen_dll_path), "%.159s",
 		 fgst.dll_path);
 
@@ -6484,7 +6759,7 @@ static void hdr_apply(const struct gc573_user_video_signal *sig,
 			type = GC573_HDR_HLG;
 	}
 
-	gc573_hdr_set_mode(type, powf(2.0f, g_hdr_exposure_ev));
+	gc573_hdr_set_mode(type, g_hdr_enabled ? powf(2.0f, g_hdr_exposure_ev) : 1.0f);
 
 	if (type != g_hdr_announced) {
 		g_hdr_announced = type;
@@ -6656,13 +6931,22 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		float flow = g_fg_config.flow_scale;
 		bool perf = g_fg_config.perf_mode;
 		bool low_latency = g_fg_config.low_latency;
+		bool native_backend = g_fg_config.native_backend;
 		bool settings_changed = false;
+		bool backend_changed = false;
 
 		if (cmd->a >= 0 && cmd->a <= GC573_FG_30_TO_60)
 			mode = cmd->a;
 		if (cmd->d >= 2 && cmd->d <= 4 && cmd->d != mult) {
 			mult = cmd->d;
 			settings_changed = true;
+		}
+		if (cmd->mode[0]) {
+			bool want_nat = !strcasecmp(cmd->mode, "native");
+			if (want_nat != native_backend) {
+				native_backend = want_nat;
+				backend_changed = true;
+			}
 		}
 		if (cmd->f >= 0.5f && cmd->f <= 1.0f && cmd->f != flow) {
 			flow = cmd->f;
@@ -6677,26 +6961,30 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 			settings_changed = true;
 		}
 
-		if (mode != g_fg_config.mode) {
-			/* A mode change retries a previously failed Vulkan open. */
+		if (mode != g_fg_config.mode || backend_changed) {
+			/* A mode/backend change retries Vulkan or switches to OpenGL. */
 			g_fg_fallback = false;
 			g_present_rebuild = true;
+			if (g_fg_native)
+				gc573_fg_native_reset(g_fg_native);
 		}
-		/* Swapchain/layer settings only take effect on a fresh instance. */
-		if (settings_changed && mode != GC573_FG_OFF)
+		/* Swapchain/layer settings only take effect on a fresh lsfg-vk instance. */
+		if (settings_changed && mode != GC573_FG_OFF && !native_backend)
 			g_present_rebuild = true;
 
 		pthread_mutex_lock(&g_framegen_lock);
 		g_fg_config.mode = mode;
 		g_fg_config.multiplier = mult;
+		g_fg_config.native_backend = native_backend;
 		g_fg_config.flow_scale = flow;
 		g_fg_config.perf_mode = perf;
 		g_fg_config.low_latency = low_latency;
 		pthread_mutex_unlock(&g_framegen_lock);
 
 		framegen_apply_config();
-		printf("[IPC] Frame generation: %s %dx (flow %d%%, perf %s, low-latency %s)\n",
+		printf("[IPC] Frame generation: %s %dx (%s, flow %d%%, perf %s, low-latency %s)\n",
 		       framegen_mode_name(mode), mult,
+		       native_backend ? "native" : "lsfg",
 		       (int)(flow * 100.0f + 0.5f),
 		       perf ? "on" : "off",
 		       low_latency ? "on" : "off");
@@ -6978,6 +7266,12 @@ int main(int argc, char *argv[])
 			g_fg_config.multiplier = gc573_fg_clamp_multiplier(atoi(argv[++i]));
 		} else if (strncmp(argv[i], "--fg-mult=", 10) == 0) {
 			g_fg_config.multiplier = gc573_fg_clamp_multiplier(atoi(argv[i] + 10));
+		} else if (strcmp(argv[i], "--fg-backend") == 0 && i + 1 < argc) {
+			g_fg_config.native_backend =
+				strcasecmp(argv[++i], "native") == 0;
+		} else if (strncmp(argv[i], "--fg-backend=", 13) == 0) {
+			g_fg_config.native_backend =
+				strcasecmp(argv[i] + 13, "native") == 0;
 		} else if (strcmp(argv[i], "--fg-dedup") == 0) {
 			if (g_fg_config.mode == GC573_FG_60_TO_120)
 				g_fg_config.mode = GC573_FG_30_TO_60;
@@ -7522,7 +7816,22 @@ int main(int argc, char *argv[])
 		while (SDL_PollEvent(&event)) {
 			if (osd_handle_mouse(window, &event))
 				continue;
-			if (event.type == SDL_QUIT) {
+			if (event.type == SDL_WINDOWEVENT) {
+				if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED && g_parent_winid != 0) {
+#if defined(SDL_VIDEO_DRIVER_X11)
+					embed_revert_focus(window);
+#endif
+				}
+			} else if (event.type == SDL_MOUSEBUTTONDOWN && g_parent_winid != 0) {
+#if defined(SDL_VIDEO_DRIVER_X11)
+				embed_revert_focus(window);
+				if (event.button.clicks == 2 && event.button.button == SDL_BUTTON_LEFT) {
+					printf("[HUB] TOGGLE_FULLSCREEN\n");
+					fflush(stdout);
+					embed_forward_key(window, NULL, XK_f);
+				}
+#endif
+			} else if (event.type == SDL_QUIT) {
 				if (g_trace_mode && streaming)
 					g_trace_requested = true;
 				g_running = 0;
@@ -7542,15 +7851,27 @@ int main(int argc, char *argv[])
 						/* Embedded in Qt host: Esc exits Cinema Fullscreen instead of killing stream. */
 						printf("[HUB] EXIT_FULLSCREEN\n");
 						fflush(stdout);
+#if defined(SDL_VIDEO_DRIVER_X11)
+						embed_forward_key(window, &event, XK_Escape);
+#endif
 					} else {
 						if (g_trace_mode && streaming)
 							g_trace_requested = true;
 						g_running = 0;
 					}
 				} else if (event.key.keysym.sym == SDLK_q) {
-					if (g_trace_mode && streaming)
-						g_trace_requested = true;
-					g_running = 0;
+					if (g_parent_winid != 0) {
+						/* Embedded in Qt host: 'q' exits Cinema Fullscreen instead of killing background engine. */
+						printf("[HUB] EXIT_FULLSCREEN\n");
+						fflush(stdout);
+#if defined(SDL_VIDEO_DRIVER_X11)
+						embed_forward_key(window, &event, XK_Escape);
+#endif
+					} else {
+						if (g_trace_mode && streaming)
+							g_trace_requested = true;
+						g_running = 0;
+					}
 				} else if (event.key.keysym.sym == SDLK_t &&
 					   g_trace_mode && streaming) {
 					g_trace_requested = true;
@@ -7561,6 +7882,9 @@ int main(int argc, char *argv[])
 						/* Embedded in Qt host: let Qt toggle Cinema Fullscreen. */
 						printf("[HUB] TOGGLE_FULLSCREEN\n");
 						fflush(stdout);
+#if defined(SDL_VIDEO_DRIVER_X11)
+						embed_forward_key(window, &event, XK_f);
+#endif
 					} else {
 						uint32_t flags = SDL_GetWindowFlags(window);
 						bool enable =
@@ -7572,6 +7896,11 @@ int main(int argc, char *argv[])
 						       enable ? "on" : "off");
 						fflush(stdout);
 					}
+				} else if (g_parent_winid != 0) {
+#if defined(SDL_VIDEO_DRIVER_X11)
+					/* Forward any other hotkeys (M, Tab, G, Ctrl+R, etc.) to Qt parent window */
+					embed_forward_key(window, &event, NoSymbol);
+#endif
 				} else if (event.key.keysym.sym == SDLK_a) {
 					char title[128];
 
@@ -7651,14 +7980,19 @@ int main(int argc, char *argv[])
 					SDL_SetWindowTitle(window, title);
 				} else if (event.key.keysym.sym == SDLK_TAB ||
 					   event.key.keysym.sym == SDLK_i ||
-					   event.key.keysym.sym == SDLK_o ||
-					   event.key.keysym.sym == SDLK_s ||
+					   event.key.keysym.sym == SDLK_o) {
+					g_osd_enabled = !g_osd_enabled;
+					printf("[OSD] Overlay: %s\n",
+					       g_osd_enabled ? "on" : "off");
+					fflush(stdout);
+				} else if (event.key.keysym.sym == SDLK_s ||
 					   event.key.keysym.sym == SDLK_F10) {
 					g_osd_enabled = !g_osd_enabled;
 					SDL_ShowCursor(g_osd_enabled ?
 						       SDL_ENABLE : SDL_DISABLE);
-					printf("[OSD] Overlay: %s\n",
-					       g_osd_enabled ? "on" : "off");
+					printf("[OSD] Streamer mode: %s (cursor %s)\n",
+					       g_osd_enabled ? "off" : "on",
+					       g_osd_enabled ? "visible" : "hidden");
 					fflush(stdout);
 				} else if (event.key.keysym.sym == SDLK_F1 ||
 					   event.key.keysym.sym == SDLK_QUESTION) {
@@ -7677,6 +8011,10 @@ int main(int argc, char *argv[])
 					   event.key.keysym.sym == SDLK_KP_MINUS) {
 					audio_hotkey_set_gain(-0.05f, window);
 				}
+			} else if (event.type == SDL_KEYUP && g_parent_winid != 0) {
+#if defined(SDL_VIDEO_DRIVER_X11)
+				embed_forward_key(window, &event, NoSymbol);
+#endif
 			}
 		}
 		if (!g_running)
@@ -7815,6 +8153,12 @@ int main(int argc, char *argv[])
 				       (want != g_present_driver);
 
 			if (rebuild && !g_headless && window) {
+				if (!g_parent_winid) {
+					SDL_GetWindowPosition(window, &g_saved_win_x, &g_saved_win_y);
+					SDL_GetWindowSize(window, &g_saved_win_w, &g_saved_win_h);
+					g_saved_win_max = (SDL_GetWindowFlags(window) & SDL_WINDOW_MAXIMIZED) != 0;
+					g_has_saved_win = true;
+				}
 				if (standby.texture) {
 					SDL_DestroyTexture(standby.texture);
 					standby.texture = NULL;
@@ -8050,10 +8394,14 @@ int main(int argc, char *argv[])
 								input_height = fresh.height;
 								input_rate_x100 =
 									fresh.frame_rate_x100;
+								g_fg_source_hz_x100 = input_rate_x100;
+								if (input_rate_x100 >= 2000)
+									g_fg_native_period_ns = 100000000000.0 / (double)input_rate_x100;
 								if (g_framegen)
 									gc573_framegen_set_source_hz(
 										g_framegen,
 										input_rate_x100);
+								framegen_sync_pacer();
 								last_frames = __atomic_load_n(&video.frames,
 											      __ATOMIC_RELAXED);
 								last_stats = now_ms();
@@ -8137,9 +8485,13 @@ int main(int argc, char *argv[])
 							input_height = sig.height;
 							input_rate_x100 =
 								sig.frame_rate_x100;
+							g_fg_source_hz_x100 = input_rate_x100;
+							if (input_rate_x100 >= 2000)
+								g_fg_native_period_ns = 100000000000.0 / (double)input_rate_x100;
 							if (g_framegen)
 								gc573_framegen_set_source_hz(
 									g_framegen, input_rate_x100);
+							framegen_sync_pacer();
 							last_frames = __atomic_load_n(&video.frames,
 									      __ATOMIC_RELAXED);
 							last_stats = now_ms();
@@ -8196,9 +8548,22 @@ int main(int argc, char *argv[])
 			 * window and a frame generation mode is selected.  The capture ring
 			 * is then the only frame source for the window.
 			 */
+			bool fg_cfg_native;
+			int fg_cfg_mode;
+			int fg_cfg_mult;
+			pthread_mutex_lock(&g_framegen_lock);
+			fg_cfg_native = g_fg_config.native_backend;
+			fg_cfg_mode = g_fg_config.mode;
+			fg_cfg_mult = g_fg_config.multiplier > 1 ?
+				      g_fg_config.multiplier : 2;
+			pthread_mutex_unlock(&g_framegen_lock);
+
+			bool fg_native = fg_cfg_native &&
+					 fg_cfg_mode != GC573_FG_OFF;
 			bool fg_live = !g_headless && renderer && g_framegen &&
-				       g_present_driver == PRESENT_DRIVER_VULKAN &&
-				       g_fg_config.mode != GC573_FG_OFF;
+				       fg_cfg_mode != GC573_FG_OFF &&
+				       (fg_native ||
+					g_present_driver == PRESENT_DRIVER_VULKAN);
 			bool want_pump;
 
 			/* The capture thread only feeds the ring while this path is live. */
@@ -8322,53 +8687,175 @@ int main(int argc, char *argv[])
 
 			if (fg_live) {
 				const uint8_t *fg_pixels = NULL;
+				bool native_ready = fg_native &&
+					fg_native_ensure(output_width, output_height) &&
+					gc573_fg_native_ready(g_fg_native);
+				bool cycle_busy = native_ready &&
+					g_fg_native_synth_step <= fg_cfg_mult;
+
+				if (fg_native && g_fg_native)
+					gc573_fg_native_set_params(
+						g_fg_native,
+						g_fg_config.flow_scale,
+						g_fg_config.perf_mode);
 
 				/*
-				 * Present exactly once per accepted frame and NEVER on an
-				 * idle refresh: lsfg-vk synthesizes its in-between frame
-				 * from the swapchain presents it observes, so a repeated
-				 * present would make it interpolate a frozen pair.
+				 * Present every sub-frame of the current Native cycle before
+				 * popping the next capture frame so rapid HDMI arrivals never
+				 * starve step N. When a new DMA frame is already queued, tighten
+				 * remaining step deadlines slightly to catch up without dropping.
+				 * For lsfg-vk, never present on an idle refresh.
 				 */
-				if (gc573_framegen_take(g_framegen, &fg_pixels)) {
-					if (texture && output_width && output_height) {
-						if (SDL_UpdateTexture(texture, NULL,
-								      fg_pixels,
-								      output_width * 2) < 0) {
-							static bool reported;
+				if (!cycle_busy && gc573_framegen_take(g_framegen, &fg_pixels)) {
+					const uint8_t *present_pixels = fg_pixels;
+					float first_t = 1.0f / (float)fg_cfg_mult;
 
-							if (!reported) {
-								printf("[SDL-ERR] SDL_UpdateTexture failed: %s\n",
-								       SDL_GetError());
-								reported = true;
+					if (fg_native &&
+					    fg_native_ensure(output_width, output_height)) {
+						uint64_t now_ns = fg_native_now_ns();
+						struct gc573_fg_stats st;
+						double period_ns = 0.0;
+
+						gc573_framegen_get_stats(g_framegen, &st);
+						if (st.deduplicator_active && st.unique_fps >= 20.0) {
+							period_ns = 1000000000.0 / st.unique_fps;
+						} else if (st.deduplicator_active && st.raw_fps >= 40.0) {
+							period_ns = 2000000000.0 / st.raw_fps;
+						} else if (st.raw_fps >= 20.0) {
+							period_ns = 1000000000.0 / st.raw_fps;
+						} else if (g_fg_native_last_ns > 0) {
+							double dt = (double)(now_ns - g_fg_native_last_ns);
+							if (dt > 4000000.0 && dt < 45000000.0)
+								period_ns = dt;
+						}
+						if (period_ns >= 4000000.0 && period_ns <= 45000000.0) {
+							if (g_fg_native_period_ns >= 4000000.0)
+								g_fg_native_period_ns = 0.90 * g_fg_native_period_ns + 0.10 * period_ns;
+							else
+								g_fg_native_period_ns = period_ns;
+						}
+						g_fg_native_last_ns = now_ns;
+						g_fg_native_synth_step = 2;
+						gc573_fg_native_set_params(
+							g_fg_native,
+							g_fg_config.flow_scale,
+							g_fg_config.perf_mode);
+						gc573_fg_native_push(
+							g_fg_native, fg_pixels,
+							output_width, output_height,
+							output_width * 2U);
+					}
+					if (texture && output_width && output_height) {
+						char audio_text[64];
+						const char *audio_desc =
+							audio_osd_text(
+								&audio, audio_text,
+								sizeof(audio_text));
+
+						osd_update(
+							renderer, window,
+							input_width, input_height,
+							current_sig.interlaced,
+							input_rate_x100,
+							displayed_fps,
+							audio_desc,
+							gc573_hdr_active() ?
+							gc573_hdr_label() :
+							NULL,
+							colorspace_short(
+								current_sig.colorspace));
+						if (fg_native &&
+						    render_frame_native_gl(
+							    window, renderer,
+							    g_fg_native, first_t,
+							    aspect_ratio(g_aspect,
+									 video_aspect),
+							    output_width, output_height)) {
+							g_fg_native_present_ns = fg_native_now_ns();
+							fg_native_note_present();
+						} else {
+							if (SDL_UpdateTexture(texture, NULL,
+									      present_pixels,
+									      output_width * 2) < 0) {
+								static bool reported;
+
+								if (!reported) {
+									printf("[SDL-ERR] SDL_UpdateTexture failed: %s\n",
+									       SDL_GetError());
+									reported = true;
+								}
+							}
+							render_frame(
+								window, renderer, texture,
+								aspect_ratio(g_aspect,
+									     video_aspect),
+								output_width, output_height);
+							if (fg_native) {
+								g_fg_native_present_ns = fg_native_now_ns();
+								fg_native_note_present();
 							}
 						}
-						{
-							char audio_text[64];
-							const char *audio_desc =
-								audio_osd_text(
-									&audio, audio_text,
-									sizeof(audio_text));
-
-							osd_update(
-								renderer, window,
-								input_width, input_height,
-								current_sig.interlaced,
-								input_rate_x100,
-								displayed_fps,
-								audio_desc,
-								gc573_hdr_active() ?
-								gc573_hdr_label() :
-								NULL,
-								colorspace_short(
-									current_sig.colorspace));
-						}
-						render_frame(
-							window, renderer, texture,
-							aspect_ratio(g_aspect,
-								     video_aspect),
-							output_width, output_height);
 					}
 					gc573_framegen_release(g_framegen);
+				} else if (native_ready) {
+					uint64_t now_ns = fg_native_now_ns();
+					uint64_t anchor_ns = g_fg_native_last_ns
+							     ? g_fg_native_last_ns
+							     : g_fg_native_present_ns;
+					double deadline_scale = gc573_framegen_has_unread(g_framegen)
+								? 0.70 : 1.0;
+					uint64_t due_ns = anchor_ns +
+						(uint64_t)(((g_fg_native_period_ns *
+							     (double)(g_fg_native_synth_step - 1)) /
+							    (double)fg_cfg_mult) * deadline_scale);
+
+					if (g_fg_native_synth_step <= fg_cfg_mult &&
+					    now_ns >= due_ns) {
+						float t = (g_fg_native_synth_step == fg_cfg_mult)
+							  ? 1.0f
+							  : (float)g_fg_native_synth_step /
+							    (float)fg_cfg_mult;
+
+						if (texture) {
+							if (render_frame_native_gl(
+								    window, renderer,
+								    g_fg_native, t,
+								    aspect_ratio(g_aspect,
+										 video_aspect),
+								    output_width, output_height)) {
+								fg_native_note_present();
+							} else if (gc573_fg_native_synthesize(
+									   g_fg_native, t,
+									   g_fg_native_buf,
+									   output_width * 2U)) {
+								SDL_UpdateTexture(
+									texture, NULL,
+									g_fg_native_buf,
+									output_width * 2);
+								render_frame(
+									window, renderer, texture,
+									aspect_ratio(g_aspect,
+										     video_aspect),
+									output_width, output_height);
+								fg_native_note_present();
+							}
+						}
+						g_fg_native_synth_step++;
+					} else if (g_fg_native_synth_step <= fg_cfg_mult) {
+						uint64_t wake_margin_ns = 350000ULL;
+						uint64_t target_wake = due_ns > wake_margin_ns
+								       ? due_ns - wake_margin_ns
+								       : due_ns;
+						uint64_t cap_ns = now_ns + 1500000ULL;
+						uint64_t wake_ns = target_wake < cap_ns ? target_wake : cap_ns;
+						struct timespec ts;
+
+						ts.tv_sec = (time_t)(wake_ns / 1000000000ULL);
+						ts.tv_nsec = (long)(wake_ns % 1000000000ULL);
+						clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
+					} else {
+						(void)gc573_framegen_wait(g_framegen, 500);
+					}
 				} else {
 					/*
 					 * Event-driven wait: the DMA thread signals as soon as a
@@ -8784,6 +9271,11 @@ int main(int argc, char *argv[])
 		/* Never returns: resumes by re-executing, or exits. */
 		handoff_pause(argv, card_id, everlive_handoff_release(),
 			      &handoff_peer);
+	}
+
+	if (g_handoff_lease_fd >= 0) {
+		close(g_handoff_lease_fd);
+		g_handoff_lease_fd = -1;
 	}
 
 	printf("[✓] EverLive Userspace Streamer closed cleanly.\n");

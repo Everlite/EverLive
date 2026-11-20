@@ -22,7 +22,8 @@ CORE_LIB := $(CORE_DIR)/libeverlive_core.a
 SANITIZE := -fsanitize=address,undefined -fno-omit-frame-pointer
 
 TARGETS := test_card_registry test_frame_convert test_framestore test_ctl_proto \
-           test_json_rpc test_v4l2_shim test_handoff test_edid test_config test_framegen
+           test_json_rpc test_v4l2_shim test_handoff test_edid test_config test_framegen \
+           test_fg_native
 
 all: $(TARGETS)
 
@@ -69,8 +70,16 @@ test_config: test_config.c $(GC570D_SRC)/gc570d-config.c
 	$(CC) $(CFLAGS) $(INCLUDES) $(DEFS_GC570D) -o $@ $^
 
 # --- GC573 --------------------------------------------------------------
-test_framegen: test_framegen.c $(GC573_DIR)/src/gc573_user_framegen.c
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^ -pthread -lm
+PACER_LIB := $(GC573_DIR)/libeverlive-vk-pacer.so
+
+$(PACER_LIB): FORCE
+	$(MAKE) -C $(GC573_DIR) libeverlive-vk-pacer.so
+
+test_framegen: test_framegen.c $(GC573_DIR)/src/gc573_user_framegen.c $(PACER_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_framegen.c $(GC573_DIR)/src/gc573_user_framegen.c -pthread -lm -ldl
+
+test_fg_native: test_fg_native.c $(GC573_DIR)/src/gc573_user_fg_native.c
+	$(CC) $(CFLAGS) $(INCLUDES) $(shell pkg-config --cflags sdl2) -o $@ $^ $(shell pkg-config --libs sdl2) -pthread -lm
 
 -include $(TARGETS:=.d)
 
@@ -88,6 +97,7 @@ test: all
 	@./test_config
 	@echo "=== GC573 (Live Gamer 4K) ==="
 	@./test_framegen
+	@./test_fg_native
 	@echo "=== All EverLive tests passed ==="
 
 asan:

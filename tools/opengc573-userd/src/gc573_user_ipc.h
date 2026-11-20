@@ -187,6 +187,7 @@ struct gc573_stats {
 	bool framegen_layer_found;
 	bool framegen_dll_found;
 	bool framegen_vulkan_active;
+	bool framegen_native_backend;
 	bool framegen_dedup_active;
 	char framegen_dll_path[160];
 };

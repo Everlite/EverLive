@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """EverLive Console Hub design tokens and application stylesheet.
 
-The v1.7.0 shell carried its palette inline in ``everlive_viewer.init_ui``.
+The v2.0.0 shell carried its palette inline in ``everlive_viewer.init_ui``.
 Centralising it here keeps the mockup palette in one place and lets the
 widget modules style themselves without copying hex strings around.
 """
@@ -524,6 +524,17 @@ QPushButton#segmentButton:checked {
 }
 QPushButton#segmentButton:disabled {
     color: @TEXT_DIM@;
+}
+
+QWidget#inspectorTabbar {
+    background-color: @SURFACE@;
+    border: 1px solid @GROUP_BORDER@;
+    border-radius: @SEGMENT_RADIUS@;
+}
+QWidget#inspectorTabbar QPushButton#segmentButton {
+    padding: 0px 4px;
+    font-size: 13px;
+    font-weight: 600;
 }
 
 /* Icon buttons */

@@ -4,3 +4,4 @@ gc573_user_probe
 gc573_user_streamer
 gc573_user_diag
 everlive_userd
+libeverlive-vk-pacer.so

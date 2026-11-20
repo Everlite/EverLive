@@ -289,7 +289,7 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 		     "\"perf_mode\":%s,\"low_latency\":%s,"
 		     "\"layer_found\":%s,"
 		     "\"dll_found\":%s,\"dll_path\":\"%s\","
-		     "\"vulkan_active\":%s,\"deduplicator_active\":%s},"
+		     "\"vulkan_active\":%s,\"backend\":\"%s\",\"deduplicator_active\":%s},"
 		     "\"led\":{\"r\":%u,\"g\":%u,\"b\":%u},"
 		     "\"clients\":%u,\"age_ms\":%llu}",
 		     GC573_IPC_PROTO_VERSION, s->version, (long)getpid(),
@@ -326,6 +326,7 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 		     st.framegen_layer_found ? "true" : "false",
 		     st.framegen_dll_found ? "true" : "false", dll_esc,
 		     st.framegen_vulkan_active ? "true" : "false",
+		     st.framegen_native_backend ? "native" : "lsfg",
 		     st.framegen_dedup_active ? "true" : "false",
 		     st.led_r, st.led_g, st.led_b,
 		     (unsigned int)gc573_ipc_has_clients(),
@@ -715,6 +716,7 @@ static void ipc_handle_framegen(struct ipc_client *c, const char *id,
 {
 	struct gc573_ipc_cmd cmd = { .kind = GC573_IPC_CMD_FRAMEGEN };
 	char mode[16];
+	char backend[16];
 	bool flag;
 	double scale;
 	double mult;
@@ -788,10 +790,24 @@ static void ipc_handle_framegen(struct ipc_client *c, const char *id,
 		cmd.b = flag ? 1 : 0;
 	if (everlive_json_get_bool(line, "low_latency", &flag))
 		cmd.c = flag ? 1 : 0;
+	if (everlive_json_get_string(line, "backend", backend, sizeof(backend))) {
+		if (!strcasecmp(backend, "native") ||
+		    !strcasecmp(backend, "builtin"))
+			snprintf(cmd.mode, sizeof(cmd.mode), "native");
+		else if (!strcasecmp(backend, "lsfg") ||
+			 !strcasecmp(backend, "lsfg-vk"))
+			snprintf(cmd.mode, sizeof(cmd.mode), "lsfg");
+		else {
+			ipc_error(c, id, -32602,
+				  "unknown backend: lsfg|native");
+			return;
+		}
+	}
 
-	if (cmd.a < 0 && cmd.b < 0 && cmd.c < 0 && cmd.d < 0 && cmd.f < 0.0f) {
+	if (cmd.a < 0 && cmd.b < 0 && cmd.c < 0 && cmd.d < 0 &&
+	    cmd.f < 0.0f && !cmd.mode[0]) {
 		ipc_error(c, id, -32602,
-			  "invalid params: mode, multiplier, dedup, flow_scale, perf_mode or low_latency required");
+			  "invalid params: mode, multiplier, dedup, backend, flow_scale, perf_mode or low_latency required");
 		return;
 	}
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive v1.6.0 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573) & Live Gamer DUO (GC570D)
+# EverLive v2.0.0 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573) & Live Gamer DUO (GC570D)
 # ==============================================================================
 # Installiert den 100% blob-freien Userspace VFIO-Treiber, udev-Hardware-Rechte,
 # Speicher-Locking-Limits und die EverLive Desktop-App für HDMI Console Gaming.
@@ -25,7 +25,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}===================================================================${NC}"
-echo -e "${BLUE}   EverLive (1.6.0) - GC573 & GC570D Gaming Suite Installer   ${NC}"
+echo -e "${BLUE}   EverLive (2.0.0) - GC573 & GC570D Gaming Suite Installer   ${NC}"
 echo -e "${BLUE}===================================================================${NC}"
 
 # Optionale Virtual Camera: standardmäßig ja, per --no-loopback abschaltbar.
@@ -326,20 +326,34 @@ ensure_lsfg_vk() {
 
             archive_rel="$(curl -fsSL --max-time 10 https://builds.lsfg-vk.dev/ 2>/dev/null | \
                 sed -n 's/.*href="\([^"]*\.tar\.xz\)">&gt;&gt; Latest release.*/\1/p' | head -n 1 || true)"
-            [ -z "${archive_rel}" ] && archive_rel="lsfg-vk-2.0.0.tar.xz"
+            if ! [[ "${archive_rel}" =~ ^[A-Za-z0-9._/-]+\.tar\.xz$ ]] || [[ "${archive_rel}" == *".."* ]]; then
+                archive_rel="lsfg-vk-2.0.0.tar.xz"
+            fi
             archive_url="https://builds.lsfg-vk.dev/${archive_rel}"
 
             echo -e "[*] Lade offizielles lsfg-vk 2.0 Paket (${archive_rel})..."
             tmp_tar="$(mktemp /tmp/everlive-lsfg-vk.XXXXXX.tar.xz)"
-            if curl -fL --max-time 60 "${archive_url}" -o "${tmp_tar}" &&
-               tar -tJf "${tmp_tar}" >/dev/null 2>&1; then
-                chmod 644 "${tmp_tar}"
-                if [ "${TARGET_USER}" != "root" ]; then
-                    sudo -u "${TARGET_USER}" mkdir -p "${TARGET_HOME}/.local"
-                    sudo -u "${TARGET_USER}" tar -xJf "${tmp_tar}" -C "${TARGET_HOME}/.local" || true
-                else
-                    mkdir -p "${TARGET_HOME}/.local"
-                    tar -xJf "${tmp_tar}" -C "${TARGET_HOME}/.local" || true
+            if curl -fsSL --max-time 60 "${archive_url}" -o "${tmp_tar}" &&
+               tar -tJf "${tmp_tar}" >/dev/null 2>&1 &&
+               ! tar -tJf "${tmp_tar}" | grep -qE '(^/|\.\.)'; then
+                local sha_expected=""
+                sha_expected="$(curl -fsSL --max-time 10 "${archive_url}.sha256" 2>/dev/null | awk '{print $1}' | head -n 1 || true)"
+                if [[ "${sha_expected}" =~ ^[a-fA-F0-9]{64}$ ]] && command -v sha256sum >/dev/null 2>&1; then
+                    if ! echo "${sha_expected}  ${tmp_tar}" | sha256sum -c - >/dev/null 2>&1; then
+                        echo -e "${RED}[!] SHA-256-Prüfung für ${archive_rel} fehlgeschlagen — Abbruch.${NC}"
+                        rm -f "${tmp_tar}"
+                        tmp_tar=""
+                    fi
+                fi
+                if [ -n "${tmp_tar}" ]; then
+                    chmod 644 "${tmp_tar}"
+                    if [ "${TARGET_USER}" != "root" ]; then
+                        sudo -u "${TARGET_USER}" mkdir -p "${TARGET_HOME}/.local"
+                        sudo -u "${TARGET_USER}" tar --no-same-owner --no-same-permissions -xJf "${tmp_tar}" -C "${TARGET_HOME}/.local" || true
+                    else
+                        mkdir -p "${TARGET_HOME}/.local"
+                        tar --no-same-owner --no-same-permissions -xJf "${tmp_tar}" -C "${TARGET_HOME}/.local" || true
+                    fi
                 fi
             fi
             rm -f "${tmp_tar}"
@@ -445,11 +459,12 @@ make -C "${SCRIPT_DIR}" -j"$(nproc)"
 
 # Never leave build artifacts world-writable, and keep binaries setcap-safe.
 chmod 0755 "${USERD_DIR}/gc573_user_streamer" "${USERD_DIR}/everlive_userd" \
-    "${USERD_DIR}/gc573_user_probe" "${CORE_DIR}/everlive-ctl" \
+    "${USERD_DIR}/gc573_user_probe" "${USERD_DIR}/gc573_user_diag" "${CORE_DIR}/everlive-ctl" \
     "${GC570D_DIR}/opengc570d-userd" "${GC570D_DIR}/gc570d-ctl" \
     "${SCRIPT_DIR}/play.sh"
 chmod 0644 "${GC570D_DIR}/libgc570d-v4l2.so" 2>/dev/null || true
 chmod 0644 "${USERD_DIR}/libgc573-v4l2.so" 2>/dev/null || true
+chmod 0644 "${USERD_DIR}/libeverlive-vk-pacer.so" 2>/dev/null || true
 
 # Core library, everlive-ctl, everlive-service, headers, and systemd unit.
 make -C "${CORE_DIR}" install
@@ -597,11 +612,16 @@ cat > /etc/security/limits.d/99-everlive-memlock.conf <<EOF
 EOF
 
 # Udev-Regel: Bindet AVerMedia GC573 (1461:0054 / 1461:5550) an vfio-pci
+# sowie USB/HID-Rechte für Live Gamer ULTRA 2.1 (GC553G2, 07ca:2553)
 cat > /etc/udev/rules.d/70-everlive.rules <<EOF
 # AVerMedia Live Gamer 4K (GC573) & Live Gamer BOLT (GC555) - Userspace VFIO Mode
 ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1461", ATTR{device}=="0x0054", ATTR{driver_override}="vfio-pci"
 ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1461", ATTR{device}=="0x0055", ATTR{driver_override}="vfio-pci"
 SUBSYSTEM=="vfio", MODE="0660", TAG+="uaccess", GROUP="video"
+# AVerMedia Live Gamer ULTRA 2.1 (GC553G2, USB 07ca:2553 + HID LampArray 07ca:d553)
+SUBSYSTEM=="usb", ATTR{idVendor}=="07ca", ATTR{idProduct}=="2553", MODE="0660", TAG+="uaccess", GROUP="video"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="07ca", ATTRS{idProduct}=="d553", MODE="0660", TAG+="uaccess", GROUP="video"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="07ca", ATTRS{idProduct}=="2553", MODE="0660", TAG+="uaccess", GROUP="video"
 EOF
 
 udevadm control --reload-rules 2>/dev/null || true
@@ -688,6 +708,10 @@ import card_profile
 
 override = os.environ.get("EVERLIVE_PRELOAD_LIB", "").strip()
 profile = card_profile.detect_card_profile()
+if not override and (getattr(profile, "is_uvc", False) or not profile.preload_library):
+    print(f"[*] {profile.display_name} is a native USB/UVC device — "
+          "LD_PRELOAD launchers are not needed (select the camera directly in OBS/Discord).")
+    sys.exit(0)
 system_lib = f"/usr/local/lib/{profile.preload_library}"
 library = override
 if not library and os.path.isfile(system_lib):
@@ -731,7 +755,7 @@ else
 fi
 
 echo -e "\n${GREEN}===================================================================${NC}"
-echo -e "${GREEN}   EverLive v1.6.0 erfolgreich installiert!                        ${NC}"
+echo -e "${GREEN}   EverLive v2.0.0 erfolgreich installiert!                        ${NC}"
 echo -e "${GREEN}===================================================================${NC}"
 echo -e "Du kannst EverLive ab sofort direkt über dein Startmenü"
 echo -e "starten (Eintrag \"EverLive\"), oder im Terminal mit:"

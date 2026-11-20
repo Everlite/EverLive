@@ -3,6 +3,8 @@
 # EverLive — top-level orchestration and system-wide installation.
 #
 #   make                                        # build core, engines, and CLI
+#   make hwsuhd                                 # HWS UHD engine (opt-in, see
+#                                               # tools/openhws-userd/README.md)
 #   make test                                   # run all unit tests
 #   sudo make install                           # system-wide install (PREFIX=/usr/local)
 #   make install DESTDIR="$pkgdir" PREFIX=/usr  # distro packaging
@@ -27,17 +29,21 @@ SYSCONFDIR      ?= /etc
 CORE_DIR   := tools/libeverlive-core
 GC573_DIR  := tools/opengc573-userd
 GC570D_DIR := tools/opengc570d-userd
+HWSUHD_DIR := tools/openhws-userd
+CAM_DIR    := tools/everlive-cam
 VIEWER_DIR := tools/everlive
 TESTS_DIR  := tests
 PKG_DIR    := packaging
 
-GC573_BINS  := gc573_user_streamer everlive_userd gc573_user_probe
+GC573_BINS  := gc573_user_streamer everlive_userd gc573_user_probe gc573_user_diag
 GC570D_BINS := opengc570d-userd gc570d-ctl
 ICON_SIZES  := 16 32 48 64 128 256 512
 
 # Python modules imported by everlive_viewer.py.
 VIEWER_PY := everlive_client.py card_profile.py service_manager.py \
-             app_integrations.py ui_theme.py ui_widgets.py fa_icons.py
+             app_integrations.py everlive_recorder.py gc553g2_control.py \
+             ui_theme.py ui_widgets.py fa_icons.py everlive_multi.py \
+             everlive_cam.py
 VIEWER_ASSETS := fonts/fa-solid-900.ttf fonts/fa-brands-400.ttf \
                  fonts/LICENSE.txt fonts/chevron-down.png \
                  fonts/NotoSans-Regular.ttf fonts/NotoSans-SemiBold.ttf \
@@ -49,9 +55,9 @@ GC570D_SED := sed -e 's|/usr/local/libexec/|$(GC570D_RUNDIR)/|g' \
 
 L := $(DESTDIR)$(EVERLIVE_LIBDIR)
 
-.PHONY: all core gc573 gc570d test check asan clean install uninstall
+.PHONY: all core gc573 gc570d hwsuhd cam test check asan clean install uninstall
 
-all: core gc573 gc570d
+all: core gc573 gc570d cam
 
 core:
 	+$(MAKE) -C $(CORE_DIR)
@@ -61,6 +67,15 @@ gc573: core
 
 gc570d: core
 	+$(MAKE) -C $(GC570D_DIR)
+
+# Webcam bridge (everlive_camd + libeverlive-cam-v4l2.so) for the Hub's
+# picture-in-picture overlay.
+cam: core
+	+$(MAKE) -C $(CAM_DIR)
+
+# Not part of `all`: the HWS UHD engine is built and installed on request.
+hwsuhd: core
+	+$(MAKE) -C $(HWSUHD_DIR)
 
 test: all
 	+$(MAKE) -C $(TESTS_DIR) test
@@ -75,6 +90,8 @@ clean:
 	+$(MAKE) -C $(CORE_DIR) clean
 	+$(MAKE) -C $(GC573_DIR) clean
 	+$(MAKE) -C $(GC570D_DIR) clean
+	+$(MAKE) -C $(HWSUHD_DIR) clean
+	+$(MAKE) -C $(CAM_DIR) clean
 	+$(MAKE) -C $(TESTS_DIR) clean
 
 install: all
@@ -82,6 +99,7 @@ install: all
 	+$(MAKE) -C $(CORE_DIR) install PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 	+$(MAKE) -C $(GC573_DIR) install PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 	+$(MAKE) -C $(GC570D_DIR) install-bin PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
+	install -Dm0644 $(CAM_DIR)/libeverlive-cam-v4l2.so $(DESTDIR)$(LIBDIR)/libeverlive-cam-v4l2.so
 	# 2. Application runtime tree under $(EVERLIVE_LIBDIR)
 	install -Dm0755 play.sh $(L)/play.sh
 	install -Dm0755 $(VIEWER_DIR)/everlive_viewer.py $(L)/$(VIEWER_DIR)/everlive_viewer.py
@@ -93,6 +111,7 @@ install: all
 	install -m0755 $(addprefix $(GC573_DIR)/,$(GC573_BINS)) $(GC573_DIR)/vfio_pci_bind.sh $(L)/$(GC573_DIR)/
 	install -m0755 $(addprefix $(GC570D_DIR)/,$(GC570D_BINS)) $(GC570D_DIR)/gc570d-vfio-bind.sh $(L)/$(GC570D_DIR)/
 	install -m0755 $(CORE_DIR)/everlive-ctl $(CORE_DIR)/everlive-service.sh $(L)/$(CORE_DIR)/
+	install -Dm0755 $(CAM_DIR)/everlive_camd $(L)/$(CAM_DIR)/everlive_camd
 	$(GC570D_SED) $(GC570D_DIR)/gc570d-sleep.sh > $(L)/$(GC570D_DIR)/gc570d-sleep.sh
 	chmod 0755 $(L)/$(GC570D_DIR)/gc570d-sleep.sh
 	# 3. Main launcher, desktop entry and icons
@@ -129,8 +148,10 @@ uninstall:
 	+$(MAKE) -C $(CORE_DIR) uninstall PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 	+$(MAKE) -C $(GC573_DIR) uninstall PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 	+$(MAKE) -C $(GC570D_DIR) uninstall-bin PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
+	rm -f $(DESTDIR)$(LIBDIR)/libeverlive-cam-v4l2.so
 	rm -f $(DESTDIR)$(LIBDIR)/libgc570d-v4l2.so \
-	      $(DESTDIR)$(LIBDIR)/libgc573-v4l2.so
+	      $(DESTDIR)$(LIBDIR)/libgc573-v4l2.so \
+	      $(DESTDIR)$(LIBDIR)/libeverlive-vk-pacer.so
 	rm -rf $(L)
 	rm -f $(DESTDIR)$(BINDIR)/everlive
 	rm -f $(DESTDIR)$(DATADIR)/applications/everlive.desktop

@@ -22,6 +22,8 @@ from typing import FrozenSet, Iterable, Optional, Tuple
 
 MODEL_GC573 = "gc573"
 MODEL_GC570D = "gc570d"
+MODEL_HWSUHD = "hwsuhd"
+MODEL_GC553G2 = "gc553g2"
 
 CAP_VIDEO = "video"
 CAP_AUDIO = "audio"
@@ -92,6 +94,10 @@ class CardProfile:
     def is_duo(self) -> bool:
         return self.model == MODEL_GC570D
 
+    @property
+    def is_uvc(self) -> bool:
+        return self.model == MODEL_GC553G2
+
 
 def _profile(
     model: str,
@@ -142,10 +148,137 @@ GC570D_PROFILE = _profile(
     "libgc570d-v4l2.so",
 )
 
+# ACASIS VS2583 / AVMatrix VC12-4K class card (openhws-userd).  Only selected
+# explicitly (EVERLIVE_CARD=hwsuhd) or when no AVerMedia card is installed.
+HWSUHD_PROFILE = _profile(
+    MODEL_HWSUHD,
+    "HWS UHD · 4K60 Capture",
+    (CAP_VIDEO, CAP_AUDIO, CAP_PASSTHROUGH, CAP_4K60, CAP_1080P60),
+    1,
+    ("/dev/video10",),
+    ("/dev/video64",),
+    "libhwsuhd-v4l2.so",
+)
+
+GC553G2_PROFILE = _profile(
+    MODEL_GC553G2,
+    "GC553G2 · Live Gamer ULTRA 2.1",
+    (
+        CAP_VIDEO, CAP_AUDIO, CAP_PASSTHROUGH, CAP_EDID,
+        CAP_4K60, CAP_4K120, CAP_1440P120, CAP_1080P240, CAP_1080P60,
+        CAP_HDR, CAP_RGB_LED,
+    ),
+    1,
+    (),
+    (),
+    "",
+)
+
 _STATIC_PROFILES = {
     MODEL_GC573: GC573_PROFILE,
     MODEL_GC570D: GC570D_PROFILE,
+    MODEL_HWSUHD: HWSUHD_PROFILE,
+    MODEL_GC553G2: GC553G2_PROFILE,
 }
+
+
+AVERMEDIA_VENDOR_ID = "0x1461"
+AVERMEDIA_DEVICE_IDS = frozenset({"0x0054", "0x0055"})
+GC570D_SUBSYSTEM_ID = "0x5700"
+# HWS UHD family (ACASIS VS2583 / AVMatrix VC12-4K), 4K60 HDMI model only.
+HWSUHD_PCI_IDS = frozenset({("0x8888", "0x8581"), ("0x8888", "0x85a1"),
+                            ("0x8888", "0x8591"), ("0x1f33", "0x8581")})
+HWSUHD_SUBSYSTEM_ID = "0x0007"
+
+PCI_DEVICES_DIR = "/sys/bus/pci/devices"
+
+
+def _read_text(path: str) -> str:
+    try:
+        with open(path, "r") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def identify_pci_card(dev: str) -> Optional[str]:
+    """Model slug of a supported capture card at sysfs path ``dev``, or None.
+
+    GC573 and GC570D share PCI device 1461:0054; only ``subsystem_device``
+    separates them (0x5700 is the GC570D).  The BOLT (1461:0055) is a
+    GC573-class device.
+    """
+    vendor = _read_text(os.path.join(dev, "vendor")).lower()
+    device = _read_text(os.path.join(dev, "device")).lower()
+    subsystem = _read_text(os.path.join(dev, "subsystem_device")).lower()
+    if vendor == AVERMEDIA_VENDOR_ID and device in AVERMEDIA_DEVICE_IDS:
+        if device == "0x0054" and subsystem == GC570D_SUBSYSTEM_ID:
+            return MODEL_GC570D
+        return MODEL_GC573
+    if (vendor, device) in HWSUHD_PCI_IDS and subsystem == HWSUHD_SUBSYSTEM_ID:
+        return MODEL_HWSUHD
+    return None
+
+
+def detect_pci_cards(base: str = PCI_DEVICES_DIR) -> list:
+    """Every supported PCIe capture card, in PCI address order.
+
+    Each entry is ``{"pci", "model", "driver", "mode", "subsystem"}`` where
+    ``mode`` is ``vfio`` (bound to vfio-pci), ``kernel`` (an EverLive kernel
+    driver) or ``unknown`` (unbound or another driver).
+    """
+    try:
+        entries = sorted(os.listdir(base))
+    except OSError:
+        return []
+    cards = []
+    for entry in entries:
+        dev = os.path.join(base, entry)
+        model = identify_pci_card(dev)
+        if model is None:
+            continue
+        driver = None
+        mode = "unknown"
+        link = os.path.join(dev, "driver")
+        if os.path.islink(link):
+            driver = os.path.basename(os.path.realpath(link))
+            if driver == "vfio-pci":
+                mode = "vfio"
+            elif model != MODEL_HWSUHD and driver in ("open_gc573", "gc570d"):
+                mode = "kernel"
+        subsystem = _read_text(os.path.join(dev, "subsystem_device")).lower()
+        cards.append({
+            "pci": entry,
+            "model": model,
+            "driver": driver,
+            "mode": mode,
+            "subsystem": subsystem or None,
+        })
+    return cards
+
+
+def static_profile(model: str) -> CardProfile:
+    """The static descriptor for ``model`` (GC573 when unknown)."""
+    return _STATIC_PROFILES.get(str(model or "").lower(), GC573_PROFILE)
+
+
+def _detect_usb_from_sysfs(base: str = "/sys/bus/usb/devices") -> Optional[str]:
+    try:
+        entries = os.listdir(base)
+    except OSError:
+        return None
+    for entry in sorted(entries):
+        dev = os.path.join(base, entry)
+        try:
+            with open(os.path.join(dev, "idVendor")) as f:
+                vendor = f.read().strip().lower()
+            with open(os.path.join(dev, "idProduct")) as f:
+                product = f.read().strip().lower()
+        except OSError:
+            continue
+        if vendor == "07ca" and product == "2553":
+            return MODEL_GC553G2
+    return None
 
 
 def _detect_from_sysfs() -> Optional[str]:
@@ -153,7 +286,7 @@ def _detect_from_sysfs() -> Optional[str]:
     try:
         entries = os.listdir(base)
     except OSError:
-        return None
+        entries = []
     for entry in entries:
         dev = os.path.join(base, entry)
         try:
@@ -175,7 +308,7 @@ def _detect_from_sysfs() -> Optional[str]:
         except OSError:
             subsystem = ""
         return MODEL_GC570D if subsystem == "0x5700" else MODEL_GC573
-    return None
+    return _detect_usb_from_sysfs()
 
 
 def _parse_ctl_detect(text: str) -> Optional[CardProfile]:
