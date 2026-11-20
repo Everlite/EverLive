@@ -71,6 +71,8 @@ enum everlive_osd_mode {
 	EVERLIVE_OSD_MODE_CARD = 2,
 };
 
+static enum everlive_osd_action g_hover_action = EVERLIVE_OSD_ACTION_NONE;
+
 struct everlive_frame {
 	uint32_t width;
 	uint32_t height;
@@ -1110,6 +1112,8 @@ static void sdl_scale_rect(SDL_Rect *dst, const SDL_Rect *src,
 			   SDL_Renderer *renderer, int win_w, int win_h);
 static void sdl_render_popup(struct everlive_sdl *sdl, int win_w, int win_h,
 			     float scale);
+static void sdl_render_tooltip(struct everlive_sdl *sdl, int win_w, int win_h,
+			       float scale);
 static void sdl_render_toast(struct everlive_sdl *sdl, int win_w, int win_h);
 
 static void sdl_render_frame(struct everlive_state *st, struct everlive_sdl *sdl)
@@ -1170,6 +1174,7 @@ static void sdl_render_frame(struct everlive_state *st, struct everlive_sdl *sdl
 					       sdl->renderer, win_w, win_h);
 				SDL_RenderCopy(sdl->renderer,
 					       sdl->card.texture, NULL, &draw);
+				sdl_render_tooltip(sdl, win_w, win_h, scale);
 				sdl_render_popup(sdl, win_w, win_h, scale);
 			}
 		} else if (sdl->overlay) {
@@ -1280,6 +1285,7 @@ static void sdl_card_update(struct everlive_state *st,
 		 (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP));
 	snap.recording = atomic_load_explicit(&st->recording, __ATOMIC_RELAXED);
 	snap.interactive = true;
+	snap.hover_action = g_hover_action;
 	snap.volume_pct = vol;
 	everlive_osd_build_card(sdl->renderer, &snap,
 				(float)win_h / 1080.0f, win_w, win_h,
@@ -1499,6 +1505,10 @@ static void sdl_cycle_scale(struct everlive_state *st,
 static void sdl_open_popup(struct everlive_sdl *sdl,
 			   enum everlive_osd_popup_kind kind)
 {
+	if (g_hover_action != EVERLIVE_OSD_ACTION_NONE) {
+		g_hover_action = EVERLIVE_OSD_ACTION_NONE;
+		sdl_card_invalidate(sdl);
+	}
 	sdl->popup_kind = kind;
 	sdl->popup_open = true;
 	sdl->popup_dirty = true;
@@ -1513,16 +1523,90 @@ static void sdl_close_popup(struct everlive_sdl *sdl)
 	everlive_osd_destroy_popup(&sdl->popup);
 }
 
-static enum everlive_osd_action sdl_hit_card(struct everlive_sdl *sdl,
-					     int x, int y)
+static enum everlive_osd_action sdl_hit_card_raw(struct everlive_sdl *sdl,
+						 int x, int y)
 {
 	SDL_Point point = { x - sdl->card_dest.x, y - sdl->card_dest.y };
 
+	if (!sdl->card.texture || sdl->card_dest.w <= 0)
+		return EVERLIVE_OSD_ACTION_NONE;
 	for (int i = 0; i < sdl->card.hit_count; i++) {
 		if (SDL_PointInRect(&point, &sdl->card.hits[i].rect))
 			return sdl->card.hits[i].action;
 	}
 	return EVERLIVE_OSD_ACTION_NONE;
+}
+
+static enum everlive_osd_action sdl_hit_card(struct everlive_sdl *sdl,
+					     int x, int y)
+{
+	enum everlive_osd_action hit = sdl_hit_card_raw(sdl, x, y);
+
+	if (getenv("EVERLIVE_OSD_DEBUG"))
+		fprintf(stderr,
+			"[OSD] click %d,%d local=%d,%d dest=%d,%d %dx%d gen=%u hit=%d\n",
+			x, y, x - sdl->card_dest.x, y - sdl->card_dest.y,
+			sdl->card_dest.x, sdl->card_dest.y,
+			sdl->card_dest.w, sdl->card_dest.h,
+			sdl->card.generation, hit);
+	return hit;
+}
+
+static void sdl_set_hover(struct everlive_sdl *sdl,
+			  enum everlive_osd_action action)
+{
+	if (g_hover_action == action)
+		return;
+	g_hover_action = action;
+	sdl_card_invalidate(sdl);
+	if (getenv("EVERLIVE_OSD_DEBUG"))
+		fprintf(stderr, "[OSD] hover=%d\n", action);
+}
+
+static void sdl_update_hover(struct everlive_state *st,
+			     struct everlive_sdl *sdl, int x, int y)
+{
+	int win_w = 0;
+	int win_h = 0;
+	int pos;
+
+	if (!sdl->window || !atomic_load_explicit(&st->osd, __ATOMIC_RELAXED) ||
+	    sdl->popup_open || !sdl_card_mode_active(st, sdl) ||
+	    !sdl->card.texture) {
+		sdl_set_hover(sdl, EVERLIVE_OSD_ACTION_NONE);
+		return;
+	}
+	SDL_GetWindowSize(sdl->window, &win_w, &win_h);
+	if (win_w <= 0 || win_h <= 0 || x < 0 || y < 0 ||
+	    x >= win_w || y >= win_h) {
+		sdl_set_hover(sdl, EVERLIVE_OSD_ACTION_NONE);
+		return;
+	}
+	pos = atomic_load_explicit(&st->osd_pos, __ATOMIC_RELAXED);
+	sdl_place_osd(&sdl->card_dest, sdl->card.width, sdl->card.height,
+		      (float)win_h / 1080.0f, win_w, win_h, pos);
+	sdl_set_hover(sdl, sdl_hit_card_raw(sdl, x, y));
+}
+
+static void sdl_render_tooltip(struct everlive_sdl *sdl, int win_w, int win_h,
+			       float scale)
+{
+	const struct everlive_osd_hitbox *anchor;
+	SDL_Rect screen;
+
+	if (sdl->popup_open || g_hover_action == EVERLIVE_OSD_ACTION_NONE)
+		return;
+	anchor = sdl_card_hit(sdl, g_hover_action);
+	if (!anchor)
+		return;
+	screen.x = sdl->card_dest.x + anchor->rect.x;
+	screen.y = sdl->card_dest.y + anchor->rect.y;
+	screen.w = anchor->rect.w;
+	screen.h = anchor->rect.h;
+	if (everlive_osd_build_tooltip(sdl->renderer, &sdl->card,
+				       g_hover_action, scale))
+		everlive_osd_render_tooltip(sdl->renderer, &sdl->card,
+					    &screen, win_w, win_h);
 }
 
 static void sdl_volume_track_event(struct everlive_state *st,
@@ -1582,6 +1666,11 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 							   __ATOMIC_RELAXED));
 		}
 	}
+	if (event->type == SDL_MOUSEMOTION)
+		sdl_update_hover(st, sdl, event->motion.x, event->motion.y);
+	else if (event->type == SDL_MOUSEBUTTONDOWN ||
+		 event->type == SDL_MOUSEBUTTONUP)
+		sdl_update_hover(st, sdl, event->button.x, event->button.y);
 
 	if (event->type == SDL_MOUSEBUTTONUP &&
 	    event->button.button == SDL_BUTTON_LEFT) {
@@ -1736,6 +1825,7 @@ static void sdl_poll_embedded_pointer(struct everlive_state *st,
 	}
 	(void)win_x;
 	(void)win_y;
+	sdl_update_hover(st, sdl, local_x, local_y);
 	down = (mask & Button1Mask) != 0;
 	if (down && !g_embed_mouse_down) {
 		SDL_Event event;
@@ -1795,6 +1885,9 @@ static bool sdl_handle_events(struct everlive_state *st,
 			continue;
 		if (sdl_handle_mouse(st, sdl, &event))
 			continue;
+		if (event.type == SDL_WINDOWEVENT &&
+		    event.window.event == SDL_WINDOWEVENT_LEAVE)
+			sdl_set_hover(sdl, EVERLIVE_OSD_ACTION_NONE);
 		if (event.type == SDL_QUIT)
 			return false;
 		if (event.type != SDL_KEYDOWN || event.key.repeat)

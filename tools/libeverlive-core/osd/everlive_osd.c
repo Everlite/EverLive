@@ -214,6 +214,85 @@ static void draw_chip(SDL_Surface *surface, int x, int y, int w, int h,
 		     surface_color(surface, fill, 255));
 }
 
+static uint32_t mix_rgb(uint32_t base, uint32_t tint, int percent)
+{
+	int r = (int)((base >> 16) & 0xff);
+	int g = (int)((base >> 8) & 0xff);
+	int b = (int)(base & 0xff);
+	int tr = (int)((tint >> 16) & 0xff);
+	int tg = (int)((tint >> 8) & 0xff);
+	int tb = (int)(tint & 0xff);
+
+	r += (tr - r) * percent / 100;
+	g += (tg - g) * percent / 100;
+	b += (tb - b) * percent / 100;
+	return (uint32_t)((r << 16) | (g << 8) | b);
+}
+
+static void draw_chip_hover(SDL_Surface *surface, int x, int y, int w, int h,
+			    int radius, uint32_t fill, uint32_t border,
+			    bool hovered)
+{
+	uint32_t hot_fill = hovered ? mix_rgb(fill, 0xFFFFFF, 12) : fill;
+
+	draw_chip(surface, x, y, w, h, radius, hot_fill,
+		  hovered ? EVERLIVE_OSD_HOVER_BORDER : border);
+}
+
+static bool snapshot_hover(const struct everlive_osd_snapshot *snap,
+			   enum everlive_osd_action action)
+{
+	return snap && snap->hover_action == action;
+}
+
+static const char *action_label(enum everlive_osd_action action)
+{
+	switch (action) {
+	case EVERLIVE_OSD_ACTION_INPUT:
+		return "Input";
+	case EVERLIVE_OSD_ACTION_ASPECT:
+		return "Aspect";
+	case EVERLIVE_OSD_ACTION_SCALE:
+		return "Scale";
+	case EVERLIVE_OSD_ACTION_PIP:
+		return "Picture-in-Picture";
+	case EVERLIVE_OSD_ACTION_VOLUME:
+		return "Volume";
+	case EVERLIVE_OSD_ACTION_MUTE:
+		return "Mute";
+	case EVERLIVE_OSD_ACTION_FULLSCREEN:
+		return "Fullscreen";
+	case EVERLIVE_OSD_ACTION_RECORD:
+		return "Record";
+	default:
+		return NULL;
+	}
+}
+
+static const char *action_shortcut(enum everlive_osd_action action)
+{
+	switch (action) {
+	case EVERLIVE_OSD_ACTION_INPUT:
+		return "1 / 2";
+	case EVERLIVE_OSD_ACTION_ASPECT:
+		return "A";
+	case EVERLIVE_OSD_ACTION_SCALE:
+		return "L";
+	case EVERLIVE_OSD_ACTION_PIP:
+		return "P";
+	case EVERLIVE_OSD_ACTION_VOLUME:
+		return "Up / Down";
+	case EVERLIVE_OSD_ACTION_MUTE:
+		return "M";
+	case EVERLIVE_OSD_ACTION_FULLSCREEN:
+		return "F";
+	case EVERLIVE_OSD_ACTION_RECORD:
+		return "Ctrl+R";
+	default:
+		return NULL;
+	}
+}
+
 static bool file_exists(const char *path)
 {
 	return path && *path && access(path, R_OK) == 0;
@@ -347,9 +426,16 @@ void everlive_osd_destroy_card(struct everlive_osd_card *card)
 		return;
 	if (card->texture)
 		SDL_DestroyTexture(card->texture);
+	if (card->tooltip)
+		SDL_DestroyTexture(card->tooltip);
 	card->texture = NULL;
+	card->tooltip = NULL;
 	card->width = 0;
 	card->height = 0;
+	card->tooltip_width = 0;
+	card->tooltip_height = 0;
+	card->tooltip_action = EVERLIVE_OSD_ACTION_NONE;
+	card->tooltip_scale = 0.0f;
 	card->scale = 0.0f;
 	card->hit_count = 0;
 	card->cache_key[0] = '\0';
@@ -431,13 +517,14 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 		return false;
 
 	snprintf(key, sizeof(key),
-		 "%s|%s|%s|%s|%s|%d|%d|%d|%d|%d|%d|%.3f|%dx%d",
+		 "%s|%s|%s|%s|%s|%d|%d|%d|%d|%d|%d|%d|%.3f|%dx%d",
 		 title, route,
 		 snap && snap->route_source ? snap->route_source : "",
 		 snap && snap->route_target ? snap->route_target : "",
 		 input_label, show_input, snap && snap->pip,
 		 snap && snap->muted, snap && snap->fullscreen,
 		 snap && snap->recording,
+		 snap ? (int)snap->hover_action : 0,
 		 snap ? snap->volume_pct : 0, s, viewport_w, viewport_h);
 	if (out->texture && out->scale == s && out->viewport_w == viewport_w &&
 	    out->viewport_h == viewport_h && strcmp(out->cache_key, key) == 0)
@@ -574,8 +661,10 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 		int label_y = chip_y + (chip_h - text_height(g_font_regular,
 							     chip_size)) / 2;
 
-		draw_chip(surface, x, chip_y, input_w, chip_h, radius,
-			  EVERLIVE_OSD_INPUT_BG, EVERLIVE_OSD_BORDER);
+		draw_chip_hover(surface, x, chip_y, input_w, chip_h, radius,
+				EVERLIVE_OSD_INPUT_BG, EVERLIVE_OSD_BORDER,
+				snapshot_hover(snap,
+					       EVERLIVE_OSD_ACTION_INPUT));
 		draw_text(surface, input_label, g_font_regular, chip_size,
 			  label_x, label_y, EVERLIVE_OSD_TITLE, 255, NULL);
 		draw_glyph(surface, EVERLIVE_OSD_ICON_CHEVRON,
@@ -592,8 +681,10 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 	{
 		SDL_Rect hit = { x, chip_y, aspect_w, chip_h };
 
-		draw_chip(surface, x, chip_y, aspect_w, chip_h, radius,
-			  EVERLIVE_OSD_CHIP_BG, EVERLIVE_OSD_BORDER);
+		draw_chip_hover(surface, x, chip_y, aspect_w, chip_h, radius,
+				EVERLIVE_OSD_CHIP_BG, EVERLIVE_OSD_BORDER,
+				snapshot_hover(snap,
+					       EVERLIVE_OSD_ACTION_ASPECT));
 		draw_text(surface, aspect_label, g_font_regular, chip_size,
 			  x + iscale(16.0f * s),
 			  chip_y + (chip_h - text_height(g_font_regular,
@@ -605,8 +696,10 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 	{
 		SDL_Rect hit = { x, chip_y, scale_w, chip_h };
 
-		draw_chip(surface, x, chip_y, scale_w, chip_h, radius,
-			  EVERLIVE_OSD_CHIP_BG, EVERLIVE_OSD_BORDER);
+		draw_chip_hover(surface, x, chip_y, scale_w, chip_h, radius,
+				EVERLIVE_OSD_CHIP_BG, EVERLIVE_OSD_BORDER,
+				snapshot_hover(snap,
+					       EVERLIVE_OSD_ACTION_SCALE));
 		draw_text(surface, scale_label, g_font_regular, chip_size,
 			  x + iscale(16.0f * s),
 			  chip_y + (chip_h - text_height(g_font_regular,
@@ -627,8 +720,9 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 		SDL_Rect hit = { x, chip_y, button, button };		\
 		int glyph_w = glyph_width((glyph), icon_size);		\
 		int glyph_h = icon_size;					\
-		draw_chip(surface, x, chip_y, button, button, radius,	\
-			  (fill), (border));				\
+		draw_chip_hover(surface, x, chip_y, button, button, radius, \
+				(fill), (border),			\
+				snapshot_hover(snap, (action)));	\
 		draw_glyph(surface, (glyph), icon_size,			\
 			   x + (button - glyph_w) / 2,			\
 			   chip_y + (button - glyph_h) / 2, (color), 255); \
@@ -686,6 +780,156 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 			out->generation, s, viewport_w, viewport_h, width,
 			height, out->hit_count);
 	return true;
+}
+
+bool everlive_osd_build_tooltip(SDL_Renderer *renderer,
+				struct everlive_osd_card *card,
+				enum everlive_osd_action action,
+				float scale)
+{
+	SDL_Surface *surface;
+	SDL_Texture *texture;
+	const char *label;
+	const char *shortcut;
+	float s = clamp_scale(scale);
+	int label_size;
+	int key_size;
+	int pad;
+	int gap;
+	int key_pad;
+	int radius;
+	int label_w;
+	int label_h;
+	int key_w;
+	int key_h;
+	int cap_h;
+	int cap_w;
+	int content_h;
+	int width;
+	int height;
+	int label_y;
+	int cap_x;
+	int cap_y;
+
+	if (!renderer || !card || !g_available)
+		return false;
+	if (action <= EVERLIVE_OSD_ACTION_NONE ||
+	    action >= EVERLIVE_OSD_ACTION_COUNT)
+		return false;
+	if (card->tooltip && card->tooltip_action == action &&
+	    fabsf(card->tooltip_scale - s) < 0.001f)
+		return true;
+
+	label = action_label(action);
+	shortcut = action_shortcut(action);
+	if (!label || !shortcut)
+		return false;
+
+	label_size = iscale(15.0f * s);
+	key_size = iscale(14.0f * s);
+	if (label_size < 11)
+		label_size = 11;
+	if (key_size < 10)
+		key_size = 10;
+	pad = iscale(10.0f * s);
+	gap = iscale(12.0f * s);
+	key_pad = iscale(7.0f * s);
+	radius = iscale(7.0f * s);
+	label_w = text_width(label, g_font_regular, label_size);
+	label_h = text_height(g_font_regular, label_size);
+	key_w = text_width(shortcut, g_font_semibold, key_size);
+	key_h = text_height(g_font_semibold, key_size);
+	cap_h = key_h + iscale(4.0f * s);
+	cap_w = key_w + key_pad * 2;
+	content_h = label_h > cap_h ? label_h : cap_h;
+	width = pad * 2 + label_w + gap + cap_w;
+	height = pad * 2 + content_h;
+	if (width < 1 || height < 1)
+		return false;
+
+	surface = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32,
+						 SDL_PIXELFORMAT_RGBA32);
+	if (!surface)
+		return false;
+	SDL_FillRect(surface, NULL, 0);
+	fill_rounded(surface, 0, 0, width, height, radius,
+		     surface_color(surface, EVERLIVE_OSD_HOVER_BORDER, 255));
+	fill_rounded(surface, 1, 1, width - 2, height - 2,
+		     radius > 1 ? radius - 1 : 0,
+		     surface_color(surface, EVERLIVE_OSD_TOOLTIP_BG, 242));
+	label_y = (height - label_h) / 2;
+	draw_text(surface, label, g_font_regular, label_size, pad, label_y,
+		  EVERLIVE_OSD_TITLE, 255, NULL);
+	cap_x = pad + label_w + gap;
+	cap_y = (height - cap_h) / 2;
+	draw_chip(surface, cap_x, cap_y, cap_w, cap_h, radius / 2,
+		  EVERLIVE_OSD_CHIP_BG, EVERLIVE_OSD_BORDER);
+	draw_text(surface, shortcut, g_font_semibold, key_size,
+		  cap_x + key_pad, cap_y + (cap_h - key_h) / 2,
+		  EVERLIVE_OSD_MINT, 255, NULL);
+
+	texture = SDL_CreateTextureFromSurface(renderer, surface);
+	SDL_FreeSurface(surface);
+	if (!texture)
+		return false;
+	SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+	if (card->tooltip)
+		SDL_DestroyTexture(card->tooltip);
+	card->tooltip = texture;
+	card->tooltip_width = width;
+	card->tooltip_height = height;
+	card->tooltip_action = action;
+	card->tooltip_scale = s;
+	return true;
+}
+
+void everlive_osd_render_tooltip(SDL_Renderer *renderer,
+				 const struct everlive_osd_card *card,
+				 const SDL_Rect *anchor,
+				 int viewport_w, int viewport_h)
+{
+	SDL_Rect dst;
+	SDL_Rect scaled;
+	int gap;
+	int margin;
+	int out_w = 0;
+	int out_h = 0;
+
+	if (!renderer || !card || !card->tooltip || !anchor)
+		return;
+	if (viewport_w <= 0 || viewport_h <= 0)
+		return;
+	gap = iscale(8.0f * (card->tooltip_scale > 0.0f ?
+			     card->tooltip_scale : 1.0f));
+	margin = iscale(8.0f * (card->tooltip_scale > 0.0f ?
+				card->tooltip_scale : 1.0f));
+	dst.w = card->tooltip_width;
+	dst.h = card->tooltip_height;
+	dst.x = anchor->x + (anchor->w - dst.w) / 2;
+	dst.y = anchor->y + anchor->h + gap;
+	if (dst.x < margin)
+		dst.x = margin;
+	if (dst.x + dst.w > viewport_w - margin)
+		dst.x = viewport_w - dst.w - margin;
+	if (dst.y + dst.h > viewport_h - margin) {
+		dst.y = anchor->y - dst.h - gap;
+		if (dst.y < margin)
+			dst.y = margin;
+	}
+
+	scaled = dst;
+	if (SDL_GetRendererOutputSize(renderer, &out_w, &out_h) == 0 &&
+	    out_w > 0 && out_h > 0) {
+		scaled.x = lroundf((float)dst.x * (float)out_w /
+				   (float)viewport_w);
+		scaled.y = lroundf((float)dst.y * (float)out_h /
+				   (float)viewport_h);
+		scaled.w = lroundf((float)dst.w * (float)out_w /
+				   (float)viewport_w);
+		scaled.h = lroundf((float)dst.h * (float)out_h /
+				   (float)viewport_h);
+	}
+	SDL_RenderCopy(renderer, card->tooltip, NULL, &scaled);
 }
 
 bool everlive_osd_build_popup(SDL_Renderer *renderer,

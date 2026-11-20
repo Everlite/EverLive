@@ -99,6 +99,29 @@ class RecordingPlanTests(unittest.TestCase):
             self.assertIn("everlive-capture-audio.monitor", plan.cmd)
             self.assertNotIn("+faststart", plan.cmd)
 
+    def _shm_plan(self, tmp: str):
+        return rec.build_recording_plan(
+            output_dir=tmp, model="gc573", vfio_mode=True,
+            preload_library="/usr/local/lib/libgc573-v4l2.so",
+            width=1920, height=1080, source_fps=60.0, fps_setting="60",
+            source_setting="shm", encoder_setting="libx264",
+            quality_setting="high", container_format="mkv",
+            resolved_encoder="libx264")
+
+    def test_ffmpeg8_keeps_input_thread_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+                rec, "_supports_input_thread_queue", return_value=True):
+            plan = self._shm_plan(tmp)
+            idx = plan.cmd.index("-thread_queue_size")
+            self.assertLess(idx, plan.cmd.index("-i"))
+            self.assertEqual(plan.cmd[idx + 1], "1024")
+
+    def test_ffmpeg9_omits_input_thread_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+                rec, "_supports_input_thread_queue", return_value=False):
+            plan = self._shm_plan(tmp)
+            self.assertNotIn("-thread_queue_size", plan.cmd)
+
     def test_build_plan_gc570d_hdmi2_mp4(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan = rec.build_recording_plan(

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -429,6 +430,35 @@ def _shm_v4l2_node(model: str, duo_input: int, v4l2_device: Optional[str]) -> st
     return "/dev/video63"
 
 
+_INPUT_QUEUE_SUPPORT: Dict[str, bool] = {}
+
+
+def _supports_input_thread_queue(ffmpeg_bin: str) -> bool:
+    """Return whether this ffmpeg accepts -thread_queue_size before -i.
+
+    FFmpeg 9 moved the option to the muxer help and rejects it on an input
+    URL.  Older releases use it to absorb short v4l2/pulse input stalls, so
+    keep it where it works and omit it where it would make ffmpeg exit.
+    """
+    cached = _INPUT_QUEUE_SUPPORT.get(ffmpeg_bin)
+    if cached is not None:
+        return cached
+    supported = False
+    try:
+        proc = subprocess.run(
+            [ffmpeg_bin, "-hide_banner", "-version"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=3, check=False)
+        match = re.search(r"ffmpeg version (?:n)?(\d+)",
+                          proc.stdout or "")
+        if match:
+            supported = int(match.group(1)) < 9
+    except (OSError, subprocess.SubprocessError, ValueError):
+        supported = False
+    _INPUT_QUEUE_SUPPORT[ffmpeg_bin] = supported
+    return supported
+
+
 def build_recording_plan(
     *,
     output_dir: str = "",
@@ -479,6 +509,8 @@ def build_recording_plan(
 
     env: Dict[str, str] = {}
     cmd: List[str] = [ffmpeg_bin, "-hide_banner", "-loglevel", "warning"]
+    queue_args = (["-thread_queue_size", "1024"]
+                  if _supports_input_thread_queue(ffmpeg_bin) else [])
 
     if encoder in ("h264_vaapi", "hevc_vaapi"):
         va_node = vdev or "/dev/dri/renderD128"
@@ -488,7 +520,7 @@ def build_recording_plan(
         disp = display if display is not None else os.environ.get("DISPLAY", ":0")
         cmd.extend([
             "-f", "x11grab",
-            "-thread_queue_size", "1024",
+            *queue_args,
             "-draw_mouse", "0",
             "-framerate", str(fps),
             "-window_id", str(int(window_id or 0)),
@@ -501,7 +533,7 @@ def build_recording_plan(
                 env["LD_PRELOAD"] = preload_library
             cmd.extend([
                 "-f", "v4l2",
-                "-thread_queue_size", "1024",
+                *queue_args,
                 "-input_format", "yuyv422",
                 "-framerate", str(fps),
                 "-video_size", f"{even_w}x{even_h}",
@@ -511,7 +543,7 @@ def build_recording_plan(
             node = v4l2_device or "/dev/video0"
             cmd.extend([
                 "-f", "v4l2",
-                "-thread_queue_size", "1024",
+                *queue_args,
                 "-framerate", str(fps),
                 "-video_size", f"{even_w}x{even_h}",
                 "-i", node,
@@ -525,14 +557,14 @@ def build_recording_plan(
                 p for p in (env.get("LD_PRELOAD"), pip.preload_library) if p)
         cmd.extend([
             "-f", "v4l2",
-            "-thread_queue_size", "1024",
+            *queue_args,
             "-input_format", "yuyv422",
             "-framerate", str(max(1, int(pip.fps))),
             "-i", pip.node,
         ])
 
     if audio_source:
-        cmd.extend(["-f", "pulse", "-thread_queue_size", "1024", "-i", audio_source])
+        cmd.extend(["-f", "pulse", *queue_args, "-i", audio_source])
 
     def video_filter(chain: str) -> List[str]:
         if pip is None:

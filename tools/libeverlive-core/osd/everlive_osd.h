@@ -22,6 +22,8 @@
 #define EVERLIVE_OSD_ROUTE	0x94A3BB
 #define EVERLIVE_OSD_INPUT_BG	0x25334A
 #define EVERLIVE_OSD_CHIP_BG	0x202334
+#define EVERLIVE_OSD_HOVER_BORDER 0x3A3E54
+#define EVERLIVE_OSD_TOOLTIP_BG	0x161927
 #define EVERLIVE_OSD_DIVIDER	0x334155
 #define EVERLIVE_OSD_LIVE	0x19FF3B
 #define EVERLIVE_OSD_MINT_BG	0x23423B
@@ -71,6 +73,7 @@ struct everlive_osd_snapshot {
 	bool fullscreen;
 	bool recording;
 	bool interactive;
+	enum everlive_osd_action hover_action;
 	int volume_pct;
 };
 
@@ -88,6 +91,11 @@ struct everlive_osd_card {
 	int viewport_h;
 	unsigned generation;
 	char cache_key[768];
+	SDL_Texture *tooltip;
+	int tooltip_width;
+	int tooltip_height;
+	enum everlive_osd_action tooltip_action;
+	float tooltip_scale;
 	struct everlive_osd_hitbox hits[EVERLIVE_OSD_ACTION_COUNT];
 	int hit_count;
 };
@@ -121,6 +129,14 @@ bool everlive_osd_build_popup(SDL_Renderer *renderer,
 			      int selected_input, int volume_pct,
 			      float scale,
 			      struct everlive_osd_popup *out);
+bool everlive_osd_build_tooltip(SDL_Renderer *renderer,
+				struct everlive_osd_card *card,
+				enum everlive_osd_action action,
+				float scale);
+void everlive_osd_render_tooltip(SDL_Renderer *renderer,
+				 const struct everlive_osd_card *card,
+				 const SDL_Rect *anchor,
+				 int viewport_w, int viewport_h);
 bool everlive_osd_build_text(SDL_Renderer *renderer, const char *text,
 			     int viewport_h, SDL_Texture **texture,
 			     int *width, int *height, int *scale_out);
