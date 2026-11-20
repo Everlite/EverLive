@@ -22,9 +22,14 @@ class OsdModeTests(unittest.TestCase):
 
         def __init__(self):
             self.calls = []
+            self.record_calls = []
 
         def set_osd_mode(self, mode):
             self.calls.append(mode)
+            return True
+
+        def set_recording(self, active):
+            self.record_calls.append(active)
             return True
 
     class FakeCheck:
@@ -55,6 +60,22 @@ class OsdModeTests(unittest.TestCase):
         window = self._window(fullscreen=False, popout=True)
         everlive_viewer.MainWindow._sync_osd_mode(window)
         self.assertEqual(window._ipc.calls, ["card"])
+
+    def test_record_state_follows_recorder_on_attach(self):
+        window = self._window()
+        window.recorder = SimpleNamespace(is_recording=True)
+        everlive_viewer.MainWindow._sync_osd_mode(window)
+        self.assertEqual(window._ipc.record_calls, [True])
+        self.assertTrue(window._osd_recording_state)
+
+    def test_toggle_record_hub_action_is_queued(self):
+        window = SimpleNamespace(
+            _vfio_saw_output=False,
+            _pending_hub_actions=[],
+        )
+        everlive_viewer.GameStreamer._parse_streamer_line(
+            window, "[HUB] TOGGLE_RECORD")
+        self.assertEqual(window._pending_hub_actions, ["toggle_record"])
 
     def test_no_ipc_connection_is_a_no_op(self):
         window = self._window(fullscreen=True)

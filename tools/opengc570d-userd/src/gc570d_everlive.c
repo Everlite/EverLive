@@ -108,6 +108,8 @@ struct everlive_state {
 	atomic_bool osd;
 	atomic_int osd_pos;
 	atomic_int osd_mode;
+	atomic_bool recording;
+	atomic_bool osd_dirty;
 	atomic_int aspect;
 	atomic_int scale;
 	atomic_int volume_pct;
@@ -136,6 +138,8 @@ static struct everlive_state g_everlive = {
 	.osd = ATOMIC_VAR_INIT(true),
 	.osd_pos = ATOMIC_VAR_INIT(EVERLIVE_OSD_TR),
 	.osd_mode = ATOMIC_VAR_INIT(EVERLIVE_OSD_MODE_CARD),
+	.recording = ATOMIC_VAR_INIT(false),
+	.osd_dirty = ATOMIC_VAR_INIT(false),
 	.aspect = ATOMIC_VAR_INIT(EVERLIVE_ASPECT_AUTO),
 	.scale = ATOMIC_VAR_INIT(EVERLIVE_SCALE_FIT),
 	.volume_pct = ATOMIC_VAR_INIT(100),
@@ -1274,6 +1278,7 @@ static void sdl_card_update(struct everlive_state *st,
 	snap.fullscreen = sdl->fullscreen ||
 		(SDL_GetWindowFlags(sdl->window) &
 		 (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP));
+	snap.recording = atomic_load_explicit(&st->recording, __ATOMIC_RELAXED);
 	snap.interactive = true;
 	snap.volume_pct = vol;
 	everlive_osd_build_card(sdl->renderer, &snap,
@@ -1658,10 +1663,123 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 	case EVERLIVE_OSD_ACTION_FULLSCREEN:
 		sdl_toggle_fullscreen(sdl);
 		break;
+	case EVERLIVE_OSD_ACTION_RECORD:
+		printf("[HUB] TOGGLE_RECORD\n");
+		fflush(stdout);
+		break;
 	default:
 		break;
 	}
 	return action != EVERLIVE_OSD_ACTION_NONE;
+}
+
+static bool g_embed_mouse_down;
+static uint64_t g_embed_click_ns;
+static int g_embed_click_x;
+static int g_embed_click_y;
+
+static void sdl_poll_embedded_pointer(struct everlive_state *st,
+				      struct everlive_sdl *sdl)
+{
+#if defined(SDL_VIDEO_DRIVER_X11)
+	SDL_SysWMinfo info;
+	Display *dpy;
+	Window xwin;
+	Window root_ret;
+	Window child_ret;
+	int root_x = 0;
+	int root_y = 0;
+	int win_x = 0;
+	int win_y = 0;
+	int local_x = 0;
+	int local_y = 0;
+	unsigned int mask = 0;
+	bool down;
+
+	if (!sdl->window || sdl->parent_winid == 0) {
+		g_embed_mouse_down = false;
+		return;
+	}
+	{
+		static uint64_t last_poll_ns;
+		uint64_t poll_now = now_ns();
+
+		if (poll_now - last_poll_ns < 8000000ULL)
+			return;
+		last_poll_ns = poll_now;
+	}
+	SDL_VERSION(&info.version);
+	if (!SDL_GetWindowWMInfo(sdl->window, &info) ||
+	    info.subsystem != SDL_SYSWM_X11 || !info.info.x11.display)
+		return;
+	dpy = info.info.x11.display;
+	xwin = info.info.x11.window;
+	if (!XQueryPointer(dpy, DefaultRootWindow(dpy), &root_ret, &child_ret,
+			   &root_x, &root_y, &win_x, &win_y, &mask))
+		return;
+	if (!XTranslateCoordinates(dpy, DefaultRootWindow(dpy), xwin,
+				   root_x, root_y, &local_x, &local_y,
+				   &child_ret))
+		return;
+	{
+		XWindowAttributes xa;
+		int ww = 0;
+		int wh = 0;
+
+		/* X11 reports physical pixels; SDL mouse events are logical. */
+		SDL_GetWindowSize(sdl->window, &ww, &wh);
+		if (XGetWindowAttributes(dpy, xwin, &xa) && xa.width > 0 &&
+		    xa.height > 0 && ww > 0 && wh > 0) {
+			local_x = (local_x * ww + xa.width / 2) / xa.width;
+			local_y = (local_y * wh + xa.height / 2) / xa.height;
+		}
+	}
+	(void)win_x;
+	(void)win_y;
+	down = (mask & Button1Mask) != 0;
+	if (down && !g_embed_mouse_down) {
+		SDL_Event event;
+		uint64_t now = now_ns();
+		int clicks = (now - g_embed_click_ns < 450000000ULL &&
+			      abs(local_x - g_embed_click_x) < 8 &&
+			      abs(local_y - g_embed_click_y) < 8) ? 2 : 1;
+
+		memset(&event, 0, sizeof(event));
+		event.type = SDL_MOUSEBUTTONDOWN;
+		event.button.button = SDL_BUTTON_LEFT;
+		event.button.state = SDL_PRESSED;
+		event.button.clicks = (Uint8)clicks;
+		event.button.x = local_x;
+		event.button.y = local_y;
+		sdl_handle_mouse(st, sdl, &event);
+		g_embed_click_ns = now;
+		g_embed_click_x = local_x;
+		g_embed_click_y = local_y;
+	} else if (down && g_embed_mouse_down) {
+		SDL_Event event;
+
+		memset(&event, 0, sizeof(event));
+		event.type = SDL_MOUSEMOTION;
+		event.motion.x = local_x;
+		event.motion.y = local_y;
+		event.motion.state = SDL_BUTTON_LMASK;
+		sdl_handle_mouse(st, sdl, &event);
+	} else if (!down && g_embed_mouse_down) {
+		SDL_Event event;
+
+		memset(&event, 0, sizeof(event));
+		event.type = SDL_MOUSEBUTTONUP;
+		event.button.button = SDL_BUTTON_LEFT;
+		event.button.state = SDL_RELEASED;
+		event.button.x = local_x;
+		event.button.y = local_y;
+		sdl_handle_mouse(st, sdl, &event);
+	}
+	g_embed_mouse_down = down;
+#else
+	(void)st;
+	(void)sdl;
+#endif
 }
 
 static bool sdl_handle_events(struct everlive_state *st,
@@ -1670,6 +1788,11 @@ static bool sdl_handle_events(struct everlive_state *st,
 	SDL_Event event;
 
 	while (SDL_PollEvent(&event)) {
+		if (sdl->parent_winid != 0 &&
+		    (event.type == SDL_MOUSEBUTTONDOWN ||
+		     event.type == SDL_MOUSEBUTTONUP ||
+		     event.type == SDL_MOUSEMOTION))
+			continue;
 		if (sdl_handle_mouse(st, sdl, &event))
 			continue;
 		if (event.type == SDL_QUIT)
@@ -1938,6 +2061,11 @@ static void *everlive_thread(void *arg)
 
 #ifdef HAVE_SDL2
 		if (sdl_ready) {
+			if (atomic_exchange_explicit(&st->osd_dirty, false,
+						     __ATOMIC_RELAXED)) {
+				sdl_card_invalidate(&sdl);
+				sdl.overlay_built_ns = 0;
+			}
 			for (i = 0; i < 2; i++) {
 				if (updated[i])
 					sdl_update_texture(st, &sdl, i, &st->frame[i]);
@@ -1997,8 +2125,10 @@ static void *everlive_thread(void *arg)
 				keep_running = false;
 				break;
 			}
-			if (sdl_embed_sync_size(st, &sdl))
+			if (sdl_embed_sync_size(st, &sdl)) {
+				sdl_poll_embedded_pointer(st, &sdl);
 				sdl_render_frame(st, &sdl);
+			}
 		}
 #else
 		(void)keep_running;
@@ -2059,6 +2189,8 @@ int gc570d_everlive_start(struct everlive_framestore *framestore,
 	atomic_init(&g_everlive.osd, options->osd);
 	atomic_init(&g_everlive.osd_pos, parse_osd_pos(options->osd_pos));
 	atomic_init(&g_everlive.osd_mode, EVERLIVE_OSD_MODE_CARD);
+	atomic_init(&g_everlive.recording, false);
+	atomic_init(&g_everlive.osd_dirty, false);
 	atomic_init(&g_everlive.aspect, parse_aspect_mode(options->aspect));
 	atomic_init(&g_everlive.scale, parse_scale_mode(options->scale));
 	atomic_init(&g_everlive.volume_pct, vol);
@@ -2185,6 +2317,14 @@ void gc570d_everlive_set_osd_mode(const char *mode)
 		return;
 	atomic_store_explicit(&g_everlive.osd_mode, parse_osd_mode(mode),
 			      __ATOMIC_RELAXED);
+}
+
+void gc570d_everlive_set_recording(bool active)
+{
+	if (!atomic_load_explicit(&g_everlive.started, __ATOMIC_ACQUIRE))
+		return;
+	atomic_store_explicit(&g_everlive.recording, active, __ATOMIC_RELAXED);
+	atomic_store_explicit(&g_everlive.osd_dirty, true, __ATOMIC_RELAXED);
 }
 
 void gc570d_everlive_set_pip(bool enabled)

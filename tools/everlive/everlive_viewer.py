@@ -1471,6 +1471,9 @@ class GameStreamer:
         if "[HUB] TOGGLE_FULLSCREEN" in line:
             self._pending_hub_actions.append("toggle_fullscreen")
             return
+        if "[HUB] TOGGLE_RECORD" in line:
+            self._pending_hub_actions.append("toggle_record")
+            return
         if "[HUB] EXIT_FULLSCREEN" in line:
             self._pending_hub_actions.append("exit_fullscreen")
             return
@@ -5428,6 +5431,8 @@ if HAS_QT:
             for act in pending:
                 if act == "toggle_fullscreen":
                     self.toggle_cinema_fullscreen()
+                elif act == "toggle_record":
+                    self.toggle_recording()
                 elif act == "exit_fullscreen":
                     self._exit_cinema_fullscreen()
                 elif isinstance(act, tuple) and act[0] == "fg_mult":
@@ -5657,6 +5662,10 @@ if HAS_QT:
             if self._ipc is None or not self._ipc.connected:
                 return
             self._ipc.set_osd_mode("card")
+            active = bool(
+                getattr(self, "recorder", None) and self.recorder.is_recording)
+            self._ipc.set_recording(active)
+            self._osd_recording_state = active
 
         def _set_cinema_fullscreen(self, enabled: bool):
             self._cinema_fullscreen = bool(enabled)
@@ -7456,6 +7465,12 @@ if HAS_QT:
         def _sync_recording_ui(self):
             active = bool(getattr(self, "recorder", None) and self.recorder.is_recording)
             plan = self.recorder.current_plan if active else None
+
+            if getattr(self, "_osd_recording_state", None) != active:
+                self._osd_recording_state = active
+                ipc = getattr(self, "_ipc", None)
+                if ipc is not None and ipc.connected:
+                    ipc.set_recording(active)
 
             if hasattr(self, "btn_record"):
                 if active:

@@ -431,16 +431,20 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 		return false;
 
 	snprintf(key, sizeof(key),
-		 "%s|%s|%s|%s|%s|%d|%d|%d|%d|%d|%.3f|%dx%d",
+		 "%s|%s|%s|%s|%s|%d|%d|%d|%d|%d|%d|%.3f|%dx%d",
 		 title, route,
 		 snap && snap->route_source ? snap->route_source : "",
 		 snap && snap->route_target ? snap->route_target : "",
 		 input_label, show_input, snap && snap->pip,
 		 snap && snap->muted, snap && snap->fullscreen,
+		 snap && snap->recording,
 		 snap ? snap->volume_pct : 0, s, viewport_w, viewport_h);
 	if (out->texture && out->scale == s && out->viewport_w == viewport_w &&
 	    out->viewport_h == viewport_h && strcmp(out->cache_key, key) == 0)
 		return true;
+
+	/* Hitboxes describe exactly one build.  Never append to stale ones. */
+	out->hit_count = 0;
 
 	title_size = iscale(30.0f * s);
 	route_size = iscale(20.0f * s);
@@ -482,13 +486,21 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 			  iscale(8.0f * s) + chevron;
 	}
 	aspect_w = iscale(16.0f * s) * 2 +
-		   text_width(aspect_label, g_font_regular, chip_size);
+		   text_width("Aspect: Stretch", g_font_regular, chip_size);
 	scale_w = iscale(16.0f * s) * 2 +
-		  text_width(scale_label, g_font_regular, chip_size);
+		  text_width("Scale: Integer", g_font_regular, chip_size);
+	if (text_width(aspect_label, g_font_regular, chip_size) >
+	    text_width("Aspect: Stretch", g_font_regular, chip_size))
+		aspect_w = iscale(16.0f * s) * 2 +
+			   text_width(aspect_label, g_font_regular, chip_size);
+	if (text_width(scale_label, g_font_regular, chip_size) >
+	    text_width("Scale: Integer", g_font_regular, chip_size))
+		scale_w = iscale(16.0f * s) * 2 +
+			  text_width(scale_label, g_font_regular, chip_size);
 	divider_w = iscale(1.0f * s);
 	if (divider_w < 1)
 		divider_w = 1;
-	icon_count = 3 + (show_input ? 1 : 0);
+	icon_count = 4 + (show_input ? 1 : 0);
 	icons_w = icon_count * button + (icon_count - 1) * iscale(9.0f * s);
 	chip_row_w = aspect_w + scale_w + icons_w +
 		     gap + gap + gap + divider_w + gap +
@@ -604,10 +616,11 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 		x += scale_w + gap;
 	}
 
-	SDL_Rect divider = { x, chip_y + iscale(6.0f * s), divider_w,
+	x = width - pad - icons_w;
+	SDL_Rect divider = { x - gap - divider_w,
+			     chip_y + iscale(6.0f * s), divider_w,
 			     chip_h - iscale(12.0f * s) };
 	SDL_FillRect(surface, &divider, divider_color);
-	x += divider_w + gap;
 
 #define DRAW_ICON_BUTTON(action, glyph, fill, border, color)		\
 	do {								\
@@ -623,6 +636,11 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 		x += button + iscale(9.0f * s);				\
 	} while (0)
 
+	DRAW_ICON_BUTTON(EVERLIVE_OSD_ACTION_RECORD,
+			 snap && snap->recording ? EVERLIVE_OSD_ICON_STOP : EVERLIVE_OSD_ICON_RECORD,
+			 snap && snap->recording ? EVERLIVE_OSD_DANGER_BG : EVERLIVE_OSD_CHIP_BG,
+			 snap && snap->recording ? EVERLIVE_OSD_DANGER_BORDER : EVERLIVE_OSD_BORDER,
+			 snap && snap->recording ? EVERLIVE_OSD_DANGER : EVERLIVE_OSD_TITLE);
 	if (show_input) {
 		DRAW_ICON_BUTTON(EVERLIVE_OSD_ACTION_PIP,
 				 EVERLIVE_OSD_ICON_PIP,
@@ -660,7 +678,13 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 	out->scale = s;
 	out->viewport_w = viewport_w;
 	out->viewport_h = viewport_h;
+	out->generation++;
 	snprintf(out->cache_key, sizeof(out->cache_key), "%s", key);
+	if (getenv("EVERLIVE_OSD_DEBUG"))
+		fprintf(stderr,
+			"[OSD] build gen=%u scale=%.2f viewport=%dx%d size=%dx%d hits=%d\n",
+			out->generation, s, viewport_w, viewport_h, width,
+			height, out->hit_count);
 	return true;
 }
 

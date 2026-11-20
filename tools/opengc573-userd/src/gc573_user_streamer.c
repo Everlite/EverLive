@@ -427,6 +427,7 @@ enum osd_mode {
 };
 
 static enum osd_mode g_osd_mode = OSD_MODE_CARD;
+static int g_recording_flag;
 
 static const char *osd_pos_name(enum osd_position pos)
 {
@@ -2024,6 +2025,7 @@ static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
 	snap.pip = false;
 	snap.muted = __atomic_load_n(&g_audio_mute_flag, __ATOMIC_RELAXED) != 0;
 	snap.fullscreen = osd_window_is_fullscreen(window);
+	snap.recording = __atomic_load_n(&g_recording_flag, __ATOMIC_RELAXED) != 0;
 	snap.interactive = !g_headless;
 	snap.volume_pct = (int)(gain * 100.0f + 0.5f);
 
@@ -2388,14 +2390,22 @@ static void osd_close_popup(void)
 static enum everlive_osd_action osd_hit_card(int x, int y)
 {
 	SDL_Point point = { x - g_card_dest.x, y - g_card_dest.y };
+	enum everlive_osd_action hit = EVERLIVE_OSD_ACTION_NONE;
 
 	if (!g_card.texture || g_card_dest.w <= 0)
 		return EVERLIVE_OSD_ACTION_NONE;
 	for (int i = 0; i < g_card.hit_count; i++) {
-		if (SDL_PointInRect(&point, &g_card.hits[i].rect))
-			return g_card.hits[i].action;
+		if (SDL_PointInRect(&point, &g_card.hits[i].rect)) {
+			hit = g_card.hits[i].action;
+			break;
+		}
 	}
-	return EVERLIVE_OSD_ACTION_NONE;
+	if (getenv("EVERLIVE_OSD_DEBUG"))
+		fprintf(stderr,
+			"[OSD] click %d,%d local=%d,%d dest=%d,%d %dx%d gen=%u hit=%d\n",
+			x, y, point.x, point.y, g_card_dest.x, g_card_dest.y,
+			g_card_dest.w, g_card_dest.h, g_card.generation, hit);
+	return hit;
 }
 
 static bool osd_volume_track_event(int x, bool press)
@@ -2496,6 +2506,10 @@ static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 	case EVERLIVE_OSD_ACTION_FULLSCREEN:
 		osd_toggle_fullscreen(window);
 		toast_trigger("Fullscreen toggled");
+		break;
+	case EVERLIVE_OSD_ACTION_RECORD:
+		printf("[HUB] TOGGLE_RECORD\n");
+		fflush(stdout);
 		break;
 	default:
 		break;
@@ -2600,6 +2614,113 @@ static void toast_render(SDL_Renderer *renderer, SDL_Window *window)
 		dst.y = 0;
 
 	SDL_RenderCopy(renderer, g_toast.texture, NULL, &dst);
+}
+
+static bool g_embed_mouse_down;
+static uint64_t g_embed_click_ms;
+static int g_embed_click_x;
+static int g_embed_click_y;
+
+static void embed_poll_pointer(SDL_Window *window)
+{
+#if defined(SDL_VIDEO_DRIVER_X11)
+	SDL_SysWMinfo info;
+	Display *dpy;
+	Window xwin;
+	Window root_ret;
+	Window child_ret;
+	int root_x = 0;
+	int root_y = 0;
+	int win_x = 0;
+	int win_y = 0;
+	int local_x = 0;
+	int local_y = 0;
+	unsigned int mask = 0;
+	bool down;
+
+	if (!window || g_parent_winid == 0) {
+		g_embed_mouse_down = false;
+		return;
+	}
+	{
+		static uint64_t last_poll_ms;
+		uint64_t poll_now = now_ms();
+
+		if (poll_now - last_poll_ms < 8)
+			return;
+		last_poll_ms = poll_now;
+	}
+	SDL_VERSION(&info.version);
+	if (!SDL_GetWindowWMInfo(window, &info) ||
+	    info.subsystem != SDL_SYSWM_X11 || !info.info.x11.display)
+		return;
+	dpy = info.info.x11.display;
+	xwin = info.info.x11.window;
+	if (!XQueryPointer(dpy, DefaultRootWindow(dpy), &root_ret, &child_ret,
+			   &root_x, &root_y, &win_x, &win_y, &mask))
+		return;
+	if (!XTranslateCoordinates(dpy, DefaultRootWindow(dpy), xwin,
+				   root_x, root_y, &local_x, &local_y,
+				   &child_ret))
+		return;
+	{
+		XWindowAttributes xa;
+		int ww = 0;
+		int wh = 0;
+
+		/* X11 reports physical pixels; SDL mouse events are logical. */
+		SDL_GetWindowSize(window, &ww, &wh);
+		if (XGetWindowAttributes(dpy, xwin, &xa) && xa.width > 0 &&
+		    xa.height > 0 && ww > 0 && wh > 0) {
+			local_x = (local_x * ww + xa.width / 2) / xa.width;
+			local_y = (local_y * wh + xa.height / 2) / xa.height;
+		}
+	}
+	(void)win_x;
+	(void)win_y;
+	down = (mask & Button1Mask) != 0;
+	if (down && !g_embed_mouse_down) {
+		SDL_Event event;
+		uint64_t now = now_ms();
+		int clicks = (now - g_embed_click_ms < 450ULL &&
+			      abs(local_x - g_embed_click_x) < 8 &&
+			      abs(local_y - g_embed_click_y) < 8) ? 2 : 1;
+
+		memset(&event, 0, sizeof(event));
+		event.type = SDL_MOUSEBUTTONDOWN;
+		event.button.button = SDL_BUTTON_LEFT;
+		event.button.state = SDL_PRESSED;
+		event.button.clicks = (Uint8)clicks;
+		event.button.x = local_x;
+		event.button.y = local_y;
+		osd_handle_mouse(window, &event);
+		g_embed_click_ms = now;
+		g_embed_click_x = local_x;
+		g_embed_click_y = local_y;
+	} else if (down && g_embed_mouse_down) {
+		SDL_Event event;
+
+		memset(&event, 0, sizeof(event));
+		event.type = SDL_MOUSEMOTION;
+		event.motion.x = local_x;
+		event.motion.y = local_y;
+		event.motion.state = SDL_BUTTON_LMASK;
+		osd_handle_mouse(window, &event);
+	} else if (!down && g_embed_mouse_down) {
+		SDL_Event event;
+
+		memset(&event, 0, sizeof(event));
+		event.type = SDL_MOUSEBUTTONUP;
+		event.button.button = SDL_BUTTON_LEFT;
+		event.button.state = SDL_RELEASED;
+		event.button.x = local_x;
+		event.button.y = local_y;
+		osd_handle_mouse(window, &event);
+	}
+	g_embed_mouse_down = down;
+#else
+	(void)window;
+#endif
 }
 
 static void fit_destination(SDL_Rect *dst, int win_w, int win_h,
@@ -6851,6 +6972,12 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 			g_osd_pos = (enum osd_position)cmd->a;
 		printf("[IPC] OSD position: %s\n", osd_pos_name(g_osd_pos));
 		break;
+	case GC573_IPC_CMD_RECORD_STATE:
+		__atomic_store_n(&g_recording_flag, cmd->a ? 1 : 0,
+				 __ATOMIC_RELAXED);
+		osd_card_invalidate();
+		printf("[IPC] Recording: %s\n", cmd->a ? "on" : "off");
+		break;
 	case GC573_IPC_CMD_OSD_MODE:
 		if (cmd->a >= 0 && cmd->a <= OSD_MODE_CARD) {
 			g_osd_mode = (enum osd_mode)cmd->a;
@@ -7810,10 +7937,17 @@ int main(int argc, char *argv[])
 		SDL_Event event;
 		uint64_t now;
 
-		if (window && g_parent_winid && !g_headless)
+		if (window && g_parent_winid && !g_headless) {
 			embed_window_sync_size(window);
+			embed_poll_pointer(window);
+		}
 
 		while (SDL_PollEvent(&event)) {
+			if (g_parent_winid != 0 &&
+			    (event.type == SDL_MOUSEBUTTONDOWN ||
+			     event.type == SDL_MOUSEBUTTONUP ||
+			     event.type == SDL_MOUSEMOTION))
+				continue;
 			if (osd_handle_mouse(window, &event))
 				continue;
 			if (event.type == SDL_WINDOWEVENT) {

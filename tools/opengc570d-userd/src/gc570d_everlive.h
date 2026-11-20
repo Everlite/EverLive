@@ -46,6 +46,7 @@ void gc570d_everlive_set_port(int port);
 void gc570d_everlive_set_osd(bool enabled);
 void gc570d_everlive_set_osd_pos(const char *pos);
 void gc570d_everlive_set_osd_mode(const char *mode);
+void gc570d_everlive_set_recording(bool active);
 void gc570d_everlive_set_pip(bool enabled);
 void gc570d_everlive_set_aspect(const char *aspect);
 void gc570d_everlive_set_scale(const char *scale);

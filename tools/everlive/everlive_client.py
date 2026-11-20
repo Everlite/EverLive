@@ -369,6 +369,10 @@ if QSocketNotifier is not None:
             return self.request("osd.mode.set",
                                 {"mode": str(mode).strip().lower()})
 
+        def set_recording(self, active: bool) -> bool:
+            """Mirror the Hub recorder state on the engine OSD."""
+            return self.request("record.state", {"active": bool(active)})
+
         def set_aspect(self, mode: str) -> bool:
             """mode: ``auto`` | ``16:9`` | ``4:3`` | ``stretch``."""
             return self.request("aspect.set", {"mode": str(mode)})

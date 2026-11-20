@@ -301,7 +301,7 @@ static void rpc_hello(int fd, const char *id)
 		     "\"osd.set\",\"osd.position.set\",\"osd.mode.set\","
 		     "\"aspect.set\","
 		     "\"scale.set\",\"input.set\",\"pip.set\","
-		     "\"mode.set\",\"hotplug\",\"edid.set\"]}",
+		     "\"mode.set\",\"hotplug\",\"edid.set\",\"record.state\"]}",
 		     g_version, (long)getpid(), path_esc);
 	if (n > 0 && (size_t)n < sizeof(result))
 		rpc_reply(fd, id, result);
@@ -471,6 +471,18 @@ static void rpc_osd_mode(int fd, const char *id, const char *line)
 		return;
 	}
 	gc570d_everlive_set_osd_mode(mode);
+	rpc_ok(fd, id);
+}
+
+static void rpc_record_state(int fd, const char *id, const char *line)
+{
+	bool active;
+
+	if (!everlive_json_get_bool(line, "active", &active)) {
+		rpc_error(fd, id, -32602, "invalid params: active required");
+		return;
+	}
+	gc570d_everlive_set_recording(active);
 	rpc_ok(fd, id);
 }
 
@@ -676,6 +688,8 @@ static void rpc_dispatch(int fd, const char *id, const char *method,
 		rpc_osd_pos(fd, id, line);
 	else if (strcmp(method, "osd.mode.set") == 0)
 		rpc_osd_mode(fd, id, line);
+	else if (strcmp(method, "record.state") == 0)
+		rpc_record_state(fd, id, line);
 	else if (strcmp(method, "aspect.set") == 0)
 		rpc_aspect(fd, id, line);
 	else if (strcmp(method, "scale.set") == 0)

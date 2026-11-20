@@ -729,6 +729,8 @@ These methods are implemented when supported by the hardware, and must return er
 | `audio.channels.set`| `{"mode": "auto"}` | Layout: `auto\|stereo\|5.1\|7.1` (GC573); `auto\|stereo` (GC570D) | GC573, GC570D |
 | `osd.set` | `{"enabled": true}` | On-screen display toggle | GC573, GC570D |
 | `osd.position.set` | `{"pos": "tr"}` | OSD placement: `tr`, `br`, `bl`, `tl` (or `top-right`, etc.) | GC573, GC570D |
+| `osd.mode.set` | `{"mode": "card"}` | OSD style: `auto`, `compact`, `card` | GC573, GC570D, HWS UHD |
+| `record.state` | `{"active": true}` | Mirror the Hub recorder state in the OSD Record button | GC573, GC570D, HWS UHD |
 | `aspect.set` | `{"mode": "auto"}` | Aspect ratio: `auto`, `16:9`, `4:3`, `stretch` | GC573, GC570D |
 | `scale.set` | `{"mode": "fit"}` | Scaling: `fit`, `integer` | GC573, GC570D |
 | `mode.set` | `{"mode": "gaming"}` | Modes: `gaming`, `headless` | GC573 only (GC570D -> `-32601`) |

@@ -71,7 +71,8 @@ static bool g_fullscreen;
 static bool g_vsync;
 static bool g_osd = true;
 static int g_osd_pos;
-static int g_osd_mode = HWS_IPC_OSD_MODE_CARD;			/* enum hws_ipc_osd_pos */
+static int g_osd_mode = HWS_IPC_OSD_MODE_CARD;	/* enum hws_ipc_osd_pos */
+static atomic_int g_recording;
 static int g_aspect = ASPECT_AUTO;
 static bool g_scale_integer;
 static bool g_streamer_mode;
@@ -240,6 +241,8 @@ static void *output_thread(void *arg)
 
 static bool g_mode_switch;	/* leave the current main loop to switch mode */
 
+static void hws_card_invalidate(void);
+
 static void apply_cmd(const struct hws_ipc_cmd *cmd)
 {
 	char msg[96];
@@ -259,8 +262,13 @@ static void apply_cmd(const struct hws_ipc_cmd *cmd)
 	case HWS_IPC_CMD_OSD_POSITION:
 		g_osd_pos = cmd->a & 3;
 		break;
+	case HWS_IPC_CMD_RECORD_STATE:
+		atomic_store(&g_recording, cmd->a != 0);
+		hws_card_invalidate();
+		break;
 	case HWS_IPC_CMD_OSD_MODE:
 		g_osd_mode = cmd->a & 3;
+		hws_card_invalidate();
 		break;
 	case HWS_IPC_CMD_ASPECT:
 		g_aspect = cmd->a & 3;
@@ -704,6 +712,7 @@ static void hws_card_update(SDL_Renderer *r, SDL_Window *win,
 	snap.fullscreen = g_fullscreen ||
 		(flags & (SDL_WINDOW_FULLSCREEN |
 			  SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0;
+	snap.recording = atomic_load(&g_recording) != 0;
 	snap.interactive = true;
 	snap.volume_pct = (int)lrintf(gain * 100.0f);
 	everlive_osd_build_card(r, &snap, (float)win_h / 1080.0f,
@@ -804,11 +813,20 @@ static void hws_apply_volume(SDL_Renderer *r, SDL_Window *win, int pct)
 static enum everlive_osd_action hws_hit_card(int x, int y)
 {
 	SDL_Point point = { x - g_card_dest.x, y - g_card_dest.y };
+	enum everlive_osd_action hit = EVERLIVE_OSD_ACTION_NONE;
 
-	for (int i = 0; i < g_card.hit_count; i++)
-		if (SDL_PointInRect(&point, &g_card.hits[i].rect))
-			return g_card.hits[i].action;
-	return EVERLIVE_OSD_ACTION_NONE;
+	for (int i = 0; i < g_card.hit_count; i++) {
+		if (SDL_PointInRect(&point, &g_card.hits[i].rect)) {
+			hit = g_card.hits[i].action;
+			break;
+		}
+	}
+	if (getenv("EVERLIVE_OSD_DEBUG"))
+		fprintf(stderr,
+			"[OSD] click %d,%d local=%d,%d dest=%d,%d %dx%d gen=%u hit=%d\n",
+			x, y, point.x, point.y, g_card_dest.x, g_card_dest.y,
+			g_card_dest.w, g_card_dest.h, g_card.generation, hit);
+	return hit;
 }
 
 static void hws_mouse_track(SDL_Window *win, int x, bool press)
@@ -912,6 +930,10 @@ static bool hws_handle_mouse(SDL_Event *event, SDL_Window *win)
 		}
 		hws_card_invalidate();
 		break;
+	case EVERLIVE_OSD_ACTION_RECORD:
+		printf("[HUB] TOGGLE_RECORD\n");
+		fflush(stdout);
+		break;
 	default:
 		break;
 	}
@@ -958,6 +980,108 @@ static void draw_osd(SDL_Renderer *r, SDL_Window *win, int out_w, int out_h)
 		return;
 	}
 	draw_compact_osd(r, out_w, out_h);
+}
+
+static bool g_embed_mouse_down;
+static uint64_t g_embed_click_ms;
+static int g_embed_click_x;
+static int g_embed_click_y;
+
+static void hws_poll_pointer(SDL_Window *win)
+{
+#if defined(HAVE_X11)
+	Display *dpy;
+	Window self;
+	Window root_ret;
+	Window child_ret;
+	int root_x = 0;
+	int root_y = 0;
+	int win_x = 0;
+	int win_y = 0;
+	int local_x = 0;
+	int local_y = 0;
+	unsigned int mask = 0;
+	bool down;
+
+	if (!win || g_parent_winid == 0) {
+		g_embed_mouse_down = false;
+		return;
+	}
+	{
+		static uint64_t last_poll_ms;
+		uint64_t poll_now = now_ms();
+
+		if (poll_now - last_poll_ms < 8)
+			return;
+		last_poll_ms = poll_now;
+	}
+	if (!embed_info(win, &dpy, &self))
+		return;
+	if (!XQueryPointer(dpy, DefaultRootWindow(dpy), &root_ret, &child_ret,
+			   &root_x, &root_y, &win_x, &win_y, &mask))
+		return;
+	if (!XTranslateCoordinates(dpy, DefaultRootWindow(dpy), self,
+				   root_x, root_y, &local_x, &local_y,
+				   &child_ret))
+		return;
+	{
+		XWindowAttributes xa;
+		int ww = 0;
+		int wh = 0;
+
+		/* X11 reports physical pixels; SDL mouse events are logical. */
+		SDL_GetWindowSize(win, &ww, &wh);
+		if (XGetWindowAttributes(dpy, self, &xa) && xa.width > 0 &&
+		    xa.height > 0 && ww > 0 && wh > 0) {
+			local_x = (local_x * ww + xa.width / 2) / xa.width;
+			local_y = (local_y * wh + xa.height / 2) / xa.height;
+		}
+	}
+	(void)win_x;
+	(void)win_y;
+	down = (mask & Button1Mask) != 0;
+	if (down && !g_embed_mouse_down) {
+		SDL_Event event;
+		uint64_t now = now_ms();
+		int clicks = (now - g_embed_click_ms < 450ULL &&
+			      abs(local_x - g_embed_click_x) < 8 &&
+			      abs(local_y - g_embed_click_y) < 8) ? 2 : 1;
+
+		memset(&event, 0, sizeof(event));
+		event.type = SDL_MOUSEBUTTONDOWN;
+		event.button.button = SDL_BUTTON_LEFT;
+		event.button.state = SDL_PRESSED;
+		event.button.clicks = (Uint8)clicks;
+		event.button.x = local_x;
+		event.button.y = local_y;
+		hws_handle_mouse(&event, win);
+		g_embed_click_ms = now;
+		g_embed_click_x = local_x;
+		g_embed_click_y = local_y;
+	} else if (down && g_embed_mouse_down) {
+		SDL_Event event;
+
+		memset(&event, 0, sizeof(event));
+		event.type = SDL_MOUSEMOTION;
+		event.motion.x = local_x;
+		event.motion.y = local_y;
+		event.motion.state = SDL_BUTTON_LMASK;
+		hws_handle_mouse(&event, win);
+	} else if (!down && g_embed_mouse_down) {
+		SDL_Event event;
+
+		memset(&event, 0, sizeof(event));
+		event.type = SDL_MOUSEBUTTONUP;
+		event.button.button = SDL_BUTTON_LEFT;
+		event.button.state = SDL_RELEASED;
+		event.button.x = local_x;
+		event.button.y = local_y;
+		hws_handle_mouse(&event, win);
+	}
+	g_embed_mouse_down = down;
+#else
+	(void)win;
+#endif
 }
 
 static SDL_Rect dest_rect(int win_w, int win_h, unsigned int fw, unsigned int fh)
@@ -1106,6 +1230,11 @@ static void run_window(void)
 		bool have_frame;
 
 		while (SDL_PollEvent(&e)) {
+			if (g_parent_winid != 0 &&
+			    (e.type == SDL_MOUSEBUTTONDOWN ||
+			     e.type == SDL_MOUSEBUTTONUP ||
+			     e.type == SDL_MOUSEMOTION))
+				continue;
 			if (hws_handle_mouse(&e, win))
 				continue;
 			if (e.type == SDL_KEYDOWN && !e.key.repeat &&
@@ -1125,6 +1254,8 @@ static void run_window(void)
 		}
 		poll_ipc();
 		embed_sync(win);
+		if (g_parent_winid != 0)
+			hws_poll_pointer(win);
 		SDL_GetRendererOutputSize(ren, &win_w, &win_h);
 
 		have_frame = hws_capture_acquire(g_cap, CONSUMER_PRESENT, last_seq,

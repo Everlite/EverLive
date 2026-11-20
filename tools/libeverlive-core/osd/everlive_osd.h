@@ -41,6 +41,8 @@
 #define EVERLIVE_OSD_ICON_EXPAND		0xF065
 #define EVERLIVE_OSD_ICON_COMPRESS	0xF066
 #define EVERLIVE_OSD_ICON_ARROW_RIGHT	0xF061
+#define EVERLIVE_OSD_ICON_RECORD		0xF111 /* solid circle */
+#define EVERLIVE_OSD_ICON_STOP		0xF04D
 
 enum everlive_osd_action {
 	EVERLIVE_OSD_ACTION_NONE = 0,
@@ -51,6 +53,7 @@ enum everlive_osd_action {
 	EVERLIVE_OSD_ACTION_VOLUME,
 	EVERLIVE_OSD_ACTION_MUTE,
 	EVERLIVE_OSD_ACTION_FULLSCREEN,
+	EVERLIVE_OSD_ACTION_RECORD,
 	EVERLIVE_OSD_ACTION_COUNT,
 };
 
@@ -66,6 +69,7 @@ struct everlive_osd_snapshot {
 	bool pip;
 	bool muted;
 	bool fullscreen;
+	bool recording;
 	bool interactive;
 	int volume_pct;
 };
@@ -82,6 +86,7 @@ struct everlive_osd_card {
 	float scale;
 	int viewport_w;
 	int viewport_h;
+	unsigned generation;
 	char cache_key[768];
 	struct everlive_osd_hitbox hits[EVERLIVE_OSD_ACTION_COUNT];
 	int hit_count;

@@ -85,6 +85,7 @@ enum hws_ipc_mode {
 	HWS_IPC_CMD_EDID,
 	HWS_IPC_CMD_HOTPLUG,
 	HWS_IPC_CMD_HDR_EV,
+	HWS_IPC_CMD_RECORD_STATE,
 };
 
 /*

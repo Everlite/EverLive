@@ -353,6 +353,7 @@ static void ipc_send_hello(struct ipc_server *s, struct ipc_client *c,
 		     "\"audio.volume.set\",\"audio.mute.set\","
 		     "\"audio.channels.set\","
 		     "\"osd.set\",\"osd.position.set\",\"osd.mode.set\","
+		     "\"record.state\","
 		     "\"aspect.set\",\"scale.set\",\"mode.set\","
 		     "\"v4l2.set\",\"toast.show\"]}",
 		     HWS_IPC_PROTO_VERSION, s->version, (long)getpid(),
@@ -541,6 +542,20 @@ static void ipc_handle_osd_mode(struct ipc_client *c, const char *id,
 	ipc_push_and_reply(c, id, &cmd);
 }
 
+static void ipc_handle_record_state(struct ipc_client *c, const char *id,
+				    const char *line)
+{
+	struct hws_ipc_cmd cmd = { .kind = HWS_IPC_CMD_RECORD_STATE };
+	bool active;
+
+	if (!everlive_json_get_bool(line, "active", &active)) {
+		ipc_error(c, id, -32602, "invalid params: active required");
+		return;
+	}
+	cmd.a = active ? 1 : 0;
+	ipc_push_and_reply(c, id, &cmd);
+}
+
 static void ipc_handle_aspect(struct ipc_client *c, const char *id,
 			      const char *line)
 {
@@ -701,6 +716,8 @@ static void ipc_handle_line(struct ipc_server *s, struct ipc_client *c,
 		ipc_handle_osd_position(c, has_id ? id : NULL, line);
 	} else if (strcmp(method, "osd.mode.set") == 0) {
 		ipc_handle_osd_mode(c, has_id ? id : NULL, line);
+	} else if (strcmp(method, "record.state") == 0) {
+		ipc_handle_record_state(c, has_id ? id : NULL, line);
 	} else if (strcmp(method, "aspect.set") == 0) {
 		ipc_handle_aspect(c, has_id ? id : NULL, line);
 	} else if (strcmp(method, "mode.set") == 0) {

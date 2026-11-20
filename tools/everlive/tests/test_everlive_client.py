@@ -29,6 +29,16 @@ class ClientCommandTests(unittest.TestCase):
             self.assertTrue(client.set_osd_mode("CARD"))
             request.assert_called_once_with("osd.mode.set", {"mode": "card"})
 
+    def test_set_recording_mirrors_engine_state(self):
+        client = everlive_client.EverLiveIpcClient()
+        with mock.patch.object(client, "request", return_value=True) as request:
+            self.assertTrue(client.set_recording(True))
+            client.set_recording(False)
+            self.assertEqual(
+                request.call_args_list,
+                [mock.call("record.state", {"active": True}),
+                 mock.call("record.state", {"active": False})])
+
     def test_set_osd_mode_preserves_auto_and_compact(self):
         client = everlive_client.EverLiveIpcClient()
         with mock.patch.object(client, "request", return_value=True) as request:
