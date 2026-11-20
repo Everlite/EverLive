@@ -617,6 +617,44 @@ static bool hws_card_active(SDL_Window *win)
 			  SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0;
 }
 
+static void draw_toast_box(SDL_Renderer *r, SDL_Window *win,
+			   int win_w, int win_h)
+{
+	const char *line = g_toast;
+	int scale = win_h >= 1080 ? 2 : 1;
+	int pad = 8 * scale;
+	int lh = 10 * scale;
+	int bw = (int)strlen(line) * 8 * scale + 2 * pad;
+	int bh = lh + 2 * pad - 2 * scale;
+	int bx = (win_w - bw) / 2;
+	int by;
+	int gap = 6 * scale;
+
+	if (g_osd && hws_card_active(win) && g_card.texture &&
+	    g_card_dest.h > 0) {
+		by = g_osd_pos == HWS_IPC_OSD_BOTTOM ?
+			g_card_dest.y - bh - gap :
+			g_card_dest.y + g_card_dest.h + gap;
+	} else {
+		by = g_osd_pos == HWS_IPC_OSD_BOTTOM ?
+			win_h - bh - 16 : 16;
+	}
+	if (bx < 8)
+		bx = 8;
+	if (by < 8)
+		by = 8;
+	if (by + bh > win_h - 8)
+		by = win_h - bh - 8;
+
+	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawColor(r, 10, 12, 18, 190);
+	SDL_RenderFillRect(r, &(SDL_Rect){ bx, by, bw, bh });
+	SDL_SetRenderDrawColor(r, 34, 211, 238, 255);
+	SDL_RenderFillRect(r, &(SDL_Rect){ bx, by, 3 * scale, bh });
+	SDL_SetRenderDrawColor(r, 235, 240, 245, 255);
+	draw_text(r, bx + pad, by + pad, scale, line);
+}
+
 static void hws_scale_rect(SDL_Rect *dst, const SDL_Rect *src,
 			   SDL_Renderer *renderer, int win_w, int win_h)
 {
@@ -1032,6 +1070,9 @@ static bool hws_handle_mouse(SDL_Event *event, SDL_Window *win)
 		printf("[HUB] TOGGLE_RECORD\n");
 		fflush(stdout);
 		break;
+	case EVERLIVE_OSD_ACTION_HIDE:
+		g_osd = false;
+		break;
 	default:
 		break;
 	}
@@ -1421,11 +1462,8 @@ static void run_window(void)
 			SDL_RenderCopy(ren, tex, NULL, &d);
 		}
 		draw_osd(ren, win, win_w, win_h);
-		if (now_ms() < g_toast_until_ms) {
-			const char *line = g_toast;
-
-			draw_box_text(ren, win_w, win_h, HWS_IPC_OSD_BOTTOM, &line, 1);
-		}
+		if (now_ms() < g_toast_until_ms)
+			draw_toast_box(ren, win, win_w, win_h);
 		SDL_RenderPresent(ren);
 
 		if (now_ms() - last_stats >= 1000) {

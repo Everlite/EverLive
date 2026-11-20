@@ -1122,7 +1122,8 @@ static void sdl_render_popup(struct everlive_sdl *sdl, int win_w, int win_h,
 			     float scale);
 static void sdl_render_tooltip(struct everlive_sdl *sdl, int win_w, int win_h,
 			       float scale);
-static void sdl_render_toast(struct everlive_sdl *sdl, int win_w, int win_h);
+static void sdl_render_toast(struct everlive_state *st,
+			     struct everlive_sdl *sdl, int win_w, int win_h);
 
 static void sdl_render_frame(struct everlive_state *st, struct everlive_sdl *sdl)
 {
@@ -1208,7 +1209,7 @@ static void sdl_render_frame(struct everlive_state *st, struct everlive_sdl *sdl
 
 		SDL_GetWindowSize(sdl->window, &win_w, &win_h);
 		if (win_w > 0 && win_h > 0)
-			sdl_render_toast(sdl, win_w, win_h);
+			sdl_render_toast(st, sdl, win_w, win_h);
 	}
 	SDL_RenderPresent(sdl->renderer);
 }
@@ -1357,11 +1358,13 @@ static void sdl_toast(struct everlive_sdl *sdl, const char *message)
 	}
 }
 
-static void sdl_render_toast(struct everlive_sdl *sdl, int win_w, int win_h)
+static void sdl_render_toast(struct everlive_state *st,
+			     struct everlive_sdl *sdl, int win_w, int win_h)
 {
 	SDL_Rect dst;
 	SDL_Rect draw;
 	float scale;
+	int pos;
 
 	if (!sdl->toast_text[0] || now_ns() >= sdl->toast_until_ns)
 		return;
@@ -1376,14 +1379,36 @@ static void sdl_render_toast(struct everlive_sdl *sdl, int win_w, int win_h)
 			 sdl->toast_text);
 	}
 	scale = (float)win_h / 1080.0f;
+	pos = atomic_load_explicit(&st->osd_pos, __ATOMIC_RELAXED);
 	dst.w = sdl->toast_w;
 	dst.h = sdl->toast_h;
 	dst.x = (win_w - dst.w) / 2;
-	dst.y = win_h - dst.h - (int)(24.0f * scale + 0.5f);
+	{
+		int gap = (int)(10.0f * scale + 0.5f);
+		int edge = (int)(16.0f * scale + 0.5f);
+
+		if (gap < 6)
+			gap = 6;
+		if (edge < 8)
+			edge = 8;
+		if (sdl_card_mode_active(st, sdl) && sdl->card.texture &&
+		    sdl->card_dest.h > 0) {
+			if (pos == EVERLIVE_OSD_BOTTOM)
+				dst.y = sdl->card_dest.y - dst.h - gap;
+			else
+				dst.y = sdl->card_dest.y +
+					sdl->card_dest.h + gap;
+		} else {
+			dst.y = pos == EVERLIVE_OSD_BOTTOM ?
+				win_h - dst.h - edge : edge;
+		}
+	}
 	if (dst.x < 8)
 		dst.x = 8;
 	if (dst.y < 8)
 		dst.y = 8;
+	if (dst.y + dst.h > win_h - 8)
+		dst.y = win_h - dst.h - 8;
 	sdl_scale_rect(&draw, &dst, sdl->renderer, win_w, win_h);
 	SDL_RenderCopy(sdl->renderer, sdl->toast_texture, NULL, &draw);
 }
@@ -1825,6 +1850,9 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 	case EVERLIVE_OSD_ACTION_RECORD:
 		printf("[HUB] TOGGLE_RECORD\n");
 		fflush(stdout);
+		break;
+	case EVERLIVE_OSD_ACTION_HIDE:
+		atomic_store_explicit(&st->osd, false, __ATOMIC_RELAXED);
 		break;
 	default:
 		break;

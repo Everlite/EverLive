@@ -62,6 +62,7 @@ ICONS = {
     "table-cells-large": ("solid", "\uf009"),
     "headphones": ("solid", "\uf025"),
     "camera": ("solid", "\uf030"),
+    "eye-slash": ("solid", "\uf070"),
     # help / diagnostics
     "help": ("solid", "\uf059"),
     "info": ("solid", "\uf05a"),
@@ -108,6 +109,7 @@ _FALLBACK_GLYPHS = {
     "table-cells-large": "▦",
     "headphones": "🎧",
     "camera": "◉",
+    "eye-slash": "🚫",
     "help": "?",
     "info": "i",
     "keyboard": "⌨",

@@ -264,6 +264,8 @@ static const char *action_label(enum everlive_osd_action action)
 		return "Fullscreen";
 	case EVERLIVE_OSD_ACTION_RECORD:
 		return "Record";
+	case EVERLIVE_OSD_ACTION_HIDE:
+		return "Hide overlay";
 	default:
 		return NULL;
 	}
@@ -288,6 +290,8 @@ static const char *action_shortcut(enum everlive_osd_action action)
 		return "F";
 	case EVERLIVE_OSD_ACTION_RECORD:
 		return "Ctrl+R";
+	case EVERLIVE_OSD_ACTION_HIDE:
+		return "Tab / O";
 	default:
 		return NULL;
 	}
@@ -598,7 +602,7 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 	if (divider_w < 1)
 		divider_w = 1;
 	info_gap = iscale(24.0f * s);
-	icon_count = 4 + (show_input ? 1 : 0);
+	icon_count = 5 + (show_input ? 1 : 0);
 	icons_w = icon_count * button + (icon_count - 1) * iscale(9.0f * s);
 
 	info_w = dot + gap + title_w;
@@ -769,6 +773,10 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 			 snap && snap->fullscreen ? EVERLIVE_OSD_DANGER_BG : EVERLIVE_OSD_CHIP_BG,
 			 snap && snap->fullscreen ? EVERLIVE_OSD_DANGER_BORDER : EVERLIVE_OSD_BORDER,
 			 snap && snap->fullscreen ? EVERLIVE_OSD_DANGER : EVERLIVE_OSD_TITLE);
+	DRAW_ICON_BUTTON(EVERLIVE_OSD_ACTION_HIDE,
+			 EVERLIVE_OSD_ICON_HIDE,
+			 EVERLIVE_OSD_CHIP_BG, EVERLIVE_OSD_BORDER,
+			 EVERLIVE_OSD_TITLE);
 #undef DRAW_ICON_BUTTON
 
 	texture = SDL_CreateTextureFromSurface(renderer, surface);

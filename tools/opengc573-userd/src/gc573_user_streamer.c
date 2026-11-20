@@ -2561,6 +2561,11 @@ static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 		printf("[HUB] TOGGLE_RECORD\n");
 		fflush(stdout);
 		break;
+	case EVERLIVE_OSD_ACTION_HIDE:
+		g_osd_enabled = false;
+		printf("[OSD] Overlay: off\n");
+		fflush(stdout);
+		break;
 	default:
 		break;
 	}
@@ -2657,11 +2662,31 @@ static void toast_render(SDL_Renderer *renderer, SDL_Window *window)
 	dst.w = g_toast.width;
 	dst.h = g_toast.height;
 	dst.x = (win_w - dst.w) / 2;
-	dst.y = win_h - dst.h - (scale >= 3 ? 36 : (scale == 2 ? 24 : 16));
-	if (dst.x < 0)
-		dst.x = 0;
-	if (dst.y < 0)
-		dst.y = 0;
+	{
+		int gap = (int)(10.0f * (float)win_h / 1080.0f + 0.5f);
+		int edge = (int)(16.0f * (float)win_h / 1080.0f + 0.5f);
+
+		if (gap < 6)
+			gap = 6;
+		if (edge < 8)
+			edge = 8;
+		if (g_osd_enabled && osd_card_active(window) &&
+		    g_card_dest.h > 0) {
+			if (g_osd_pos == OSD_POS_BOTTOM)
+				dst.y = g_card_dest.y - dst.h - gap;
+			else
+				dst.y = g_card_dest.y + g_card_dest.h + gap;
+		} else {
+			dst.y = g_osd_pos == OSD_POS_BOTTOM ?
+				win_h - dst.h - edge : edge;
+		}
+	}
+	if (dst.x < 8)
+		dst.x = 8;
+	if (dst.y < 8)
+		dst.y = 8;
+	if (dst.y + dst.h > win_h - 8)
+		dst.y = win_h - dst.h - 8;
 
 	SDL_RenderCopy(renderer, g_toast.texture, NULL, &dst);
 }
