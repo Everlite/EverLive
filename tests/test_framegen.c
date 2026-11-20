@@ -437,6 +437,49 @@ int main(void)
 	}
 
 	/* ---------------------------------------------------------------- */
+	printf("\n6b) AFMF GPU Optical Flow layer (env + layer path)\n");
+	{
+		struct gc573_fg_probe probe;
+		struct gc573_fg_config cfg = {
+			.mode = GC573_FG_60_TO_120,
+			.backend = GC573_FG_BACKEND_AFMF,
+			.multiplier = 4,
+			.perf_mode = false,
+		};
+		(void)gc573_fg_apply_env(&cfg, &probe);
+		check(getenv("AFMF_ENABLE") && strcmp(getenv("AFMF_ENABLE"), "1") == 0,
+		      "AFMF backend exports AFMF_ENABLE=1", NULL);
+		check(getenv("AFMF_PACING") && strcmp(getenv("AFMF_PACING"), "1") == 0,
+		      "AFMF backend exports AFMF_PACING=1", NULL);
+		check(getenv("DISABLE_LSFGVK") && strcmp(getenv("DISABLE_LSFGVK"), "1") == 0,
+		      "AFMF backend disables LSFGVK layer collision", NULL);
+		check(getenv("AFMF_MULTIPLIER") && strcmp(getenv("AFMF_MULTIPLIER"), "4") == 0,
+		      "AFMF backend exports AFMF_MULTIPLIER=4 for 4x mode", NULL);
+		check(getenv("AFMF_CAS_SHARPNESS") && strcmp(getenv("AFMF_CAS_SHARPNESS"), "40") == 0,
+		      "AFMF backend exports FidelityFX CAS sharpness", NULL);
+		check(getenv("AFMF_HUD_DETECT") && strcmp(getenv("AFMF_HUD_DETECT"), "1") == 0,
+		      "AFMF backend exports AFMF_HUD_DETECT=1 for UI protection", NULL);
+		check(getenv("AFMF_EXTRA_IMAGES") && strcmp(getenv("AFMF_EXTRA_IMAGES"), "6") == 0,
+		      "4x mode exports AFMF_EXTRA_IMAGES=6", NULL);
+		check(getenv("AFMF_PERFORMANCE_MODE") &&
+		      strcmp(getenv("AFMF_PERFORMANCE_MODE"), "quality") == 0,
+		      "perf_mode=false sets AFMF_PERFORMANCE_MODE=quality", NULL);
+
+		cfg.perf_mode = true;
+		(void)gc573_fg_apply_env(&cfg, &probe);
+		check(getenv("AFMF_PERFORMANCE_MODE") &&
+		      strcmp(getenv("AFMF_PERFORMANCE_MODE"), "performance") == 0,
+		      "perf_mode=true sets AFMF_PERFORMANCE_MODE=performance", NULL);
+
+		cfg.mode = GC573_FG_OFF;
+		(void)gc573_fg_apply_env(&cfg, &probe);
+		check(getenv("AFMF_ENABLE") == NULL,
+		      "GC573_FG_OFF unsets AFMF_ENABLE", NULL);
+		check(getenv("DISABLE_AFMF") && strcmp(getenv("DISABLE_AFMF"), "1") == 0,
+		      "GC573_FG_OFF exports DISABLE_AFMF=1", NULL);
+	}
+
+	/* ---------------------------------------------------------------- */
 	printf("\n7) Event-driven wait() wakeup\n");
 	{
 		struct gc573_fg_config cfg = {
@@ -506,7 +549,6 @@ int main(void)
 		struct gc573_fg_config cfg = {
 			.mode = GC573_FG_OFF,
 			.multiplier = 2,
-			.native_backend = false,
 			.flow_scale = 1.0f,
 			.low_latency = true,
 		};
@@ -515,12 +557,12 @@ int main(void)
 		      "OFF mode targets 0.0 Hz", NULL);
 
 		cfg.mode = GC573_FG_30_TO_60;
-		cfg.native_backend = true;
+		cfg.backend = GC573_FG_BACKEND_AFMF;
 		cfg.multiplier = 4;
-		check(gc573_fg_target_output_hz(&cfg, 59.94) == 0.0,
-		      "native_backend targets 0.0 Hz (CPU/GL pacer owns it)", NULL);
+		check(gc573_fg_target_output_hz(&cfg, 60.0) == 0.0,
+		      "AFMF backend targets 0.0 Hz (AFMF internal pacer owns it)", NULL);
 
-		cfg.native_backend = false;
+		cfg.backend = GC573_FG_BACKEND_LSFG;
 		cfg.multiplier = 2;
 		check(fabs(gc573_fg_target_output_hz(&cfg, 59.94) - 59.94) < 0.05,
 		      "30to60 2x at 59.94 Hz targets ~59.94 Hz", NULL);
@@ -611,7 +653,6 @@ int main(void)
 		struct gc573_fg_config cfg = {
 			.mode = GC573_FG_60_TO_120,
 			.multiplier = 4,
-			.native_backend = true,
 			.flow_scale = 1.0f,
 			.perf_mode = false,
 			.low_latency = true,

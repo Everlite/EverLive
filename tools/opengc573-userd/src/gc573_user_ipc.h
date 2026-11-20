@@ -179,10 +179,13 @@ struct gc573_stats {
 	bool framegen_low_latency;
 	bool framegen_layer_found;
 	bool framegen_dll_found;
+	bool framegen_afmf_found;
 	bool framegen_vulkan_active;
 	bool framegen_native_backend;
+	int framegen_backend;
 	bool framegen_dedup_active;
 	char framegen_dll_path[160];
+	char framegen_backend_name[16];
 };
 
 /**

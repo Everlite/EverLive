@@ -84,3 +84,9 @@ packaging/arch/*/src/
 packaging/arch/*/pkg/
 packaging/arch/*/everlive/
 packaging/arch/*/*.tar.*
+
+# AFMF build directory
+tools/everlive-fg-afmf/build/
+
+# Editor / IDE
+.vscode/

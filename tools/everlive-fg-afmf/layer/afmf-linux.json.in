@@ -1,0 +1,20 @@
+{
+  "file_format_version": "1.0.0",
+  "layer": {
+    "name": "VK_LAYER_AFMF",
+    "type": "GLOBAL",
+    "library_path": "@AFMF_LAYER_LIBRARY_PATH@",
+    "api_version": "1.4.341",
+    "implementation_version": "5",
+    "description": "afmf-linux @PROJECT_VERSION@: AMD Fluid Motion Frames style frame generation for Linux",
+    "functions": {
+      "vkNegotiateLoaderLayerInterfaceVersion": "vkNegotiateLoaderLayerInterfaceVersion"
+    },
+    "enable_environment": {
+      "AFMF_ENABLE": "1"
+    },
+    "disable_environment": {
+      "DISABLE_AFMF": "1"
+    }
+  }
+}

@@ -31,6 +31,7 @@ GC573_DIR  := tools/opengc573-userd
 GC570D_DIR := tools/opengc570d-userd
 HWSUHD_DIR := tools/openhws-userd
 CAM_DIR    := tools/everlive-cam
+AFMF_DIR   := tools/everlive-fg-afmf
 VIEWER_DIR := tools/everlive
 TESTS_DIR  := tests
 PKG_DIR    := packaging
@@ -53,9 +54,9 @@ GC570D_SED := sed -e 's|/usr/local/libexec/|$(GC570D_RUNDIR)/|g' \
 
 L := $(DESTDIR)$(EVERLIVE_LIBDIR)
 
-.PHONY: all core gc573 gc570d hwsuhd cam test check asan clean install uninstall
+.PHONY: all core gc573 gc570d hwsuhd cam afmf test check asan clean install uninstall
 
-all: core gc573 gc570d cam
+all: core gc573 gc570d cam afmf
 
 core:
 	+$(MAKE) -C $(CORE_DIR)
@@ -70,6 +71,16 @@ gc570d: core
 # picture-in-picture overlay.
 cam: core
 	+$(MAKE) -C $(CAM_DIR)
+
+# AMD Fluid Motion Frames (AFMF) FidelityFX Optical Flow Vulkan Layer
+afmf:
+	@if command -v cmake >/dev/null 2>&1 && (command -v glslang >/dev/null 2>&1 || command -v glslangValidator >/dev/null 2>&1); then \
+		echo "=== Building AFMF GPU Frame Generation (FidelityFX Vulkan Layer) ==="; \
+		mkdir -p $(AFMF_DIR)/build && \
+		(cd $(AFMF_DIR) && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release && ninja -C build); \
+	else \
+		echo "[-] cmake or glslang not found; skipping AFMF layer build."; \
+	fi
 
 # Not part of `all`: the HWS UHD engine is built and installed on request.
 hwsuhd: core
@@ -91,6 +102,7 @@ clean:
 	+$(MAKE) -C $(HWSUHD_DIR) clean
 	+$(MAKE) -C $(CAM_DIR) clean
 	+$(MAKE) -C $(TESTS_DIR) clean
+	rm -rf $(AFMF_DIR)/build
 
 install: all
 	# 1. C library, headers, engine binaries and CLI tools
@@ -110,6 +122,12 @@ install: all
 	install -m0755 $(addprefix $(GC570D_DIR)/,$(GC570D_BINS)) $(GC570D_DIR)/gc570d-vfio-bind.sh $(L)/$(GC570D_DIR)/
 	install -m0755 $(CORE_DIR)/everlive-ctl $(CORE_DIR)/everlive-service.sh $(L)/$(CORE_DIR)/
 	install -Dm0755 $(CAM_DIR)/everlive_camd $(L)/$(CAM_DIR)/everlive_camd
+	# AFMF GPU Frame Generation layer
+	if [ -f $(AFMF_DIR)/build/layer/libafmf-linux.so ]; then \
+		install -d $(L)/afmf; \
+		install -m0755 $(AFMF_DIR)/build/layer/libafmf-linux.so $(L)/afmf/libafmf-linux.so; \
+		install -m0644 $(AFMF_DIR)/build/layer/afmf-linux.json $(L)/afmf/afmf-linux.json; \
+	fi
 	$(GC570D_SED) $(GC570D_DIR)/gc570d-sleep.sh > $(L)/$(GC570D_DIR)/gc570d-sleep.sh
 	chmod 0755 $(L)/$(GC570D_DIR)/gc570d-sleep.sh
 	# 3. Main launcher, desktop entry and icons

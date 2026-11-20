@@ -120,8 +120,8 @@ FRAMEGEN_OPTIONS = [
 FRAMEGEN_KEYS = {key for _, key in FRAMEGEN_OPTIONS}
 
 FRAMEGEN_BACKEND_OPTIONS = [
-    ("LSFG-VK (External, Beta)", "lsfg"),
-    ("EverLive Native (Beta)", "native"),
+    ("AFMF — AMD FidelityFX GPU (Open-Source, Recommended)", "afmf"),
+    ("LSFG-VK (External Lossless Scaling)", "lsfg"),
 ]
 
 # Older settings files / scripts used 60to120/30to60 or shader-pipeline names.
@@ -156,7 +156,7 @@ DEFAULT_SETTINGS = {
     "audio_channels": "auto",
     "framegen_mode": "off",
     "fg_multiplier": 2,
-    "fg_backend": "lsfg",
+    "fg_backend": "afmf",
     "fg_dedup": False,
     "fg_flow_scale": 1.0,
     "fg_perf_mode": False,
@@ -426,12 +426,40 @@ def probe_lsfg_vk() -> Dict[str, object]:
             if dll_path:
                 break
 
+    afmf_layer_dir = ""
+    viewer_dir = os.path.dirname(os.path.abspath(__file__))
+    afmf_candidates = [
+        os.path.join(viewer_dir, "..", "everlive-fg-afmf", "build", "layer"),
+        os.path.join(viewer_dir, "..", "..", "tools", "everlive-fg-afmf", "build", "layer"),
+        "/usr/local/lib/everlive/afmf",
+        "/usr/lib/everlive/afmf",
+    ] + search
+    afmf_env = os.environ.get("EVERLIVE_AFMF_DIR")
+    if afmf_env:
+        afmf_candidates.insert(0, afmf_env)
+    for directory in afmf_candidates:
+        cand_json = os.path.join(directory, "afmf-linux.json")
+        if os.path.isfile(cand_json):
+            afmf_layer_dir = directory
+            break
+        try:
+            for name in os.listdir(directory):
+                if name.lower().endswith(".json") and "afmf" in name.lower():
+                    afmf_layer_dir = directory
+                    break
+        except OSError:
+            continue
+        if afmf_layer_dir:
+            break
+
     return {
         "layer_found": bool(layer_dir),
         "dll_found": bool(dll_path),
         "legacy_dll_found": legacy_dll_found,
         "layer_dir": layer_dir,
         "dll_path": dll_path,
+        "afmf_found": bool(afmf_layer_dir),
+        "afmf_layer_dir": afmf_layer_dir,
     }
 
 
@@ -2202,7 +2230,7 @@ class GameStreamer:
         # Flow/perf/latency/backend are passed even in mode OFF so a later live toggle
         # (hotkey or IPC) starts from the Hub's saved values, not defaults.
         cmd.extend(["--fg-backend",
-                    "native" if str(fg_backend).lower() == "native" else "lsfg"])
+                    "afmf" if str(fg_backend).lower() in ("afmf", "fidelityfx", "gpu") else "lsfg"])
         cmd.extend(["--fg-flow-scale",
                     f"{max(0.5, min(1.0, float(fg_flow_scale))):.2f}"])
         cmd.append("--fg-perf" if fg_perf_mode else "--no-fg-perf")
@@ -8368,9 +8396,9 @@ if HAS_QT:
             if mode not in FRAMEGEN_KEYS:
                 mode = "off"
             mult = int(mode[0]) if mode in ("2x", "3x", "4x") else int(self.saved_cfg.get("fg_multiplier", 2))
-            backend = self.combo_fg_backend.currentData() if hasattr(self, "combo_fg_backend") else self.saved_cfg.get("fg_backend", "lsfg")
-            if backend not in ("lsfg", "native"):
-                backend = "lsfg"
+            backend = self.combo_fg_backend.currentData() if hasattr(self, "combo_fg_backend") else self.saved_cfg.get("fg_backend", "afmf")
+            if backend not in ("afmf", "lsfg"):
+                backend = "afmf"
             dedup = self.chk_fg_dedup.isChecked() if hasattr(self, "chk_fg_dedup") else False
             return {
                 "framegen_mode": mode,
@@ -8408,10 +8436,18 @@ if HAS_QT:
             self._apply_framegen()
 
         def _sync_fg_backend_controls(self):
-            for w_attr in ("slider_flow", "lbl_flow", "chk_fg_perf", "chk_fg_ll"):
-                w = getattr(self, w_attr, None)
-                if w is not None:
-                    w.setEnabled(True)
+            backend = (self.combo_fg_backend.currentData()
+                       if hasattr(self, "combo_fg_backend")
+                       else self.saved_cfg.get("fg_backend", "afmf"))
+            is_afmf = backend == "afmf"
+            if hasattr(self, "slider_flow"):
+                self.slider_flow.setEnabled(not is_afmf)
+            if hasattr(self, "lbl_flow"):
+                self.lbl_flow.setEnabled(not is_afmf)
+            if hasattr(self, "chk_fg_perf"):
+                self.chk_fg_perf.setEnabled(True)
+            if hasattr(self, "chk_fg_ll"):
+                self.chk_fg_ll.setEnabled(not is_afmf)
 
         def on_fg_backend_changed(self, *_):
             self._sync_fg_backend_controls()
@@ -8434,20 +8470,34 @@ if HAS_QT:
 
         def _set_fg_readiness(self, layer_found: bool, dll_found: bool,
                               dll_path: str = "",
-                              legacy_dll_found: Optional[bool] = None):
+                              legacy_dll_found: Optional[bool] = None,
+                              afmf_found: Optional[bool] = None):
             """Colour the readiness badge green/amber with the exact fix."""
             backend = (self.combo_fg_backend.currentData()
                        if hasattr(self, "combo_fg_backend")
-                       else self.saved_cfg.get("fg_backend", "lsfg"))
-            if backend == "native":
-                self._fg_ready_ok = True
+                       else self.saved_cfg.get("fg_backend", "afmf"))
+            if backend == "afmf":
+                if afmf_found is None:
+                    try:
+                        afmf_found = bool(probe_lsfg_vk().get("afmf_found"))
+                    except Exception:
+                        afmf_found = False
+                self._fg_ready_ok = bool(afmf_found)
                 if hasattr(self, "lbl_fg_ready"):
-                    self.lbl_fg_ready.setText("✓ Built-in")
-                    self.lbl_fg_ready.setStyleSheet(
-                        "color: #5ED4B2; font-size: 11px; font-weight: 700;")
-                    self.lbl_fg_ready.setToolTip(
-                        "EverLive Native Frame Gen (GPL-2.0 prototype) · No external DLLs required")
+                    if afmf_found:
+                        self.lbl_fg_ready.setText("✓ AFMF GPU Ready")
+                        self.lbl_fg_ready.setStyleSheet(
+                            "color: #5ED4B2; font-size: 11px; font-weight: 700;")
+                        self.lbl_fg_ready.setToolTip(
+                            "AFMF (AMD FidelityFX Optical Flow) · Native GPU Frame Generation · Open Source")
+                    else:
+                        self.lbl_fg_ready.setText("⚠ Build AFMF")
+                        self.lbl_fg_ready.setStyleSheet(
+                            "color: #F5C84B; font-size: 11px; font-weight: 700;")
+                        self.lbl_fg_ready.setToolTip(
+                            "AFMF layer not built yet. Run 'make afmf' in project root.")
                 return
+
             self._fg_ready_ok = bool(layer_found and dll_found)
             if not hasattr(self, "lbl_fg_ready"):
                 return
@@ -8492,11 +8542,13 @@ if HAS_QT:
                 probe = probe_lsfg_vk()
             except Exception:
                 probe = {"layer_found": False, "dll_found": False,
-                         "legacy_dll_found": False, "dll_path": ""}
+                         "legacy_dll_found": False, "dll_path": "",
+                         "afmf_found": False}
             self._set_fg_readiness(
                 bool(probe.get("layer_found")), bool(probe.get("dll_found")),
                 str(probe.get("dll_path") or ""),
-                bool(probe.get("legacy_dll_found")))
+                bool(probe.get("legacy_dll_found")),
+                bool(probe.get("afmf_found")))
 
         def on_fg_recheck(self):
             self._refresh_fg_readiness()
@@ -8541,31 +8593,33 @@ if HAS_QT:
                 self._fg_output_fps = 0.0
                 return
 
-            is_native = fg.get("backend") == "native"
-            if not is_native and not (fg.get("layer_found") and fg.get("dll_found")):
-                self._fg_summary = "LSFG-VK Missing"
+            backend = str(fg.get("backend") or "afmf").lower()
+            is_afmf = backend == "afmf"
+            is_ready = bool(fg.get("afmf_found")) if is_afmf else bool(fg.get("layer_found") and fg.get("dll_found"))
+
+            if not is_ready:
+                self._fg_summary = "AFMF Missing" if is_afmf else "LSFG-VK Missing"
                 self._fg_fps_badge = ""
                 self._fg_present_fps = 0.0
                 self._fg_output_fps = 0.0
                 return
 
             dedup_tag = " (Dedup)" if dedup_live else ""
+            tag = "AFMF" if is_afmf else "LSFG"
             if headless:
-                tag = "Native" if is_native else "LSFG"
                 self._fg_summary = f"{tag} {mult}x{dedup_tag}: Armed"
                 self._fg_fps_badge = ""
                 self._fg_present_fps = 0.0
                 self._fg_output_fps = 0.0
                 return
 
-            if not is_native and fg.get("vulkan_active") is False:
+            if fg.get("vulkan_active") is False:
                 self._fg_summary = "OpenGL Fallback (No FG)"
                 self._fg_fps_badge = ""
                 self._fg_present_fps = 0.0
                 self._fg_output_fps = 0.0
                 return
 
-            tag = "Native" if is_native else "LSFG"
             self._fg_summary = f"{tag} {mult}x{dedup_tag}: {present:.0f}→{output:.0f} FPS"
             self._fg_fps_badge = f"{present:.0f}→{output:.0f} FPS ({mult}x)"
             self._fg_present_fps = present

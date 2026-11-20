@@ -119,8 +119,13 @@ def parse_device_list(text: str) -> List[Tuple[str, str]]:
     for line in text.splitlines():
         path, _sep, name = line.partition("\t")
         path = path.strip()
+        name = name.strip() or path
+        # Exclude loopback virtual cameras from being picked as PiP input sources
+        lower_name = name.lower()
+        if "v4l2 loopback" in lower_name or "everlive capture" in lower_name:
+            continue
         if path.startswith("/dev/video"):
-            devices.append((path, name.strip() or path))
+            devices.append((path, name))
     return devices
 
 
