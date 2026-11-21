@@ -342,8 +342,8 @@ if HAS_QT:
 
         def __init__(self, icon_name: str, tooltip: str = "", parent=None,
                      *, checkable: bool = False, size: int = 34,
-                     icon_size: int = 18, color: str = "#9AA0B0",
-                     active_color: str = "#E7EBF2"):
+                     icon_size: int = 18, color: str = ui_theme.TEXT_MUTED,
+                     active_color: str = ui_theme.TEXT):
             super().__init__(parent)
             self.setObjectName("iconButton")
             self.setFixedSize(int(size), int(size))
@@ -358,9 +358,14 @@ if HAS_QT:
             if tooltip:
                 self.setToolTip(tooltip)
 
-        def set_icon(self, icon_name: str):
+        def set_icon(self, icon_name: str, *, color: str | None = None,
+                     active_color: str | None = None):
             """Swap the glyph (normal/mute/fullscreen state changes)."""
             self._icon_name = str(icon_name)
+            if color is not None:
+                self._icon_color = color
+            if active_color is not None:
+                self._icon_active = active_color
             if fa_icons is not None and fa_icons.available():
                 self.setIcon(fa_icons.icon(
                     self._icon_name, self._icon_color, self._icon_size,

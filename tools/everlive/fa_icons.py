@@ -79,8 +79,10 @@ ICONS = {
     "trash": ("solid", "\uf1f8"),
     # telemetry
     "chart": ("solid", "\uf201"),
+    "chart-bar": ("solid", "\uf080"),
     "microchip": ("solid", "\uf2db"),
     "disk": ("solid", "\uf0a0"),
+    "xmark": ("solid", "\uf00d"),
     # brands
     "discord": ("brands", "\uf392"),
     "github": ("brands", "\uf09b"),
@@ -130,8 +132,10 @@ _FALLBACK_GLYPHS = {
     "download": "⤓",
     "trash": "🗑",
     "chart": "📈",
+    "chart-bar": "▥",
     "microchip": "▤",
     "disk": "▥",
+    "xmark": "×",
     "discord": "◉",
     "github": "◆",
 }
@@ -210,14 +214,12 @@ def icon(name: str, color: str = "#9AA0B0", size: int = 18,
 
     result = QIcon()
     normal = _render(name, color, size)
+    active = _render(name, active_color or color, size)
     result.addPixmap(normal, QIcon.Normal, QIcon.Off)
-    result.addPixmap(normal, QIcon.Normal, QIcon.On)
-    result.addPixmap(
-        _render(name, active_color or color, size), QIcon.Active, QIcon.Off)
-    result.addPixmap(
-        _render(name, active_color or color, size), QIcon.Active, QIcon.On)
-    result.addPixmap(
-        _render(name, active_color or color, size), QIcon.Selected, QIcon.On)
+    result.addPixmap(active, QIcon.Normal, QIcon.On)
+    result.addPixmap(active, QIcon.Active, QIcon.Off)
+    result.addPixmap(active, QIcon.Active, QIcon.On)
+    result.addPixmap(active, QIcon.Selected, QIcon.On)
     result.addPixmap(
         _render(name, disabled_color, size), QIcon.Disabled, QIcon.Off)
     return result

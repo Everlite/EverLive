@@ -535,14 +535,16 @@ struct everlive_sdl {
 	uint32_t texture_w[2];
 	uint32_t texture_h[2];
 	int texture_scale_mode[2];
-	SDL_Texture *overlay;
-	uint32_t overlay_w;
-	uint32_t overlay_h;
-	uint64_t overlay_built_ns;
+	uint64_t stats_built_ns;
 	struct everlive_osd_card card;
+	struct everlive_osd_stats stats;
 	struct everlive_osd_popup popup;
 	SDL_Rect card_dest;
+	SDL_Rect stats_dest;
 	SDL_Rect popup_dest;
+	enum everlive_osd_action stats_hover_action;
+	bool stats_dirty;
+	bool quicknav_forced;
 	enum everlive_osd_popup_kind popup_kind;
 	bool popup_open;
 	bool popup_dragging;
@@ -568,13 +570,21 @@ struct everlive_sdl {
 	int embed_last_h;
 	uint64_t embed_last_sync_ns;
 	uint64_t quicknav_wake_ns;
-	bool quicknav_manual_hidden;
+	bool quicknav_enabled;
 };
 
 static void sdl_quicknav_wake(struct everlive_sdl *sdl)
 {
+	if (!sdl->quicknav_enabled)
+		return;
 	sdl->quicknav_wake_ns = now_ns();
-	sdl->quicknav_manual_hidden = false;
+}
+
+static void sdl_quicknav_force(struct everlive_sdl *sdl)
+{
+	sdl->quicknav_enabled = true;
+	sdl->quicknav_forced = true;
+	sdl_quicknav_wake(sdl);
 }
 
 static void sdl_set_hover(struct everlive_sdl *sdl,
@@ -582,30 +592,43 @@ static void sdl_set_hover(struct everlive_sdl *sdl,
 
 static void sdl_quicknav_hide(struct everlive_sdl *sdl)
 {
-	sdl->quicknav_manual_hidden = true;
+	sdl->quicknav_enabled = false;
+	sdl->quicknav_forced = false;
 	sdl->quicknav_wake_ns = 0;
 	sdl->popup_open = false;
 	sdl->popup_dragging = false;
 	sdl->popup_kind = EVERLIVE_OSD_POPUP_NONE;
 	sdl->popup_hover = -1;
+	sdl->stats_hover_action = EVERLIVE_OSD_ACTION_NONE;
+	sdl->stats_dirty = true;
 	sdl_set_hover(sdl, EVERLIVE_OSD_ACTION_NONE);
 }
 
 static bool sdl_quicknav_is_active(struct everlive_sdl *sdl)
 {
-	if (sdl->quicknav_manual_hidden)
+	if (!sdl->quicknav_enabled)
 		return false;
 	if (sdl->popup_open || sdl->popup_dragging || g_hover_action != EVERLIVE_OSD_ACTION_NONE)
 		return true;
 	return (now_ns() - sdl->quicknav_wake_ns < 3000000000ULL);
 }
 
+static void sdl_quicknav_tick(struct everlive_sdl *sdl)
+{
+	if (sdl->quicknav_forced && !sdl_quicknav_is_active(sdl))
+		sdl->quicknav_forced = false;
+}
+
 static void sdl_quicknav_sync_cursor(struct everlive_sdl *sdl)
 {
+	static int last_cursor_state = -1;
+	int show;
+
 	if (sdl->parent_winid != 0)
 		return;
-	static int last_cursor_state = -1;
-	int show = sdl_quicknav_is_active(sdl) ? SDL_ENABLE : SDL_DISABLE;
+	show = (sdl_quicknav_is_active(sdl) ||
+		sdl->stats_hover_action != EVERLIVE_OSD_ACTION_NONE) ?
+		SDL_ENABLE : SDL_DISABLE;
 	if (show != last_cursor_state) {
 		SDL_ShowCursor(show);
 		last_cursor_state = show;
@@ -613,35 +636,6 @@ static void sdl_quicknav_sync_cursor(struct everlive_sdl *sdl)
 }
 
 static bool g_osd_font_init_attempted;
-
-static void sdl_build_overlay(struct everlive_sdl *sdl, const char *line1,
-			      const char *line2, const char *line3)
-{
-	char text[768];
-	SDL_Texture *texture = NULL;
-	int width = 0;
-	int height = 0;
-
-	if (!sdl->renderer)
-		return;
-	if (!everlive_osd_available()) {
-		if (!g_osd_font_init_attempted) {
-			g_osd_font_init_attempted = true;
-			everlive_osd_init();
-		}
-		if (!everlive_osd_available())
-			return;
-	}
-	snprintf(text, sizeof(text), "%s\n%s\n%s", line1, line2, line3);
-	if (!everlive_osd_build_text(sdl->renderer, text, 1080, &texture,
-				     &width, &height, NULL))
-		return;
-	if (sdl->overlay)
-		SDL_DestroyTexture(sdl->overlay);
-	sdl->overlay = texture;
-	sdl->overlay_w = (uint32_t)width;
-	sdl->overlay_h = (uint32_t)height;
-}
 
 #if defined(SDL_VIDEO_DRIVER_X11)
 static int (*g_prev_x_error_handler)(Display *, XErrorEvent *);
@@ -939,14 +933,12 @@ static void sdl_presentation_close(struct everlive_sdl *sdl)
 		sdl->texture_h[i] = 0;
 		sdl->texture_scale_mode[i] = 0;
 	}
-	if (sdl->overlay)
-		SDL_DestroyTexture(sdl->overlay);
-	sdl->overlay = NULL;
-	sdl->overlay_w = 0;
-	sdl->overlay_h = 0;
-	sdl->overlay_built_ns = 0;
+	sdl->stats_built_ns = 0;
+	everlive_osd_destroy_stats(&sdl->stats);
 	everlive_osd_destroy_card(&sdl->card);
 	everlive_osd_destroy_popup(&sdl->popup);
+	sdl->stats_hover_action = EVERLIVE_OSD_ACTION_NONE;
+	sdl->stats_dirty = true;
 	if (sdl->toast_texture)
 		SDL_DestroyTexture(sdl->toast_texture);
 	sdl->toast_texture = NULL;
@@ -1210,18 +1202,22 @@ static void sdl_render_frame(struct everlive_state *st, struct everlive_sdl *sdl
 		}
 	}
 
-	if (atomic_load_explicit(&st->osd, __ATOMIC_RELAXED)) {
+	{
 		int pos = atomic_load_explicit(&st->osd_pos, __ATOMIC_RELAXED);
+		bool stats_enabled =
+			atomic_load_explicit(&st->osd, __ATOMIC_RELAXED);
+		bool card_visible = sdl_card_mode_active(st, sdl) &&
+			sdl_quicknav_is_active(sdl) && sdl->card.texture;
+		int win_w = 0;
+		int win_h = 0;
+		float scale = 0.0f;
 
-		if (sdl_card_mode_active(st, sdl) && sdl_quicknav_is_active(sdl) && sdl->card.texture) {
-			int win_w = 0;
-			int win_h = 0;
-			float scale;
-			SDL_Rect draw;
+		SDL_GetWindowSize(sdl->window, &win_w, &win_h);
+		if (win_w > 0 && win_h > 0) {
+			scale = (float)win_h / 1080.0f;
+			if (card_visible) {
+				SDL_Rect draw;
 
-			SDL_GetWindowSize(sdl->window, &win_w, &win_h);
-			if (win_w > 0 && win_h > 0) {
-				scale = (float)win_h / 1080.0f;
 				sdl_place_osd(&sdl->card_dest,
 					      sdl->card.width, sdl->card.height,
 					      scale, win_w, win_h, pos);
@@ -1229,33 +1225,26 @@ static void sdl_render_frame(struct everlive_state *st, struct everlive_sdl *sdl
 					       sdl->renderer, win_w, win_h);
 				SDL_RenderCopy(sdl->renderer,
 					       sdl->card.texture, NULL, &draw);
-				sdl_render_tooltip(sdl, win_w, win_h, scale);
-				sdl_render_popup(sdl, win_w, win_h, scale);
 			}
-		} else if (sdl->overlay) {
-			const int margin = 24;
-			SDL_Rect overlay_dst = {
-				.x = margin,
-				.y = margin,
-				.w = (int)sdl->overlay_w,
-				.h = (int)sdl->overlay_h,
-			};
-
-			overlay_dst.x = out_w - overlay_dst.w - margin;
-			overlay_dst.y = pos == EVERLIVE_OSD_BOTTOM ?
-				out_h - overlay_dst.h - margin : margin;
-			SDL_RenderCopy(sdl->renderer, sdl->overlay, NULL,
-				       &overlay_dst);
+			if (stats_enabled && sdl->stats.texture) {
+				everlive_osd_place_stats(
+					&sdl->stats_dest, &sdl->stats,
+					pos == EVERLIVE_OSD_BOTTOM,
+					&sdl->card_dest, card_visible, scale,
+					win_w, win_h);
+				everlive_osd_render_stats(
+					sdl->renderer, &sdl->stats,
+					&sdl->stats_dest, win_w, win_h);
+			}
+			if (card_visible)
+				sdl_render_tooltip(sdl, win_w, win_h, scale);
+			if (card_visible)
+				sdl_render_popup(sdl, win_w, win_h, scale);
+			if (!sdl->popup_open &&
+			    (card_visible ||
+			     (stats_enabled && sdl->stats.texture)))
+				sdl_render_toast(st, sdl, win_w, win_h);
 		}
-	}
-
-	if (atomic_load_explicit(&st->osd, __ATOMIC_RELAXED)) {
-		int win_w = 0;
-		int win_h = 0;
-
-		SDL_GetWindowSize(sdl->window, &win_w, &win_h);
-		if (win_w > 0 && win_h > 0 && !sdl->popup_open)
-			sdl_render_toast(st, sdl, win_w, win_h);
 	}
 	SDL_RenderPresent(sdl->renderer);
 }
@@ -1266,6 +1255,8 @@ static bool sdl_card_mode_active(struct everlive_state *st,
 	int mode = atomic_load_explicit(&st->osd_mode, __ATOMIC_RELAXED);
 	Uint32 flags;
 
+	if (sdl->quicknav_forced)
+		return true;
 	if (mode == EVERLIVE_OSD_MODE_CARD)
 		return true;
 	if (mode == EVERLIVE_OSD_MODE_COMPACT)
@@ -1279,7 +1270,7 @@ static bool sdl_card_mode_active(struct everlive_state *st,
 static void sdl_card_invalidate(struct everlive_sdl *sdl)
 {
 	sdl->card.cache_key[0] = '\0';
-	sdl->overlay_built_ns = 0;
+	sdl->stats_built_ns = 0;
 }
 
 static void sdl_card_update(struct everlive_state *st,
@@ -1453,8 +1444,16 @@ static void sdl_render_toast(struct everlive_state *st,
 			gap = 6;
 		if (edge < 8)
 			edge = 8;
-		if (sdl_card_mode_active(st, sdl) && sdl_quicknav_is_active(sdl) && sdl->card.texture &&
-		    sdl->card_dest.h > 0) {
+		if (atomic_load_explicit(&st->osd, __ATOMIC_RELAXED) &&
+		    sdl->stats.texture && sdl->stats_dest.h > 0) {
+			if (pos == EVERLIVE_OSD_BOTTOM)
+				dst.y = sdl->stats_dest.y - dst.h - gap;
+			else
+				dst.y = sdl->stats_dest.y +
+					sdl->stats_dest.h + gap;
+		} else if (sdl_card_mode_active(st, sdl) &&
+			   sdl_quicknav_is_active(sdl) && sdl->card.texture &&
+			   sdl->card_dest.h > 0) {
 			if (pos == EVERLIVE_OSD_BOTTOM)
 				dst.y = sdl->card_dest.y - dst.h - gap;
 			else
@@ -1646,6 +1645,29 @@ static enum everlive_osd_action sdl_hit_card(struct everlive_sdl *sdl,
 	return hit;
 }
 
+static enum everlive_osd_action sdl_hit_stats_raw(struct everlive_sdl *sdl,
+						  int x, int y)
+{
+	const struct everlive_osd_hitbox *hit;
+
+	if (!sdl->stats.texture || sdl->stats_dest.w <= 0)
+		return EVERLIVE_OSD_ACTION_NONE;
+	hit = everlive_osd_stats_hit(&sdl->stats, x - sdl->stats_dest.x,
+				     y - sdl->stats_dest.y);
+	return hit ? hit->action : EVERLIVE_OSD_ACTION_NONE;
+}
+
+static void sdl_set_stats_hover(struct everlive_sdl *sdl,
+				enum everlive_osd_action action)
+{
+	if (sdl->stats_hover_action == action)
+		return;
+	sdl->stats_hover_action = action;
+	sdl->stats_dirty = true;
+	if (getenv("EVERLIVE_OSD_DEBUG"))
+		fprintf(stderr, "[OSD] stats hover=%d\n", action);
+}
+
 static void sdl_set_hover(struct everlive_sdl *sdl,
 			  enum everlive_osd_action action)
 {
@@ -1672,23 +1694,48 @@ static void sdl_update_hover(struct everlive_state *st,
 	int win_w = 0;
 	int win_h = 0;
 	int pos;
+	bool stats_enabled;
+	bool card_visible;
+	enum everlive_osd_action card_hit;
+	enum everlive_osd_action stats_hit;
+	float scale;
 
-	if (!sdl->window || !atomic_load_explicit(&st->osd, __ATOMIC_RELAXED) ||
-	    !sdl_quicknav_is_active(sdl) || sdl->popup_open ||
-	    !sdl_card_mode_active(st, sdl) || !sdl->card.texture) {
+	if (!sdl->window || sdl->popup_open) {
 		sdl_set_hover(sdl, EVERLIVE_OSD_ACTION_NONE);
+		sdl_set_stats_hover(sdl, EVERLIVE_OSD_ACTION_NONE);
 		return;
 	}
 	SDL_GetWindowSize(sdl->window, &win_w, &win_h);
 	if (win_w <= 0 || win_h <= 0 || x < 0 || y < 0 ||
 	    x >= win_w || y >= win_h) {
 		sdl_set_hover(sdl, EVERLIVE_OSD_ACTION_NONE);
+		sdl_set_stats_hover(sdl, EVERLIVE_OSD_ACTION_NONE);
 		return;
 	}
+	scale = (float)win_h / 1080.0f;
 	pos = atomic_load_explicit(&st->osd_pos, __ATOMIC_RELAXED);
-	sdl_place_osd(&sdl->card_dest, sdl->card.width, sdl->card.height,
-		      (float)win_h / 1080.0f, win_w, win_h, pos);
-	sdl_set_hover(sdl, sdl_hit_card_raw(sdl, x, y));
+	stats_enabled = atomic_load_explicit(&st->osd, __ATOMIC_RELAXED);
+	card_visible = sdl_card_mode_active(st, sdl) &&
+		sdl_quicknav_is_active(sdl) && sdl->card.texture;
+	if (card_visible)
+		sdl_place_osd(&sdl->card_dest, sdl->card.width,
+			      sdl->card.height, scale, win_w, win_h, pos);
+	if (stats_enabled && sdl->stats.texture)
+		everlive_osd_place_stats(&sdl->stats_dest, &sdl->stats,
+					 pos == EVERLIVE_OSD_BOTTOM,
+					 &sdl->card_dest, card_visible,
+					 scale, win_w, win_h);
+	stats_hit = stats_enabled && sdl->stats.texture ?
+		sdl_hit_stats_raw(sdl, x, y) : EVERLIVE_OSD_ACTION_NONE;
+	card_hit = card_visible ? sdl_hit_card_raw(sdl, x, y) :
+		EVERLIVE_OSD_ACTION_NONE;
+	if (stats_hit != EVERLIVE_OSD_ACTION_NONE) {
+		sdl_set_stats_hover(sdl, stats_hit);
+		sdl_set_hover(sdl, EVERLIVE_OSD_ACTION_NONE);
+	} else {
+		sdl_set_stats_hover(sdl, EVERLIVE_OSD_ACTION_NONE);
+		sdl_set_hover(sdl, card_hit);
+	}
 }
 
 static void sdl_render_tooltip(struct everlive_sdl *sdl, int win_w, int win_h,
@@ -1775,6 +1822,10 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 			     struct everlive_sdl *sdl, const SDL_Event *event)
 {
 	enum everlive_osd_action action;
+	enum everlive_osd_action stats_action;
+	bool stats_enabled;
+	bool card_mode;
+	bool card_visible;
 	SDL_Point point;
 	int x;
 	int y;
@@ -1789,25 +1840,26 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 			event->type == SDL_MOUSEMOTION ? event->motion.y : event->button.y,
 			sdl->card_dest.x, sdl->card_dest.y,
 			sdl->card_dest.w, sdl->card_dest.h);
-	if (!atomic_load_explicit(&st->osd, __ATOMIC_RELAXED) ||
-	    !sdl_card_mode_active(st, sdl))
+	stats_enabled = atomic_load_explicit(&st->osd, __ATOMIC_RELAXED);
+	card_mode = sdl_card_mode_active(st, sdl);
+	card_visible = card_mode && sdl_quicknav_is_active(sdl) &&
+		sdl->card.texture;
+	if (!card_mode && !(stats_enabled && sdl->stats.texture))
 		return false;
 
-	if (event->type == SDL_MOUSEMOTION) {
+	if (card_mode && event->type == SDL_MOUSEMOTION) {
 		if (event->motion.xrel != 0 || event->motion.yrel != 0)
 			sdl_quicknav_wake(sdl);
-	} else if (event->type == SDL_MOUSEBUTTONDOWN) {
+	} else if (card_mode && event->type == SDL_MOUSEBUTTONDOWN) {
 		sdl_quicknav_wake(sdl);
 	}
-	if (!sdl_quicknav_is_active(sdl))
-		return false;
 
 	{
 		int win_w = 0;
 		int win_h = 0;
 
 		SDL_GetWindowSize(sdl->window, &win_w, &win_h);
-		if (win_w > 0 && win_h > 0) {
+		if (card_visible && win_w > 0 && win_h > 0) {
 			sdl_place_osd(&sdl->card_dest, sdl->card.width,
 				      sdl->card.height,
 				      (float)win_h / 1080.0f,
@@ -1891,7 +1943,22 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 		sdl_close_popup(sdl);
 	}
 
-	action = sdl_hit_card(sdl, x, y);
+	stats_action = (stats_enabled && sdl->stats.texture) ?
+		sdl_hit_stats_raw(sdl, x, y) : EVERLIVE_OSD_ACTION_NONE;
+	if (stats_action != EVERLIVE_OSD_ACTION_NONE) {
+		if (stats_action == EVERLIVE_OSD_ACTION_STATS_CLOSE) {
+			atomic_store_explicit(&st->osd, false,
+					      __ATOMIC_RELAXED);
+			everlive_osd_destroy_stats(&sdl->stats);
+			sdl->stats_hover_action = EVERLIVE_OSD_ACTION_NONE;
+			sdl->stats_dirty = true;
+			sdl_card_invalidate(sdl);
+			sdl_toast(sdl, "Performance HUD: Off");
+		}
+		return true;
+	}
+	action = card_visible ? sdl_hit_card(sdl, x, y) :
+		EVERLIVE_OSD_ACTION_NONE;
 	if (event->button.clicks >= 2 &&
 	    action == EVERLIVE_OSD_ACTION_NONE) {
 		sdl_toggle_fullscreen(sdl);
@@ -1949,6 +2016,8 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 	case EVERLIVE_OSD_ACTION_STATS: {
 		bool next = !atomic_load_explicit(&st->osd, __ATOMIC_RELAXED);
 		atomic_store_explicit(&st->osd, next, __ATOMIC_RELAXED);
+		sdl->stats_hover_action = EVERLIVE_OSD_ACTION_NONE;
+		sdl->stats_dirty = true;
 		sdl_toast(sdl, next ? "Performance HUD: On" : "Performance HUD: Off");
 		sdl_card_invalidate(sdl);
 		break;
@@ -2099,8 +2168,10 @@ static bool sdl_handle_events(struct everlive_state *st,
 		if (sdl_handle_mouse(st, sdl, &event))
 			continue;
 		if (event.type == SDL_WINDOWEVENT &&
-		    event.window.event == SDL_WINDOWEVENT_LEAVE)
+		    event.window.event == SDL_WINDOWEVENT_LEAVE) {
 			sdl_set_hover(sdl, EVERLIVE_OSD_ACTION_NONE);
+			sdl_set_stats_hover(sdl, EVERLIVE_OSD_ACTION_NONE);
+		}
 		if (event.type == SDL_QUIT)
 			return false;
 		if (event.type != SDL_KEYDOWN || event.key.repeat)
@@ -2114,11 +2185,11 @@ static bool sdl_handle_events(struct everlive_state *st,
 		switch (event.key.keysym.scancode) {
 		case SDL_SCANCODE_1:
 			gc570d_everlive_set_port(0);
-			sdl->overlay_built_ns = 0;
+			sdl->stats_built_ns = 0;
 			break;
 		case SDL_SCANCODE_2:
 			gc570d_everlive_set_port(1);
-			sdl->overlay_built_ns = 0;
+			sdl->stats_built_ns = 0;
 			break;
 		case SDL_SCANCODE_P:
 			atomic_store_explicit(&st->pip,
@@ -2129,15 +2200,20 @@ static bool sdl_handle_events(struct everlive_state *st,
 			atomic_store_explicit(&st->osd,
 				!atomic_load_explicit(&st->osd, __ATOMIC_RELAXED),
 				__ATOMIC_RELAXED);
+			sdl->stats_hover_action = EVERLIVE_OSD_ACTION_NONE;
+			sdl->stats_dirty = true;
+			sdl_card_invalidate(sdl);
 			sdl_toast(sdl, atomic_load_explicit(&st->osd, __ATOMIC_RELAXED) ?
 				  "Performance HUD: On" : "Performance HUD: Off");
 			break;
-		case SDL_SCANCODE_O:
+		case SDL_SCANCODE_Z:
+			if (!(event.key.keysym.mod & KMOD_ALT))
+				break;
 			if (sdl_quicknav_is_active(sdl)) {
 				sdl_quicknav_hide(sdl);
 				sdl_toast(sdl, "Quick Nav: Off");
 			} else {
-				sdl_quicknav_wake(sdl);
+				sdl_quicknav_force(sdl);
 				sdl_toast(sdl, "Quick Nav: On");
 			}
 			break;
@@ -2153,7 +2229,7 @@ static bool sdl_handle_events(struct everlive_state *st,
 								__ATOMIC_RELAXED) + 1) & 3;
 			atomic_store_explicit(&st->aspect, next_aspect,
 					      __ATOMIC_RELAXED);
-			sdl->overlay_built_ns = 0;
+			sdl->stats_built_ns = 0;
 			break;
 		}
 		case SDL_SCANCODE_L: {
@@ -2164,14 +2240,14 @@ static bool sdl_handle_events(struct everlive_state *st,
 					 EVERLIVE_SCALE_INTEGER;
 			atomic_store_explicit(&st->scale, next_scale,
 					      __ATOMIC_RELAXED);
-			sdl->overlay_built_ns = 0;
+			sdl->stats_built_ns = 0;
 			break;
 		}
 		case SDL_SCANCODE_M: {
 			bool next_mute = !atomic_load_explicit(&st->muted,
 							       __ATOMIC_RELAXED);
 			gc570d_everlive_set_mute(next_mute);
-			sdl->overlay_built_ns = 0;
+			sdl->stats_built_ns = 0;
 			break;
 		}
 		case SDL_SCANCODE_UP:
@@ -2183,7 +2259,7 @@ static bool sdl_handle_events(struct everlive_state *st,
 				v = 150;
 			atomic_store_explicit(&st->muted, false, __ATOMIC_RELAXED);
 			gc570d_everlive_set_volume(v);
-			sdl->overlay_built_ns = 0;
+			sdl->stats_built_ns = 0;
 			break;
 		}
 		case SDL_SCANCODE_DOWN:
@@ -2194,7 +2270,7 @@ static bool sdl_handle_events(struct everlive_state *st,
 			if (v < 0)
 				v = 0;
 			gc570d_everlive_set_volume(v);
-			sdl->overlay_built_ns = 0;
+			sdl->stats_built_ns = 0;
 			break;
 		}
 		case SDL_SCANCODE_F:
@@ -2210,6 +2286,7 @@ static bool sdl_handle_events(struct everlive_state *st,
 			break;
 		}
 	}
+	sdl_quicknav_tick(sdl);
 	sdl_quicknav_sync_cursor(sdl);
 	return true;
 }
@@ -2331,6 +2408,7 @@ static void *everlive_thread(void *arg)
 
 #ifdef HAVE_SDL2
 	memset(&sdl, 0, sizeof(sdl));
+	sdl.quicknav_enabled = true;
 	if (st->opt.enable_sdl && !st->opt.headless) {
 		sdl_ready = sdl_init(st, &sdl);
 		if (!sdl_ready)
@@ -2381,14 +2459,14 @@ static void *everlive_thread(void *arg)
 			if (atomic_exchange_explicit(&st->osd_dirty, false,
 						     __ATOMIC_RELAXED)) {
 				sdl_card_invalidate(&sdl);
-				sdl.overlay_built_ns = 0;
+				sdl.stats_built_ns = 0;
 			}
 			for (i = 0; i < 2; i++) {
 				if (updated[i])
 					sdl_update_texture(st, &sdl, i, &st->frame[i]);
 			}
 
-			if (now - sdl.overlay_built_ns >= EVERLIVE_STATUS_NS) {
+			{
 				int port = atomic_load_explicit(&st->port,
 								__ATOMIC_RELAXED);
 				int aspect = atomic_load_explicit(&st->aspect,
@@ -2399,44 +2477,72 @@ static void *everlive_thread(void *arg)
 							       __ATOMIC_RELAXED);
 				bool muted = atomic_load_explicit(&st->muted,
 								  __ATOMIC_RELAXED);
-				char line1[160];
-				char line2[160];
-				char line3[160];
+				bool stats_enabled = atomic_load_explicit(
+					&st->osd, __ATOMIC_RELAXED);
+				char row1[384];
+				char row2[512];
+				int max_width;
+				unsigned src_w = shm_port_source_width(st, port);
+				unsigned src_h = shm_port_source_height(st, port);
+				unsigned src_fps = shm_port_source_fps(st, port);
 				int out_w = st->frame[port].width ?
 					(int)st->frame[port].width : 1920;
 				int out_h = st->frame[port].height ?
 					(int)st->frame[port].height : 1080;
+				int win_w = 0;
+				int win_h = 0;
 
-				if (sdl_card_mode_active(st, &sdl) && sdl_quicknav_is_active(&sdl)) {
-					int win_w = 0;
-					int win_h = 0;
-
-					SDL_GetWindowSize(sdl.window,
-							  &win_w, &win_h);
+				SDL_GetWindowSize(sdl.window, &win_w, &win_h);
+				if (sdl_card_mode_active(st, &sdl) &&
+				    sdl_quicknav_is_active(&sdl))
 					sdl_card_update(st, &sdl, port, aspect,
 							win_w, win_h);
-				}
-				if (atomic_load_explicit(&st->osd, __ATOMIC_RELAXED)) {
-					snprintf(line1, sizeof(line1),
-						 "EverLive DUO - %s  (%s%s)",
-						 shm_port_name(port),
+				if (!stats_enabled) {
+					if (sdl.stats.texture)
+						everlive_osd_destroy_stats(
+							&sdl.stats);
+					sdl.stats_hover_action =
+						EVERLIVE_OSD_ACTION_NONE;
+					sdl.stats_built_ns = 0;
+					sdl.stats_dirty = false;
+				} else if (!sdl.stats.texture ||
+					   sdl.stats_dirty ||
+					   now - sdl.stats_built_ns >=
+						   EVERLIVE_STATUS_NS) {
+					if (src_w && src_h) {
+						if (src_fps)
+							snprintf(row1, sizeof(row1),
+								 "%s · %ux%u -> %ux%u @ %u FPS",
+								 shm_port_name(port), src_w, src_h,
+								 out_w, out_h, src_fps);
+						else
+							snprintf(row1, sizeof(row1),
+								 "%s · %ux%u -> %ux%u",
+								 shm_port_name(port), src_w, src_h,
+								 out_w, out_h);
+					} else {
+						snprintf(row1, sizeof(row1),
+							 "%s · No signal",
+							 shm_port_name(port));
+					}
+					snprintf(row2, sizeof(row2),
+						 "YUYV · %s · %s · %u ch · Vol %s%d%%",
 						 aspect_mode_label(aspect),
 						 scale == EVERLIVE_SCALE_INTEGER ?
-						 " Integer" : "");
-					snprintf(line2, sizeof(line2),
-						 "%ux%u -> %ux%u YUYV  |  %u Hz %u ch LPCM  |  Vol %s%d%%",
-						 shm_port_source_width(st, port),
-						 shm_port_source_height(st, port),
-						 out_w, out_h,
-						 shm_port_rate(st, port),
+						 "Integer" : "Fit",
 						 shm_port_channels(st, port),
 						 muted ? "Muted/" : "", vol);
-					snprintf(line3, sizeof(line3),
-						 "1/2 Input  P PiP  A Aspect  L Scale  M Mute  Tab OSD  F Full");
-					sdl_build_overlay(&sdl, line1, line2,
-							  line3);
+					max_width = everlive_osd_stats_max_width(
+						win_w, sdl.card.width,
+						(float)win_h / 1080.0f);
+					everlive_osd_build_stats(
+						sdl.renderer, "GC570D", row1, row2,
+						max_width, sdl.stats_hover_action,
+						(float)win_h / 1080.0f,
+						win_w, win_h, &sdl.stats);
+					sdl.stats_built_ns = now;
+					sdl.stats_dirty = false;
 				}
-				sdl.overlay_built_ns = now;
 			}
 
 			if (!sdl_handle_events(st, &sdl)) {
@@ -2619,6 +2725,7 @@ void gc570d_everlive_set_osd(bool enabled)
 	if (!atomic_load_explicit(&g_everlive.started, __ATOMIC_ACQUIRE))
 		return;
 	atomic_store_explicit(&g_everlive.osd, enabled, __ATOMIC_RELAXED);
+	atomic_store_explicit(&g_everlive.osd_dirty, true, __ATOMIC_RELAXED);
 }
 
 void gc570d_everlive_set_osd_pos(const char *pos)
@@ -2635,6 +2742,7 @@ void gc570d_everlive_set_osd_mode(const char *mode)
 		return;
 	atomic_store_explicit(&g_everlive.osd_mode, parse_osd_mode(mode),
 			      __ATOMIC_RELAXED);
+	atomic_store_explicit(&g_everlive.osd_dirty, true, __ATOMIC_RELAXED);
 }
 
 void gc570d_everlive_set_recording(bool active)

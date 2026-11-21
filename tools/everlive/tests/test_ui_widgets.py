@@ -217,6 +217,16 @@ class WidgetTests(unittest.TestCase):
         button.setChecked(True)
         self.assertTrue(button.isChecked())
 
+    def test_icon_button_can_recolour_glyph(self):
+        from PySide6.QtGui import QIcon
+        button = ui_widgets.IconButton("mute", "Mute")
+        before = button.icon().pixmap(
+            16, 16, QIcon.Normal, QIcon.Off).toImage()
+        button.set_icon("mute", color=ui_theme.ON_ACCENT)
+        after = button.icon().pixmap(
+            16, 16, QIcon.Normal, QIcon.Off).toImage()
+        self.assertNotEqual(before, after)
+
 
 if __name__ == "__main__":
     unittest.main()

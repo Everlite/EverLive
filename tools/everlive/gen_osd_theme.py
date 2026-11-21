@@ -72,6 +72,7 @@ _COLORS = {
     "BLUE": ui_theme.BLUE,
     "BLUE_BORDER": ui_theme.BLUE_HOVER,
     "BLUE_TEXT": ui_theme.BLUE_TEXT,
+    "ON_ACCENT": ui_theme.ON_ACCENT,
 }
 
 # Geometry and type are the Hub's own measurements.  Keep this table in the

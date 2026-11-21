@@ -451,20 +451,6 @@ static bool parse_osd_pos(const char *value, enum osd_position *out)
 	return false;
 }
 
-static const char *aspect_label(enum stream_aspect aspect)
-{
-	switch (aspect) {
-	case ASPECT_16_9:
-		return "16:9 AR";
-	case ASPECT_4_3:
-		return "4:3 AR";
-	case ASPECT_STRETCH:
-		return "Stretch";
-	default:
-		return "Auto AR";
-	}
-}
-
 static const char *aspect_name(enum stream_aspect aspect)
 {
 	switch (aspect) {
@@ -1807,8 +1793,8 @@ struct osd_overlay {
 	char text[640];
 };
 
-static struct osd_overlay g_osd;
 static struct everlive_osd_card g_card;
+static struct everlive_osd_stats g_stats;
 static struct everlive_osd_popup g_popup;
 static enum everlive_osd_popup_kind g_popup_kind;
 static bool g_popup_open;
@@ -1820,44 +1806,70 @@ static int g_popup_hover = -1;
 static int g_popup_volume = 100;
 static bool g_osd_font_init_attempted;
 static SDL_Rect g_card_dest;
+static SDL_Rect g_stats_dest;
 static SDL_Rect g_popup_dest;
+static enum everlive_osd_action g_stats_hover_action =
+	EVERLIVE_OSD_ACTION_NONE;
+static bool g_stats_dirty;
+static bool g_quicknav_forced;
 
-/* Quick Navigation bar state: auto-wakes on mouse motion/click/hotkey, auto-hides after 3s */
+/* Quick Navigation bar state: auto-wakes on mouse motion/click when enabled, auto-hides after 3s */
 static uint64_t g_quicknav_wake_ms;
-static bool g_quicknav_manual_hidden;
+static bool g_quicknav_enabled = true;
 
 static void quicknav_wake(void)
 {
+	if (!g_quicknav_enabled)
+		return;
 	g_quicknav_wake_ms = now_ms();
-	g_quicknav_manual_hidden = false;
+}
+
+static void quicknav_force(void)
+{
+	g_quicknav_enabled = true;
+	g_quicknav_forced = true;
+	quicknav_wake();
 }
 
 static void quicknav_hide(void)
 {
-	g_quicknav_manual_hidden = true;
+	g_quicknav_enabled = false;
+	g_quicknav_forced = false;
 	g_quicknav_wake_ms = 0;
 	g_popup_open = false;
 	g_popup_dragging = false;
 	g_popup_kind = EVERLIVE_OSD_POPUP_NONE;
 	g_popup_hover = -1;
 	g_hover_action = EVERLIVE_OSD_ACTION_NONE;
+	g_stats_hover_action = EVERLIVE_OSD_ACTION_NONE;
+	g_stats_dirty = true;
 }
 
 static bool quicknav_is_active(void)
 {
-	if (g_quicknav_manual_hidden)
+	if (!g_quicknav_enabled)
 		return false;
 	if (g_popup_open || g_popup_dragging || g_hover_action != EVERLIVE_OSD_ACTION_NONE)
 		return true;
 	return (now_ms() - g_quicknav_wake_ms < 3000ULL);
 }
 
+static void quicknav_tick(void)
+{
+	if (g_quicknav_forced && !quicknav_is_active())
+		g_quicknav_forced = false;
+}
+
 static void quicknav_sync_cursor(void)
 {
+	static int last_cursor_state = -1;
+	int show;
+
 	if (g_parent_winid != 0)
 		return;
-	static int last_cursor_state = -1;
-	int show = quicknav_is_active() ? SDL_ENABLE : SDL_DISABLE;
+	show = (quicknav_is_active() ||
+		g_stats_hover_action != EVERLIVE_OSD_ACTION_NONE) ?
+		SDL_ENABLE : SDL_DISABLE;
 	if (show != last_cursor_state) {
 		SDL_ShowCursor(show);
 		last_cursor_state = show;
@@ -1897,19 +1909,14 @@ static void toast_destroy(void)
 
 static void osd_destroy(void)
 {
-	if (g_osd.texture) {
-		SDL_DestroyTexture(g_osd.texture);
-		g_osd.texture = NULL;
-	}
-	g_osd.width = 0;
-	g_osd.height = 0;
-	g_osd.scale = 0;
-	g_osd.text[0] = '\0';
+	everlive_osd_destroy_stats(&g_stats);
 	everlive_osd_destroy_card(&g_card);
 	everlive_osd_destroy_popup(&g_popup);
 	g_popup_open = false;
 	g_popup_kind = EVERLIVE_OSD_POPUP_NONE;
 	g_popup_hover = -1;
+	g_stats_hover_action = EVERLIVE_OSD_ACTION_NONE;
+	g_stats_dirty = true;
 	toast_destroy();
 }
 
@@ -1940,6 +1947,8 @@ static bool osd_window_is_fullscreen(SDL_Window *window)
 
 static bool osd_card_active(SDL_Window *window)
 {
+	if (g_quicknav_forced)
+		return true;
 	if (g_osd_mode == OSD_MODE_CARD)
 		return true;
 	if (g_osd_mode == OSD_MODE_COMPACT)
@@ -2072,11 +2081,6 @@ static void osd_build(SDL_Renderer *renderer, int scale, const char *text,
 	snprintf(out->text, sizeof(out->text), "%s", text);
 }
 
-static void osd_rebuild(SDL_Renderer *renderer, int scale, const char *text)
-{
-	osd_build(renderer, scale, text, &g_osd);
-}
-
 static int osd_scale_for_height(int win_h)
 {
 	if (win_h >= 1800)
@@ -2103,22 +2107,33 @@ static void osd_note_dma_age(uint64_t age_us)
 		g_osd_dma_ms = quantised;
 }
 
+static void stats_append(char *buf, size_t size, const char *text)
+{
+	size_t len;
+
+	if (!text || !*text || size == 0)
+		return;
+	len = strlen(buf);
+	if (len >= size - 1)
+		return;
+	snprintf(buf + len, size - len, "%s%s", len ? " · " : "", text);
+}
+
 static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 		       uint32_t in_w, uint32_t in_h, bool interlaced,
 		       uint32_t rate_x100, double fps, const char *audio_text,
 		       unsigned audio_ch, uint32_t audio_rate,
 		       const char *hdr_text, const char *chroma_text)
 {
-	char line2[384];
-	char line3[128];
-	char text[640];
-	char tail[96] = "";
-	char scale_tag[32] = "";
-	char dma_tag[32] = "";
-	char ar_tag[24] = "";
-	char vsync_tag[24] = "";
+	char row1[384];
+	char row2[384];
+	char fields[320] = "";
+	char fg[128];
+	char tag[48];
+	int max_width;
+	int win_w = 0;
 	int win_h = 0;
-	int scale;
+	float scale;
 	static uint64_t last_hud_ms;
 	uint64_t now_ms_val;
 
@@ -2131,54 +2146,49 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 	}
 
 	if (!g_osd_enabled) {
-		if (g_osd.texture) {
-			SDL_DestroyTexture(g_osd.texture);
-			g_osd.texture = NULL;
-			g_osd.text[0] = '\0';
-		}
+		if (g_stats.texture)
+			everlive_osd_destroy_stats(&g_stats);
+		g_stats_hover_action = EVERLIVE_OSD_ACTION_NONE;
+		g_stats_dirty = false;
 		return;
 	}
 
 	now_ms_val = now_ms();
-	if (g_osd.texture && now_ms_val - last_hud_ms < 500)
+	if (!g_stats_dirty && g_stats.texture &&
+	    now_ms_val - last_hud_ms < 500)
 		return;
 	last_hud_ms = now_ms_val;
+	g_stats_dirty = false;
 
-	if (hdr_text && *hdr_text)
-		snprintf(tail, sizeof(tail), " | %s", hdr_text);
-	if (g_aspect != ASPECT_AUTO)
-		snprintf(ar_tag, sizeof(ar_tag), " | %s",
-			 aspect_label(g_aspect));
-	if (g_integer_factor > 0)
-		snprintf(scale_tag, sizeof(scale_tag), " | %dx",
-			 g_integer_factor);
-	if (g_osd_dma_ms > 0.0)
-		snprintf(dma_tag, sizeof(dma_tag), " | %4.1fms",
-			 g_osd_dma_ms);
-	if (g_vsync)
-		snprintf(vsync_tag, sizeof(vsync_tag), " | VSync");
+	SDL_GetWindowSize(window, &win_w, &win_h);
+	scale = (float)win_h / 1080.0f;
 
-	SDL_GetWindowSize(window, NULL, &win_h);
-	scale = osd_scale_for_height(win_h);
-
-	snprintf(line2, sizeof(line2),
-		 "%ux%u%s %.0fHz | %5.1f FPS%s%s%s%s | %s%s",
-		 in_w, in_h, interlaced ? "i" : "p",
-		 (double)rate_x100 / 100.0, fps,
-		 ar_tag, scale_tag, dma_tag, vsync_tag,
-		 audio_text, tail);
-
-	framegen_describe(line3, sizeof(line3));
-
-	if (line3[0])
-		snprintf(text, sizeof(text), "%s\n%s", line2, line3);
+	if (in_w && in_h)
+		snprintf(row1, sizeof(row1),
+			 "%ux%u%s %.0fHz · %.1f FPS", in_w, in_h,
+			 interlaced ? "i" : "p",
+			 (double)rate_x100 / 100.0, fps);
 	else
-		snprintf(text, sizeof(text), "%s", line2);
+		snprintf(row1, sizeof(row1), "No signal · %.1f FPS", fps);
+	stats_append(row1, sizeof(row1), audio_text);
 
-	if (scale == g_osd.scale && strcmp(text, g_osd.text) == 0)
-		return;
+	stats_append(fields, sizeof(fields), hdr_text);
+	if (g_osd_dma_ms > 0.0) {
+		snprintf(tag, sizeof(tag), "DMA %.1fms", g_osd_dma_ms);
+		stats_append(fields, sizeof(fields), tag);
+	}
+	if (g_vsync)
+		stats_append(fields, sizeof(fields), "VSync");
+	framegen_describe(fg, sizeof(fg));
+	snprintf(row2, sizeof(row2), "%s%s%s",
+		 fg[0] ? fg : "Frame Gen Off",
+		 fields[0] ? " · " : "", fields);
 
-	osd_rebuild(renderer, scale, text);
+	max_width = everlive_osd_stats_max_width(win_w, g_card.width,
+						 scale);
+	everlive_osd_build_stats(renderer, "GC573", row1, row2,
+				 max_width, g_stats_hover_action, scale,
+				 win_w, win_h, &g_stats);
 }
 
 static void osd_scale_rect(SDL_Rect *dst, const SDL_Rect *src,
@@ -2197,21 +2207,6 @@ static void osd_scale_rect(SDL_Rect *dst, const SDL_Rect *src,
 	dst->y = lroundf((float)src->y * (float)out_h / (float)win_h);
 	dst->w = lroundf((float)src->w * (float)out_w / (float)win_w);
 	dst->h = lroundf((float)src->h * (float)out_h / (float)win_h);
-}
-
-static void osd_hud_place(SDL_Rect *dst, int win_w, int win_h)
-{
-	int margin = g_osd.scale >= 3 ? 24 : (g_osd.scale == 2 ? 16 : 10);
-	bool bottom = g_osd_pos == OSD_POS_BOTTOM;
-
-	dst->w = g_osd.width;
-	dst->h = g_osd.height;
-	dst->x = win_w - margin - dst->w;
-	dst->y = bottom ? win_h - margin - dst->h : margin;
-	if (dst->x < 0)
-		dst->x = 0;
-	if (dst->y < 0)
-		dst->y = 0;
 }
 
 static void osd_place(SDL_Rect *dst, int width, int height, float scale,
@@ -2313,35 +2308,37 @@ static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
 {
 	int win_w = 0;
 	int win_h = 0;
+	bool card_visible;
+	float scale;
 	SDL_Rect dst;
+	SDL_Rect draw;
 
 	if (!window)
 		return;
 
 	SDL_GetWindowSize(window, &win_w, &win_h);
-	if (osd_card_active(window) && quicknav_is_active() && g_card.texture) {
-		float scale = (float)win_h / 1080.0f;
-
+	scale = (float)win_h / 1080.0f;
+	card_visible = osd_card_active(window) && quicknav_is_active() &&
+		g_card.texture;
+	if (card_visible) {
 		osd_place(&dst, g_card.width, g_card.height, scale,
 			  win_w, win_h);
-		SDL_Rect draw;
-
 		g_card_dest = dst;
 		osd_scale_rect(&draw, &dst, renderer, win_w, win_h);
 		SDL_RenderCopy(renderer, g_card.texture, NULL, &draw);
+	}
+	if (g_osd_enabled && g_stats.texture) {
+		everlive_osd_place_stats(&g_stats_dest, &g_stats,
+					 g_osd_pos == OSD_POS_BOTTOM,
+					 &g_card_dest, card_visible, scale,
+					 win_w, win_h);
+		everlive_osd_render_stats(renderer, &g_stats, &g_stats_dest,
+					  win_w, win_h);
+	}
+	if (card_visible)
 		osd_render_tooltip(renderer, win_w, win_h, scale);
+	if (card_visible)
 		osd_render_popup(renderer, win_w, win_h, scale);
-		return;
-	}
-	if (!g_osd_enabled || !g_osd.texture)
-		return;
-	osd_hud_place(&dst, win_w, win_h);
-	{
-		SDL_Rect draw;
-
-		osd_scale_rect(&draw, &dst, renderer, win_w, win_h);
-		SDL_RenderCopy(renderer, g_osd.texture, NULL, &draw);
-	}
 }
 
 static int osd_volume_percent(void)
@@ -2458,6 +2455,27 @@ static enum everlive_osd_action osd_hit_card(int x, int y)
 	return hit;
 }
 
+static enum everlive_osd_action osd_hit_stats_raw(int x, int y)
+{
+	const struct everlive_osd_hitbox *hit;
+
+	if (!g_stats.texture || g_stats_dest.w <= 0)
+		return EVERLIVE_OSD_ACTION_NONE;
+	hit = everlive_osd_stats_hit(&g_stats, x - g_stats_dest.x,
+				     y - g_stats_dest.y);
+	return hit ? hit->action : EVERLIVE_OSD_ACTION_NONE;
+}
+
+static void osd_set_stats_hover(enum everlive_osd_action action)
+{
+	if (g_stats_hover_action == action)
+		return;
+	g_stats_hover_action = action;
+	g_stats_dirty = true;
+	if (getenv("EVERLIVE_OSD_DEBUG"))
+		fprintf(stderr, "[OSD] stats hover=%d\n", action);
+}
+
 static void osd_set_hover(enum everlive_osd_action action)
 {
 	enum everlive_osd_action old = g_hover_action;
@@ -2481,21 +2499,45 @@ static void osd_update_hover(SDL_Window *window, int x, int y)
 {
 	int win_w = 0;
 	int win_h = 0;
+	bool card_visible;
+	enum everlive_osd_action card_hit;
+	enum everlive_osd_action stats_hit;
+	float scale;
 
-	if (!window || g_headless || !quicknav_is_active() || g_popup_open ||
-	    !osd_card_active(window) || !g_card.texture) {
+	if (!window || g_headless || g_popup_open) {
 		osd_set_hover(EVERLIVE_OSD_ACTION_NONE);
+		osd_set_stats_hover(EVERLIVE_OSD_ACTION_NONE);
 		return;
 	}
 	SDL_GetWindowSize(window, &win_w, &win_h);
 	if (win_w <= 0 || win_h <= 0 || x < 0 || y < 0 ||
 	    x >= win_w || y >= win_h) {
 		osd_set_hover(EVERLIVE_OSD_ACTION_NONE);
+		osd_set_stats_hover(EVERLIVE_OSD_ACTION_NONE);
 		return;
 	}
-	osd_place(&g_card_dest, g_card.width, g_card.height,
-		  (float)win_h / 1080.0f, win_w, win_h);
-	osd_set_hover(osd_hit_card_raw(x, y));
+	scale = (float)win_h / 1080.0f;
+	card_visible = osd_card_active(window) && quicknav_is_active() &&
+		g_card.texture;
+	if (card_visible)
+		osd_place(&g_card_dest, g_card.width, g_card.height,
+			  scale, win_w, win_h);
+	if (g_osd_enabled && g_stats.texture)
+		everlive_osd_place_stats(&g_stats_dest, &g_stats,
+					 g_osd_pos == OSD_POS_BOTTOM,
+					 &g_card_dest, card_visible, scale,
+					 win_w, win_h);
+	stats_hit = g_osd_enabled && g_stats.texture ?
+		osd_hit_stats_raw(x, y) : EVERLIVE_OSD_ACTION_NONE;
+	card_hit = card_visible ? osd_hit_card_raw(x, y) :
+		EVERLIVE_OSD_ACTION_NONE;
+	if (stats_hit != EVERLIVE_OSD_ACTION_NONE) {
+		osd_set_stats_hover(stats_hit);
+		osd_set_hover(EVERLIVE_OSD_ACTION_NONE);
+	} else {
+		osd_set_stats_hover(EVERLIVE_OSD_ACTION_NONE);
+		osd_set_hover(card_hit);
+	}
 }
 
 static void osd_render_tooltip(SDL_Renderer *renderer, int win_w, int win_h,
@@ -2577,31 +2619,33 @@ static void osd_update_popup_hover(int x, int y)
 static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 {
 	enum everlive_osd_action action;
+	enum everlive_osd_action stats_action;
+	bool card_mode;
+	bool card_visible;
 	SDL_Point point;
 	int x;
 	int y;
 
 	if (!window || g_headless)
 		return false;
-	if (!osd_card_active(window) || !g_card.texture)
+	card_mode = osd_card_active(window);
+	card_visible = card_mode && quicknav_is_active() && g_card.texture;
+	if (!card_mode && !(g_osd_enabled && g_stats.texture))
 		return false;
 
-	if (event->type == SDL_MOUSEMOTION) {
+	if (card_mode && event->type == SDL_MOUSEMOTION) {
 		if (event->motion.xrel != 0 || event->motion.yrel != 0)
 			quicknav_wake();
-	} else if (event->type == SDL_MOUSEBUTTONDOWN) {
+	} else if (card_mode && event->type == SDL_MOUSEBUTTONDOWN) {
 		quicknav_wake();
 	}
-
-	if (!quicknav_is_active())
-		return false;
 
 	{
 		int win_w = 0;
 		int win_h = 0;
 
 		SDL_GetWindowSize(window, &win_w, &win_h);
-		if (win_w > 0 && win_h > 0) {
+		if (card_visible && win_w > 0 && win_h > 0) {
 			osd_place(&g_card_dest, g_card.width, g_card.height,
 				  (float)win_h / 1080.0f, win_w, win_h);
 		}
@@ -2669,7 +2713,20 @@ static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 		osd_close_popup();
 	}
 
-	action = osd_hit_card(x, y);
+	stats_action = (g_osd_enabled && g_stats.texture) ?
+		osd_hit_stats_raw(x, y) : EVERLIVE_OSD_ACTION_NONE;
+	if (stats_action != EVERLIVE_OSD_ACTION_NONE) {
+		if (stats_action == EVERLIVE_OSD_ACTION_STATS_CLOSE) {
+			g_osd_enabled = false;
+			everlive_osd_destroy_stats(&g_stats);
+			g_stats_hover_action = EVERLIVE_OSD_ACTION_NONE;
+			g_stats_dirty = true;
+			osd_card_invalidate();
+			toast_trigger("Performance HUD: Off");
+		}
+		return true;
+	}
+	action = card_visible ? osd_hit_card(x, y) : EVERLIVE_OSD_ACTION_NONE;
 	if (event->button.clicks >= 2 &&
 	    action == EVERLIVE_OSD_ACTION_NONE) {
 		osd_toggle_fullscreen(window);
@@ -2704,6 +2761,8 @@ static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 		break;
 	case EVERLIVE_OSD_ACTION_STATS:
 		g_osd_enabled = !g_osd_enabled;
+		g_stats_hover_action = EVERLIVE_OSD_ACTION_NONE;
+		g_stats_dirty = true;
 		toast_trigger(g_osd_enabled ? "Performance HUD: On" : "Performance HUD: Off");
 		osd_card_invalidate();
 		break;
@@ -2843,8 +2902,14 @@ have_toast:
 			gap = 6;
 		if (edge < 8)
 			edge = 8;
-		if (osd_card_active(window) && quicknav_is_active() &&
-		    g_card_dest.h > 0) {
+		if (g_osd_enabled && g_stats.texture &&
+		    g_stats_dest.h > 0) {
+			if (g_osd_pos == OSD_POS_BOTTOM)
+				dst.y = g_stats_dest.y - dst.h - gap;
+			else
+				dst.y = g_stats_dest.y + g_stats_dest.h + gap;
+		} else if (osd_card_active(window) &&
+			   quicknav_is_active() && g_card_dest.h > 0) {
 			if (g_osd_pos == OSD_POS_BOTTOM)
 				dst.y = g_card_dest.y - dst.h - gap;
 			else
@@ -6427,6 +6492,21 @@ static void embed_forward_key(SDL_Window *window, const SDL_Event *ev, KeySym fa
 		case SDLK_TAB: sym = XK_Tab; break;
 		case SDLK_g: sym = XK_g; break;
 		case SDLK_q: sym = XK_Escape; break;
+		case SDLK_p: sym = XK_p; break;
+		case SDLK_z: sym = XK_z; break;
+		case SDLK_a: sym = XK_a; break;
+		case SDLK_l: sym = XK_l; break;
+		case SDLK_1: sym = XK_1; break;
+		case SDLK_i: sym = XK_i; break;
+		case SDLK_h: sym = XK_h; break;
+		case SDLK_PLUS:
+		case SDLK_KP_PLUS:
+		case SDLK_EQUALS: sym = XK_plus; break;
+		case SDLK_MINUS:
+		case SDLK_KP_MINUS: sym = XK_minus; break;
+		case SDLK_F1: sym = XK_F1; break;
+		case SDLK_r: sym = XK_r; break;
+		case SDLK_t: sym = XK_t; break;
 		default: break;
 		}
 	}
@@ -6750,7 +6830,7 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 						 g_present_driver ==
 						 PRESENT_DRIVER_VULKAN);
 
-	SDL_ShowCursor((g_osd_enabled || g_parent_winid) ? SDL_ENABLE : SDL_DISABLE);
+	quicknav_sync_cursor();
 	return 0;
 }
 
@@ -7088,8 +7168,11 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		break;
 	case GC573_IPC_CMD_OSD_ENABLE:
 		g_osd_enabled = cmd->a != 0;
+		g_stats_hover_action = EVERLIVE_OSD_ACTION_NONE;
+		g_stats_dirty = true;
+		osd_card_invalidate();
 		if (window)
-			SDL_ShowCursor((g_osd_enabled || g_parent_winid) ? SDL_ENABLE : SDL_DISABLE);
+			quicknav_sync_cursor();
 		printf("[IPC] OSD overlay: %s\n",
 		       g_osd_enabled ? "on" : "off");
 		break;
@@ -7108,9 +7191,17 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		if (cmd->a >= 0 && cmd->a <= OSD_MODE_CARD) {
 			g_osd_mode = (enum osd_mode)cmd->a;
 			osd_card_invalidate();
-			g_osd.scale = -1;
 		}
 		printf("[IPC] OSD mode: %d\n", cmd->a);
+		break;
+	case GC573_IPC_CMD_QUICKNAV_TOGGLE:
+		if (quicknav_is_active()) {
+			quicknav_hide();
+			toast_trigger("Quick Nav: Off");
+		} else {
+			quicknav_force();
+			toast_trigger("Quick Nav: On");
+		}
 		break;
 	case GC573_IPC_CMD_ASPECT:
 		if (cmd->a >= 0 && cmd->a < (int32_t)ASPECT_COUNT)
@@ -7987,7 +8078,7 @@ int main(int argc, char *argv[])
 		       framegen_mode_name(g_fg_config.mode),
 		       (int)(g_fg_config.flow_scale * 100.0f + 0.5f),
 		       g_fg_config.perf_mode ? "on" : "off");
-		SDL_ShowCursor((g_osd_enabled || g_parent_winid) ? SDL_ENABLE : SDL_DISABLE);
+		quicknav_sync_cursor();
 	}
 	if (v4l2_sink.fd >= 0)
 		printf("[V4L2] Loopback output active on %s\n", v4l2_sink.path);
@@ -8232,17 +8323,22 @@ int main(int argc, char *argv[])
 				} else if (event.key.keysym.sym == SDLK_TAB ||
 					   event.key.keysym.sym == SDLK_i) {
 					g_osd_enabled = !g_osd_enabled;
+					g_stats_hover_action =
+						EVERLIVE_OSD_ACTION_NONE;
+					g_stats_dirty = true;
+					osd_card_invalidate();
 					printf("[OSD] Performance HUD: %s\n",
 					       g_osd_enabled ? "on" : "off");
 					fflush(stdout);
 					toast_trigger(g_osd_enabled ?
 						      "Performance HUD: On" : "Performance HUD: Off");
-				} else if (event.key.keysym.sym == SDLK_o) {
+				} else if (event.key.keysym.sym == SDLK_z &&
+					   (event.key.keysym.mod & KMOD_ALT)) {
 					if (quicknav_is_active()) {
 						quicknav_hide();
 						toast_trigger("Quick Nav: Off");
 					} else {
-						quicknav_wake();
+						quicknav_force();
 						toast_trigger("Quick Nav: On");
 					}
 				} else if (event.key.keysym.sym == SDLK_s ||
@@ -8277,6 +8373,7 @@ int main(int argc, char *argv[])
 #endif
 			}
 		}
+		quicknav_tick();
 		quicknav_sync_cursor();
 		if (!g_running)
 			break;

@@ -50,9 +50,14 @@ WARN_BORDER = "#6B5734"
 DANGER = "#FF6B7A"
 DANGER_BG = "#3B1D25"
 DANGER_BORDER = "#7A2A38"
+DANGER_SOLID = "#9E3342"
+DANGER_SOLID_HOVER = "#B53B4C"
+DANGER_BORDER_BRIGHT = "#FF5D5D"
+ON_ACCENT = "#FFFFFF"
 
 CHIP_BG = "#211F2E"
 CHIP_BORDER = "#3A3650"
+VIDEO_BG = "#07060E"
 
 # Form fields and keycaps.
 INPUT_BG = "#25334A"
@@ -88,9 +93,46 @@ CONTROL_H = 36
 BUTTON_H = 36
 INPUT_H = 36
 
-FONT_STACK = ('-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, '
-              '"Helvetica Neue", Arial, sans-serif')
-MONO_STACK = '"JetBrains Mono", "Consolas", monospace'
+FONT_FAMILY = "Noto Sans"
+MONO_FAMILY = "Noto Sans Mono"
+FONT_STACK = ('"Noto Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", '
+              'Roboto, "Helvetica Neue", Arial, sans-serif')
+MONO_STACK = '"Noto Sans Mono", "JetBrains Mono", "Consolas", monospace'
+
+_TEXT_FONTS_LOADED = False
+
+
+def ensure_fonts() -> bool:
+    """Register the bundled Hub text faces once a QApplication exists.
+
+    Returns ``True`` when at least one bundled font registered.  The QSS
+    stacks keep system fallbacks, so an old install without the files still
+    renders normally.
+    """
+    global _TEXT_FONTS_LOADED
+    if _TEXT_FONTS_LOADED:
+        return True
+    try:
+        from PySide6.QtGui import QFontDatabase
+        from PySide6.QtWidgets import QApplication
+    except ImportError:
+        return False
+    if QApplication.instance() is None:
+        return False
+
+    loaded = False
+    for filename in (
+            "NotoSans-Regular.ttf",
+            "NotoSans-SemiBold.ttf",
+            "NotoSans-ExtraBold.ttf",
+            "NotoSansMono-SemiBold.ttf"):
+        path = os.path.join(ASSET_DIR, filename)
+        if not os.path.isfile(path):
+            continue
+        if QFontDatabase.addApplicationFont(path) >= 0:
+            loaded = True
+    _TEXT_FONTS_LOADED = loaded
+    return loaded
 
 TOKENS = {
     "BG": BG,
@@ -120,8 +162,13 @@ TOKENS = {
     "DANGER": DANGER,
     "DANGER_BG": DANGER_BG,
     "DANGER_BORDER": DANGER_BORDER,
+    "DANGER_SOLID": DANGER_SOLID,
+    "DANGER_SOLID_HOVER": DANGER_SOLID_HOVER,
+    "DANGER_BORDER_BRIGHT": DANGER_BORDER_BRIGHT,
+    "ON_ACCENT": ON_ACCENT,
     "CHIP_BG": CHIP_BG,
     "CHIP_BORDER": CHIP_BORDER,
+    "VIDEO_BG": VIDEO_BG,
     "INPUT_BG": INPUT_BG,
     "INPUT_HOVER": INPUT_HOVER,
     "INPUT_BORDER": INPUT_BORDER,
@@ -174,15 +221,10 @@ QFrame#videoStageFrame {
     border: 1px solid @BORDER@;
     border-radius: @RADIUS@;
 }
-QFrame#telemetryCard {
+QFrame#edidCard {
     background-color: @SURFACE@;
     border: 1px solid @BORDER@;
     border-radius: @RADIUS@;
-}
-QFrame#edidCard {
-    background-color: @SURFACE@;
-    border: 1px solid #263042;
-    border-radius: 8px;
 }
 QFrame#remoteCard {
     background-color: @SURFACE@;
@@ -205,10 +247,21 @@ QFrame#cardFrame {
     border: 1px solid @BORDER@;
     border-radius: @RADIUS@;
 }
-QFrame#handshakeCard {
-    background-color: @SURFACE_SUNKEN@;
-    border: 1px solid @BORDER_STRONG@;
-    border-radius: @RADIUS@;
+QGroupBox#cameraGroup {
+    background: transparent;
+    border: none;
+    margin-top: 12px;
+    padding-top: 6px;
+}
+QGroupBox#cameraGroup::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 0px;
+    padding: 0px;
+    color: #CBD5E1;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.7px;
 }
 QFrame#bottomBar {
     background-color: @SURFACE_RAISED@;
@@ -219,26 +272,6 @@ QFrame#bottomBar {
 QFrame#bottomBar QLabel {
     color: @TEXT_MUTED@;
 }
-QPushButton#btnBar {
-    background: transparent;
-    border: 1px solid @GROUP_BORDER@;
-    color: @TEXT_MUTED@;
-    border-radius: @RADIUS@;
-    padding: 4px 14px;
-    font-size: 14px;
-    font-weight: 600;
-}
-QPushButton#btnBar:hover {
-    background-color: @SURFACE_HOVER@;
-    border-color: @BORDER_STRONG@;
-    color: @TEXT@;
-}
-QPushButton#btnBar:checked {
-    background-color: @BLUE@;
-    border-color: @BLUE_HOVER@;
-    color: @BLUE_TEXT@;
-}
-
 QLabel#deckTitle {
     color: @TEXT_MUTED@;
     font-size: 13.5px;
@@ -303,11 +336,6 @@ QLabel#sourceName {
     font-weight: 800;
     letter-spacing: 0.6px;
 }
-QWidget#sourceSegments {
-    background-color: @SURFACE_SUNKEN@;
-    border: 1px solid @BORDER@;
-    border-radius: @SEGMENT_RADIUS@;
-}
 QLabel#badgeModel {
     color: @TEXT@;
     background-color: @CHIP_BG@;
@@ -341,7 +369,6 @@ QLabel#hintText {
 QLabel#kvKey {
     color: #94A3B8;
     font-size: 13.5px;
-    font-variant-numeric: tabular-nums;
 }
 QLabel#telemetryMeta {
     color: #94A3B8;
@@ -352,14 +379,12 @@ QLabel#kvVal {
     font-family: @MONO_STACK@;
     font-size: 13.5px;
     font-weight: 600;
-    font-variant-numeric: tabular-nums;
 }
 QLabel#heroSignal {
     color: @TEXT@;
     font-family: @MONO_STACK@;
     font-size: 14px;
     font-weight: 700;
-    font-variant-numeric: tabular-nums;
 }
 QLabel#heroMeta {
     color: @TEXT_MUTED@;
@@ -370,7 +395,6 @@ QLabel#fpsHero {
     font-family: @MONO_STACK@;
     font-size: 26px;
     font-weight: 800;
-    font-variant-numeric: tabular-nums;
 }
 QLabel#fpsUnit {
     color: @TEXT_MUTED@;
@@ -385,34 +409,6 @@ QLabel#teleValue {
 QLabel#teleSub {
     color: @TEXT_MUTED@;
     font-size: 12.5px;
-}
-QLabel#stageBadge {
-    color: @ACCENT@;
-    background-color: #261628;
-    border: 1px solid #4A2444;
-    border-radius: @RADIUS@;
-    padding: 3px 12px;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.9px;
-}
-QLabel#stageTitle {
-    color: @TEXT@;
-    font-size: 20px;
-    font-weight: 700;
-}
-QLabel#stageSub {
-    color: @TEXT_MUTED@;
-    font-size: 12px;
-}
-QLabel#audioFormat {
-    color: @ACCENT_SOFT@;
-    background-color: #211B36;
-    border: 1px solid #382E5C;
-    border-radius: 8px;
-    padding: 0px 12px;
-    font-size: 12.5px;
-    font-weight: 600;
 }
 QLabel#footerText {
     color: @TEXT_DIM@;
@@ -443,10 +439,6 @@ QLabel#legacyBadge {
     font-weight: 700;
     letter-spacing: 0.5px;
 }
-QLabel#helperNote {
-    color: @LABEL@;
-    font-size: 13px;
-}
 QLabel#kbd {
     color: @TEXT@;
     background-color: #1E2634;
@@ -461,38 +453,8 @@ QLabel#numericValue {
     color: @TEXT@;
     font-family: @MONO_STACK@;
     font-size: 13px;
-    font-variant-numeric: tabular-nums;
 }
 
-/* Inspector tabs */
-QTabWidget#inspectorTabs::pane {
-    border: none;
-    background: transparent;
-    margin-top: 6px;
-}
-QTabWidget#inspectorTabs QTabBar {
-    background: transparent;
-    border: none;
-}
-QTabWidget#inspectorTabs QTabBar::tab {
-    background-color: transparent;
-    color: @TEXT_MUTED@;
-    border: none;
-    border-radius: @RADIUS@;
-    padding: 8px 12px;
-    margin: 3px;
-    font-size: 12px;
-    font-weight: 600;
-}
-QTabWidget#inspectorTabs QTabBar::tab:hover:!selected {
-    color: @TEXT@;
-    background-color: @SURFACE_HOVER@;
-}
-QTabWidget#inspectorTabs QTabBar::tab:selected {
-    color: @TEXT@;
-    background-color: @BLUE@;
-    border: 1px solid @BLUE_HOVER@;
-}
 QScrollArea#inspectorScroll, QScrollArea#inspectorScroll > QWidget > QWidget {
     background: transparent;
     border: none;
@@ -503,11 +465,6 @@ QWidget#segmentedControl {
     background-color: @SURFACE@;
     border: 1px solid @GROUP_BORDER@;
     border-radius: @SEGMENT_RADIUS@;
-}
-QWidget#sourceSegments {
-    background-color: @SURFACE_SUNKEN@;
-    border: 1px solid @GROUP_BORDER@;
-    border-radius: @RADIUS@;
 }
 QPushButton#segmentButton {
     background-color: transparent;
@@ -679,29 +636,35 @@ QWidget#actionGroup {
     border-radius: 6px;
 }
 QPushButton#actionButton,
-QPushButton#actionStart {
+QPushButton#actionStart,
+QPushButton#actionRecord {
     border: none;
     border-radius: 0px;
     padding: 0px;
 }
 QPushButton#actionButton[actionPos="first"],
-QPushButton#actionStart[actionPos="first"] {
+QPushButton#actionStart[actionPos="first"],
+QPushButton#actionRecord[actionPos="first"] {
     border-top-left-radius: 6px;
     border-bottom-left-radius: 6px;
 }
 QPushButton#actionButton[actionPos="last"],
-QPushButton#actionStart[actionPos="last"] {
+QPushButton#actionStart[actionPos="last"],
+QPushButton#actionRecord[actionPos="last"] {
     border-top-right-radius: 6px;
     border-bottom-right-radius: 6px;
 }
 QPushButton#actionButton[actionPos="only"],
-QPushButton#actionStart[actionPos="only"] {
+QPushButton#actionStart[actionPos="only"],
+QPushButton#actionRecord[actionPos="only"] {
     border-radius: 6px;
 }
 QPushButton#actionButton[actionPos="first"],
 QPushButton#actionButton[actionPos="middle"],
 QPushButton#actionStart[actionPos="first"],
-QPushButton#actionStart[actionPos="middle"] {
+QPushButton#actionStart[actionPos="middle"],
+QPushButton#actionRecord[actionPos="first"],
+QPushButton#actionRecord[actionPos="middle"] {
     border-right: 1px solid @GROUP_BORDER@;
 }
 QPushButton#actionStart {
@@ -712,14 +675,28 @@ QPushButton#actionStart:hover {
     background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
         stop:0 #2B9679, stop:1 #40BA98);
 }
-QPushButton#actionButton {
+QPushButton#actionButton,
+QPushButton#actionRecord {
     background-color: transparent;
 }
-QPushButton#actionButton:hover {
+QPushButton#actionButton:hover,
+QPushButton#actionRecord:hover {
     background-color: @SURFACE_HOVER@;
+}
+QPushButton#actionButton:checked {
+    background-color: @BLUE@;
+}
+QPushButton#actionButton:checked:hover {
+    background-color: @BLUE_HOVER@;
 }
 QPushButton#actionButton:disabled {
     background-color: transparent;
+}
+QPushButton#actionRecord[recording="true"] {
+    background-color: @DANGER_BG@;
+}
+QPushButton#actionRecord[recording="true"]:hover {
+    background-color: @DANGER_SOLID@;
 }
 
 /* Buttons */
@@ -739,26 +716,6 @@ QPushButton:hover {
 }
 QPushButton:pressed { background-color: @SURFACE_SUNKEN@; }
 QPushButton:disabled { color: @TEXT_DIM@; border-color: @BORDER@; }
-QPushButton#btnStepper {
-    padding: 0px;
-    font-size: 15px;
-    font-weight: 600;
-    background-color: @SURFACE_RAISED@;
-    color: @TEXT@;
-    border: 1px solid @GROUP_BORDER@;
-    border-radius: @RADIUS@;
-}
-QPushButton#btnStepper:hover {
-    background-color: @SURFACE_HOVER@;
-    border-color: @ACCENT@;
-    color: #FFFFFF;
-}
-QPushButton#btnStepper:pressed { background-color: @SURFACE_SUNKEN@; }
-QPushButton#btnStepper:disabled {
-    background-color: @SURFACE_SUNKEN@;
-    color: @TEXT_DIM@;
-    border-color: @BORDER@;
-}
 QPushButton#btnGhost {
     background-color: transparent;
     color: @TEXT_MUTED@;
@@ -774,19 +731,6 @@ QPushButton#btnGhost:checked {
     background-color: @BLUE@;
     color: @BLUE_TEXT@;
     border-color: @BLUE_HOVER@;
-}
-QPushButton#btnMute {
-    background-color: @SURFACE_RAISED@;
-    color: @TEXT@;
-    border: 1px solid @GROUP_BORDER@;
-    border-radius: @RADIUS@;
-    padding: 3px 8px;
-    font-size: 11px;
-    font-weight: 600;
-}
-QPushButton#btnMute:hover {
-    background-color: @SURFACE_HOVER@;
-    border-color: @ACCENT@;
 }
 QPushButton#btnLaunchStart {
     background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
@@ -815,14 +759,14 @@ QPushButton#btnLaunchActive:hover {
         stop:0 #2B9679, stop:1 #40BA98);
 }
 QPushButton#btnLaunchStop {
-    background-color: #9E3342;
-    border: 1px solid #FF5D5D;
+    background-color: @DANGER_SOLID@;
+    border: 1px solid @DANGER_BORDER_BRIGHT@;
     color: #FFFFFF;
     font-size: 12px;
     font-weight: 700;
     padding: 5px 15px;
 }
-QPushButton#btnLaunchStop:hover { background-color: #B53B4C; }
+QPushButton#btnLaunchStop:hover { background-color: @DANGER_SOLID_HOVER@; }
 QPushButton#btnStudioStart,
 QPushButton#btnStudioSwitch {
     background-color: transparent;
@@ -848,14 +792,14 @@ QPushButton#btnLaunchSwitch {
 }
 QPushButton#btnLaunchSwitch:hover { background-color: @BLUE_HOVER@; }
 QPushButton#btnStudioStop {
-    background-color: #9E3342;
-    border: 1px solid #FF5D5D;
+    background-color: @DANGER_SOLID@;
+    border: 1px solid @DANGER_BORDER_BRIGHT@;
     color: #FFFFFF;
     font-size: 12px;
     font-weight: 700;
     padding: 5px 13px;
 }
-QPushButton#btnStudioStop:hover { background-color: #B53B4C; }
+QPushButton#btnStudioStop:hover { background-color: @DANGER_SOLID_HOVER@; }
 
 /* Checkboxes (legacy rows not yet using ToggleSwitch) */
 QCheckBox {
@@ -883,10 +827,13 @@ QScrollBar:vertical {
     background: transparent;
     width: 8px;
     margin: 0px;
+    border: none;
+    border-radius: 4px;
 }
 QScrollBar::handle:vertical {
     background: @BORDER_STRONG@;
-    border-radius: @RADIUS@;
+    border: none;
+    border-radius: 4px;
     min-height: 26px;
 }
 QScrollBar::handle:vertical:hover {
