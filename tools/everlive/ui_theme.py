@@ -341,7 +341,6 @@ QLabel#hintText {
 QLabel#kvKey {
     color: #94A3B8;
     font-size: 13.5px;
-    font-variant-numeric: tabular-nums;
 }
 QLabel#telemetryMeta {
     color: #94A3B8;
@@ -352,14 +351,12 @@ QLabel#kvVal {
     font-family: @MONO_STACK@;
     font-size: 13.5px;
     font-weight: 600;
-    font-variant-numeric: tabular-nums;
 }
 QLabel#heroSignal {
     color: @TEXT@;
     font-family: @MONO_STACK@;
     font-size: 14px;
     font-weight: 700;
-    font-variant-numeric: tabular-nums;
 }
 QLabel#heroMeta {
     color: @TEXT_MUTED@;
@@ -370,7 +367,6 @@ QLabel#fpsHero {
     font-family: @MONO_STACK@;
     font-size: 26px;
     font-weight: 800;
-    font-variant-numeric: tabular-nums;
 }
 QLabel#fpsUnit {
     color: @TEXT_MUTED@;
@@ -461,7 +457,6 @@ QLabel#numericValue {
     color: @TEXT@;
     font-family: @MONO_STACK@;
     font-size: 13px;
-    font-variant-numeric: tabular-nums;
 }
 
 /* Inspector tabs */

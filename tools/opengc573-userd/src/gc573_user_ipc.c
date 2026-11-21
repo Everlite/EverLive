@@ -287,7 +287,7 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 		     "\"output_fps\":%.2f,\"unique_fps\":%.2f,"
 		     "\"raw_fps\":%.2f,\"flow_scale\":%.2f,"
 		     "\"perf_mode\":%s,\"low_latency\":%s,"
-		     "\"layer_found\":%s,"
+		     "\"layer_found\":%s,\"afmf_found\":%s,"
 		     "\"dll_found\":%s,\"dll_path\":\"%s\","
 		     "\"vulkan_active\":%s,\"backend\":\"%s\",\"deduplicator_active\":%s},"
 		     "\"led\":{\"r\":%u,\"g\":%u,\"b\":%u},"
@@ -324,9 +324,12 @@ static void ipc_send_status(struct ipc_server *s, struct ipc_client *c,
 		     st.framegen_perf_mode ? "true" : "false",
 		     st.framegen_low_latency ? "true" : "false",
 		     st.framegen_layer_found ? "true" : "false",
+		     st.framegen_afmf_found ? "true" : "false",
 		     st.framegen_dll_found ? "true" : "false", dll_esc,
 		     st.framegen_vulkan_active ? "true" : "false",
-		     st.framegen_native_backend ? "native" : "lsfg",
+		     st.framegen_backend_name[0] ? st.framegen_backend_name :
+		     (st.framegen_backend == 1 ? "afmf" :
+		      (st.framegen_native_backend ? "native" : "lsfg")),
 		     st.framegen_dedup_active ? "true" : "false",
 		     st.led_r, st.led_g, st.led_b,
 		     (unsigned int)gc573_ipc_has_clients(),
@@ -806,15 +809,21 @@ static void ipc_handle_framegen(struct ipc_client *c, const char *id,
 	if (everlive_json_get_bool(line, "low_latency", &flag))
 		cmd.c = flag ? 1 : 0;
 	if (everlive_json_get_string(line, "backend", backend, sizeof(backend))) {
-		if (!strcasecmp(backend, "native") ||
-		    !strcasecmp(backend, "builtin"))
+		if (!strcasecmp(backend, "afmf") ||
+		    !strcasecmp(backend, "fidelityfx") ||
+		    !strcasecmp(backend, "gpu"))
+			snprintf(cmd.mode, sizeof(cmd.mode), "afmf");
+		else if (!strcasecmp(backend, "native") ||
+		    !strcasecmp(backend, "builtin") ||
+		    !strcasecmp(backend, "cpu"))
 			snprintf(cmd.mode, sizeof(cmd.mode), "native");
 		else if (!strcasecmp(backend, "lsfg") ||
-			 !strcasecmp(backend, "lsfg-vk"))
+			 !strcasecmp(backend, "lsfg-vk") ||
+			 !strcasecmp(backend, "lossless"))
 			snprintf(cmd.mode, sizeof(cmd.mode), "lsfg");
 		else {
 			ipc_error(c, id, -32602,
-				  "unknown backend: lsfg|native");
+				  "unknown backend: afmf|lsfg|native");
 			return;
 		}
 	}

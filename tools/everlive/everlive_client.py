@@ -464,7 +464,7 @@ if QSocketNotifier is not None:
             if dedup is not None:
                 params["dedup"] = bool(dedup)
             if backend is not None:
-                params["backend"] = "native" if str(backend).lower() == "native" else "lsfg"
+                params["backend"] = "afmf" if str(backend).lower() in ("afmf", "fidelityfx", "gpu") else "lsfg"
             return self.request("framegen.set", params)
 
         # -- wire ------------------------------------------------------

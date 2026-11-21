@@ -1,0 +1,100 @@
+// afmf-linux: the new frame into the colour ring and its luma, in one pass.
+//
+// One read of the game's frame writes both the colour ring image the interpolator samples and
+// the level-0 luma the FidelityFX flow searches, instead of a copy followed by the SDK's luma
+// pass (two full reads). The luma is what ffx_opticalflow_prepare_luma.h computes: Rec.709
+// luma of the encoded values for SDR (transfer function 0) and the scRGB path for half floats
+// (transfer function 2), truncated to 8 bits. Only used when the swapchain's format is the
+// ring's own (no sRGB decode on the way) and the game's images carry sampled usage.
+//
+// Compiled once per ring format: AFMF_OUT_FORMAT in {rgba8, rgb10_a2, rgba16f};
+// AFMF_OUT_FORMAT_NONE=1 leaves the storage image unqualified (B8G8R8A8 rings, needs the device
+// feature shaderStorageImageWriteWithoutFormat).
+
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+
+#ifndef AFMF_OUT_FORMAT
+#define AFMF_OUT_FORMAT rgba8
+#endif
+#ifndef AFMF_OUT_FORMAT_NONE
+#define AFMF_OUT_FORMAT_NONE 0
+#endif
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D u_src; // the swapchain image, in its own format
+#if AFMF_OUT_FORMAT_NONE
+layout(set = 0, binding = 1) writeonly uniform image2D u_colour;
+#else
+layout(set = 0, binding = 1, AFMF_OUT_FORMAT) writeonly uniform image2D u_colour;
+#endif
+layout(set = 0, binding = 2, r8ui) writeonly uniform uimage2D u_luma;
+
+layout(push_constant) uniform Params {
+    ivec2 size;            // frame size in pixels
+    int transfer_function; // FidelityFX backbuffer transfer function: 0 SDR as is, 2 scRGB
+    float min_luminance;   // scRGB only, nits
+    float max_luminance;
+    int luma_half;         // 1: the luma is half the frame, one texel per 2x2 block
+} p;
+
+// ffx_opticalflow_prepare_luma.h: LuminanceToPerceivedLuminance.
+float perceived(float y)
+{
+    return (y <= 216.0 / 24389.0 ? y * (24389.0 / 27.0) : pow(y, 1.0 / 3.0) * 116.0 - 16.0) * 0.01;
+}
+
+uint luma_of(vec4 c)
+{
+    const vec3 rec709 = vec3(0.2126, 0.7152, 0.0722);
+    float y;
+    if (p.transfer_function == 2) {
+        vec3 linear = (c.rgb - vec3(p.min_luminance / 80.0)) /
+                      vec3((p.max_luminance - p.min_luminance) / 80.0);
+        y = perceived(max(dot(linear, rec709), 0.0)); /* scRGB goes below zero out of gamut */
+    } else {
+        y = dot(c.rgb, rec709);
+    }
+    /* Above 1.0 (more than the peak) the r8ui store would wrap and a bright pixel come out dark. */
+    return uint(clamp(y, 0.0, 1.0) * 255.0);
+}
+
+void main()
+{
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+
+    if (p.luma_half == 0) {
+        if (id.x >= p.size.x || id.y >= p.size.y)
+            return;
+        vec4 c = texelFetch(u_src, id, 0);
+        imageStore(u_colour, id, c);
+        imageStore(u_luma, id, uvec4(luma_of(c), 0u, 0u, 0u));
+        return;
+    }
+
+    /* Performance mode: the colour ring stays at frame size for the interpolator, the luma comes
+     * out at half. One invocation owns a 2x2 block, so the frame is still read once, and the
+     * luma texel is taken from the block's average, as the downscale-then-luma path it replaces
+     * did with a linear filter. */
+    ivec2 luma_size = (p.size + 1) / 2;
+    if (id.x >= luma_size.x || id.y >= luma_size.y)
+        return;
+    ivec2 base = id * 2;
+    vec4 sum = vec4(0.0);
+    float taken = 0.0;
+    for (int dy = 0; dy < 2; dy++) {
+        for (int dx = 0; dx < 2; dx++) {
+            ivec2 pix = base + ivec2(dx, dy);
+            if (pix.x >= p.size.x || pix.y >= p.size.y)
+                continue;
+            vec4 c = texelFetch(u_src, pix, 0);
+            imageStore(u_colour, pix, c);
+            sum += c;
+            taken += 1.0;
+        }
+    }
+    if (taken == 0.0)
+        return;
+    imageStore(u_luma, id, uvec4(luma_of(sum / taken), 0u, 0u, 0u));
+}

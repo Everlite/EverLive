@@ -1,0 +1,32 @@
+// afmf-linux: 2x2 box downsample of the new frame for half-resolution optical flow.
+//
+// Sampling with a linear filter exactly at the centre of each 2x2 source quad averages the four
+// texels; the result feeds the FidelityFX luma pass, which only needs RGB. Runs on the layer's
+// compute queue, unlike vkCmdBlitImage, which needs a graphics queue.
+
+#version 450
+
+#ifndef AFMF_OUT_FORMAT
+#define AFMF_OUT_FORMAT rgba8
+#endif
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D u_src;
+layout(set = 0, binding = 1, AFMF_OUT_FORMAT) uniform image2D u_dst;
+
+layout(push_constant) uniform Params {
+    ivec2 size;   // destination size in pixels
+    ivec2 source; // the frame's size: with an odd extent it is not exactly twice the destination
+} p;
+
+void main()
+{
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= p.size.x || pix.y >= p.size.y)
+        return;
+    // The centre of the 2x2 source quad this texel covers, in the source's own texels: measured
+    // against the destination it drifts by a texel on an odd frame and the box blurs.
+    vec2 uv = (vec2(pix) * 2.0 + 1.0) / vec2(p.source);
+    imageStore(u_dst, pix, texture(u_src, uv));
+}

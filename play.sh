@@ -264,6 +264,10 @@ if [ -f "${USERD_DIR}/Makefile" ] && { [ ! -x "${STREAMER_BIN}" ] || ! make -q -
     echo "[*] Aktualisiere/Kompiliere EverLive Userspace VFIO Engine..."
     make -C "${USERD_DIR}" -j"$(nproc)"
 fi
+if [ -f "${SCRIPT_DIR}/tools/everlive-fg-afmf/CMakeLists.txt" ] && [ ! -f "${SCRIPT_DIR}/tools/everlive-fg-afmf/build/layer/libafmf-linux.so" ]; then
+    echo "[*] Kompiliere AFMF GPU Frame Generation Layer..."
+    make -C "${SCRIPT_DIR}" afmf
+fi
 
 # 2. Raise soft memlock limit to hard limit and ensure cap_ipc_lock=+ep on the binary
 # (rebuilding with make strips file capabilities, which otherwise caps VFIO DMA at 8 MiB)

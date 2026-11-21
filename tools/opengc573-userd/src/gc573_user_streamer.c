@@ -29,7 +29,6 @@
 #include "gc573_user_audio_tap.h"
 #include "gc573_user_hdr.h"
 #include "gc573_user_framegen.h"
-#include "gc573_user_fg_native.h"
 #include "gc573_camera.h"
 #include "gc573_user_log.h"
 #include "everlive_osd.h"
@@ -262,6 +261,7 @@ static pthread_mutex_t g_framegen_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct gc573_fg_config g_fg_config = {
 	.mode = GC573_FG_OFF,
 	.multiplier = 2,
+	.backend = GC573_FG_BACKEND_AFMF,
 	.flow_scale = 1.0f,
 	.perf_mode = false,
 	.low_latency = true,
@@ -3065,53 +3065,6 @@ static bool fit_destination_integer(SDL_Rect *dst, int win_w, int win_h,
 	 */
 	dst->x &= ~1;
 
-	return true;
-}
-
-static bool render_frame_native_gl(SDL_Window *window, SDL_Renderer *renderer,
-				   struct gc573_fg_native *fg_nat, float t,
-				   float src_aspect, int src_w, int src_h)
-{
-	SDL_Rect dst;
-	int win_w = 0, win_h = 0;
-	int draw_w = 0, draw_h = 0;
-
-	SDL_GetWindowSize(window, &win_w, &win_h);
-	if (win_w <= 0 || win_h <= 0)
-		return false;
-	SDL_GL_GetDrawableSize(window, &draw_w, &draw_h);
-	if (draw_w <= 0 || draw_h <= 0) {
-		draw_w = win_w;
-		draw_h = win_h;
-	}
-
-	if (g_scale_mode == SCALE_INTEGER &&
-	    fit_destination_integer(&dst, win_w, win_h, src_w, src_h, src_aspect))
-		g_integer_factor = src_h > 0 ? dst.h / src_h : 0;
-	else {
-		g_integer_factor = 0;
-		fit_destination(&dst, win_w, win_h, src_aspect);
-	}
-
-	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-	SDL_RenderClear(renderer);
-	SDL_RenderFlush(renderer);
-
-	{
-		int gx = (dst.x * draw_w) / win_w;
-		int gy = (dst.y * draw_h) / win_h;
-		int gw = (dst.w * draw_w) / win_w;
-		int gh = (dst.h * draw_h) / win_h;
-
-		if (!gc573_fg_native_gl_render(fg_nat, t, gx, gy, gw, gh,
-					       draw_w, draw_h))
-			return false;
-	}
-
-	osd_render(renderer, window);
-	help_render(renderer, window);
-	toast_render(renderer, window);
-	SDL_RenderPresent(renderer);
 	return true;
 }
 
@@ -6274,63 +6227,10 @@ static bool framegen_path_wanted(void)
 	return g_fg_config.mode != GC573_FG_OFF;
 }
 
-static struct gc573_fg_native *g_fg_native;
-static uint8_t *g_fg_native_buf;
-static size_t g_fg_native_buf_bytes;
-static uint64_t g_fg_native_last_ns;
-static uint64_t g_fg_native_present_ns;
-static double g_fg_native_period_ns = 16666667.0;
-static int g_fg_native_synth_step = 1;
-static uint32_t g_fg_native_present_count;
-static uint64_t g_fg_native_fps_win_ns;
-static double g_fg_native_measured_fps;
-
-static uint64_t fg_native_now_ns(void)
-{
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
-static void fg_native_note_present(void)
-{
-	uint64_t now = fg_native_now_ns();
-
-	if (g_fg_native_fps_win_ns == 0)
-		g_fg_native_fps_win_ns = now;
-	g_fg_native_present_count++;
-	if (now - g_fg_native_fps_win_ns >= 1000000000ULL) {
-		double sec = (double)(now - g_fg_native_fps_win_ns) / 1e9;
-		g_fg_native_measured_fps = (double)g_fg_native_present_count / sec;
-		g_fg_native_present_count = 0;
-		g_fg_native_fps_win_ns = now;
-	}
-}
-
-static bool fg_native_ensure(uint32_t w, uint32_t h)
-{
-	size_t need = (size_t)w * h * 2U;
-
-	if (!g_fg_native)
-		g_fg_native = gc573_fg_native_create();
-	if (!g_fg_native || !need)
-		return false;
-	if (g_fg_native_buf_bytes < need) {
-		uint8_t *nb = realloc(g_fg_native_buf, need);
-		if (!nb)
-			return false;
-		g_fg_native_buf = nb;
-		g_fg_native_buf_bytes = need;
-	}
-	return true;
-}
-
 /* Driver the current mode asks for; a Vulkan failure pins us to OpenGL. */
 static enum present_driver framegen_desired_driver(void)
 {
-	if (!g_fg_fallback && framegen_path_wanted() &&
-	    !g_fg_config.native_backend)
+	if (!g_fg_fallback && framegen_path_wanted())
 		return PRESENT_DRIVER_VULKAN;
 	return PRESENT_DRIVER_OPENGL;
 }
@@ -6392,43 +6292,39 @@ static void framegen_describe(char *out, size_t len)
 		return;
 
 	int mult = st.multiplier > 1 ? st.multiplier : 2;
-	if (g_fg_config.native_backend) {
-		double in_fps = (st.deduplicator_active && st.unique_fps > 0.5)
-				? st.unique_fps : st.present_fps;
-		double out_fps = g_fg_native_measured_fps > 0.5
-				 ? g_fg_native_measured_fps : in_fps * mult;
-		if (st.deduplicator_active)
-			snprintf(out, len, "Native %dx (30p): %.1f -> %.1f FPS",
+	bool is_afmf = (g_fg_config.backend == GC573_FG_BACKEND_AFMF);
+	const char *bname = is_afmf ? "AFMF" : "LSFG";
+	ready = is_afmf ? (st.afmf_found && st.vulkan_active)
+			: (st.layer_found && st.dll_found && st.vulkan_active);
+	if (!ready) {
+		const char *why = is_afmf ? (!st.afmf_found ? "LAYER" : "VULKAN")
+					  : (!st.layer_found ? "LAYER" : (!st.dll_found ? "DLL" : "VULKAN"));
+
+		snprintf(out, len, "%s %dx [MISSING %s]", bname, mult, why);
+		return;
+	}
+
+	double in_fps = (st.deduplicator_active && st.unique_fps > 0.5)
+			? st.unique_fps : st.present_fps;
+	double out_fps = (st.deduplicator_active && st.unique_fps > 0.5)
+			? (st.unique_fps * (double)mult) : st.output_fps;
+
+	if (st.deduplicator_active) {
+		if (is_afmf)
+			snprintf(out, len, "AFMF %dx (30p): %.1f -> %.1f FPS",
 				 mult, in_fps, out_fps);
 		else
-			snprintf(out, len, "Native %dx: %.1f -> %.1f FPS",
-				 mult, in_fps, out_fps);
-		return;
+			snprintf(out, len, "LSFG %dx (30p): %.1f -> %.1f FPS | Flow %d%%",
+				 mult, in_fps, out_fps,
+				 (int)(st.flow_scale * 100.0f + 0.5f));
+	} else {
+		snprintf(out, len, "%s %dx: %.1f -> %.1f FPS",
+			 bname, mult, in_fps, out_fps);
 	}
-	ready = st.layer_found && st.dll_found && st.vulkan_active;
-	if (!ready) {
-		const char *why = !st.layer_found ? "LAYER" :
-				  (!st.dll_found ? "DLL" : "VULKAN");
-
-		snprintf(out, len, "LSFG %dx [MISSING %s]", mult, why);
-		return;
-	}
-
-	if (st.deduplicator_active)
-		snprintf(out, len, "LSFG %dx (30p): %.1f -> %.1f FPS | Flow %d%%",
-			 mult,
-			 st.unique_fps > 0.5 ? st.unique_fps : st.present_fps,
-			 st.output_fps,
-			 (int)(st.flow_scale * 100.0f + 0.5f));
-	else
-		snprintf(out, len, "LSFG %dx: %.1f -> %.1f FPS",
-			 mult, st.present_fps, st.output_fps);
 }
 
 static void framegen_teardown(void)
 {
-	if (g_fg_native)
-		gc573_fg_native_gl_teardown(g_fg_native);
 	pthread_mutex_lock(&g_framegen_lock);
 	if (g_framegen) {
 		gc573_framegen_destroy(g_framegen);
@@ -6468,11 +6364,29 @@ static bool framegen_prepare_vulkan(void)
 	}
 
 	if (!ready) {
-		pr_warn("lsfg-vk incomplete: layer %s, lsfg-vk.dll %s "
-			"(select 'lsfg-vk' beta in Steam -> Lossless Scaling -> Properties -> Betas)",
-			probe.layer_found ? "found" : "missing",
-			probe.dll_found ? probe.dll_path : "missing");
-		pr_warn("Frame generation will present without 2x until this is fixed");
+		if (cfg.backend == GC573_FG_BACKEND_AFMF) {
+			pr_warn("AFMF layer not found (run 'make afmf' or check tools/everlive-fg-afmf/build/layer)");
+			if (probe.layer_found && probe.dll_found) {
+				pr_info("Falling back to LSFG-VK backend...");
+				cfg.backend = GC573_FG_BACKEND_LSFG;
+				pthread_mutex_lock(&g_framegen_lock);
+				g_fg_config.backend = GC573_FG_BACKEND_LSFG;
+				pthread_mutex_unlock(&g_framegen_lock);
+				ready = gc573_fg_apply_env(&cfg, &probe);
+				if (g_framegen) {
+					gc573_framegen_set_probe(g_framegen, &probe);
+					gc573_framegen_set_config(g_framegen, &cfg);
+				}
+			} else {
+				pr_warn("Frame generation will present without FG until the AFMF layer is built");
+			}
+		} else {
+			pr_warn("lsfg-vk incomplete: layer %s, lsfg-vk.dll %s "
+				"(select 'lsfg-vk' beta in Steam -> Lossless Scaling -> Properties -> Betas)",
+				probe.layer_found ? "found" : "missing",
+				probe.dll_found ? probe.dll_path : "missing");
+			pr_warn("Frame generation will present without 2x until this is fixed");
+		}
 	}
 	return ready;
 }
@@ -6772,9 +6686,7 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 	(void)tex_h;
 	*texture = NULL;
 
-	bool native_fg_active = framegen_path_wanted() &&
-				g_fg_config.native_backend;
-	bool use_gl_vsync = g_vsync && !native_fg_active;
+	bool use_gl_vsync = g_vsync;
 
 	if (want_vk) {
 		(void)framegen_prepare_vulkan();
@@ -6876,11 +6788,6 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 static void presentation_destroy(SDL_Window **window, SDL_Renderer **renderer,
 				 SDL_Texture **texture)
 {
-	g_fg_native_last_ns = 0;
-	g_fg_native_present_ns = 0;
-	g_fg_native_synth_step = 1;
-	if (g_fg_native)
-		gc573_fg_native_gl_teardown(g_fg_native);
 	if (*texture) {
 		SDL_DestroyTexture(*texture);
 		*texture = NULL;
@@ -7085,22 +6992,21 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 	st.framegen_perf_mode = g_fg_config.perf_mode;
 	st.framegen_low_latency = g_fg_config.low_latency;
 	st.framegen_layer_found = fgst.layer_found;
+	st.framegen_afmf_found = fgst.afmf_found;
 	st.framegen_dll_found = fgst.dll_found;
 	st.framegen_vulkan_active = fgst.vulkan_active;
-	st.framegen_native_backend = g_fg_config.native_backend;
+	st.framegen_native_backend = false;
+	st.framegen_backend = g_fg_config.backend;
+	snprintf(st.framegen_backend_name, sizeof(st.framegen_backend_name), "%s",
+		 gc573_fg_backend_name(g_fg_config.backend));
 	st.framegen_dedup_active = fgst.deduplicator_active;
 	if (fgst.deduplicator_active && fgst.unique_fps > 0.5) {
 		st.framegen_present_fps = fgst.unique_fps;
-		if (!g_fg_config.native_backend &&
-		    fgst.layer_found && fgst.dll_found && fgst.vulkan_active)
+		if ((g_fg_config.backend == GC573_FG_BACKEND_AFMF ?
+		     fgst.afmf_found : (fgst.layer_found && fgst.dll_found)) &&
+		    fgst.vulkan_active)
 			st.framegen_output_fps = fgst.unique_fps *
 						 (double)st.framegen_multiplier;
-	}
-	if (g_fg_config.native_backend && g_fg_config.mode != GC573_FG_OFF) {
-		int m = g_fg_config.multiplier > 1 ? g_fg_config.multiplier : 2;
-		st.framegen_output_fps = g_fg_native_measured_fps > 0.5
-					 ? g_fg_native_measured_fps
-					 : st.framegen_present_fps * (double)m;
 	}
 	{
 		static bool prev_dedup_active;
@@ -7315,7 +7221,7 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		float flow = g_fg_config.flow_scale;
 		bool perf = g_fg_config.perf_mode;
 		bool low_latency = g_fg_config.low_latency;
-		bool native_backend = g_fg_config.native_backend;
+		int backend = g_fg_config.backend;
 		bool settings_changed = false;
 		bool backend_changed = false;
 
@@ -7326,9 +7232,9 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 			settings_changed = true;
 		}
 		if (cmd->mode[0]) {
-			bool want_nat = !strcasecmp(cmd->mode, "native");
-			if (want_nat != native_backend) {
-				native_backend = want_nat;
+			int b = gc573_fg_backend_parse(cmd->mode);
+			if (b >= 0 && b != backend) {
+				backend = b;
 				backend_changed = true;
 			}
 		}
@@ -7349,17 +7255,15 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 			/* A mode/backend change retries Vulkan or switches to OpenGL. */
 			g_fg_fallback = false;
 			g_present_rebuild = true;
-			if (g_fg_native)
-				gc573_fg_native_reset(g_fg_native);
 		}
-		/* Swapchain/layer settings only take effect on a fresh lsfg-vk instance. */
-		if (settings_changed && mode != GC573_FG_OFF && !native_backend)
+		/* Swapchain/layer settings only take effect on a fresh layer instance. */
+		if (settings_changed && mode != GC573_FG_OFF)
 			g_present_rebuild = true;
 
 		pthread_mutex_lock(&g_framegen_lock);
 		g_fg_config.mode = mode;
 		g_fg_config.multiplier = mult;
-		g_fg_config.native_backend = native_backend;
+		g_fg_config.backend = backend;
 		g_fg_config.flow_scale = flow;
 		g_fg_config.perf_mode = perf;
 		g_fg_config.low_latency = low_latency;
@@ -7368,7 +7272,7 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		framegen_apply_config();
 		printf("[IPC] Frame generation: %s %dx (%s, flow %d%%, perf %s, low-latency %s)\n",
 		       framegen_mode_name(mode), mult,
-		       native_backend ? "native" : "lsfg",
+		       gc573_fg_backend_name(backend),
 		       (int)(flow * 100.0f + 0.5f),
 		       perf ? "on" : "off",
 		       low_latency ? "on" : "off");
@@ -7651,11 +7555,13 @@ int main(int argc, char *argv[])
 		} else if (strncmp(argv[i], "--fg-mult=", 10) == 0) {
 			g_fg_config.multiplier = gc573_fg_clamp_multiplier(atoi(argv[i] + 10));
 		} else if (strcmp(argv[i], "--fg-backend") == 0 && i + 1 < argc) {
-			g_fg_config.native_backend =
-				strcasecmp(argv[++i], "native") == 0;
+			int b = gc573_fg_backend_parse(argv[++i]);
+			if (b >= 0)
+				g_fg_config.backend = b;
 		} else if (strncmp(argv[i], "--fg-backend=", 13) == 0) {
-			g_fg_config.native_backend =
-				strcasecmp(argv[i] + 13, "native") == 0;
+			int b = gc573_fg_backend_parse(argv[i] + 13);
+			if (b >= 0)
+				g_fg_config.backend = b;
 		} else if (strcmp(argv[i], "--fg-dedup") == 0) {
 			if (g_fg_config.mode == GC573_FG_60_TO_120)
 				g_fg_config.mode = GC573_FG_30_TO_60;
@@ -8798,8 +8704,6 @@ int main(int argc, char *argv[])
 								input_rate_x100 =
 									fresh.frame_rate_x100;
 								g_fg_source_hz_x100 = input_rate_x100;
-								if (input_rate_x100 >= 2000)
-									g_fg_native_period_ns = 100000000000.0 / (double)input_rate_x100;
 								if (g_framegen)
 									gc573_framegen_set_source_hz(
 										g_framegen,
@@ -8889,8 +8793,6 @@ int main(int argc, char *argv[])
 							input_rate_x100 =
 								sig.frame_rate_x100;
 							g_fg_source_hz_x100 = input_rate_x100;
-							if (input_rate_x100 >= 2000)
-								g_fg_native_period_ns = 100000000000.0 / (double)input_rate_x100;
 							if (g_framegen)
 								gc573_framegen_set_source_hz(
 									g_framegen, input_rate_x100);
@@ -8951,22 +8853,14 @@ int main(int argc, char *argv[])
 			 * window and a frame generation mode is selected.  The capture ring
 			 * is then the only frame source for the window.
 			 */
-			bool fg_cfg_native;
 			int fg_cfg_mode;
-			int fg_cfg_mult;
 			pthread_mutex_lock(&g_framegen_lock);
-			fg_cfg_native = g_fg_config.native_backend;
 			fg_cfg_mode = g_fg_config.mode;
-			fg_cfg_mult = g_fg_config.multiplier > 1 ?
-				      g_fg_config.multiplier : 2;
 			pthread_mutex_unlock(&g_framegen_lock);
 
-			bool fg_native = fg_cfg_native &&
-					 fg_cfg_mode != GC573_FG_OFF;
 			bool fg_live = !g_headless && renderer && g_framegen &&
 				       fg_cfg_mode != GC573_FG_OFF &&
-				       (fg_native ||
-					g_present_driver == PRESENT_DRIVER_VULKAN);
+				       g_present_driver == PRESENT_DRIVER_VULKAN;
 			bool want_pump;
 
 			/* The capture thread only feeds the ring while this path is live. */
@@ -9090,64 +8984,10 @@ int main(int argc, char *argv[])
 
 			if (fg_live) {
 				const uint8_t *fg_pixels = NULL;
-				bool native_ready = fg_native &&
-					fg_native_ensure(output_width, output_height) &&
-					gc573_fg_native_ready(g_fg_native);
-				bool cycle_busy = native_ready &&
-					g_fg_native_synth_step <= fg_cfg_mult;
 
-				if (fg_native && g_fg_native)
-					gc573_fg_native_set_params(
-						g_fg_native,
-						g_fg_config.flow_scale,
-						g_fg_config.perf_mode);
-
-				/*
-				 * Present every sub-frame of the current Native cycle before
-				 * popping the next capture frame so rapid HDMI arrivals never
-				 * starve step N. When a new DMA frame is already queued, tighten
-				 * remaining step deadlines slightly to catch up without dropping.
-				 * For lsfg-vk, never present on an idle refresh.
-				 */
-				if (!cycle_busy && gc573_framegen_take(g_framegen, &fg_pixels)) {
+				if (gc573_framegen_take(g_framegen, &fg_pixels)) {
 					const uint8_t *present_pixels = fg_pixels;
-					float first_t = 1.0f / (float)fg_cfg_mult;
 
-					if (fg_native &&
-					    fg_native_ensure(output_width, output_height)) {
-						uint64_t now_ns = fg_native_now_ns();
-						struct gc573_fg_stats st;
-						double period_ns = 0.0;
-
-						gc573_framegen_get_stats(g_framegen, &st);
-						if (st.deduplicator_active && st.unique_fps >= 20.0) {
-							period_ns = 1000000000.0 / st.unique_fps;
-						} else if (st.deduplicator_active && st.raw_fps >= 40.0) {
-							period_ns = 2000000000.0 / st.raw_fps;
-						} else if (st.raw_fps >= 20.0) {
-							period_ns = 1000000000.0 / st.raw_fps;
-						} else if (g_fg_native_last_ns > 0) {
-							double dt = (double)(now_ns - g_fg_native_last_ns);
-							if (dt > 4000000.0 && dt < 45000000.0)
-								period_ns = dt;
-						}
-						if (period_ns >= 4000000.0 && period_ns <= 45000000.0) {
-							if (g_fg_native_period_ns >= 4000000.0)
-								g_fg_native_period_ns = 0.90 * g_fg_native_period_ns + 0.10 * period_ns;
-							else
-								g_fg_native_period_ns = period_ns;
-						}
-						g_fg_native_last_ns = now_ns;
-						g_fg_native_synth_step = 2;
-						gc573_fg_native_set_params(
-							g_fg_native,
-							g_fg_config.flow_scale,
-							g_fg_config.perf_mode);
-						gc573_fg_native_push(
-							g_fg_native, fg_pixels,
-							output_width, output_height,
-							output_width * 2U);
-					}
 					if (texture && output_width && output_height) {
 						static uint64_t last_osd_update_us = 0;
 						uint64_t now_osd_us = now_us();
@@ -9177,19 +9017,33 @@ int main(int argc, char *argv[])
 								colorspace_short(
 									current_sig.colorspace));
 						}
-						if (fg_native &&
-						    render_frame_native_gl(
-							    window, renderer,
-							    g_fg_native, first_t,
-							    aspect_ratio(g_aspect,
-									 video_aspect),
-							    output_width, output_height)) {
-							g_fg_native_present_ns = fg_native_now_ns();
-							fg_native_note_present();
-						} else {
-							if (SDL_UpdateTexture(texture, NULL,
-									      present_pixels,
-									      output_width * 2) < 0) {
+						{
+							void *tex_pixels = NULL;
+							int tex_pitch = 0;
+							const int src_pitch = (int)(output_width * 2U);
+
+							if (SDL_LockTexture(texture, NULL,
+									    &tex_pixels,
+									    &tex_pitch) == 0 &&
+							    tex_pixels) {
+								if (tex_pitch == src_pitch) {
+									memcpy(tex_pixels,
+									       present_pixels,
+									       (size_t)src_pitch * output_height);
+								} else {
+									const uint8_t *src = present_pixels;
+									uint8_t *dst = (uint8_t *)tex_pixels;
+
+									for (unsigned int y = 0; y < output_height; y++) {
+										memcpy(dst, src, (size_t)src_pitch);
+										src += src_pitch;
+										dst += tex_pitch;
+									}
+								}
+								SDL_UnlockTexture(texture);
+							} else if (SDL_UpdateTexture(texture, NULL,
+										     present_pixels,
+										     src_pitch) < 0) {
 								static bool reported;
 
 								if (!reported) {
@@ -9198,77 +9052,14 @@ int main(int argc, char *argv[])
 									reported = true;
 								}
 							}
-							render_frame(
-								window, renderer, texture,
-								aspect_ratio(g_aspect,
-									     video_aspect),
-								output_width, output_height);
-							if (fg_native) {
-								g_fg_native_present_ns = fg_native_now_ns();
-								fg_native_note_present();
-							}
 						}
+						render_frame(
+							window, renderer, texture,
+							aspect_ratio(g_aspect,
+								     video_aspect),
+							output_width, output_height);
 					}
 					gc573_framegen_release(g_framegen);
-				} else if (native_ready) {
-					uint64_t now_ns = fg_native_now_ns();
-					uint64_t anchor_ns = g_fg_native_last_ns
-							     ? g_fg_native_last_ns
-							     : g_fg_native_present_ns;
-					double deadline_scale = gc573_framegen_has_unread(g_framegen)
-								? 0.70 : 1.0;
-					uint64_t due_ns = anchor_ns +
-						(uint64_t)(((g_fg_native_period_ns *
-							     (double)(g_fg_native_synth_step - 1)) /
-							    (double)fg_cfg_mult) * deadline_scale);
-
-					if (g_fg_native_synth_step <= fg_cfg_mult &&
-					    now_ns >= due_ns) {
-						float t = (g_fg_native_synth_step == fg_cfg_mult)
-							  ? 1.0f
-							  : (float)g_fg_native_synth_step /
-							    (float)fg_cfg_mult;
-
-						if (texture) {
-							if (render_frame_native_gl(
-								    window, renderer,
-								    g_fg_native, t,
-								    aspect_ratio(g_aspect,
-										 video_aspect),
-								    output_width, output_height)) {
-								fg_native_note_present();
-							} else if (gc573_fg_native_synthesize(
-									   g_fg_native, t,
-									   g_fg_native_buf,
-									   output_width * 2U)) {
-								SDL_UpdateTexture(
-									texture, NULL,
-									g_fg_native_buf,
-									output_width * 2);
-								render_frame(
-									window, renderer, texture,
-									aspect_ratio(g_aspect,
-										     video_aspect),
-									output_width, output_height);
-								fg_native_note_present();
-							}
-						}
-						g_fg_native_synth_step++;
-					} else if (g_fg_native_synth_step <= fg_cfg_mult) {
-						uint64_t wake_margin_ns = 350000ULL;
-						uint64_t target_wake = due_ns > wake_margin_ns
-								       ? due_ns - wake_margin_ns
-								       : due_ns;
-						uint64_t cap_ns = now_ns + 1500000ULL;
-						uint64_t wake_ns = target_wake < cap_ns ? target_wake : cap_ns;
-						struct timespec ts;
-
-						ts.tv_sec = (time_t)(wake_ns / 1000000000ULL);
-						ts.tv_nsec = (long)(wake_ns % 1000000000ULL);
-						clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
-					} else {
-						(void)gc573_framegen_wait(g_framegen, 500);
-					}
 				} else {
 					/*
 					 * Event-driven wait: the DMA thread signals as soon as a
