@@ -353,6 +353,7 @@ static void ipc_send_hello(struct ipc_server *s, struct ipc_client *c,
 		     "\"audio.volume.set\",\"audio.mute.set\","
 		     "\"audio.channels.set\","
 		     "\"osd.set\",\"osd.position.set\",\"osd.mode.set\","
+		     "\"osd.quicknav.toggle\","
 		     "\"record.state\","
 		     "\"aspect.set\",\"scale.set\",\"mode.set\","
 		     "\"v4l2.set\",\"toast.show\"]}",
@@ -716,6 +717,9 @@ static void ipc_handle_line(struct ipc_server *s, struct ipc_client *c,
 		ipc_handle_osd_position(c, has_id ? id : NULL, line);
 	} else if (strcmp(method, "osd.mode.set") == 0) {
 		ipc_handle_osd_mode(c, has_id ? id : NULL, line);
+	} else if (strcmp(method, "osd.quicknav.toggle") == 0) {
+		struct hws_ipc_cmd cmd = { .kind = HWS_IPC_CMD_QUICKNAV_TOGGLE };
+		ipc_push_and_reply(c, has_id ? id : NULL, &cmd);
 	} else if (strcmp(method, "record.state") == 0) {
 		ipc_handle_record_state(c, has_id ? id : NULL, line);
 	} else if (strcmp(method, "aspect.set") == 0) {

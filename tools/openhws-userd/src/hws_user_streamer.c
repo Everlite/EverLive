@@ -361,6 +361,15 @@ static void apply_cmd(const struct hws_ipc_cmd *cmd)
 		g_osd_mode = cmd->a & 3;
 		hws_card_invalidate();
 		break;
+	case HWS_IPC_CMD_QUICKNAV_TOGGLE:
+		if (quicknav_is_active()) {
+			quicknav_hide();
+			toast("Quick Nav: Off");
+		} else {
+			quicknav_force();
+			toast("Quick Nav: On");
+		}
+		break;
 	case HWS_IPC_CMD_ASPECT:
 		g_aspect = cmd->a & 3;
 		break;
@@ -1517,7 +1526,16 @@ static void hws_poll_pointer(SDL_Window *win)
 		event.button.clicks = (Uint8)clicks;
 		event.button.x = local_x;
 		event.button.y = local_y;
-		hws_handle_mouse(&event, win);
+		if (!hws_handle_mouse(&event, win) && clicks == 2) {
+			int ww = 0, wh = 0;
+
+			SDL_GetWindowSize(win, &ww, &wh);
+			if (local_x >= 0 && local_y >= 0 &&
+			    local_x < ww && local_y < wh) {
+				printf("[HUB] TOGGLE_FULLSCREEN\n");
+				fflush(stdout);
+			}
+		}
 		g_embed_click_ms = now;
 		g_embed_click_x = local_x;
 		g_embed_click_y = local_y;
