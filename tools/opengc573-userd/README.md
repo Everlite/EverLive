@@ -118,7 +118,7 @@ gc573_user_streamer [PCI_ADDRESS] [OPTIONS]
 Game-window hotkeys: <kbd>f</kbd>/<kbd>F11</kbd> fullscreen, <kbd>1</kbd>/<kbd>l</kbd> scaling (fit/integer),
 <kbd>g</kbd> frame generation mode, <kbd>h</kbd> HDR tonemapper, <kbd>a</kbd> aspect ratio,
 <kbd>↑</kbd>/<kbd>↓</kbd> (or <kbd>+</kbd>/<kbd>-</kbd>) volume, <kbd>m</kbd> mute, <kbd>F1</kbd>/<kbd>?</kbd> help overlay,
-<kbd>p</kbd> OSD top/bottom, <kbd>o</kbd>/<kbd>i</kbd>/<kbd>Tab</kbd> stats overlay, <kbd>s</kbd>/<kbd>F10</kbd> overlay + cursor, <kbd>Esc</kbd>/<kbd>q</kbd> quit.
+<kbd>p</kbd> OSD top/bottom, <kbd>i</kbd>/<kbd>Tab</kbd> stats overlay, <kbd>Alt</kbd>+<kbd>Z</kbd> Quick Navigation, <kbd>s</kbd>/<kbd>F10</kbd> overlay + cursor, <kbd>Esc</kbd>/<kbd>q</kbd> quit.
 
 ## Remote Control Socket
 

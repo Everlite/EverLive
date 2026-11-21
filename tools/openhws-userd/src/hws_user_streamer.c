@@ -140,23 +140,25 @@ static uint64_t now_ms(void)
 
 #ifdef HAVE_SDL2
 static uint64_t g_quicknav_wake_ms;
-static bool g_quicknav_manual_hidden;
+static bool g_quicknav_enabled = true;
 
 static void quicknav_wake(void)
 {
+	if (!g_quicknav_enabled)
+		return;
 	g_quicknav_wake_ms = now_ms();
-	g_quicknav_manual_hidden = false;
 }
 
 static void quicknav_force(void)
 {
+	g_quicknav_enabled = true;
 	g_quicknav_forced = true;
 	quicknav_wake();
 }
 
 static void quicknav_hide(void)
 {
-	g_quicknav_manual_hidden = true;
+	g_quicknav_enabled = false;
 	g_quicknav_forced = false;
 	g_quicknav_wake_ms = 0;
 	g_popup_open = false;
@@ -170,7 +172,7 @@ static void quicknav_hide(void)
 
 static bool quicknav_is_active(void)
 {
-	if (g_quicknav_manual_hidden)
+	if (!g_quicknav_enabled)
 		return false;
 	if (g_popup_open || g_popup_dragging || g_hover_action != EVERLIVE_OSD_ACTION_NONE)
 		return true;
@@ -650,7 +652,7 @@ static void embed_sync(SDL_Window *w)
 }
 #endif
 
-static void handle_key(SDL_Window *win, SDL_Keycode key);
+static void handle_key(SDL_Window *win, SDL_Keycode key, Uint16 mod);
 
 static bool hws_card_active(SDL_Window *win)
 {
@@ -1268,7 +1270,7 @@ static bool hws_handle_mouse(SDL_Event *event, SDL_Window *win)
 			printf("[HUB] TOGGLE_FULLSCREEN\n");
 			fflush(stdout);
 		} else {
-			handle_key(win, SDLK_f);
+			handle_key(win, SDLK_f, 0);
 		}
 		return true;
 	}
@@ -1283,7 +1285,7 @@ static bool hws_handle_mouse(SDL_Event *event, SDL_Window *win)
 		everlive_osd_destroy_popup(&g_popup);
 		break;
 	case EVERLIVE_OSD_ACTION_SCALE:
-		handle_key(win, SDLK_l);
+		handle_key(win, SDLK_l, 0);
 		hws_card_invalidate();
 		break;
 	case EVERLIVE_OSD_ACTION_VOLUME:
@@ -1297,7 +1299,7 @@ static bool hws_handle_mouse(SDL_Event *event, SDL_Window *win)
 		everlive_osd_destroy_popup(&g_popup);
 		break;
 	case EVERLIVE_OSD_ACTION_MUTE:
-		handle_key(win, SDLK_m);
+		handle_key(win, SDLK_m, 0);
 		hws_card_invalidate();
 		break;
 	case EVERLIVE_OSD_ACTION_FULLSCREEN:
@@ -1305,7 +1307,7 @@ static bool hws_handle_mouse(SDL_Event *event, SDL_Window *win)
 			printf("[HUB] TOGGLE_FULLSCREEN\n");
 			fflush(stdout);
 		} else {
-			handle_key(win, SDLK_f);
+			handle_key(win, SDLK_f, 0);
 		}
 		hws_card_invalidate();
 		break;
@@ -1577,7 +1579,7 @@ static SDL_Rect dest_rect(int win_w, int win_h, unsigned int fw, unsigned int fh
 	return d;
 }
 
-static void handle_key(SDL_Window *win, SDL_Keycode k)
+static void handle_key(SDL_Window *win, SDL_Keycode k, Uint16 mod)
 {
 	char msg[64];
 	float gain;
@@ -1628,7 +1630,9 @@ static void handle_key(SDL_Window *win, SDL_Keycode k)
 		hws_card_invalidate();
 		toast(g_osd ? "Performance HUD: On" : "Performance HUD: Off");
 		break;
-	case SDLK_o:
+	case SDLK_z:
+		if (!(mod & KMOD_ALT))
+			break;
 		if (quicknav_is_active()) {
 			quicknav_hide();
 			toast("Quick Nav: Off");
@@ -1725,9 +1729,9 @@ static void run_window(void)
 			if (e.type == SDL_QUIT)
 				g_quit = 1;
 			else if (e.type == SDL_KEYDOWN && !e.key.repeat)
-				handle_key(win, e.key.keysym.sym);
+				handle_key(win, e.key.keysym.sym, e.key.keysym.mod);
 			else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.clicks == 2 && !g_parent_winid)
-				handle_key(win, SDLK_f);
+				handle_key(win, SDLK_f, 0);
 		}
 		quicknav_tick();
 		quicknav_sync_cursor();

@@ -1813,25 +1813,27 @@ static enum everlive_osd_action g_stats_hover_action =
 static bool g_stats_dirty;
 static bool g_quicknav_forced;
 
-/* Quick Navigation bar state: auto-wakes on mouse motion/click/hotkey, auto-hides after 3s */
+/* Quick Navigation bar state: auto-wakes on mouse motion/click when enabled, auto-hides after 3s */
 static uint64_t g_quicknav_wake_ms;
-static bool g_quicknav_manual_hidden;
+static bool g_quicknav_enabled = true;
 
 static void quicknav_wake(void)
 {
+	if (!g_quicknav_enabled)
+		return;
 	g_quicknav_wake_ms = now_ms();
-	g_quicknav_manual_hidden = false;
 }
 
 static void quicknav_force(void)
 {
+	g_quicknav_enabled = true;
 	g_quicknav_forced = true;
 	quicknav_wake();
 }
 
 static void quicknav_hide(void)
 {
-	g_quicknav_manual_hidden = true;
+	g_quicknav_enabled = false;
 	g_quicknav_forced = false;
 	g_quicknav_wake_ms = 0;
 	g_popup_open = false;
@@ -1845,7 +1847,7 @@ static void quicknav_hide(void)
 
 static bool quicknav_is_active(void)
 {
-	if (g_quicknav_manual_hidden)
+	if (!g_quicknav_enabled)
 		return false;
 	if (g_popup_open || g_popup_dragging || g_hover_action != EVERLIVE_OSD_ACTION_NONE)
 		return true;
@@ -8306,7 +8308,8 @@ int main(int argc, char *argv[])
 					fflush(stdout);
 					toast_trigger(g_osd_enabled ?
 						      "Performance HUD: On" : "Performance HUD: Off");
-				} else if (event.key.keysym.sym == SDLK_o) {
+				} else if (event.key.keysym.sym == SDLK_z &&
+					   (event.key.keysym.mod & KMOD_ALT)) {
 					if (quicknav_is_active()) {
 						quicknav_hide();
 						toast_trigger("Quick Nav: Off");

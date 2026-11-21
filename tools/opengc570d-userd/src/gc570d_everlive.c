@@ -570,17 +570,19 @@ struct everlive_sdl {
 	int embed_last_h;
 	uint64_t embed_last_sync_ns;
 	uint64_t quicknav_wake_ns;
-	bool quicknav_manual_hidden;
+	bool quicknav_enabled;
 };
 
 static void sdl_quicknav_wake(struct everlive_sdl *sdl)
 {
+	if (!sdl->quicknav_enabled)
+		return;
 	sdl->quicknav_wake_ns = now_ns();
-	sdl->quicknav_manual_hidden = false;
 }
 
 static void sdl_quicknav_force(struct everlive_sdl *sdl)
 {
+	sdl->quicknav_enabled = true;
 	sdl->quicknav_forced = true;
 	sdl_quicknav_wake(sdl);
 }
@@ -590,7 +592,7 @@ static void sdl_set_hover(struct everlive_sdl *sdl,
 
 static void sdl_quicknav_hide(struct everlive_sdl *sdl)
 {
-	sdl->quicknav_manual_hidden = true;
+	sdl->quicknav_enabled = false;
 	sdl->quicknav_forced = false;
 	sdl->quicknav_wake_ns = 0;
 	sdl->popup_open = false;
@@ -604,7 +606,7 @@ static void sdl_quicknav_hide(struct everlive_sdl *sdl)
 
 static bool sdl_quicknav_is_active(struct everlive_sdl *sdl)
 {
-	if (sdl->quicknav_manual_hidden)
+	if (!sdl->quicknav_enabled)
 		return false;
 	if (sdl->popup_open || sdl->popup_dragging || g_hover_action != EVERLIVE_OSD_ACTION_NONE)
 		return true;
@@ -2204,7 +2206,9 @@ static bool sdl_handle_events(struct everlive_state *st,
 			sdl_toast(sdl, atomic_load_explicit(&st->osd, __ATOMIC_RELAXED) ?
 				  "Performance HUD: On" : "Performance HUD: Off");
 			break;
-		case SDL_SCANCODE_O:
+		case SDL_SCANCODE_Z:
+			if (!(event.key.keysym.mod & KMOD_ALT))
+				break;
 			if (sdl_quicknav_is_active(sdl)) {
 				sdl_quicknav_hide(sdl);
 				sdl_toast(sdl, "Quick Nav: Off");
@@ -2404,6 +2408,7 @@ static void *everlive_thread(void *arg)
 
 #ifdef HAVE_SDL2
 	memset(&sdl, 0, sizeof(sdl));
+	sdl.quicknav_enabled = true;
 	if (st->opt.enable_sdl && !st->opt.headless) {
 		sdl_ready = sdl_init(st, &sdl);
 		if (!sdl_ready)

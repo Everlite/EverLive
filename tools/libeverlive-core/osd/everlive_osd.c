@@ -415,7 +415,7 @@ static void draw_icon_button(SDL_Surface *surface, int x, int y, int size,
 			     uint32_t fill, uint32_t border, uint32_t color,
 			     bool filled, bool hovered)
 {
-	int glyph_w = glyph_width(glyph, glyph_size);
+	SDL_Surface *rendered;
 
 	if (filled) {
 		draw_chip(surface, x, y, size, size, radius, fill, border);
@@ -423,9 +423,11 @@ static void draw_icon_button(SDL_Surface *surface, int x, int y, int size,
 		draw_chip(surface, x, y, size, size, radius,
 			  EVERLIVE_OSD_HOVER_BG, EVERLIVE_OSD_HOVER_BORDER);
 	}
-	draw_glyph(surface, glyph, glyph_size,
-		   x + (size - glyph_w) / 2,
-		   y + (size - glyph_size) / 2, color, 255);
+	rendered = render_glyph(glyph, glyph_size, color, 255);
+	if (rendered)
+		blit_surface(surface, rendered,
+			     x + (size - rendered->w) / 2,
+			     y + (size - rendered->h) / 2);
 }
 
 static bool snapshot_hover(const struct everlive_osd_snapshot *snap,
@@ -490,7 +492,7 @@ static const char *action_shortcut(enum everlive_osd_action action)
 	case EVERLIVE_OSD_ACTION_STATS:
 		return "Tab / I";
 	case EVERLIVE_OSD_ACTION_HIDE:
-		return "O";
+		return "Alt+Z";
 	case EVERLIVE_OSD_ACTION_STATS_CLOSE:
 		return "Tab / I";
 	default:
@@ -1369,6 +1371,10 @@ bool everlive_osd_build_stats(SDL_Renderer *renderer,
 	int close_gap = uscale(8.0f, u);
 	int text_max_w;
 	int title_max_w;
+	int title_w;
+	int row1_w;
+	int row2_w;
+	int content_w;
 	int title_h;
 	int row1_h;
 	int row2_h;
@@ -1412,7 +1418,17 @@ bool everlive_osd_build_stats(SDL_Renderer *renderer,
 	if (close_gap < 4)
 		close_gap = 4;
 
-	panel_w = max_width;
+	title_w = text_width(title ? title : "EverLive", g_font_semibold,
+			     title_size);
+	row1_w = text_width(row1 ? row1 : "", g_font_semibold, row1_size);
+	row2_w = text_width(row2 ? row2 : "", g_font_mono, row2_size);
+	content_w = title_w + button + close_gap;
+	if (row1_w > content_w)
+		content_w = row1_w;
+	if (row2_w > content_w)
+		content_w = row2_w;
+	content_w += pad_x * 2;
+	panel_w = content_w < max_width ? content_w : max_width;
 	if (panel_w < 1)
 		return false;
 	text_max_w = panel_w - pad_x * 2;
