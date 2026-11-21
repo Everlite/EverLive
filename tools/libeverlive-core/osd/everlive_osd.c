@@ -1446,13 +1446,14 @@ bool everlive_osd_build_stats(SDL_Renderer *renderer,
 		     surface_color(surface, EVERLIVE_OSD_CARD_BG,
 				   EVERLIVE_OSD_CARD_ALPHA));
 
-	draw_icon_button(surface, pad_x, pad_y, button, button_radius,
-			 EVERLIVE_OSD_ICON_XMARK, icon_size, 0, 0,
+	draw_icon_button(surface, panel_w - pad_x - button, pad_y, button,
+			 button_radius, EVERLIVE_OSD_ICON_XMARK, icon_size, 0, 0,
 			 hover_action == EVERLIVE_OSD_ACTION_STATS_CLOSE ?
 				EVERLIVE_OSD_TITLE : EVERLIVE_OSD_TEXT_MUTED,
 			 false,
 			 hover_action == EVERLIVE_OSD_ACTION_STATS_CLOSE);
-	out->hits[0].rect = (SDL_Rect){ pad_x, pad_y, button, button };
+	out->hits[0].rect = (SDL_Rect){ panel_w - pad_x - button, pad_y,
+				       button, button };
 	out->hits[0].action = EVERLIVE_OSD_ACTION_STATS_CLOSE;
 	out->hit_count = 1;
 
