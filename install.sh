@@ -400,9 +400,6 @@ detect_and_install_deps() {
         ! command -v wpctl >/dev/null 2>&1 && MISSING_PKGS+=(wireplumber)
         ! pacman -Q xcb-util-cursor >/dev/null 2>&1 && MISSING_PKGS+=(xcb-util-cursor)
         ! sudo -u "${TARGET_USER}" python3 -c 'import PySide6' >/dev/null 2>&1 && MISSING_PKGS+=(pyside6)
-        ! command -v cmake >/dev/null 2>&1 && MISSING_PKGS+=(cmake)
-        ! command -v ninja >/dev/null 2>&1 && MISSING_PKGS+=(ninja)
-        ! command -v glslang >/dev/null 2>&1 && ! command -v glslangValidator >/dev/null 2>&1 && MISSING_PKGS+=(glslang)
         
         if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
             echo -e "${YELLOW}[!] Fehlende Pakete gefunden: ${MISSING_PKGS[*]}${NC}"
@@ -419,8 +416,6 @@ detect_and_install_deps() {
         ! dpkg -s libxcb-cursor0 >/dev/null 2>&1 && MISSING_PKGS+=(libxcb-cursor0)
         ! dpkg -s python3-pip >/dev/null 2>&1 && MISSING_PKGS+=(python3-pip)
         ! dpkg -s python3-venv >/dev/null 2>&1 && MISSING_PKGS+=(python3-venv)
-        ! command -v cmake >/dev/null 2>&1 && MISSING_PKGS+=(cmake ninja-build)
-        ! command -v glslangValidator >/dev/null 2>&1 && MISSING_PKGS+=(glslang-tools)
         
         if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
             echo -e "${YELLOW}[!] Fehlende Pakete gefunden: ${MISSING_PKGS[*]}${NC}"
@@ -436,8 +431,6 @@ detect_and_install_deps() {
         ! command -v wpctl >/dev/null 2>&1 && MISSING_PKGS+=(wireplumber)
         ! rpm -q xcb-util-cursor >/dev/null 2>&1 && MISSING_PKGS+=(xcb-util-cursor)
         ! sudo -u "${TARGET_USER}" python3 -c 'import PySide6' >/dev/null 2>&1 && MISSING_PKGS+=(python3-pyside6)
-        ! command -v cmake >/dev/null 2>&1 && MISSING_PKGS+=(cmake ninja-build)
-        ! command -v glslangValidator >/dev/null 2>&1 && MISSING_PKGS+=(glslang)
         
         if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
             echo -e "${YELLOW}[!] Fehlende Pakete gefunden: ${MISSING_PKGS[*]}${NC}"

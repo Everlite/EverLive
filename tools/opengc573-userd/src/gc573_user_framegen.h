@@ -41,12 +41,6 @@ enum gc573_fg_mode {
   GC573_FG_30_TO_60 = 2,
 };
 
-/* Frame generation backends. */
-enum gc573_fg_backend {
-  GC573_FG_BACKEND_LSFG = 0, /* Lossless Scaling (lsfg-vk Vulkan layer) */
-  GC573_FG_BACKEND_AFMF = 1, /* AMD Fluid Motion Frames GPU (FidelityFX Vulkan layer) */
-};
-
 /* Cadence classification result of one captured YUYV frame. */
 enum gc573_fg_frame_class {
   GC573_FG_DUPLICATE = 0, /* HDMI repeat inside the 60 Hz container */
@@ -104,9 +98,10 @@ struct gc573_fg_cadence {
 struct gc573_fg_config {
   int mode;            /* enum gc573_fg_mode */
   int multiplier;      /* 2, 3, or 4 (0 defaults to 2) */
-  int backend;         /* enum gc573_fg_backend (0=lsfg, 1=afmf) */
+  bool native_backend; /* true = built-in GPL-2.0 CPU+YUYV flow; false = lsfg-vk
+                        */
   float flow_scale;    /* 0.50 .. 1.00 (LSFGVK_FLOW_SCALE) */
-  bool perf_mode;      /* LSFGVK_PERFORMANCE_MODE / AFMF_PERFORMANCE_MODE */
+  bool perf_mode;      /* LSFGVK_PERFORMANCE_MODE */
   /*
    * Keep lsfg-vk from enlarging the Vulkan swapchain.  EverLive only
    * uploads a 2D capture texture plus OSD, so the default 1-2 extra
@@ -116,26 +111,22 @@ struct gc573_fg_config {
   bool low_latency;
 };
 
-/* Result of the frame generation layer installation probe. */
+/* Result of the lsfg-vk installation probe. */
 struct gc573_fg_probe {
   bool layer_found;
   bool dll_found;
   char layer_dir[PATH_MAX];
   char dll_path[PATH_MAX];
-  bool afmf_found;
-  char afmf_layer_dir[PATH_MAX];
 };
 
 struct gc573_fg_stats {
   int mode;
   int multiplier;
-  int backend;
-  bool afmf_found;
-  char afmf_layer_dir[PATH_MAX];
   bool layer_found;
   bool dll_found;
   char dll_path[PATH_MAX];
-  bool vulkan_active;  /* renderer really is the Vulkan path */
+  bool vulkan_active;  /* renderer really is the Vulkan/lsfg-vk path */
+  bool native_backend; /* true = built-in GPL-2.0 engine */
   bool deduplicator_active;
   float flow_scale;
   bool perf_mode;
@@ -157,11 +148,8 @@ struct gc573_fg_stats {
 /* Installation probe & environment                                    */
 /* ------------------------------------------------------------------ */
 
-const char *gc573_fg_backend_name(int backend);
-int gc573_fg_backend_parse(const char *name);
-
 /**
- * gc573_fg_probe_system - Locate the lsfg-vk layer, AFMF layer and lsfg-vk.dll
+ * gc573_fg_probe_system - Locate the lsfg-vk layer and lsfg-vk.dll
  * @out: Receives the result (never NULL)
  *
  * Scans the Vulkan implicit-layer directories for an lsfg JSON manifest and

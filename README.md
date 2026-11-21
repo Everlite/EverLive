@@ -15,7 +15,7 @@ It is designed to let you play console games (PlayStation 5, Xbox Series X, Nint
 
 The **Live Gamer DUO** additionally exposes both HDMI inputs simultaneously: HDMI 1 supports the full 3000-nit BT.2020 HDR LUT path and native lower resolutions, HDMI 2 is published as a second OBS camera, and validated stereo LPCM capture (with multichannel passthrough to HDMI OUT) is available from both inputs. When multiple supported capture cards are installed, EverLive's built-in **Capture Card Selector** allows switching between them seamlessly within the Console Hub.
 
-> **Quick Navigation:** [Installation & Quickstart](#-installation--quickstart) · [Controls & Hotkeys](#controls--hotkeys) · [OBS Streaming Setup](#-streaming--recording-with-obs) · [IOMMU & BIOS Setup](#-iommu--pcie-group-requirements) · [Live Gamer DUO (GC570D)](#live-gamer-duo-gc570d) · [GC553G2 (USB/UVC)](#live-gamer-ultra-21-gc553g2) · [HWS UHD (ACASIS VS2583)](#hws-uhd-acasis-vs2583) · [Frame Gen (AFMF / LSFG)](#frame-generation-afmf--lsfg-vk) · [Hardware-Verified Capabilities](#hardware-verified-capabilities) · [Architecture & Diagram](#architecture--design) · [Contributing](#-contributing--adding-new-cards) · [License](#legal-and-licensing)
+> **Quick Navigation:** [Installation & Quickstart](#-installation--quickstart) · [Controls & Hotkeys](#controls--hotkeys) · [OBS Streaming Setup](#-streaming--recording-with-obs) · [IOMMU & BIOS Setup](#-iommu--pcie-group-requirements) · [Live Gamer DUO (GC570D)](#live-gamer-duo-gc570d) · [GC553G2 (USB/UVC)](#live-gamer-ultra-21-gc553g2) · [HWS UHD (ACASIS VS2583)](#hws-uhd-acasis-vs2583) · [Frame Gen 2x/3x/4x & Native FG](#frame-generation-2x--3x--4x--lsfg-vk) · [Hardware-Verified Capabilities](#hardware-verified-capabilities) · [Architecture & Diagram](#architecture--design) · [Contributing](#-contributing--adding-new-cards) · [License](#legal-and-licensing)
 
 ---
 
@@ -326,20 +326,20 @@ The bridge takes YUYV or NV12 directly and decodes MJPEG when built with FFmpeg'
 
 ---
 
-<a id="frame-generation-afmf--lsfg-vk"></a>
+<a id="frame-generation-2x--3x--4x--lsfg-vk"></a>
 
-## Frame Generation (AFMF & LSFG-VK)
+## Frame Generation (2× / 3× / 4× · LSFG-VK & EverLive Native)
 
 > [!IMPORTANT]
-> **GPU Frame Generation (AFMF & LSFG-VK · Beta)**
-> EverLive provides ultra-low-latency, hardware-accelerated frame generation on GC573 (e.g. `60 → 120/180/240 FPS` or `30 → 60/90/120 FPS` with **30 FPS Dedup** enabled) with a phase-locked 2:1 cadence deduplicator and runtime switching via Console Hub or hotkey <kbd>g</kbd>.
+> **Optional Frame Generation (LSFG-VK & EverLive Native · Beta)**
+> EverLive supports **2×, 3×, and 4×** frame generation on GC573 (e.g. `60 → 120/180/240 FPS`, `120 → 240 FPS`, or `30 → 60/90/120 FPS` with **30 FPS Dedup** enabled) with a phase-locked 2:1 cadence deduplicator and runtime multiplier switching via Console Hub or hotkey <kbd>g</kbd>.
 >
 > * **Two selectable backends (`Video & FG → Engine`):**
->   * **AFMF (AMD FidelityFX · Vulkan Layer · Recommended):** 100% open-source, vendor-agnostic GPU optical-flow frame generation layer (derived from [`serialexperimentslainnnn/afmf-linux`](https://github.com/serialexperimentslainnnn/afmf-linux)). Uses AMD FidelityFX optical-flow compute shaders running natively under Vulkan (works on modern AMD, Nvidia, and Intel GPUs supporting Vulkan 1.3). Features sub-millisecond presentation latency (~0.2–0.5 ms), variable **2×, 3×, and 4×** frame interpolation (e.g. 30 FPS → 120 FPS), FidelityFX Contrast Adaptive Sharpening (CAS), temporal occlusion-aware anti-ghosting, built-in display pacing, and requires zero proprietary DLLs or Steam purchase.
->   * **LSFG-VK (Vulkan):** Uses Lossless Scaling's Vulkan layer (`lsfg-vk` + Steam `lsfg-vk` beta shader library). Supports 2×, 3×, and 4× multipliers with optional `Low-Latency Swapchain (2×)` and `Performance Mode`. Requires owning Lossless Scaling on Steam.
+>   * **LSFG-VK (Vulkan):** Uses Lossless Scaling's Vulkan layer (`lsfg-vk` + Steam `lsfg-vk` beta shader library) with optional `Low-Latency Swapchain (2×)` and `Performance Mode`.
+>   * **EverLive Native (Open-Source):** 100% open-source GPU optical-flow frame generation (`gc573_user_fg_native.[ch]`) requiring no Steam account or external DLLs. Implements hierarchical luma pyramids, 3-level dense block matching with sub-pixel interpolation, bilateral motion-vector smoothing, and continuous static HUD luminance masking to eliminate UI/crosshair ghosting.
 > * **Phase-Locked Cadence Deduplicator (30 FPS in 60 Hz containers):** Real-time relative MAD (Mean Absolute Difference) cadence detection that locks 30-in-60 duplicates (A, A, B, B) and stays rock-solid even across moving water, rain, foliage, or video noise, unlocking cleanly when real 60p motion is sustained.
-> * **Display Pacing:** When using AFMF, pacing is handled by the layer's dedicated internal pacing thread. When using LSFG-VK on a `240 Hz+` FIFO display, EverLive injects `libeverlive-vk-pacer.so` (`VK_LAYER_EVERLIVE_pacer`) downstream of `lsfg-vk` to space synthetic presents smoothly without lowering your desktop refresh rate.
-> * **Requirements for AFMF:** Built automatically via `make` / `make afmf` (requires `cmake`, `ninja`, and `glslang`). No external proprietary dependencies.
+> * **240 Hz+ Vulkan Present Pacer (`VK_LAYER_EVERLIVE_pacer`):** When running `lsfg-vk` at `60`/`90`/`120`/`180 FPS` on a `240 Hz+` FIFO display, EverLive injects `libeverlive-vk-pacer.so` explicitly downstream of `lsfg-vk` (`VK_INSTANCE_LAYERS`) to space synthetic presents smoothly without lowering your desktop refresh rate.
+> * **Standard / Non-LSFG Users:** Without Lossless Scaling installed, EverLive runs natively with zero latency overhead (or lets you test EverLive Native directly).
 > * **Requirements for LSFG-VK:**
 >   1. Install `lsfg-vk` (or use `sudo ./install.sh --with-framegen` to fetch the official release).
 >   2. Own **Lossless Scaling** on Steam and switch to the beta:  
@@ -564,8 +564,7 @@ Writing clean-room Linux drivers for proprietary capture hardware requires havin
 
 | Component | Path | License | Notes |
 |:---|:---|:---:|:---|
-| **Userspace Driver & Streamer** | `tools/opengc573-userd/` | **GPL-2.0-only** | Userspace VFIO implementation and `VK_LAYER_EVERLIVE_pacer` (`everlive_vk_pacer.c`). Copyright © 2026 Everlite. |
-| **AFMF Vulkan Layer** | `tools/everlive-fg-afmf/` | **MIT** | Open-source Vulkan frame generation layer powered by AMD FidelityFX optical-flow shaders. Vendored from [`serialexperimentslainnnn/afmf-linux`](https://github.com/serialexperimentslainnnn/afmf-linux) (MIT). |
+| **Userspace Driver & Streamer** | `tools/opengc573-userd/` | **GPL-2.0-only** | Userspace VFIO implementation, native optical-flow FG (`gc573_user_fg_native.c`), and `VK_LAYER_EVERLIVE_pacer` (`everlive_vk_pacer.c`). Copyright © 2026 Everlite. |
 | **Shared Core Library** | `tools/libeverlive-core/` | **GPL-2.0-only** | Card registry and autodiscovery, POSIX shared memory frame store (`everlive_framestore`), V4L2 virtual camera preload engine, cross-user handoff protocol (`everlive_handoff`), YUY2 frame conversion, jsmn JSON-RPC helpers, `everlive-ctl`, and systemd service. Copyright © 2026 Everlite. |
 | **Live Gamer DUO Engine** | `tools/opengc570d-userd/` | **GPL-2.0-only** | Derived from [`neoyagami/OpenGC570D`](https://github.com/neoyagami/OpenGC570D) with userspace VFIO-PCI + PipeWire port by [@PolygonPrincess](https://github.com/PolygonPrincess). Upstream base `4673bb9`, splitter PR #6 `484aa8d`, userspace import `afbb06e`. EverLive integration and frontend © 2026 Everlite & PolygonPrincess. |
 | **HWS UHD Userspace Engine** | `tools/openhws-userd/` | **GPL-2.0-only** | Userspace VFIO engine for ACASIS VS2583 / AVMatrix VC12-4K family (`hws_user_streamer`, `libhwsuhd-v4l2.so`). Copyright © 2026 Everlite & Scyllinice. |

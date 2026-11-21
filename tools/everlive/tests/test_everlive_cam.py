@@ -57,14 +57,7 @@ class SettingsTests(unittest.TestCase):
 
 class CommandTests(unittest.TestCase):
     def test_parse_device_list(self) -> None:
-        text = (
-            "/dev/video0\tElgato Facecam 4K\n"
-            "\njunk line\n"
-            "/dev/video4\t\n"
-            "/dev/video10\tEverLive Capture\n"
-            "/dev/video11\tEverLive Capture HDMI 2\n"
-            "/dev/video12\tv4l2 loopback dummy\n"
-        )
+        text = "/dev/video0\tElgato Facecam 4K\n\njunk line\n/dev/video4\t\n"
         self.assertEqual(cam.parse_device_list(text), [
             ("/dev/video0", "Elgato Facecam 4K"),
             ("/dev/video4", "/dev/video4"),

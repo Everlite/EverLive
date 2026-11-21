@@ -250,33 +250,6 @@ int gc573_fg_mode_parse(const char *name)
 	return mode;
 }
 
-const char *gc573_fg_backend_name(int backend)
-{
-	switch (backend) {
-	case GC573_FG_BACKEND_AFMF:
-		return "afmf";
-	case GC573_FG_BACKEND_LSFG:
-	default:
-		return "lsfg";
-	}
-}
-
-int gc573_fg_backend_parse(const char *name)
-{
-	if (!name || !*name)
-		return -1;
-	if (!strcasecmp(name, "afmf") || !strcasecmp(name, "fidelityfx") ||
-	    !strcasecmp(name, "amd") || !strcasecmp(name, "gpu"))
-		return GC573_FG_BACKEND_AFMF;
-	if (!strcasecmp(name, "native") || !strcasecmp(name, "cpu") ||
-	    !strcasecmp(name, "builtin"))
-		return GC573_FG_BACKEND_AFMF;
-	if (!strcasecmp(name, "lsfg") || !strcasecmp(name, "lsfg-vk") ||
-	    !strcasecmp(name, "lossless"))
-		return GC573_FG_BACKEND_LSFG;
-	return -1;
-}
-
 /* ------------------------------------------------------------------ */
 /* lsfg-vk installation probe                                          */
 /* ------------------------------------------------------------------ */
@@ -330,50 +303,6 @@ static bool fg_dir_has_lsfg(const char *dir, char *out, size_t out_len)
 			if (fg_slurp(path, buf, sizeof(buf)) &&
 			    (fg_strcasestr(buf, "lsfg") ||
 			     fg_strcasestr(buf, "lossless")))
-				hit = true;
-		}
-
-		if (hit) {
-			snprintf(out, out_len, "%s", dir);
-			closedir(d);
-			return true;
-		}
-	}
-
-	closedir(d);
-	return false;
-}
-
-static bool fg_dir_has_afmf(const char *dir, char *out, size_t out_len)
-{
-	DIR *d;
-	struct dirent *ent;
-
-	if (!dir || !*dir)
-		return false;
-
-	d = opendir(dir);
-	if (!d)
-		return false;
-
-	while ((ent = readdir(d)) != NULL) {
-		char path[PATH_MAX];
-		bool hit = false;
-
-		if (ent->d_name[0] == '.')
-			continue;
-		if (!fg_strcasestr(ent->d_name, ".json"))
-			continue;
-
-		if (fg_strcasestr(ent->d_name, "afmf")) {
-			hit = true;
-		} else {
-			char buf[65536];
-
-			fg_path(path, sizeof(path), dir, "/", ent->d_name);
-			if (fg_slurp(path, buf, sizeof(buf)) &&
-			    (fg_strcasestr(buf, "VK_LAYER_AFMF") ||
-			     fg_strcasestr(buf, "afmf-linux")))
 				hit = true;
 		}
 
@@ -598,34 +527,6 @@ void gc573_fg_probe_system(struct gc573_fg_probe *out)
 	if (!out->dll_found &&
 	    fg_steam_roots_dll(out->dll_path, sizeof(out->dll_path)))
 		out->dll_found = true;
-
-	/* --- 3. afmf-linux implicit layer -------------------------------- */
-	{
-		const char *afmf_env = getenv("EVERLIVE_AFMF_DIR");
-		if (afmf_env && fg_dir_has_afmf(afmf_env, out->afmf_layer_dir,
-						sizeof(out->afmf_layer_dir))) {
-			out->afmf_found = true;
-		} else if (fg_dir_has_afmf("./tools/everlive-fg-afmf/build/layer",
-					   out->afmf_layer_dir, sizeof(out->afmf_layer_dir)) ||
-			   fg_dir_has_afmf("../tools/everlive-fg-afmf/build/layer",
-					   out->afmf_layer_dir, sizeof(out->afmf_layer_dir)) ||
-			   fg_dir_has_afmf("/usr/local/lib/everlive/afmf",
-					   out->afmf_layer_dir, sizeof(out->afmf_layer_dir)) ||
-			   fg_dir_has_afmf("/usr/lib/everlive/afmf",
-					   out->afmf_layer_dir, sizeof(out->afmf_layer_dir)) ||
-			   fg_dir_has_afmf("/usr/share/vulkan/implicit_layer.d",
-					   out->afmf_layer_dir, sizeof(out->afmf_layer_dir)) ||
-			   fg_dir_has_afmf("/etc/vulkan/implicit_layer.d",
-					   out->afmf_layer_dir, sizeof(out->afmf_layer_dir))) {
-			out->afmf_found = true;
-		} else {
-			fg_path(dir, sizeof(dir), xdg_data,
-				"/vulkan/implicit_layer.d", NULL);
-			if (fg_dir_has_afmf(dir, out->afmf_layer_dir,
-					    sizeof(out->afmf_layer_dir)))
-				out->afmf_found = true;
-		}
-	}
 }
 
 bool gc573_fg_apply_env(const struct gc573_fg_config *cfg,
@@ -641,61 +542,8 @@ bool gc573_fg_apply_env(const struct gc573_fg_config *cfg,
 	if (!out)
 		out = &local;
 
-	/* Re-probe: the user may have just installed lsfg-vk, afmf, or the game. */
+	/* Re-probe: the user may have just installed lsfg-vk or the game. */
 	gc573_fg_probe_system(out);
-
-	if (cfg->mode == GC573_FG_OFF) {
-		setenv("DISABLE_AFMF", "1", 1);
-		unsetenv("AFMF_ENABLE");
-		setenv("DISABLE_LSFGVK", "1", 1);
-		unsetenv("LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT");
-		return true;
-	}
-
-	if (cfg->backend == GC573_FG_BACKEND_AFMF) {
-		/* Disable LSFG so layers don't collide */
-		setenv("DISABLE_LSFGVK", "1", 1);
-		unsetenv("LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT");
-
-		/* Enable AFMF */
-		unsetenv("DISABLE_AFMF");
-		setenv("AFMF_ENABLE", "1", 1);
-		setenv("AFMF_PACING", "1", 1);
-		setenv("AFMF_SEARCH_MODE", "standard", 1);
-		if (cfg->perf_mode)
-			setenv("AFMF_PERFORMANCE_MODE", "performance", 1);
-		else
-			setenv("AFMF_PERFORMANCE_MODE", "quality", 1);
-
-		mult = gc573_fg_clamp_multiplier(cfg->multiplier);
-		snprintf(mult_str, sizeof(mult_str), "%d", mult);
-		setenv("AFMF_MULTIPLIER", mult_str, 1);
-		setenv("AFMF_CAS_SHARPNESS", "40", 1);
-		setenv("AFMF_HUD_DETECT", "1", 1);
-		setenv("AFMF_HUD_THRESHOLD", "45", 1);
-		if (mult >= 4) {
-			setenv("AFMF_EXTRA_IMAGES", "6", 1);
-		} else if (mult >= 3) {
-			setenv("AFMF_EXTRA_IMAGES", "4", 1);
-		}
-
-		if (out->afmf_found && out->afmf_layer_dir[0]) {
-			const char *curr = getenv("VK_ADD_LAYER_PATH");
-			if (!curr || !*curr) {
-				setenv("VK_ADD_LAYER_PATH", out->afmf_layer_dir, 1);
-			} else if (!strstr(curr, out->afmf_layer_dir)) {
-				char combined[PATH_MAX * 2];
-				snprintf(combined, sizeof(combined), "%s:%s",
-					 out->afmf_layer_dir, curr);
-				setenv("VK_ADD_LAYER_PATH", combined, 1);
-			}
-		}
-		return out->afmf_found;
-	}
-
-	/* Backend is LSFG: disable AFMF to avoid conflict */
-	setenv("DISABLE_AFMF", "1", 1);
-	unsetenv("AFMF_ENABLE");
 
 	/* Never let a stale "disable" poison the instance we are about to make. */
 	unsetenv("DISABLE_LSFGVK");
@@ -726,7 +574,7 @@ bool gc573_fg_apply_env(const struct gc573_fg_config *cfg,
 	 * swapchain images to pace 2-3 synthetic frames per real frame without
 	 * swapchain starvation/artifacts.
 	 */
-	if (!cfg->low_latency || mult >= 3)
+	if (cfg->mode == GC573_FG_OFF || !cfg->low_latency || mult >= 3)
 		unsetenv("LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT");
 	else
 		setenv("LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT", "1", 1);
@@ -875,10 +723,7 @@ double gc573_fg_target_output_hz(const struct gc573_fg_config *cfg,
 {
 	double base_hz;
 
-	/* AFMF has its own internal Vulkan present/pacing thread; EverLive pacer
-	 * must stay disabled so the two pacing threads do not conflict. */
-	if (!cfg || cfg->mode == GC573_FG_OFF ||
-	    cfg->backend == GC573_FG_BACKEND_AFMF)
+	if (!cfg || cfg->mode == GC573_FG_OFF || cfg->native_backend)
 		return 0.0;
 
 	base_hz = (source_hz >= 20.0 && source_hz <= 250.0) ? source_hz : 60.0;
@@ -1745,9 +1590,6 @@ void gc573_framegen_get_stats(struct gc573_framegen *fg,
 
 	out->mode = fg->cfg.mode;
 	out->multiplier = gc573_fg_clamp_multiplier(fg->cfg.multiplier);
-	out->backend = fg->cfg.backend;
-	out->afmf_found = fg->probe.afmf_found;
-	snprintf(out->afmf_layer_dir, sizeof(out->afmf_layer_dir), "%s", fg->probe.afmf_layer_dir);
 	out->layer_found = fg->probe.layer_found;
 	out->dll_found = fg->probe.dll_found;
 	snprintf(out->dll_path, sizeof(out->dll_path), "%s", fg->probe.dll_path);
@@ -1768,16 +1610,14 @@ void gc573_framegen_get_stats(struct gc573_framegen *fg,
 	out->queued = fg->count;
 
 	/*
-	 * Multiply presents when the active framegen layer intercepts them.
+	 * lsfg-vk only doubles presents it actually intercepts.  Claim 2x only when
+	 * the layer, the DLL and the live Vulkan renderer are all present;
+	 * otherwise report the raw present rate so the UI can warn instead of lie.
 	 */
-	double base_fps = (out->deduplicator_active && out->unique_fps > 0.5)
-			  ? out->unique_fps : fg->present_fps;
-	if (fg->vulkan_active && (fg->cfg.backend == GC573_FG_BACKEND_AFMF ?
-				   fg->probe.afmf_found :
-				   (fg->probe.layer_found && fg->probe.dll_found)))
-		out->output_fps = base_fps * (double)out->multiplier;
+	if (fg->probe.layer_found && fg->probe.dll_found && fg->vulkan_active)
+		out->output_fps = fg->present_fps * (double)out->multiplier;
 	else
-		out->output_fps = base_fps;
+		out->output_fps = fg->present_fps;
 
 	pthread_mutex_unlock(&fg->lock);
 }
