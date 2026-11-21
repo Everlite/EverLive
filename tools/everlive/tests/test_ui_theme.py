@@ -64,7 +64,9 @@ class TokenTests(unittest.TestCase):
         import re
         stylesheet = ui_theme.build_stylesheet()
         values = set(re.findall(r"border-radius:\s*([^;]+);", stylesheet))
-        self.assertLessEqual(values, {"0px", "2px", "6px", "7px", "8px", "12px"}, values)
+        self.assertLessEqual(
+            values, {"0px", "2px", "4px", "6px", "7px", "8px", "12px"},
+            values)
 
     def test_segment_inner_edges_stay_square(self):
         stylesheet = ui_theme.build_stylesheet()
@@ -76,6 +78,13 @@ class TokenTests(unittest.TestCase):
         self.assertIn("border-top-left-radius: 6px", block)
         self.assertIn("border-bottom-left-radius: 6px", block)
         self.assertIn("border-right: 1px solid", block)
+
+    def test_scrollbar_handle_is_rounded(self):
+        stylesheet = ui_theme.build_stylesheet()
+        start = stylesheet.index("QScrollBar::handle:vertical {")
+        block = stylesheet[start:stylesheet.index("}", start)]
+        self.assertIn("border-radius: 4px", block)
+        self.assertIn("min-height: 26px", block)
 
     def test_slider_handle_is_circular(self):
         stylesheet = ui_theme.build_stylesheet()

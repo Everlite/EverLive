@@ -832,10 +832,13 @@ QScrollBar:vertical {
     background: transparent;
     width: 8px;
     margin: 0px;
+    border: none;
+    border-radius: 4px;
 }
 QScrollBar::handle:vertical {
     background: @BORDER_STRONG@;
-    border-radius: @RADIUS@;
+    border: none;
+    border-radius: 4px;
     min-height: 26px;
 }
 QScrollBar::handle:vertical:hover {

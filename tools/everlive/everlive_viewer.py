@@ -717,7 +717,7 @@ try:
     from PySide6.QtGui import (
         QGuiApplication, QFont, QIcon, QColor, QPalette, QKeySequence, QShortcut,
         QDesktopServices, QPixmap, QPainter, QAction, QPen, QBrush,
-        QLinearGradient, QPainterPath, QImage
+        QLinearGradient, QPainterPath, QImage, QRegion
     )
     HAS_QT = True
 except ImportError:
@@ -3900,6 +3900,21 @@ if HAS_QT:
                 f"background-color: {ui_theme.VIDEO_BG};")
             self.video_host.installEventFilter(self)
 
+            # Rounded-corner mask for the native video surface.  The engine's
+            # SDL window and its native host are rectangular, so this raised
+            # sibling covers the corner cut-outs instead of relying on the
+            # frame's QSS radius to clip a child window.
+            self.video_corner_overlay = QWidget(self.stage_grid_host)
+            self.video_corner_overlay.setObjectName("videoCornerOverlay")
+            self.video_corner_overlay.setAttribute(Qt.WA_NativeWindow, True)
+            self.video_corner_overlay.setAttribute(
+                Qt.WA_DontCreateNativeAncestors, True)
+            self.video_corner_overlay.setAttribute(
+                Qt.WA_TransparentForMouseEvents, True)
+            self.video_corner_overlay.setStyleSheet(
+                f"background-color: {ui_theme.SURFACE};")
+            self.video_corner_overlay.hide()
+
             # Webcam preview: a native sibling raised above video_host (and
             # the engine window inside it).
             self.pip_host = PipPreview(self.stage_grid_host)
@@ -5490,6 +5505,7 @@ if HAS_QT:
             if obj is getattr(self, "video_host", None):
                 if event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
                     self._position_pip()
+                    self._update_video_corner_overlay()
                 if event.type() == QEvent.Type.MouseButtonPress:
                     self.video_host.setFocus()
                 elif event.type() == QEvent.Type.MouseButtonDblClick:
@@ -5592,6 +5608,7 @@ if HAS_QT:
             super().resizeEvent(event)
             self._apply_responsive_chrome()
             self._position_remote_card()
+            self._update_video_corner_overlay()
 
         def _update_action_group_positions(self):
             buttons = [
@@ -5746,6 +5763,8 @@ if HAS_QT:
                 self.video_stage_frame.setStyleSheet(
                     "QFrame#videoStageFrame { background-color: #000000; border: none; border-radius: 0px; }")
                 self.video_stage_frame.layout().setContentsMargins(0, 0, 0, 0)
+                if hasattr(self, "video_corner_overlay"):
+                    self.video_corner_overlay.hide()
                 self.showFullScreen()
                 self.activateWindow()
                 self.video_host.setFocus()
@@ -5759,6 +5778,7 @@ if HAS_QT:
                 self.bottom_box.setVisible(True)
                 self._apply_ui_mode(
                     getattr(self, "ui_mode", "simple"), persist=False)
+                self._update_video_corner_overlay()
                 self.video_host.setFocus()
 
         def _get_video_host_winid(self) -> int:
@@ -5781,6 +5801,38 @@ if HAS_QT:
                 and not (hasattr(self, "chk_popout") and self.chk_popout.isChecked())
                 and self._get_video_host_winid() > 0
             )
+
+        def _update_video_corner_overlay(self):
+            """Mask the native video surface to the stage frame's radius."""
+            overlay = getattr(self, "video_corner_overlay", None)
+            host = getattr(self, "video_host", None)
+            if overlay is None or host is None:
+                return
+            if getattr(self, "_cinema_fullscreen", False):
+                overlay.hide()
+                return
+            width = host.width()
+            height = host.height()
+            if width <= 0 or height <= 0:
+                overlay.hide()
+                return
+
+            radius = max(0, int(ui_theme.RADIUS) - 1)
+            overlay.setGeometry(host.geometry())
+            outer = QRegion(0, 0, width, height)
+            if radius:
+                path = QPainterPath()
+                path.addRoundedRect(
+                    QRectF(0, 0, width, height), radius, radius)
+                inner = QRegion(path.toFillPolygon().toPolygon())
+                overlay.setMask(outer.subtracted(inner))
+            else:
+                overlay.setMask(outer)
+            overlay.show()
+            overlay.raise_()
+            if getattr(self, "pip_host", None) is not None and \
+                    self.pip_host.isVisible():
+                self.pip_host.raise_()
 
         def _position_remote_card(self):
             if not hasattr(self, "remote_card"):
