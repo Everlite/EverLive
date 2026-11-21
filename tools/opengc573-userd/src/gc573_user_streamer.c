@@ -1821,7 +1821,6 @@ static int g_popup_volume = 100;
 static bool g_osd_font_init_attempted;
 static SDL_Rect g_card_dest;
 static SDL_Rect g_popup_dest;
-static bool g_osd_card_was_active;
 
 /* Quick Navigation bar state: auto-wakes on mouse motion/click/hotkey, auto-hides after 3s */
 static uint64_t g_quicknav_wake_ms;
@@ -2129,7 +2128,6 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 	if (osd_card_active(window) && quicknav_is_active()) {
 		osd_card_update(renderer, window, in_w, in_h, interlaced,
 				rate_x100, chroma_text, audio_ch, audio_rate);
-		g_osd_card_was_active = true;
 	}
 
 	if (!g_osd_enabled) {
@@ -2333,6 +2331,7 @@ static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
 		SDL_RenderCopy(renderer, g_card.texture, NULL, &draw);
 		osd_render_tooltip(renderer, win_w, win_h, scale);
 		osd_render_popup(renderer, win_w, win_h, scale);
+		return;
 	}
 	if (!g_osd_enabled || !g_osd.texture)
 		return;
@@ -7110,7 +7109,6 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 			g_osd_mode = (enum osd_mode)cmd->a;
 			osd_card_invalidate();
 			g_osd.scale = -1;
-			g_osd_card_was_active = true;
 		}
 		printf("[IPC] OSD mode: %d\n", cmd->a);
 		break;
@@ -7185,7 +7183,6 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		float flow = g_fg_config.flow_scale;
 		bool perf = g_fg_config.perf_mode;
 		bool low_latency = g_fg_config.low_latency;
-		bool native_backend = g_fg_config.native_backend;
 		bool settings_changed = false;
 
 		if (cmd->a >= 0 && cmd->a <= GC573_FG_30_TO_60)

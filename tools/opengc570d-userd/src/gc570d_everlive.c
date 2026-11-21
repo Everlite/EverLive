@@ -1232,8 +1232,7 @@ static void sdl_render_frame(struct everlive_state *st, struct everlive_sdl *sdl
 				sdl_render_tooltip(sdl, win_w, win_h, scale);
 				sdl_render_popup(sdl, win_w, win_h, scale);
 			}
-		}
-		if (sdl->overlay) {
+		} else if (sdl->overlay) {
 			const int margin = 24;
 			SDL_Rect overlay_dst = {
 				.x = margin,
