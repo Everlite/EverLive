@@ -85,6 +85,58 @@ class OsdModeTests(unittest.TestCase):
 
 
 @unittest.skipUnless(everlive_viewer.HAS_QT, "PySide6 is not installed")
+class HubOsdControlTests(unittest.TestCase):
+    class FakeCheck:
+        def __init__(self, checked=False):
+            self.checked = checked
+            self.enabled = True
+
+        def isChecked(self):  # noqa: N802 (Qt casing)
+            return self.checked
+
+        def setEnabled(self, enabled):  # noqa: N802 (Qt casing)
+            self.enabled = enabled
+
+    class FakeEffect:
+        def __init__(self):
+            self.opacity = 1.0
+
+        def setOpacity(self, value):  # noqa: N802 (Qt casing)
+            self.opacity = value
+
+    def _window(self, *, stats=False, quicknav=False, clean=False):
+        return SimpleNamespace(
+            chk_osd=self.FakeCheck(stats),
+            chk_quicknav=self.FakeCheck(quicknav),
+            chk_quicknav_fs=self.FakeCheck(False),
+            chk_streamer=self.FakeCheck(clean),
+            combo_osd_pos=self.FakeCheck(True),
+            osd_pos_effect=self.FakeEffect(),
+        )
+
+    def test_position_enabled_for_quicknav_without_stats(self):
+        window = self._window(stats=False, quicknav=True)
+        everlive_viewer.MainWindow._update_osd_controls(window)
+        self.assertTrue(window.combo_osd_pos.enabled)
+        self.assertEqual(window.osd_pos_effect.opacity, 1.0)
+
+    def test_position_enabled_for_stats_without_quicknav(self):
+        window = self._window(stats=True, quicknav=False)
+        everlive_viewer.MainWindow._update_osd_controls(window)
+        self.assertTrue(window.combo_osd_pos.enabled)
+
+    def test_position_disabled_when_both_off_or_clean(self):
+        window = self._window(stats=False, quicknav=False)
+        everlive_viewer.MainWindow._update_osd_controls(window)
+        self.assertFalse(window.combo_osd_pos.enabled)
+        self.assertEqual(window.osd_pos_effect.opacity, 0.45)
+
+        window = self._window(stats=True, quicknav=True, clean=True)
+        everlive_viewer.MainWindow._update_osd_controls(window)
+        self.assertFalse(window.combo_osd_pos.enabled)
+
+
+@unittest.skipUnless(everlive_viewer.HAS_QT, "PySide6 is not installed")
 class RecordingUiTests(unittest.TestCase):
     class FakeRecorder:
         def __init__(self, active=True):

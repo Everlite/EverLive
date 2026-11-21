@@ -4631,8 +4631,8 @@ if HAS_QT:
             if pos_idx >= 0:
                 self.combo_osd_pos.setCurrentIndex(pos_idx)
             self.combo_osd_pos.setToolTip(
-                "Forwarded as --osd-pos. Top is the default; the bar is "
-                "centered on the chosen screen edge.")
+                "Top or bottom edge for the stats HUD and Quick Navigation "
+                "bar. Forwarded as --osd-pos.")
             self.combo_osd_pos.setEnabled(self.chk_osd.isChecked())
             self.combo_osd_pos.currentIndexChanged.connect(self.on_osd_pos_changed)
             self.osd_pos_field = _stacked_field(
@@ -4656,8 +4656,10 @@ if HAS_QT:
 
             self.chk_quicknav = QCheckBox("Quick Navigation Bar (Auto-Hide)")
             self.chk_quicknav.setToolTip(
-                "Shows interactive control bar (HDMI, aspect, scaling, volume, mute) "
-                "on mouse movement (Auto-Hides after 3s). Hotkey: O.")
+                "Auto-wakes the interactive control bar (HDMI, aspect, "
+                "scaling, volume, mute) on mouse movement; it auto-hides "
+                "after 3s. The stats Quick Navigation button and O hotkey "
+                "still force it.")
             self.chk_quicknav.setChecked(
                 bool(self.saved_cfg.get("quicknav_enabled", True)))
             self.chk_quicknav.toggled.connect(self.on_quicknav_changed)
@@ -4665,8 +4667,9 @@ if HAS_QT:
 
             self.chk_quicknav_fs = QCheckBox("Quick Navigation: Fullscreen Only")
             self.chk_quicknav_fs.setToolTip(
-                "Only wake the Quick Navigation bar in fullscreen mode, "
-                "keeping windowed view strictly clean.")
+                "Only auto-wake the Quick Navigation bar in fullscreen mode. "
+                "The stats Quick Navigation button and O hotkey still force "
+                "it in windowed mode.")
             self.chk_quicknav_fs.setChecked(
                 bool(self.saved_cfg.get("quicknav_fs_only", False)))
             self.chk_quicknav_fs.setEnabled(self.chk_quicknav.isChecked())
@@ -8414,12 +8417,16 @@ if HAS_QT:
         def _update_osd_controls(self):
             if not hasattr(self, "combo_osd_pos"):
                 return
-            allowed = (self.chk_osd.isChecked()
-                       and not self.chk_streamer.isChecked())
+            clean_feed = self.chk_streamer.isChecked()
+            quicknav_on = bool(
+                getattr(self, "chk_quicknav", None)
+                and self.chk_quicknav.isChecked())
+            allowed = ((self.chk_osd.isChecked() or quicknav_on)
+                       and not clean_feed
+                       and not bool(getattr(self, "uvc_mode", False)))
             self.combo_osd_pos.setEnabled(allowed)
             if hasattr(self, "osd_pos_effect"):
                 self.osd_pos_effect.setOpacity(1.0 if allowed else 0.45)
-            clean_feed = self.chk_streamer.isChecked()
             if hasattr(self, "chk_quicknav"):
                 self.chk_quicknav.setEnabled(not clean_feed)
             if hasattr(self, "chk_quicknav_fs"):
@@ -8446,8 +8453,8 @@ if HAS_QT:
             elif self.duo_mode and self.streamer.is_running:
                 self.streamer.ctl("osd", "1" if enabled else "0")
             elif self.streamer.is_running:
-                print("[*] OSD setting saved; use Tab/o in the gaming window "
-                      "to toggle the running overlay.")
+                print("[*] OSD setting saved; use Tab/I for stats and O for "
+                      "Quick Navigation in the gaming window.")
 
         def on_osd_pos_changed(self, *_):
             pos = normalize_osd_position(
