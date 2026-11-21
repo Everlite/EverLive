@@ -41,6 +41,19 @@ CompileFlags:
     - -I..
 ---
 If:
+  PathMatch: tools/libeverlive-core/osd/[^/]+
+CompileFlags:
+  Add:
+    - -std=gnu11
+    - -D_GNU_SOURCE
+    - -Wall
+    - -Wextra
+    - -Wno-unused-parameter
+    - -I.
+    - -I..
+    - -I/usr/include/SDL2
+---
+If:
   PathMatch: tools/opengc573-userd/src/[^/]+
 CompileFlags:
   Add:
@@ -53,6 +66,7 @@ CompileFlags:
     - -I.
     - -I../../libeverlive-core
     - -I../../libeverlive-core/v4l2
+    - -I../../libeverlive-core/osd
     - -I/usr/include/SDL2
     - -I/usr/include/pipewire-0.3
     - -I/usr/include/spa-0.2
@@ -75,6 +89,7 @@ CompileFlags:
     - -I..
     - -I../../libeverlive-core
     - -I../../libeverlive-core/v4l2
+    - -I../../libeverlive-core/osd
     - -I/usr/include/SDL2
     - -I/usr/include/pipewire-0.3
     - -I/usr/include/spa-0.2
@@ -104,6 +119,7 @@ CompileFlags:
     - -Wno-sign-compare
     - -I../tools/libeverlive-core
     - -I../tools/libeverlive-core/v4l2
+    - -I../tools/libeverlive-core/osd
     - -I../tools/opengc570d-userd/src
     - -I../tools/opengc570d-userd
     - -I../tools/opengc573-userd/src
