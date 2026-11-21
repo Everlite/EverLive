@@ -4492,9 +4492,8 @@ if HAS_QT:
                 self.on_fg_backend_changed)
             grid_fg.addWidget(_stacked_field(
                 "Engine", self.combo_fg_backend,
-                "LSFG-VK uses Lossless Scaling (Vulkan); EverLive Native is "
-                "a 100% open-source built-in prototype with Static HUD Lock "
-                "requiring no Steam or external DLLs."),
+                "LSFG-VK uses Lossless Scaling's Vulkan layer for 2x/3x/4x "
+                "frame generation."),
                 0, 0, 1, 2)
 
             self._fg_ready_ok = False
