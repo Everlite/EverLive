@@ -2474,11 +2474,12 @@ static void *everlive_thread(void *arg)
 								  __ATOMIC_RELAXED);
 				bool stats_enabled = atomic_load_explicit(
 					&st->osd, __ATOMIC_RELAXED);
-				char lines[EVERLIVE_OSD_STATS_MAX_LINES][128];
-				const char *line_ptrs[EVERLIVE_OSD_STATS_MAX_LINES];
-				int line_count = 0;
+				char row1[384];
+				char row2[512];
 				int max_width;
-				int i;
+				unsigned src_w = shm_port_source_width(st, port);
+				unsigned src_h = shm_port_source_height(st, port);
+				unsigned src_fps = shm_port_source_fps(st, port);
 				int out_w = st->frame[port].width ?
 					(int)st->frame[port].width : 1920;
 				int out_h = st->frame[port].height ?
@@ -2503,47 +2504,35 @@ static void *everlive_thread(void *arg)
 					   sdl.stats_dirty ||
 					   now - sdl.stats_built_ns >=
 						   EVERLIVE_STATUS_NS) {
-#define ADD_STAT_LINE(...) \
-	do { \
-		if (line_count < EVERLIVE_OSD_STATS_MAX_LINES) \
-			snprintf(lines[line_count++], sizeof(lines[0]), \
-				 __VA_ARGS__); \
-	} while (0)
-					ADD_STAT_LINE("Input %s",
-						      shm_port_name(port));
-					if (shm_port_source_width(st, port) &&
-					    shm_port_source_height(st, port))
-						ADD_STAT_LINE("%ux%u -> %ux%u",
-							      shm_port_source_width(st, port),
-							      shm_port_source_height(st, port),
-							      out_w, out_h);
-					else
-						ADD_STAT_LINE("No signal");
-					ADD_STAT_LINE("YUYV");
-					if (shm_port_source_fps(st, port))
-						ADD_STAT_LINE("%u FPS",
-							      shm_port_source_fps(st, port));
-					ADD_STAT_LINE("%u Hz",
-						      shm_port_rate(st, port));
-					ADD_STAT_LINE("%u ch LPCM",
-						      shm_port_channels(st, port));
-					ADD_STAT_LINE("Vol %s%d%%",
-						      muted ? "Muted/" : "", vol);
-					ADD_STAT_LINE("Aspect %s",
-						      aspect_mode_label(aspect));
-					ADD_STAT_LINE("Scale %s",
-						      scale == EVERLIVE_SCALE_INTEGER ?
-						      "Integer" : "Fit");
-#undef ADD_STAT_LINE
-					for (i = 0; i < line_count; i++)
-						line_ptrs[i] = lines[i];
+					if (src_w && src_h) {
+						if (src_fps)
+							snprintf(row1, sizeof(row1),
+								 "%s · %ux%u -> %ux%u @ %u FPS",
+								 shm_port_name(port), src_w, src_h,
+								 out_w, out_h, src_fps);
+						else
+							snprintf(row1, sizeof(row1),
+								 "%s · %ux%u -> %ux%u",
+								 shm_port_name(port), src_w, src_h,
+								 out_w, out_h);
+					} else {
+						snprintf(row1, sizeof(row1),
+							 "%s · No signal",
+							 shm_port_name(port));
+					}
+					snprintf(row2, sizeof(row2),
+						 "YUYV · %s · %s · %u ch · Vol %s%d%%",
+						 aspect_mode_label(aspect),
+						 scale == EVERLIVE_SCALE_INTEGER ?
+						 "Integer" : "Fit",
+						 shm_port_channels(st, port),
+						 muted ? "Muted/" : "", vol);
 					max_width = everlive_osd_stats_max_width(
 						win_w, sdl.card.width,
 						(float)win_h / 1080.0f);
 					everlive_osd_build_stats(
-						sdl.renderer, line_ptrs,
-						line_count, max_width,
-						sdl.stats_hover_action,
+						sdl.renderer, "GC570D", row1, row2,
+						max_width, sdl.stats_hover_action,
 						(float)win_h / 1080.0f,
 						win_w, win_h, &sdl.stats);
 					sdl.stats_built_ns = now;

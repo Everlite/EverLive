@@ -451,20 +451,6 @@ static bool parse_osd_pos(const char *value, enum osd_position *out)
 	return false;
 }
 
-static const char *aspect_label(enum stream_aspect aspect)
-{
-	switch (aspect) {
-	case ASPECT_16_9:
-		return "16:9 AR";
-	case ASPECT_4_3:
-		return "4:3 AR";
-	case ASPECT_STRETCH:
-		return "Stretch";
-	default:
-		return "Auto AR";
-	}
-}
-
 static const char *aspect_name(enum stream_aspect aspect)
 {
 	switch (aspect) {
@@ -2119,18 +2105,30 @@ static void osd_note_dma_age(uint64_t age_us)
 		g_osd_dma_ms = quantised;
 }
 
+static void stats_append(char *buf, size_t size, const char *text)
+{
+	size_t len;
+
+	if (!text || !*text || size == 0)
+		return;
+	len = strlen(buf);
+	if (len >= size - 1)
+		return;
+	snprintf(buf + len, size - len, "%s%s", len ? " · " : "", text);
+}
+
 static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 		       uint32_t in_w, uint32_t in_h, bool interlaced,
 		       uint32_t rate_x100, double fps, const char *audio_text,
 		       unsigned audio_ch, uint32_t audio_rate,
 		       const char *hdr_text, const char *chroma_text)
 {
-	char lines[EVERLIVE_OSD_STATS_MAX_LINES][128];
-	const char *line_ptrs[EVERLIVE_OSD_STATS_MAX_LINES];
+	char row1[384];
+	char row2[384];
+	char fields[320] = "";
 	char fg[128];
-	int line_count = 0;
+	char tag[48];
 	int max_width;
-	int i;
 	int win_w = 0;
 	int win_h = 0;
 	float scale;
@@ -2163,46 +2161,30 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 	SDL_GetWindowSize(window, &win_w, &win_h);
 	scale = (float)win_h / 1080.0f;
 
-#define ADD_STAT_LINE(...) \
-	do { \
-		if (line_count < EVERLIVE_OSD_STATS_MAX_LINES) \
-			snprintf(lines[line_count++], sizeof(lines[0]), \
-				 __VA_ARGS__); \
-	} while (0)
-
 	if (in_w && in_h)
-		ADD_STAT_LINE("%ux%u%s %.0fHz", in_w, in_h,
-			      interlaced ? "i" : "p",
-			      (double)rate_x100 / 100.0);
+		snprintf(row1, sizeof(row1),
+			 "%ux%u%s %.0fHz · %.1f FPS", in_w, in_h,
+			 interlaced ? "i" : "p",
+			 (double)rate_x100 / 100.0, fps);
 	else
-		ADD_STAT_LINE("No signal");
-	ADD_STAT_LINE("%.1f FPS", fps);
-	if (chroma_text && *chroma_text)
-		ADD_STAT_LINE("%s", chroma_text);
-	if (audio_text && *audio_text)
-		ADD_STAT_LINE("%s", audio_text);
-	if (hdr_text && *hdr_text)
-		ADD_STAT_LINE("%s", hdr_text);
-	ADD_STAT_LINE("Aspect %s",
-		      g_aspect == ASPECT_AUTO ? "Auto" :
-		      aspect_label(g_aspect));
-	if (g_integer_factor > 0)
-		ADD_STAT_LINE("Scale %dx", g_integer_factor);
-	else
-		ADD_STAT_LINE("Scale Fit");
-	if (g_osd_dma_ms > 0.0)
-		ADD_STAT_LINE("DMA %.1f ms", g_osd_dma_ms);
-	if (g_vsync)
-		ADD_STAT_LINE("VSync");
-	framegen_describe(fg, sizeof(fg));
-	ADD_STAT_LINE("%s", fg[0] ? fg : "Frame Gen Off");
-#undef ADD_STAT_LINE
+		snprintf(row1, sizeof(row1), "No signal · %.1f FPS", fps);
+	stats_append(row1, sizeof(row1), audio_text);
 
-	for (i = 0; i < line_count; i++)
-		line_ptrs[i] = lines[i];
+	stats_append(fields, sizeof(fields), hdr_text);
+	if (g_osd_dma_ms > 0.0) {
+		snprintf(tag, sizeof(tag), "DMA %.1fms", g_osd_dma_ms);
+		stats_append(fields, sizeof(fields), tag);
+	}
+	if (g_vsync)
+		stats_append(fields, sizeof(fields), "VSync");
+	framegen_describe(fg, sizeof(fg));
+	snprintf(row2, sizeof(row2), "%s%s%s",
+		 fg[0] ? fg : "Frame Gen Off",
+		 fields[0] ? " · " : "", fields);
+
 	max_width = everlive_osd_stats_max_width(win_w, g_card.width,
 						 scale);
-	everlive_osd_build_stats(renderer, line_ptrs, line_count,
+	everlive_osd_build_stats(renderer, "GC573", row1, row2,
 				 max_width, g_stats_hover_action, scale,
 				 win_w, win_h, &g_stats);
 }

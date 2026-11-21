@@ -76,8 +76,6 @@ struct everlive_osd_hitbox {
 	enum everlive_osd_action action;
 };
 
-#define EVERLIVE_OSD_STATS_MAX_LINES 16
-
 struct everlive_osd_stats {
 	SDL_Texture *texture;
 	int width;
@@ -182,7 +180,8 @@ bool everlive_osd_build_toast(SDL_Renderer *renderer, const char *text,
 int everlive_osd_stats_max_width(int viewport_w, int card_width,
 				 float scale);
 bool everlive_osd_build_stats(SDL_Renderer *renderer,
-			      const char *const *lines, int line_count,
+			      const char *title,
+			      const char *row1, const char *row2,
 			      int max_width,
 			      enum everlive_osd_action hover_action,
 			      float scale, int viewport_w, int viewport_h,

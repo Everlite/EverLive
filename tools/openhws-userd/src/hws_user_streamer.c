@@ -1334,15 +1334,14 @@ static void hws_stats_update(SDL_Renderer *r, SDL_Window *win,
 			     int win_w, int win_h)
 {
 	struct hws_capture_status cs;
-	char lines[EVERLIVE_OSD_STATS_MAX_LINES][128];
-	const char *line_ptrs[EVERLIVE_OSD_STATS_MAX_LINES];
-	int line_count = 0;
+	char row1[384];
+	char row2[512];
+	char audio[64];
 	int max_width;
 	int vol;
 	bool muted;
 	uint64_t now;
 	float scale;
-	int i;
 
 	if (!g_osd) {
 		if (g_stats.texture)
@@ -1361,38 +1360,37 @@ static void hws_stats_update(SDL_Renderer *r, SDL_Window *win,
 	muted = atomic_load(&g_muted);
 	scale = (float)win_h / 1080.0f;
 
-#define ADD_STAT_LINE(...) \
-	do { \
-		if (line_count < EVERLIVE_OSD_STATS_MAX_LINES) \
-			snprintf(lines[line_count++], sizeof(lines[0]), \
-				 __VA_ARGS__); \
-	} while (0)
-	ADD_STAT_LINE("HWS UHD");
-	if (cs.signal) {
-		ADD_STAT_LINE("%ux%u", cs.width, cs.height);
-		ADD_STAT_LINE("%.2f FPS", cs.fps);
-	} else if (cs.present && cs.interlaced) {
-		ADD_STAT_LINE("Interlaced input");
-	} else {
-		ADD_STAT_LINE("No signal");
-	}
-	ADD_STAT_LINE("Frames %llu", (unsigned long long)cs.frames);
-	ADD_STAT_LINE("Lost %llu", (unsigned long long)cs.dropped);
-	ADD_STAT_LINE("Restarts %llu", (unsigned long long)cs.restarts);
-	ADD_STAT_LINE("Audio L-PCM 48k");
 	if (muted)
-		ADD_STAT_LINE("Muted");
+		snprintf(audio, sizeof(audio), "Muted");
 	else
-		ADD_STAT_LINE("Vol %d%%", vol);
+		snprintf(audio, sizeof(audio), "Vol %d%%", vol);
+
+	if (cs.signal) {
+		snprintf(row1, sizeof(row1), "%ux%u @ %.2f FPS · %s%s",
+			 cs.width, cs.height, cs.fps, audio,
+			 cs.hdcp ? " · HDCP" : "");
+	} else if (cs.present && cs.interlaced) {
+		snprintf(row1, sizeof(row1), "Interlaced input · %s%s",
+			 audio, cs.hdcp ? " · HDCP" : "");
+	} else {
+		snprintf(row1, sizeof(row1), "No signal · %s%s",
+			 audio, cs.hdcp ? " · HDCP" : "");
+	}
 	if (*cs.link)
-		ADD_STAT_LINE("PCIe %s", cs.link);
-	if (cs.hdcp)
-		ADD_STAT_LINE("HDCP active");
-#undef ADD_STAT_LINE
-	for (i = 0; i < line_count; i++)
-		line_ptrs[i] = lines[i];
+		snprintf(row2, sizeof(row2),
+			 "Frames %llu · Lost %llu · Restarts %llu · PCIe %s",
+			 (unsigned long long)cs.frames,
+			 (unsigned long long)cs.dropped,
+			 (unsigned long long)cs.restarts, cs.link);
+	else
+		snprintf(row2, sizeof(row2),
+			 "Frames %llu · Lost %llu · Restarts %llu",
+			 (unsigned long long)cs.frames,
+			 (unsigned long long)cs.dropped,
+			 (unsigned long long)cs.restarts);
+
 	max_width = everlive_osd_stats_max_width(win_w, g_card.width, scale);
-	everlive_osd_build_stats(r, line_ptrs, line_count, max_width,
+	everlive_osd_build_stats(r, "HWS UHD", row1, row2, max_width,
 				 g_stats_hover_action, scale,
 				 win_w, win_h, &g_stats);
 	g_stats_built_ms = now;
