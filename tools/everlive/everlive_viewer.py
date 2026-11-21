@@ -129,7 +129,6 @@ FRAMEGEN_KEYS = {key for _, key in FRAMEGEN_OPTIONS}
 
 FRAMEGEN_BACKEND_OPTIONS = [
     ("LSFG-VK (External, Beta)", "lsfg"),
-    ("EverLive Native (Beta)", "native"),
 ]
 
 # Older settings files / scripts used 60to120/30to60 or shader-pipeline names.
@@ -8519,15 +8518,6 @@ if HAS_QT:
             backend = (self.combo_fg_backend.currentData()
                        if hasattr(self, "combo_fg_backend")
                        else self.saved_cfg.get("fg_backend", "lsfg"))
-            if backend == "native":
-                self._fg_ready_ok = True
-                if hasattr(self, "lbl_fg_ready"):
-                    self.lbl_fg_ready.setText("✓ Built-in")
-                    self.lbl_fg_ready.setStyleSheet(
-                        "color: #5ED4B2; font-size: 11px; font-weight: 700;")
-                    self.lbl_fg_ready.setToolTip(
-                        "EverLive Native Frame Gen (GPL-2.0 prototype) · No external DLLs required")
-                return
             self._fg_ready_ok = bool(layer_found and dll_found)
             if not hasattr(self, "lbl_fg_ready"):
                 return

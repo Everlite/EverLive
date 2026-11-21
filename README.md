@@ -330,15 +330,14 @@ The bridge takes YUYV or NV12 directly and decodes MJPEG when built with FFmpeg'
 
 <a id="frame-generation-2x--3x--4x--lsfg-vk"></a>
 
-## Frame Generation (2× / 3× / 4× · LSFG-VK & EverLive Native)
+## Frame Generation (2× / 3× / 4× · LSFG-VK)
 
 > [!IMPORTANT]
-> **Optional Frame Generation (LSFG-VK & EverLive Native · Beta)**
-> EverLive supports **2×, 3×, and 4×** frame generation on GC573 (e.g. `60 → 120/180/240 FPS`, `120 → 240 FPS`, or `30 → 60/90/120 FPS` with **30 FPS Dedup** enabled) with a phase-locked 2:1 cadence deduplicator and runtime multiplier switching via Console Hub or hotkey <kbd>g</kbd>.
+> **Optional Frame Generation (LSFG-VK · Experimental)**
+> EverLive supports **2×, 3×, and 4×** frame generation on GC573 via **LSFG-VK** (e.g. `60 → 120/180/240 FPS`, `1080p120 → ~200+ FPS`, or `30 → 60/90/120 FPS` with **30 FPS Dedup** enabled) with a phase-locked 2:1 cadence deduplicator and runtime multiplier switching via Console Hub or hotkey <kbd>g</kbd>.
 >
-> * **Two selectable backends (`Video & FG → Engine`):**
+> * **Backend (`Video & FG → Engine`):**
 >   * **LSFG-VK (Vulkan):** Uses Lossless Scaling's Vulkan layer (`lsfg-vk` + Steam `lsfg-vk` beta shader library) with optional `Low-Latency Swapchain (2×)` and `Performance Mode`.
->   * **EverLive Native (Open-Source):** 100% open-source GPU optical-flow frame generation (`gc573_user_fg_native.[ch]`) requiring no Steam account or external DLLs. Implements hierarchical luma pyramids, 3-level dense block matching with sub-pixel interpolation, bilateral motion-vector smoothing, and continuous static HUD luminance masking to eliminate UI/crosshair ghosting.
 > * **Phase-Locked Cadence Deduplicator (30 FPS in 60 Hz containers):** Real-time relative MAD (Mean Absolute Difference) cadence detection that locks 30-in-60 duplicates (A, A, B, B) and stays rock-solid even across moving water, rain, foliage, or video noise, unlocking cleanly when real 60p motion is sustained.
 > * **Display Pacing:** Frame pacing is handled directly by LSFG-VK with FIFO presentation enabled.
 > * **Known Throughput Limits (SDL2 Vulkan Renderer):**
@@ -568,7 +567,7 @@ Writing clean-room Linux drivers for proprietary capture hardware requires havin
 
 | Component | Path | License | Notes |
 |:---|:---|:---:|:---|
-| **Userspace Driver & Streamer** | `tools/opengc573-userd/` | **GPL-2.0-only** | Userspace VFIO implementation, native optical-flow FG (`gc573_user_fg_native.c`), and `VK_LAYER_EVERLIVE_pacer` (`everlive_vk_pacer.c`). Copyright © 2026 Everlite. |
+| **Userspace Driver & Streamer** | `tools/opengc573-userd/` | **GPL-2.0-only** | Userspace VFIO implementation and `VK_LAYER_EVERLIVE_pacer` (`everlive_vk_pacer.c`). Copyright © 2026 Everlite. |
 | **Shared Core Library** | `tools/libeverlive-core/` | **GPL-2.0-only** | Card registry and autodiscovery, POSIX shared memory frame store (`everlive_framestore`), V4L2 virtual camera preload engine, cross-user handoff protocol (`everlive_handoff`), YUY2 frame conversion, jsmn JSON-RPC helpers, `everlive-ctl`, and systemd service. Copyright © 2026 Everlite. |
 | **Live Gamer DUO Engine** | `tools/opengc570d-userd/` | **GPL-2.0-only** | Derived from [`neoyagami/OpenGC570D`](https://github.com/neoyagami/OpenGC570D) with userspace VFIO-PCI + PipeWire port by [@PolygonPrincess](https://github.com/PolygonPrincess). Upstream base `4673bb9`, splitter PR #6 `484aa8d`, userspace import `afbb06e`. EverLive integration and frontend © 2026 Everlite & PolygonPrincess. |
 | **HWS UHD Userspace Engine** | `tools/openhws-userd/` | **GPL-2.0-only** | Userspace VFIO engine for ACASIS VS2583 / AVMatrix VC12-4K family (`hws_user_streamer`, `libhwsuhd-v4l2.so`). Copyright © 2026 Everlite & Scyllinice. |
