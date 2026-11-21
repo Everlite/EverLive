@@ -6492,6 +6492,18 @@ static void embed_forward_key(SDL_Window *window, const SDL_Event *ev, KeySym fa
 		case SDLK_TAB: sym = XK_Tab; break;
 		case SDLK_g: sym = XK_g; break;
 		case SDLK_q: sym = XK_Escape; break;
+		case SDLK_p: sym = XK_p; break;
+		case SDLK_z: sym = XK_z; break;
+		case SDLK_a: sym = XK_a; break;
+		case SDLK_l: sym = XK_l; break;
+		case SDLK_1: sym = XK_1; break;
+		case SDLK_i: sym = XK_i; break;
+		case SDLK_h: sym = XK_h; break;
+		case SDLK_PLUS:
+		case SDLK_KP_PLUS:
+		case SDLK_EQUALS: sym = XK_plus; break;
+		case SDLK_MINUS:
+		case SDLK_KP_MINUS: sym = XK_minus; break;
 		default: break;
 		}
 	}
@@ -7178,6 +7190,15 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 			osd_card_invalidate();
 		}
 		printf("[IPC] OSD mode: %d\n", cmd->a);
+		break;
+	case GC573_IPC_CMD_QUICKNAV_TOGGLE:
+		if (quicknav_is_active()) {
+			quicknav_hide();
+			toast_trigger("Quick Nav: Off");
+		} else {
+			quicknav_force();
+			toast_trigger("Quick Nav: On");
+		}
 		break;
 	case GC573_IPC_CMD_ASPECT:
 		if (cmd->a >= 0 && cmd->a < (int32_t)ASPECT_COUNT)

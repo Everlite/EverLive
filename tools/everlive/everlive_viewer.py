@@ -5464,6 +5464,67 @@ if HAS_QT:
             sc_rec = QShortcut(QKeySequence("Ctrl+R"), self)
             sc_rec.setContext(win_ctx)
             sc_rec.activated.connect(self.toggle_recording)
+            sc_osd_pos = QShortcut(QKeySequence("P"), self)
+            sc_osd_pos.setContext(win_ctx)
+            sc_osd_pos.activated.connect(self._cycle_osd_position)
+            sc_quicknav = QShortcut(QKeySequence("Alt+Z"), self)
+            sc_quicknav.setContext(win_ctx)
+            sc_quicknav.activated.connect(self._toggle_quicknav)
+            sc_aspect = QShortcut(QKeySequence("A"), self)
+            sc_aspect.setContext(win_ctx)
+            sc_aspect.activated.connect(self._cycle_aspect)
+            for seq in ("L", "1"):
+                sc_scale = QShortcut(QKeySequence(seq), self)
+                sc_scale.setContext(win_ctx)
+                sc_scale.activated.connect(self._cycle_scale)
+            sc_stats = QShortcut(QKeySequence("I"), self)
+            sc_stats.setContext(win_ctx)
+            sc_stats.activated.connect(
+                lambda: self.chk_osd.setChecked(not self.chk_osd.isChecked()))
+            for seq in ("+", "="):
+                sc_vup = QShortcut(QKeySequence(seq), self)
+                sc_vup.setContext(win_ctx)
+                sc_vup.activated.connect(lambda: self._step_volume(5))
+            sc_vdown = QShortcut(QKeySequence("-"), self)
+            sc_vdown.setContext(win_ctx)
+            sc_vdown.activated.connect(lambda: self._step_volume(-5))
+
+        def _cycle_osd_position(self):
+            if not hasattr(self, "combo_osd_pos"):
+                return
+            count = self.combo_osd_pos.count()
+            if count <= 1:
+                return
+            self.combo_osd_pos.setCurrentIndex(
+                (self.combo_osd_pos.currentIndex() + 1) % count)
+
+        def _toggle_quicknav(self):
+            if self._ipc is not None and self._ipc.connected:
+                self._ipc.request("osd.quicknav.toggle", {})
+
+        def _cycle_aspect(self):
+            if not hasattr(self, "combo_aspect"):
+                return
+            count = self.combo_aspect.count()
+            if count <= 1:
+                return
+            self.combo_aspect.setCurrentIndex(
+                (self.combo_aspect.currentIndex() + 1) % count)
+
+        def _cycle_scale(self):
+            if not hasattr(self, "combo_scale"):
+                return
+            count = self.combo_scale.count()
+            if count <= 1:
+                return
+            self.combo_scale.setCurrentIndex(
+                (self.combo_scale.currentIndex() + 1) % count)
+
+        def _step_volume(self, delta: int):
+            if not hasattr(self, "slider_vol"):
+                return
+            self.slider_vol.setValue(
+                max(0, min(150, self.slider_vol.value() + int(delta))))
 
         def _cycle_framegen(self):
             if not hasattr(self, "combo_framegen"):
@@ -6684,7 +6745,8 @@ if HAS_QT:
                 self.lbl_vol.setText(f"{pct}%")
 
             muted = bool(audio.get("muted"))
-            if muted != self.muted:
+            if (muted != self.muted and
+                    time.monotonic() >= getattr(self, "_mute_pending_until", 0.0)):
                 self._set_mute_visual(muted)
 
             aspect = status.get("aspect")
@@ -9374,6 +9436,7 @@ if HAS_QT:
 
         def toggle_mute(self):
             self._set_mute_visual(not self.muted)
+            self._mute_pending_until = time.monotonic() + 0.6
             if self._ipc is not None and self._ipc.connected:
                 self._ipc.set_mute(self.muted)
                 return
