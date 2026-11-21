@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [2.0.0] - 2026-11-21
+
 ### Fixed
+- **Embedded Hub hotkeys & mute sync:** Wired `P`, `Alt+Z`, `A`, `L`/`1`, `I`, `+`/`=`, `-`, and `F1` in `everlive_viewer.py`, added `osd.quicknav.toggle` IPC across GC573/GC570D/HWS UHD, forwarded `F1`/`R`/`T` from `embed_forward_key()`, and added `_mute_pending_until` to prevent 1 Hz status polls from reverting a fresh mute toggle.
+- **HWS UHD embedded double-click fullscreen:** `hws_poll_pointer()` now emits `[HUB] TOGGLE_FULLSCREEN` on double-clicks inside the video area.
+- **Independent Stats HUD & Quick Navigation overlap:** Fixed simultaneous rendering of the compact stats line behind the active Quick Navigation bar in GC573 and GC570D.
 - **OSD volume popup:** the engines compared a popup-relative click position against the absolute popup rectangle, so every click looked like it landed outside, closed the popup and fell through to the card. GC573, GC570D and HWS UHD now hit-test the absolute pointer position. The volume slider also accepts pressed drag events again.
 - **Recording with FFmpeg 9:** the recorder only passes `-thread_queue_size` before an input when the installed FFmpeg still accepts it as an input option. FFmpeg 9 moved it to the muxer and otherwise rejected every v4l2/pulse recording at startup.
 - **Qt stylesheet warning:** removed unsupported `font-variant-numeric: tabular-nums;` in `ui_theme.py` to eliminate Qt warnings on the terminal.
@@ -73,11 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Icon-only header actions no longer replace their glyph with text when taking back a background capture (or while docking, undocking and switching modes). Transient states now update the icon and tooltip only, and `IconButton` rejects visible text so the fixed square geometry cannot regress.
 
----
+  - **Quick Navigation & Stats HUD (`Alt+Z`, `Tab`/`I`):** Redesigned Quick Navigation bar and independent 2-row corner Performance Stats HUD across GC573, GC570D, and HWS UHD, plus Console Hub visual polish, consolidated inspector tabs, and removal of unsupported `font-variant-numeric` QSS.
+- **Documentation Restructuring:** Streamlined `README.md` with hardware support/feature matrices and organized detailed guides into `docs/` (`INSTALL.md`, `CARDS.md`, `CONTROLS.md`, `OBS.md`, `FRAMEGEN.md`, `ARCHITECTURE.md`, `TROUBLESHOOTING.md`).
 
-## [2.0.0] - 2026-11-19
+### Removed
+- **Legacy EverLive Native frame generation:** Removed the experimental CPU/GL native frame-gen prototype from `dev`, keeping LSFG-VK as the supported frame-generation backend.
 
-### Added
+### Included from 2.0.0-rc (2026-11-19)
 - **Embedded Gaming Viewport & Cinema Fullscreen:**
   - `gc573_user_streamer` and `gc570d_everlive` now support embedding the SDL2/Vulkan video viewport directly inside the Console Hub (`-wid`), with an optional **Pop-out Window** toggle.
   - Cinema Fullscreen (`F`, `F11`, double-click, or `Esc` to exit) works seamlessly even while the embedded SDL2 viewport holds X11 input focus via `[HUB]` hotkey forwarding.
