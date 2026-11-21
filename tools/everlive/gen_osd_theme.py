@@ -28,7 +28,7 @@ TARGET = (REPO_ROOT / "tools" / "libeverlive-core" / "osd" /
 # The OSD is authored at 1080p with Hub measurements multiplied by this
 # factor.  At 720p (the common embedded/pop-out height) scale == 2/3, so the
 # engine then renders the Hub's 36 px controls and 16 px padding 1:1.
-HUB_SCALE = 1.5
+HUB_SCALE = 1.0
 
 
 def _rgb(value: str) -> int:

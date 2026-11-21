@@ -515,12 +515,6 @@ int main(void)
 		      "OFF mode targets 0.0 Hz", NULL);
 
 		cfg.mode = GC573_FG_30_TO_60;
-		cfg.native_backend = true;
-		cfg.multiplier = 4;
-		check(gc573_fg_target_output_hz(&cfg, 59.94) == 0.0,
-		      "native_backend targets 0.0 Hz (CPU/GL pacer owns it)", NULL);
-
-		cfg.native_backend = false;
 		cfg.multiplier = 2;
 		check(fabs(gc573_fg_target_output_hz(&cfg, 59.94) - 59.94) < 0.05,
 		      "30to60 2x at 59.94 Hz targets ~59.94 Hz", NULL);
@@ -611,7 +605,7 @@ int main(void)
 		struct gc573_fg_config cfg = {
 			.mode = GC573_FG_60_TO_120,
 			.multiplier = 4,
-			.native_backend = true,
+			.native_backend = false,
 			.flow_scale = 1.0f,
 			.perf_mode = false,
 			.low_latency = true,

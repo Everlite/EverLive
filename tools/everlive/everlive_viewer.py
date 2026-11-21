@@ -129,7 +129,6 @@ FRAMEGEN_KEYS = {key for _, key in FRAMEGEN_OPTIONS}
 
 FRAMEGEN_BACKEND_OPTIONS = [
     ("LSFG-VK (External, Beta)", "lsfg"),
-    ("EverLive Native (Beta)", "native"),
 ]
 
 # Older settings files / scripts used 60to120/30to60 or shader-pipeline names.
@@ -157,6 +156,8 @@ DEFAULT_SETTINGS = {
     "aspect_ratio": "auto",
     "osd_enabled": True,
     "osd_position": "top",
+    "quicknav_enabled": True,
+    "quicknav_fs_only": False,
     "audio_tap": False,
     "hdr_tonemap": True,
     "hdr_exposure": 0.0,
@@ -4438,6 +4439,13 @@ if HAS_QT:
                 "FRAME GENERATION", "#BB96F3", fg_head_right)
             grid_fg.setColumnStretch(0, 1)
 
+            lbl_fg_exp = QLabel("EXPERIMENTAL")
+            lbl_fg_exp.setObjectName("fieldLabel")
+            lbl_fg_exp.setStyleSheet(
+                "color: #BB96F3; font-size: 11px; font-weight: 700;"
+                " letter-spacing: 0.6px; margin-top: 0px; margin-bottom: 4px;")
+            card_fg.layout().insertWidget(1, lbl_fg_exp)
+
             self.combo_fg_backend = _shrinkable(QComboBox())
             for text, key in FRAMEGEN_BACKEND_OPTIONS:
                 self.combo_fg_backend.addItem(text, key)
@@ -4612,6 +4620,25 @@ if HAS_QT:
                 self.combo_osd_pos.setToolTip(
                     "Built-in engine stats OSD is available on VFIO PCIe cards.")
 
+            self.chk_quicknav = QCheckBox("Quick Navigation Bar (Auto-Hide)")
+            self.chk_quicknav.setToolTip(
+                "Shows interactive control bar (HDMI, aspect, scaling, volume, mute) "
+                "on mouse movement (Auto-Hides after 3s). Hotkey: O.")
+            self.chk_quicknav.setChecked(
+                bool(self.saved_cfg.get("quicknav_enabled", True)))
+            self.chk_quicknav.toggled.connect(self.on_quicknav_changed)
+            grid_osd.addWidget(_toggle(self.chk_quicknav), 2, 0, 1, 2)
+
+            self.chk_quicknav_fs = QCheckBox("Quick Navigation: Fullscreen Only")
+            self.chk_quicknav_fs.setToolTip(
+                "Only wake the Quick Navigation bar in fullscreen mode, "
+                "keeping windowed view strictly clean.")
+            self.chk_quicknav_fs.setChecked(
+                bool(self.saved_cfg.get("quicknav_fs_only", False)))
+            self.chk_quicknav_fs.setEnabled(self.chk_quicknav.isChecked())
+            self.chk_quicknav_fs.toggled.connect(self.on_quicknav_fs_changed)
+            grid_osd.addWidget(_toggle(self.chk_quicknav_fs), 3, 0, 1, 2)
+
             self.chk_streamer = QCheckBox("Clean Feed (Hide All Overlays)")
             self.chk_streamer.setToolTip(
                 "Hides mouse cursor, HUD and overlays for clean recordings.")
@@ -4620,7 +4647,7 @@ if HAS_QT:
                 lambda val: save_settings({"streamer_mode": val}))
             self.chk_streamer.toggled.connect(
                 lambda _val: self._update_osd_controls())
-            grid_osd.addWidget(_toggle(self.chk_streamer), 2, 0, 1, 2)
+            grid_osd.addWidget(_toggle(self.chk_streamer), 4, 0, 1, 2)
             lay_video.addWidget(card_osd)
             lay_video.addStretch(1)
             self._update_osd_controls()
@@ -5664,10 +5691,15 @@ if HAS_QT:
                 self._set_cinema_fullscreen(False)
 
         def _sync_osd_mode(self):
-            """Use the identity card as the normal OSD in every mode."""
+            """Sync OSD mode (card, compact, or auto) and recording state."""
             if self._ipc is None or not self._ipc.connected:
                 return
-            self._ipc.set_osd_mode("card")
+            mode = "card"
+            if hasattr(self, "chk_quicknav") and not self.chk_quicknav.isChecked():
+                mode = "compact"
+            elif hasattr(self, "chk_quicknav_fs") and self.chk_quicknav_fs.isChecked():
+                mode = "card" if getattr(self, "_cinema_fullscreen", False) else "compact"
+            self._ipc.set_osd_mode(mode)
             active = bool(
                 getattr(self, "recorder", None) and self.recorder.is_recording)
             self._ipc.set_recording(active)
@@ -5675,6 +5707,7 @@ if HAS_QT:
 
         def _set_cinema_fullscreen(self, enabled: bool):
             self._cinema_fullscreen = bool(enabled)
+            self._sync_osd_mode()
             if hasattr(self, "btn_cinema_fs"):
                 self.btn_cinema_fs.set_icon(
                     "compress" if self._cinema_fullscreen else "expand")
@@ -8311,6 +8344,23 @@ if HAS_QT:
             self.combo_osd_pos.setEnabled(allowed)
             if hasattr(self, "osd_pos_effect"):
                 self.osd_pos_effect.setOpacity(1.0 if allowed else 0.45)
+            clean_feed = self.chk_streamer.isChecked()
+            if hasattr(self, "chk_quicknav"):
+                self.chk_quicknav.setEnabled(not clean_feed)
+            if hasattr(self, "chk_quicknav_fs"):
+                qn_active = bool(getattr(self, "chk_quicknav", None) and self.chk_quicknav.isChecked())
+                self.chk_quicknav_fs.setEnabled(qn_active and not clean_feed)
+
+        def on_quicknav_changed(self, enabled: bool):
+            self.saved_cfg["quicknav_enabled"] = bool(enabled)
+            save_settings({"quicknav_enabled": bool(enabled)})
+            self._update_osd_controls()
+            self._sync_osd_mode()
+
+        def on_quicknav_fs_changed(self, enabled: bool):
+            self.saved_cfg["quicknav_fs_only"] = bool(enabled)
+            save_settings({"quicknav_fs_only": bool(enabled)})
+            self._sync_osd_mode()
 
         def on_osd_changed(self, enabled: bool):
             self.saved_cfg["osd_enabled"] = bool(enabled)
@@ -8468,15 +8518,6 @@ if HAS_QT:
             backend = (self.combo_fg_backend.currentData()
                        if hasattr(self, "combo_fg_backend")
                        else self.saved_cfg.get("fg_backend", "lsfg"))
-            if backend == "native":
-                self._fg_ready_ok = True
-                if hasattr(self, "lbl_fg_ready"):
-                    self.lbl_fg_ready.setText("✓ Built-in")
-                    self.lbl_fg_ready.setStyleSheet(
-                        "color: #5ED4B2; font-size: 11px; font-weight: 700;")
-                    self.lbl_fg_ready.setToolTip(
-                        "EverLive Native Frame Gen (GPL-2.0 prototype) · No external DLLs required")
-                return
             self._fg_ready_ok = bool(layer_found and dll_found)
             if not hasattr(self, "lbl_fg_ready"):
                 return

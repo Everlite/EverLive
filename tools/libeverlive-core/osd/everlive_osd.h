@@ -28,6 +28,7 @@
 #define EVERLIVE_OSD_ICON_STOP		0xF04D
 #define EVERLIVE_OSD_ICON_DOT		0xF111
 #define EVERLIVE_OSD_ICON_HIDE		0xF070 /* eye-slash */
+#define EVERLIVE_OSD_ICON_CHART		0xF201 /* chart-line */
 #define EVERLIVE_OSD_ICON_INPUT		0xF2F6 /* right-to-bracket */
 #define EVERLIVE_OSD_ICON_TABLE_CELLS	0xF00A /* table-cells */
 #define EVERLIVE_OSD_ICON_MAXIMIZE	0xF31E
@@ -44,6 +45,7 @@ enum everlive_osd_action {
 	EVERLIVE_OSD_ACTION_MUTE,
 	EVERLIVE_OSD_ACTION_FULLSCREEN,
 	EVERLIVE_OSD_ACTION_RECORD,
+	EVERLIVE_OSD_ACTION_STATS,
 	EVERLIVE_OSD_ACTION_HIDE,
 	EVERLIVE_OSD_ACTION_INFO,
 	EVERLIVE_OSD_ACTION_COUNT,
@@ -61,6 +63,7 @@ struct everlive_osd_snapshot {
 	bool muted;
 	bool fullscreen;
 	bool recording;
+	bool stats_active;
 	bool interactive;
 	enum everlive_osd_action hover_action;
 	int volume_pct;

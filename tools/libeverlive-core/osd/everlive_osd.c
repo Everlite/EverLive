@@ -421,6 +421,8 @@ static const char *action_label(enum everlive_osd_action action)
 		return "Fullscreen";
 	case EVERLIVE_OSD_ACTION_RECORD:
 		return "Record";
+	case EVERLIVE_OSD_ACTION_STATS:
+		return "Performance Stats";
 	case EVERLIVE_OSD_ACTION_HIDE:
 		return "Hide overlay";
 	default:
@@ -449,6 +451,8 @@ static const char *action_shortcut(enum everlive_osd_action action)
 		return "F";
 	case EVERLIVE_OSD_ACTION_RECORD:
 		return "Ctrl+R";
+	case EVERLIVE_OSD_ACTION_STATS:
+		return "Tab / I";
 	case EVERLIVE_OSD_ACTION_HIDE:
 		return "Tab / O";
 	default:
@@ -857,11 +861,12 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 		hover = (int)EVERLIVE_OSD_ACTION_NONE;
 
 	snprintf(key, sizeof(key),
-		 "%s|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%.3f|%dx%d",
+		 "%s|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%.3f|%dx%d",
 		 title, input_index, aspect_index, scale_integer ? 1 : 0,
 		 signal_live ? 1 : 0, show_input, snap && snap->pip,
 		 snap && snap->muted, snap && snap->fullscreen,
-		 snap && snap->recording, hover, s, viewport_w, viewport_h);
+		 snap && snap->recording, snap && snap->stats_active,
+		 hover, s, viewport_w, viewport_h);
 	if (out->texture && out->scale == s && out->viewport_w == viewport_w &&
 	    out->viewport_h == viewport_h && strcmp(out->cache_key, key) == 0)
 		return true;
@@ -948,7 +953,7 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 
 		scale_w = control_pad * 2 + icon_w + control_gap + label_w;
 	}
-	icon_count = 5 + (show_input ? 1 : 0);
+	icon_count = 6 + (show_input ? 1 : 0);
 	icons_w = icon_count * button + (icon_count - 1) * icon_gap;
 
 	info_w = dot_size + gap + title_w;
@@ -1192,6 +1197,11 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 						    EVERLIVE_OSD_ICON_MAXIMIZE,
 			 false, 0, 0,
 			 EVERLIVE_OSD_TITLE, EVERLIVE_OSD_TEXT_MUTED);
+	DRAW_ICON_BUTTON(EVERLIVE_OSD_ACTION_STATS,
+			 EVERLIVE_OSD_ICON_CHART,
+			 snap && snap->stats_active,
+			 EVERLIVE_OSD_MINT_BG, EVERLIVE_OSD_MINT_BORDER,
+			 EVERLIVE_OSD_MINT, EVERLIVE_OSD_TEXT_MUTED);
 	DRAW_ICON_BUTTON(EVERLIVE_OSD_ACTION_HIDE,
 			 EVERLIVE_OSD_ICON_HIDE, false, 0, 0,
 			 EVERLIVE_OSD_TEXT_MUTED, EVERLIVE_OSD_TEXT_MUTED);

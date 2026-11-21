@@ -58,6 +58,8 @@ enum gc573_fg_frame_class {
 
 /* A source faster than this is treated as a duplicated 60 Hz container. */
 #define GC573_FG_DEDUP_MIN_HZ_X100 4500U
+/* High-refresh signals (above 90 Hz) are native high frame rate and should not auto-dedup to 30p. */
+#define GC573_FG_DEDUP_MAX_HZ_X100 9000U
 /* Parity EMA smoothing and the lock separation. */
 #define GC573_FG_MAD_EMA_ALPHA 0.20f
 #define GC573_FG_LOCK_RATIO 1.60f

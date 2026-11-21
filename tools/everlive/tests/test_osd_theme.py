@@ -49,7 +49,7 @@ class OsdThemeTests(unittest.TestCase):
             "run python3 tools/everlive/gen_osd_theme.py")
 
     def test_hub_scale_lands_on_hub_pixels_at_720p(self):
-        self.assertEqual(gen_osd_theme.HUB_SCALE, 1.5)
+        self.assertEqual(gen_osd_theme.HUB_SCALE, 1.0)
 
     def test_shared_colors_match_gui(self):
         values = _defines(THEME)

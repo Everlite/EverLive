@@ -131,6 +131,49 @@ static uint64_t now_ms(void)
 	return now_us() / 1000;
 }
 
+#ifdef HAVE_SDL2
+static uint64_t g_quicknav_wake_ms;
+static bool g_quicknav_manual_hidden;
+
+static void quicknav_wake(void)
+{
+	g_quicknav_wake_ms = now_ms();
+	g_quicknav_manual_hidden = false;
+}
+
+static void quicknav_hide(void)
+{
+	g_quicknav_manual_hidden = true;
+	g_quicknav_wake_ms = 0;
+	g_popup_open = false;
+	g_popup_dragging = false;
+	g_popup_kind = EVERLIVE_OSD_POPUP_NONE;
+	g_popup_hover = -1;
+	g_hover_action = EVERLIVE_OSD_ACTION_NONE;
+}
+
+static bool quicknav_is_active(void)
+{
+	if (g_quicknav_manual_hidden)
+		return false;
+	if (g_popup_open || g_popup_dragging || g_hover_action != EVERLIVE_OSD_ACTION_NONE)
+		return true;
+	return (now_ms() - g_quicknav_wake_ms < 3000ULL);
+}
+
+static void quicknav_sync_cursor(void)
+{
+	if (g_parent_winid != 0)
+		return;
+	static int last_cursor_state = -1;
+	int show = quicknav_is_active() ? SDL_ENABLE : SDL_DISABLE;
+	if (show != last_cursor_state) {
+		SDL_ShowCursor(show);
+		last_cursor_state = show;
+	}
+}
+#endif
+
 static void on_signal(int sig)
 {
 	(void)sig;
@@ -668,7 +711,7 @@ static void draw_toast_box(SDL_Renderer *r, SDL_Window *win,
 		gap = 6;
 	if (edge < 8)
 		edge = 8;
-	if (g_osd && hws_card_active(win) && g_card.texture &&
+	if (g_osd && hws_card_active(win) && quicknav_is_active() && g_card.texture &&
 	    g_card_dest.h > 0) {
 		by = g_osd_pos == HWS_IPC_OSD_BOTTOM ?
 			g_card_dest.y - g_toast_h - gap :
@@ -754,6 +797,9 @@ static void hws_card_update(SDL_Renderer *r, SDL_Window *win,
 
 	if (!hws_ensure_osd_fonts())
 		return;
+	if (g_card.texture && g_card.cache_key[0] != '\0' &&
+	    win_w == g_card.viewport_w && win_h == g_card.viewport_h)
+		return;
 	hws_capture_get_status(g_cap, &cs);
 	snprintf(title, sizeof(title), "HWS UHD");
 	if (cs.signal && cs.width && cs.height) {
@@ -782,6 +828,7 @@ static void hws_card_update(SDL_Renderer *r, SDL_Window *win,
 		(flags & (SDL_WINDOW_FULLSCREEN |
 			  SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0;
 	snap.recording = atomic_load(&g_recording) != 0;
+	snap.stats_active = g_osd;
 	snap.interactive = true;
 	snap.hover_action = g_hover_action;
 	snap.volume_pct = (int)lrintf(gain * 100.0f);
@@ -874,7 +921,7 @@ static void hws_draw_card(SDL_Renderer *r, SDL_Window *win,
 	float scale;
 	SDL_Rect draw;
 
-	if (!hws_card_active(win))
+	if (!hws_card_active(win) || !quicknav_is_active())
 		return;
 	SDL_GetWindowSize(win, &win_w, &win_h);
 	if (win_w <= 0 || win_h <= 0)
@@ -969,7 +1016,7 @@ static void hws_update_hover(SDL_Window *win, int x, int y)
 	int win_w = 0;
 	int win_h = 0;
 
-	if (!win || !g_osd || g_streamer_mode || g_popup_open ||
+	if (!win || !g_osd || g_streamer_mode || !quicknav_is_active() || g_popup_open ||
 	    !hws_card_active(win) || !g_card.texture) {
 		hws_set_hover(EVERLIVE_OSD_ACTION_NONE);
 		return;
@@ -1069,6 +1116,14 @@ static bool hws_handle_mouse(SDL_Event *event, SDL_Window *win)
 	int y;
 
 	if (!g_osd || g_streamer_mode || !hws_card_active(win))
+		return false;
+	if (event->type == SDL_MOUSEMOTION) {
+		if (event->motion.xrel != 0 || event->motion.yrel != 0)
+			quicknav_wake();
+	} else if (event->type == SDL_MOUSEBUTTONDOWN) {
+		quicknav_wake();
+	}
+	if (!quicknav_is_active())
 		return false;
 	SDL_GetWindowSize(win, &win_w, &win_h);
 	if (win_w <= 0 || win_h <= 0)
@@ -1197,8 +1252,14 @@ static bool hws_handle_mouse(SDL_Event *event, SDL_Window *win)
 		printf("[HUB] TOGGLE_RECORD\n");
 		fflush(stdout);
 		break;
+	case EVERLIVE_OSD_ACTION_STATS:
+		g_osd = !g_osd;
+		toast(g_osd ? "Performance HUD: On" : "Performance HUD: Off");
+		hws_card_invalidate();
+		break;
 	case EVERLIVE_OSD_ACTION_HIDE:
-		g_osd = false;
+		quicknav_hide();
+		toast("Quick Nav: hidden");
 		break;
 	default:
 		break;
@@ -1241,7 +1302,7 @@ static void draw_osd(SDL_Renderer *r, SDL_Window *win, int out_w, int out_h)
 {
 	if (!g_osd || g_streamer_mode)
 		return;
-	if (hws_card_active(win)) {
+	if (hws_card_active(win) && quicknav_is_active()) {
 		hws_draw_card(r, win, out_w, out_h);
 		return;
 	}
@@ -1305,6 +1366,16 @@ static void hws_poll_pointer(SDL_Window *win)
 	}
 	(void)win_x;
 	(void)win_y;
+	{
+		static int last_local_x = -1;
+		static int last_local_y = -1;
+
+		if (abs(local_x - last_local_x) > 1 || abs(local_y - last_local_y) > 1) {
+			quicknav_wake();
+			last_local_x = local_x;
+			last_local_y = local_y;
+		}
+	}
 	hws_update_hover(win, local_x, local_y);
 	if (g_popup_open)
 		hws_update_popup_hover(win, local_x, local_y);
@@ -1428,10 +1499,19 @@ static void handle_key(SDL_Window *win, SDL_Keycode k)
 		atomic_store(&g_muted, !atomic_load(&g_muted));
 		toast(atomic_load(&g_muted) ? "Muted" : "Unmuted");
 		break;
-	case SDLK_o:
 	case SDLK_i:
 	case SDLK_TAB:
 		g_osd = !g_osd;
+		toast(g_osd ? "Performance HUD: On" : "Performance HUD: Off");
+		break;
+	case SDLK_o:
+		if (quicknav_is_active()) {
+			quicknav_hide();
+			toast("Quick Nav: Off");
+		} else {
+			quicknav_wake();
+			toast("Quick Nav: On");
+		}
 		break;
 	case SDLK_p:
 		g_osd_pos ^= 1;
@@ -1524,6 +1604,7 @@ static void run_window(void)
 			else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.clicks == 2 && !g_parent_winid)
 				handle_key(win, SDLK_f);
 		}
+		quicknav_sync_cursor();
 		poll_ipc();
 		embed_sync(win);
 		if (g_parent_winid != 0)

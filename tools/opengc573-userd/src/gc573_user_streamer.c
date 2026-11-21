@@ -29,7 +29,6 @@
 #include "gc573_user_audio_tap.h"
 #include "gc573_user_hdr.h"
 #include "gc573_user_framegen.h"
-#include "gc573_user_fg_native.h"
 #include "gc573_camera.h"
 #include "gc573_user_log.h"
 #include "everlive_osd.h"
@@ -1796,6 +1795,8 @@ static uint32_t float_to_bits(float value);
 static uint32_t g_audio_gain_bits;
 static int g_audio_mute_flag;
 static unsigned long g_parent_winid;
+static int g_embed_last_w;
+static int g_embed_last_h;
 static void toast_trigger(const char *msg);
 
 struct osd_overlay {
@@ -1820,7 +1821,48 @@ static int g_popup_volume = 100;
 static bool g_osd_font_init_attempted;
 static SDL_Rect g_card_dest;
 static SDL_Rect g_popup_dest;
-static bool g_osd_card_was_active;
+
+/* Quick Navigation bar state: auto-wakes on mouse motion/click/hotkey, auto-hides after 3s */
+static uint64_t g_quicknav_wake_ms;
+static bool g_quicknav_manual_hidden;
+
+static void quicknav_wake(void)
+{
+	g_quicknav_wake_ms = now_ms();
+	g_quicknav_manual_hidden = false;
+}
+
+static void quicknav_hide(void)
+{
+	g_quicknav_manual_hidden = true;
+	g_quicknav_wake_ms = 0;
+	g_popup_open = false;
+	g_popup_dragging = false;
+	g_popup_kind = EVERLIVE_OSD_POPUP_NONE;
+	g_popup_hover = -1;
+	g_hover_action = EVERLIVE_OSD_ACTION_NONE;
+}
+
+static bool quicknav_is_active(void)
+{
+	if (g_quicknav_manual_hidden)
+		return false;
+	if (g_popup_open || g_popup_dragging || g_hover_action != EVERLIVE_OSD_ACTION_NONE)
+		return true;
+	return (now_ms() - g_quicknav_wake_ms < 3000ULL);
+}
+
+static void quicknav_sync_cursor(void)
+{
+	if (g_parent_winid != 0)
+		return;
+	static int last_cursor_state = -1;
+	int show = quicknav_is_active() ? SDL_ENABLE : SDL_DISABLE;
+	if (show != last_cursor_state) {
+		SDL_ShowCursor(show);
+		last_cursor_state = show;
+	}
+}
 
 /* Centred F1 help card; separate texture so the stats OSD stays intact. */
 static struct osd_overlay g_help;
@@ -1950,7 +1992,7 @@ static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
 	float gain;
 	struct everlive_osd_snapshot snap;
 
-	if (!renderer || !window || !g_osd_enabled)
+	if (!renderer || !window)
 		return;
 
 	if (!everlive_osd_available()) {
@@ -1965,6 +2007,11 @@ static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
 	SDL_GetWindowSize(window, &win_w, &win_h);
 	if (win_w <= 0 || win_h <= 0)
 		return;
+
+	if (g_card.texture && g_card.cache_key[0] != '\0' &&
+	    win_w == g_card.viewport_w && win_h == g_card.viewport_h)
+		return;
+
 	scale = (float)win_h / 1080.0f;
 	if (in_w && in_h)
 		osd_output_label(input_label, sizeof(input_label), in_w, in_h,
@@ -1995,6 +2042,7 @@ static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
 	snap.muted = __atomic_load_n(&g_audio_mute_flag, __ATOMIC_RELAXED) != 0;
 	snap.fullscreen = osd_window_is_fullscreen(window);
 	snap.recording = __atomic_load_n(&g_recording_flag, __ATOMIC_RELAXED) != 0;
+	snap.stats_active = g_osd_enabled;
 	snap.interactive = !g_headless;
 	snap.hover_action = g_hover_action;
 	snap.volume_pct = (int)(gain * 100.0f + 0.5f);
@@ -2071,23 +2119,30 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 	char vsync_tag[24] = "";
 	int win_h = 0;
 	int scale;
+	static uint64_t last_hud_ms;
+	uint64_t now_ms_val;
 
-	if (!g_osd_enabled || !window)
+	if (!window)
 		return;
 
-	if (osd_card_active(window)) {
+	if (osd_card_active(window) && quicknav_is_active()) {
 		osd_card_update(renderer, window, in_w, in_h, interlaced,
 				rate_x100, chroma_text, audio_ch, audio_rate);
-		g_osd_card_was_active = true;
+	}
+
+	if (!g_osd_enabled) {
+		if (g_osd.texture) {
+			SDL_DestroyTexture(g_osd.texture);
+			g_osd.texture = NULL;
+			g_osd.text[0] = '\0';
+		}
 		return;
 	}
 
-	/* Force the compact texture to refresh after leaving fullscreen. */
-	if (g_osd_card_was_active) {
-		g_osd.scale = -1;
-		g_osd.text[0] = '\0';
-		g_osd_card_was_active = false;
-	}
+	now_ms_val = now_ms();
+	if (g_osd.texture && now_ms_val - last_hud_ms < 500)
+		return;
+	last_hud_ms = now_ms_val;
 
 	if (hdr_text && *hdr_text)
 		snprintf(tail, sizeof(tail), " | %s", hdr_text);
@@ -2142,6 +2197,21 @@ static void osd_scale_rect(SDL_Rect *dst, const SDL_Rect *src,
 	dst->y = lroundf((float)src->y * (float)out_h / (float)win_h);
 	dst->w = lroundf((float)src->w * (float)out_w / (float)win_w);
 	dst->h = lroundf((float)src->h * (float)out_h / (float)win_h);
+}
+
+static void osd_hud_place(SDL_Rect *dst, int win_w, int win_h)
+{
+	int margin = g_osd.scale >= 3 ? 24 : (g_osd.scale == 2 ? 16 : 10);
+	bool bottom = g_osd_pos == OSD_POS_BOTTOM;
+
+	dst->w = g_osd.width;
+	dst->h = g_osd.height;
+	dst->x = win_w - margin - dst->w;
+	dst->y = bottom ? win_h - margin - dst->h : margin;
+	if (dst->x < 0)
+		dst->x = 0;
+	if (dst->y < 0)
+		dst->y = 0;
 }
 
 static void osd_place(SDL_Rect *dst, int width, int height, float scale,
@@ -2245,11 +2315,11 @@ static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
 	int win_h = 0;
 	SDL_Rect dst;
 
-	if (!g_osd_enabled)
+	if (!window)
 		return;
 
 	SDL_GetWindowSize(window, &win_w, &win_h);
-	if (osd_card_active(window) && g_card.texture) {
+	if (osd_card_active(window) && quicknav_is_active() && g_card.texture) {
 		float scale = (float)win_h / 1080.0f;
 
 		osd_place(&dst, g_card.width, g_card.height, scale,
@@ -2263,10 +2333,9 @@ static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
 		osd_render_popup(renderer, win_w, win_h, scale);
 		return;
 	}
-	if (!g_osd.texture)
+	if (!g_osd_enabled || !g_osd.texture)
 		return;
-	osd_place(&dst, g_osd.width, g_osd.height, (float)g_osd.scale,
-		  win_w, win_h);
+	osd_hud_place(&dst, win_w, win_h);
 	{
 		SDL_Rect draw;
 
@@ -2413,7 +2482,7 @@ static void osd_update_hover(SDL_Window *window, int x, int y)
 	int win_w = 0;
 	int win_h = 0;
 
-	if (!window || g_headless || !g_osd_enabled || g_popup_open ||
+	if (!window || g_headless || !quicknav_is_active() || g_popup_open ||
 	    !osd_card_active(window) || !g_card.texture) {
 		osd_set_hover(EVERLIVE_OSD_ACTION_NONE);
 		return;
@@ -2512,9 +2581,19 @@ static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 	int x;
 	int y;
 
-	if (!window || g_headless || !g_osd_enabled)
+	if (!window || g_headless)
 		return false;
 	if (!osd_card_active(window) || !g_card.texture)
+		return false;
+
+	if (event->type == SDL_MOUSEMOTION) {
+		if (event->motion.xrel != 0 || event->motion.yrel != 0)
+			quicknav_wake();
+	} else if (event->type == SDL_MOUSEBUTTONDOWN) {
+		quicknav_wake();
+	}
+
+	if (!quicknav_is_active())
 		return false;
 
 	{
@@ -2623,9 +2702,15 @@ static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 		printf("[HUB] TOGGLE_RECORD\n");
 		fflush(stdout);
 		break;
+	case EVERLIVE_OSD_ACTION_STATS:
+		g_osd_enabled = !g_osd_enabled;
+		toast_trigger(g_osd_enabled ? "Performance HUD: On" : "Performance HUD: Off");
+		osd_card_invalidate();
+		break;
 	case EVERLIVE_OSD_ACTION_HIDE:
-		g_osd_enabled = false;
-		printf("[OSD] Overlay: off\n");
+		quicknav_hide();
+		toast_trigger("Quick Nav: hidden");
+		printf("[OSD] Quick Nav: off\n");
 		fflush(stdout);
 		break;
 	default:
@@ -2646,7 +2731,8 @@ static const char g_help_text[] =
 	"Up / Down  Volume Up / Down (5%) [or + / -]\n"
 	"M          Audio Mute Toggle\n"
 	"P          OSD Position (TR/BR/BL/TL)\n"
-	"Tab / I    OSD Stats Overlay Toggle\n"
+	"Tab / I    OSD Performance Overlay Toggle\n"
+	"O          Quick Navigation Bar Toggle\n"
 	"F1 / ?     Close Help Overlay\n"
 	"Esc / Q    Quit Streamer";
 
@@ -2757,7 +2843,7 @@ have_toast:
 			gap = 6;
 		if (edge < 8)
 			edge = 8;
-		if (g_osd_enabled && osd_card_active(window) &&
+		if (osd_card_active(window) && quicknav_is_active() &&
 		    g_card_dest.h > 0) {
 			if (g_osd_pos == OSD_POS_BOTTOM)
 				dst.y = g_card_dest.y - dst.h - gap;
@@ -2808,7 +2894,7 @@ static void embed_poll_pointer(SDL_Window *window)
 		static uint64_t last_poll_ms;
 		uint64_t poll_now = now_ms();
 
-		if (poll_now - last_poll_ms < 8)
+		if (poll_now - last_poll_ms < 33)
 			return;
 		last_poll_ms = poll_now;
 	}
@@ -2826,20 +2912,28 @@ static void embed_poll_pointer(SDL_Window *window)
 				   &child_ret))
 		return;
 	{
-		XWindowAttributes xa;
 		int ww = 0;
 		int wh = 0;
 
 		/* X11 reports physical pixels; SDL mouse events are logical. */
 		SDL_GetWindowSize(window, &ww, &wh);
-		if (XGetWindowAttributes(dpy, xwin, &xa) && xa.width > 0 &&
-		    xa.height > 0 && ww > 0 && wh > 0) {
-			local_x = (local_x * ww + xa.width / 2) / xa.width;
-			local_y = (local_y * wh + xa.height / 2) / xa.height;
+		if (g_embed_last_w > 0 && g_embed_last_h > 0 && ww > 0 && wh > 0) {
+			local_x = (local_x * ww + g_embed_last_w / 2) / g_embed_last_w;
+			local_y = (local_y * wh + g_embed_last_h / 2) / g_embed_last_h;
 		}
 	}
 	(void)win_x;
 	(void)win_y;
+	{
+		static int last_local_x = -1;
+		static int last_local_y = -1;
+
+		if (abs(local_x - last_local_x) > 1 || abs(local_y - last_local_y) > 1) {
+			quicknav_wake();
+			last_local_x = local_x;
+			last_local_y = local_y;
+		}
+	}
 	osd_update_hover(window, local_x, local_y);
 	if (g_popup_open)
 		osd_update_popup_hover(local_x, local_y);
@@ -2969,53 +3063,6 @@ static bool fit_destination_integer(SDL_Rect *dst, int win_w, int win_h,
 	 */
 	dst->x &= ~1;
 
-	return true;
-}
-
-static bool render_frame_native_gl(SDL_Window *window, SDL_Renderer *renderer,
-				   struct gc573_fg_native *fg_nat, float t,
-				   float src_aspect, int src_w, int src_h)
-{
-	SDL_Rect dst;
-	int win_w = 0, win_h = 0;
-	int draw_w = 0, draw_h = 0;
-
-	SDL_GetWindowSize(window, &win_w, &win_h);
-	if (win_w <= 0 || win_h <= 0)
-		return false;
-	SDL_GL_GetDrawableSize(window, &draw_w, &draw_h);
-	if (draw_w <= 0 || draw_h <= 0) {
-		draw_w = win_w;
-		draw_h = win_h;
-	}
-
-	if (g_scale_mode == SCALE_INTEGER &&
-	    fit_destination_integer(&dst, win_w, win_h, src_w, src_h, src_aspect))
-		g_integer_factor = src_h > 0 ? dst.h / src_h : 0;
-	else {
-		g_integer_factor = 0;
-		fit_destination(&dst, win_w, win_h, src_aspect);
-	}
-
-	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-	SDL_RenderClear(renderer);
-	SDL_RenderFlush(renderer);
-
-	{
-		int gx = (dst.x * draw_w) / win_w;
-		int gy = (dst.y * draw_h) / win_h;
-		int gw = (dst.w * draw_w) / win_w;
-		int gh = (dst.h * draw_h) / win_h;
-
-		if (!gc573_fg_native_gl_render(fg_nat, t, gx, gy, gw, gh,
-					       draw_w, draw_h))
-			return false;
-	}
-
-	osd_render(renderer, window);
-	help_render(renderer, window);
-	toast_render(renderer, window);
-	SDL_RenderPresent(renderer);
 	return true;
 }
 
@@ -6178,63 +6225,10 @@ static bool framegen_path_wanted(void)
 	return g_fg_config.mode != GC573_FG_OFF;
 }
 
-static struct gc573_fg_native *g_fg_native;
-static uint8_t *g_fg_native_buf;
-static size_t g_fg_native_buf_bytes;
-static uint64_t g_fg_native_last_ns;
-static uint64_t g_fg_native_present_ns;
-static double g_fg_native_period_ns = 16666667.0;
-static int g_fg_native_synth_step = 1;
-static uint32_t g_fg_native_present_count;
-static uint64_t g_fg_native_fps_win_ns;
-static double g_fg_native_measured_fps;
-
-static uint64_t fg_native_now_ns(void)
-{
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
-static void fg_native_note_present(void)
-{
-	uint64_t now = fg_native_now_ns();
-
-	if (g_fg_native_fps_win_ns == 0)
-		g_fg_native_fps_win_ns = now;
-	g_fg_native_present_count++;
-	if (now - g_fg_native_fps_win_ns >= 1000000000ULL) {
-		double sec = (double)(now - g_fg_native_fps_win_ns) / 1e9;
-		g_fg_native_measured_fps = (double)g_fg_native_present_count / sec;
-		g_fg_native_present_count = 0;
-		g_fg_native_fps_win_ns = now;
-	}
-}
-
-static bool fg_native_ensure(uint32_t w, uint32_t h)
-{
-	size_t need = (size_t)w * h * 2U;
-
-	if (!g_fg_native)
-		g_fg_native = gc573_fg_native_create();
-	if (!g_fg_native || !need)
-		return false;
-	if (g_fg_native_buf_bytes < need) {
-		uint8_t *nb = realloc(g_fg_native_buf, need);
-		if (!nb)
-			return false;
-		g_fg_native_buf = nb;
-		g_fg_native_buf_bytes = need;
-	}
-	return true;
-}
-
 /* Driver the current mode asks for; a Vulkan failure pins us to OpenGL. */
 static enum present_driver framegen_desired_driver(void)
 {
-	if (!g_fg_fallback && framegen_path_wanted() &&
-	    !g_fg_config.native_backend)
+	if (!g_fg_fallback && framegen_path_wanted())
 		return PRESENT_DRIVER_VULKAN;
 	return PRESENT_DRIVER_OPENGL;
 }
@@ -6296,19 +6290,6 @@ static void framegen_describe(char *out, size_t len)
 		return;
 
 	int mult = st.multiplier > 1 ? st.multiplier : 2;
-	if (g_fg_config.native_backend) {
-		double in_fps = (st.deduplicator_active && st.unique_fps > 0.5)
-				? st.unique_fps : st.present_fps;
-		double out_fps = g_fg_native_measured_fps > 0.5
-				 ? g_fg_native_measured_fps : in_fps * mult;
-		if (st.deduplicator_active)
-			snprintf(out, len, "Native %dx (30p): %.1f -> %.1f FPS",
-				 mult, in_fps, out_fps);
-		else
-			snprintf(out, len, "Native %dx: %.1f -> %.1f FPS",
-				 mult, in_fps, out_fps);
-		return;
-	}
 	ready = st.layer_found && st.dll_found && st.vulkan_active;
 	if (!ready) {
 		const char *why = !st.layer_found ? "LAYER" :
@@ -6331,8 +6312,6 @@ static void framegen_describe(char *out, size_t len)
 
 static void framegen_teardown(void)
 {
-	if (g_fg_native)
-		gc573_fg_native_gl_teardown(g_fg_native);
 	pthread_mutex_lock(&g_framegen_lock);
 	if (g_framegen) {
 		gc573_framegen_destroy(g_framegen);
@@ -6359,15 +6338,12 @@ static bool framegen_prepare_vulkan(void)
 
 	ready = gc573_fg_apply_env(&cfg, &probe);
 	gc573_fg_write_toml(&cfg, &probe);
-	{
-		double src_hz = (double)g_fg_source_hz_x100 / 100.0;
-		double target_hz = gc573_fg_target_output_hz(&cfg, src_hz);
-		bool pacer_ok = gc573_fg_prepare_pacer(&cfg, src_hz);
-
-		if (pacer_ok && target_hz > 10.0 && target_hz < 235.0)
-			pr_info("Vulkan present pacer active (target %.1f Hz)",
-				target_hz);
-	}
+	/*
+	 * Pacer Layer: disabled for both LSFG and AFMF when input is high refresh (> 90 Hz).
+	 * LSFG-VK and AFMF have their own internal presentation pacing. A downstream pacer layer
+	 * intercepts both real and companion frames and sleeps in the render thread, cutting 120 FPS in half.
+	 */
+	gc573_fg_update_pacer_hz(0.0);
 
 	if (g_framegen) {
 		gc573_framegen_set_probe(g_framegen, &probe);
@@ -6392,9 +6368,6 @@ static bool framegen_prepare_vulkan(void)
  * window.  The GPU presents straight to the child surface without passing
  * through Qt compositing (0.0 ms added latency).
  */
-static unsigned long g_parent_winid;
-static int g_embed_last_w;
-static int g_embed_last_h;
 static uint64_t g_embed_last_sync_ms;
 static bool g_has_saved_win;
 static int g_saved_win_x;
@@ -6682,13 +6655,13 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 	(void)tex_h;
 	*texture = NULL;
 
-	bool native_fg_active = framegen_path_wanted() &&
-				g_fg_config.native_backend;
-	bool use_gl_vsync = g_vsync && !native_fg_active;
+	bool use_gl_vsync = g_vsync;
 
 	if (want_vk) {
 		(void)framegen_prepare_vulkan();
 		SDL_SetHint(SDL_HINT_RENDER_DRIVER, "vulkan");
+		/* Vulkan frame generation requires FIFO presentation (VSync) to pace frames into VBlanks. */
+		SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
 		flags |= SDL_WINDOW_VULKAN;
 		renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
 	} else {
@@ -6760,9 +6733,9 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 
 	if (want_vk && !g_fg_fallback) {
 		g_present_driver = PRESENT_DRIVER_VULKAN;
-		/* lsfg-vk only doubles present() calls it actually sees. */
+		/* Vulkan frame generation requires FIFO presentation (VSync) to pace frames into VBlanks. */
 		if (SDL_RenderSetVSync(*renderer, 1) < 0)
-			pr_warn("Vulkan renderer rejected VSync; lsfg-vk pacing may jitter");
+			pr_warn("Vulkan renderer rejected VSync; framegen pacing may jitter");
 	} else {
 		g_present_driver = PRESENT_DRIVER_OPENGL;
 		if (SDL_RenderSetVSync(*renderer, use_gl_vsync ? 1 : 0) < 0 &&
@@ -6784,11 +6757,6 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 static void presentation_destroy(SDL_Window **window, SDL_Renderer **renderer,
 				 SDL_Texture **texture)
 {
-	g_fg_native_last_ns = 0;
-	g_fg_native_present_ns = 0;
-	g_fg_native_synth_step = 1;
-	if (g_fg_native)
-		gc573_fg_native_gl_teardown(g_fg_native);
 	if (*texture) {
 		SDL_DestroyTexture(*texture);
 		*texture = NULL;
@@ -6995,20 +6963,13 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 	st.framegen_layer_found = fgst.layer_found;
 	st.framegen_dll_found = fgst.dll_found;
 	st.framegen_vulkan_active = fgst.vulkan_active;
-	st.framegen_native_backend = g_fg_config.native_backend;
+	st.framegen_native_backend = false;
 	st.framegen_dedup_active = fgst.deduplicator_active;
 	if (fgst.deduplicator_active && fgst.unique_fps > 0.5) {
 		st.framegen_present_fps = fgst.unique_fps;
-		if (!g_fg_config.native_backend &&
-		    fgst.layer_found && fgst.dll_found && fgst.vulkan_active)
+		if (fgst.layer_found && fgst.dll_found && fgst.vulkan_active)
 			st.framegen_output_fps = fgst.unique_fps *
 						 (double)st.framegen_multiplier;
-	}
-	if (g_fg_config.native_backend && g_fg_config.mode != GC573_FG_OFF) {
-		int m = g_fg_config.multiplier > 1 ? g_fg_config.multiplier : 2;
-		st.framegen_output_fps = g_fg_native_measured_fps > 0.5
-					 ? g_fg_native_measured_fps
-					 : st.framegen_present_fps * (double)m;
 	}
 	{
 		static bool prev_dedup_active;
@@ -7148,7 +7109,6 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 			g_osd_mode = (enum osd_mode)cmd->a;
 			osd_card_invalidate();
 			g_osd.scale = -1;
-			g_osd_card_was_active = true;
 		}
 		printf("[IPC] OSD mode: %d\n", cmd->a);
 		break;
@@ -7223,9 +7183,7 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		float flow = g_fg_config.flow_scale;
 		bool perf = g_fg_config.perf_mode;
 		bool low_latency = g_fg_config.low_latency;
-		bool native_backend = g_fg_config.native_backend;
 		bool settings_changed = false;
-		bool backend_changed = false;
 
 		if (cmd->a >= 0 && cmd->a <= GC573_FG_30_TO_60)
 			mode = cmd->a;
@@ -7234,11 +7192,7 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 			settings_changed = true;
 		}
 		if (cmd->mode[0]) {
-			bool want_nat = !strcasecmp(cmd->mode, "native");
-			if (want_nat != native_backend) {
-				native_backend = want_nat;
-				backend_changed = true;
-			}
+			/* Only LSFG backend is supported on dev; ignore legacy native requests. */
 		}
 		if (cmd->f >= 0.5f && cmd->f <= 1.0f && cmd->f != flow) {
 			flow = cmd->f;
@@ -7253,30 +7207,27 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 			settings_changed = true;
 		}
 
-		if (mode != g_fg_config.mode || backend_changed) {
-			/* A mode/backend change retries Vulkan or switches to OpenGL. */
+		if (mode != g_fg_config.mode) {
+			/* A mode change retries Vulkan or switches to OpenGL. */
 			g_fg_fallback = false;
 			g_present_rebuild = true;
-			if (g_fg_native)
-				gc573_fg_native_reset(g_fg_native);
 		}
 		/* Swapchain/layer settings only take effect on a fresh lsfg-vk instance. */
-		if (settings_changed && mode != GC573_FG_OFF && !native_backend)
+		if (settings_changed && mode != GC573_FG_OFF)
 			g_present_rebuild = true;
 
 		pthread_mutex_lock(&g_framegen_lock);
 		g_fg_config.mode = mode;
 		g_fg_config.multiplier = mult;
-		g_fg_config.native_backend = native_backend;
+		g_fg_config.native_backend = false;
 		g_fg_config.flow_scale = flow;
 		g_fg_config.perf_mode = perf;
 		g_fg_config.low_latency = low_latency;
 		pthread_mutex_unlock(&g_framegen_lock);
 
 		framegen_apply_config();
-		printf("[IPC] Frame generation: %s %dx (%s, flow %d%%, perf %s, low-latency %s)\n",
+		printf("[IPC] Frame generation: %s %dx (lsfg, flow %d%%, perf %s, low-latency %s)\n",
 		       framegen_mode_name(mode), mult,
-		       native_backend ? "native" : "lsfg",
 		       (int)(flow * 100.0f + 0.5f),
 		       perf ? "on" : "off",
 		       low_latency ? "on" : "off");
@@ -7559,11 +7510,10 @@ int main(int argc, char *argv[])
 		} else if (strncmp(argv[i], "--fg-mult=", 10) == 0) {
 			g_fg_config.multiplier = gc573_fg_clamp_multiplier(atoi(argv[i] + 10));
 		} else if (strcmp(argv[i], "--fg-backend") == 0 && i + 1 < argc) {
-			g_fg_config.native_backend =
-				strcasecmp(argv[++i], "native") == 0;
+			++i;
+			g_fg_config.native_backend = false;
 		} else if (strncmp(argv[i], "--fg-backend=", 13) == 0) {
-			g_fg_config.native_backend =
-				strcasecmp(argv[i] + 13, "native") == 0;
+			g_fg_config.native_backend = false;
 		} else if (strcmp(argv[i], "--fg-dedup") == 0) {
 			if (g_fg_config.mode == GC573_FG_60_TO_120)
 				g_fg_config.mode = GC573_FG_30_TO_60;
@@ -8280,12 +8230,21 @@ int main(int argc, char *argv[])
 						 scale_name(g_scale_mode));
 					SDL_SetWindowTitle(window, title);
 				} else if (event.key.keysym.sym == SDLK_TAB ||
-					   event.key.keysym.sym == SDLK_i ||
-					   event.key.keysym.sym == SDLK_o) {
+					   event.key.keysym.sym == SDLK_i) {
 					g_osd_enabled = !g_osd_enabled;
-					printf("[OSD] Overlay: %s\n",
+					printf("[OSD] Performance HUD: %s\n",
 					       g_osd_enabled ? "on" : "off");
 					fflush(stdout);
+					toast_trigger(g_osd_enabled ?
+						      "Performance HUD: On" : "Performance HUD: Off");
+				} else if (event.key.keysym.sym == SDLK_o) {
+					if (quicknav_is_active()) {
+						quicknav_hide();
+						toast_trigger("Quick Nav: Off");
+					} else {
+						quicknav_wake();
+						toast_trigger("Quick Nav: On");
+					}
 				} else if (event.key.keysym.sym == SDLK_s ||
 					   event.key.keysym.sym == SDLK_F10) {
 					g_osd_enabled = !g_osd_enabled;
@@ -8318,6 +8277,7 @@ int main(int argc, char *argv[])
 #endif
 			}
 		}
+		quicknav_sync_cursor();
 		if (!g_running)
 			break;
 
@@ -8696,8 +8656,6 @@ int main(int argc, char *argv[])
 								input_rate_x100 =
 									fresh.frame_rate_x100;
 								g_fg_source_hz_x100 = input_rate_x100;
-								if (input_rate_x100 >= 2000)
-									g_fg_native_period_ns = 100000000000.0 / (double)input_rate_x100;
 								if (g_framegen)
 									gc573_framegen_set_source_hz(
 										g_framegen,
@@ -8787,8 +8745,6 @@ int main(int argc, char *argv[])
 							input_rate_x100 =
 								sig.frame_rate_x100;
 							g_fg_source_hz_x100 = input_rate_x100;
-							if (input_rate_x100 >= 2000)
-								g_fg_native_period_ns = 100000000000.0 / (double)input_rate_x100;
 							if (g_framegen)
 								gc573_framegen_set_source_hz(
 									g_framegen, input_rate_x100);
@@ -8849,22 +8805,14 @@ int main(int argc, char *argv[])
 			 * window and a frame generation mode is selected.  The capture ring
 			 * is then the only frame source for the window.
 			 */
-			bool fg_cfg_native;
 			int fg_cfg_mode;
-			int fg_cfg_mult;
 			pthread_mutex_lock(&g_framegen_lock);
-			fg_cfg_native = g_fg_config.native_backend;
 			fg_cfg_mode = g_fg_config.mode;
-			fg_cfg_mult = g_fg_config.multiplier > 1 ?
-				      g_fg_config.multiplier : 2;
 			pthread_mutex_unlock(&g_framegen_lock);
 
-			bool fg_native = fg_cfg_native &&
-					 fg_cfg_mode != GC573_FG_OFF;
 			bool fg_live = !g_headless && renderer && g_framegen &&
 				       fg_cfg_mode != GC573_FG_OFF &&
-				       (fg_native ||
-					g_present_driver == PRESENT_DRIVER_VULKAN);
+				       g_present_driver == PRESENT_DRIVER_VULKAN;
 			bool want_pump;
 
 			/* The capture thread only feeds the ring while this path is live. */
@@ -8988,179 +8936,57 @@ int main(int argc, char *argv[])
 
 			if (fg_live) {
 				const uint8_t *fg_pixels = NULL;
-				bool native_ready = fg_native &&
-					fg_native_ensure(output_width, output_height) &&
-					gc573_fg_native_ready(g_fg_native);
-				bool cycle_busy = native_ready &&
-					g_fg_native_synth_step <= fg_cfg_mult;
 
-				if (fg_native && g_fg_native)
-					gc573_fg_native_set_params(
-						g_fg_native,
-						g_fg_config.flow_scale,
-						g_fg_config.perf_mode);
-
-				/*
-				 * Present every sub-frame of the current Native cycle before
-				 * popping the next capture frame so rapid HDMI arrivals never
-				 * starve step N. When a new DMA frame is already queued, tighten
-				 * remaining step deadlines slightly to catch up without dropping.
-				 * For lsfg-vk, never present on an idle refresh.
-				 */
-				if (!cycle_busy && gc573_framegen_take(g_framegen, &fg_pixels)) {
+				if (gc573_framegen_take(g_framegen, &fg_pixels)) {
 					const uint8_t *present_pixels = fg_pixels;
-					float first_t = 1.0f / (float)fg_cfg_mult;
 
-					if (fg_native &&
-					    fg_native_ensure(output_width, output_height)) {
-						uint64_t now_ns = fg_native_now_ns();
-						struct gc573_fg_stats st;
-						double period_ns = 0.0;
-
-						gc573_framegen_get_stats(g_framegen, &st);
-						if (st.deduplicator_active && st.unique_fps >= 20.0) {
-							period_ns = 1000000000.0 / st.unique_fps;
-						} else if (st.deduplicator_active && st.raw_fps >= 40.0) {
-							period_ns = 2000000000.0 / st.raw_fps;
-						} else if (st.raw_fps >= 20.0) {
-							period_ns = 1000000000.0 / st.raw_fps;
-						} else if (g_fg_native_last_ns > 0) {
-							double dt = (double)(now_ns - g_fg_native_last_ns);
-							if (dt > 4000000.0 && dt < 45000000.0)
-								period_ns = dt;
-						}
-						if (period_ns >= 4000000.0 && period_ns <= 45000000.0) {
-							if (g_fg_native_period_ns >= 4000000.0)
-								g_fg_native_period_ns = 0.90 * g_fg_native_period_ns + 0.10 * period_ns;
-							else
-								g_fg_native_period_ns = period_ns;
-						}
-						g_fg_native_last_ns = now_ns;
-						g_fg_native_synth_step = 2;
-						gc573_fg_native_set_params(
-							g_fg_native,
-							g_fg_config.flow_scale,
-							g_fg_config.perf_mode);
-						gc573_fg_native_push(
-							g_fg_native, fg_pixels,
-							output_width, output_height,
-							output_width * 2U);
-					}
 					if (texture && output_width && output_height) {
-						char audio_text[64];
-						const char *audio_desc =
-							audio_osd_text(
-								&audio, audio_text,
-								sizeof(audio_text));
+						static uint64_t last_osd_update_us = 0;
+						uint64_t now_osd_us = now_us();
 
-						osd_update(
-							renderer, window,
-							input_width, input_height,
-							current_sig.interlaced,
-							input_rate_x100,
-							displayed_fps,
-							audio_desc,
-							audio.playback.channels ?
-								audio.playback.channels : 2,
-							audio.format_rate ?
-								audio.format_rate : 48000,
-							gc573_hdr_active() ?
-							gc573_hdr_label() :
-							NULL,
-							colorspace_short(
-								current_sig.colorspace));
-						if (fg_native &&
-						    render_frame_native_gl(
-							    window, renderer,
-							    g_fg_native, first_t,
-							    aspect_ratio(g_aspect,
-									 video_aspect),
-							    output_width, output_height)) {
-							g_fg_native_present_ns = fg_native_now_ns();
-							fg_native_note_present();
-						} else {
-							if (SDL_UpdateTexture(texture, NULL,
-									      present_pixels,
-									      output_width * 2) < 0) {
-								static bool reported;
+						if (now_osd_us - last_osd_update_us >= 50000ULL) {
+							char audio_text[64];
+							const char *audio_desc =
+								audio_osd_text(
+									&audio, audio_text,
+									sizeof(audio_text));
 
-								if (!reported) {
-									printf("[SDL-ERR] SDL_UpdateTexture failed: %s\n",
-									       SDL_GetError());
-									reported = true;
-								}
-							}
-							render_frame(
-								window, renderer, texture,
-								aspect_ratio(g_aspect,
-									     video_aspect),
-								output_width, output_height);
-							if (fg_native) {
-								g_fg_native_present_ns = fg_native_now_ns();
-								fg_native_note_present();
+							last_osd_update_us = now_osd_us;
+							osd_update(
+								renderer, window,
+								input_width, input_height,
+								current_sig.interlaced,
+								input_rate_x100,
+								displayed_fps,
+								audio_desc,
+								audio.playback.channels ?
+									audio.playback.channels : 2,
+								audio.format_rate ?
+									audio.format_rate : 48000,
+								gc573_hdr_active() ?
+								gc573_hdr_label() :
+								NULL,
+								colorspace_short(
+									current_sig.colorspace));
+						}
+						if (SDL_UpdateTexture(texture, NULL,
+								      present_pixels,
+								      output_width * 2) < 0) {
+							static bool reported;
+
+							if (!reported) {
+								printf("[SDL-ERR] SDL_UpdateTexture failed: %s\n",
+								       SDL_GetError());
+								reported = true;
 							}
 						}
+						render_frame(
+							window, renderer, texture,
+							aspect_ratio(g_aspect,
+								     video_aspect),
+							output_width, output_height);
 					}
 					gc573_framegen_release(g_framegen);
-				} else if (native_ready) {
-					uint64_t now_ns = fg_native_now_ns();
-					uint64_t anchor_ns = g_fg_native_last_ns
-							     ? g_fg_native_last_ns
-							     : g_fg_native_present_ns;
-					double deadline_scale = gc573_framegen_has_unread(g_framegen)
-								? 0.70 : 1.0;
-					uint64_t due_ns = anchor_ns +
-						(uint64_t)(((g_fg_native_period_ns *
-							     (double)(g_fg_native_synth_step - 1)) /
-							    (double)fg_cfg_mult) * deadline_scale);
-
-					if (g_fg_native_synth_step <= fg_cfg_mult &&
-					    now_ns >= due_ns) {
-						float t = (g_fg_native_synth_step == fg_cfg_mult)
-							  ? 1.0f
-							  : (float)g_fg_native_synth_step /
-							    (float)fg_cfg_mult;
-
-						if (texture) {
-							if (render_frame_native_gl(
-								    window, renderer,
-								    g_fg_native, t,
-								    aspect_ratio(g_aspect,
-										 video_aspect),
-								    output_width, output_height)) {
-								fg_native_note_present();
-							} else if (gc573_fg_native_synthesize(
-									   g_fg_native, t,
-									   g_fg_native_buf,
-									   output_width * 2U)) {
-								SDL_UpdateTexture(
-									texture, NULL,
-									g_fg_native_buf,
-									output_width * 2);
-								render_frame(
-									window, renderer, texture,
-									aspect_ratio(g_aspect,
-										     video_aspect),
-									output_width, output_height);
-								fg_native_note_present();
-							}
-						}
-						g_fg_native_synth_step++;
-					} else if (g_fg_native_synth_step <= fg_cfg_mult) {
-						uint64_t wake_margin_ns = 350000ULL;
-						uint64_t target_wake = due_ns > wake_margin_ns
-								       ? due_ns - wake_margin_ns
-								       : due_ns;
-						uint64_t cap_ns = now_ns + 1500000ULL;
-						uint64_t wake_ns = target_wake < cap_ns ? target_wake : cap_ns;
-						struct timespec ts;
-
-						ts.tv_sec = (time_t)(wake_ns / 1000000000ULL);
-						ts.tv_nsec = (long)(wake_ns % 1000000000ULL);
-						clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
-					} else {
-						(void)gc573_framegen_wait(g_framegen, 500);
-					}
 				} else {
 					/*
 					 * Event-driven wait: the DMA thread signals as soon as a
