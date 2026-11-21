@@ -11,31 +11,7 @@
 
 **EverLive** is an open-source Linux console gaming suite and userspace capture driver (Wayland & X11). PCIe capture cards run in Ring 3 via the in-tree Linux `vfio-pci` subsystem (no out-of-tree kernel modules or DKMS required), while supported USB cards use standard `uvcvideo` plus USB/HID controls.
 
----
-
-## Supported Hardware
-
-| Card | Interface / ID | Engine | Status | Verified By |
-|:---|:---|:---|:---|:---|
-| **AVerMedia Live Gamer 4K (GC573)** | PCIe `1461:0054` (`1461:5730`) | VFIO (`opengc573-userd`) | **Stable** | Maintainer (PS5, 1440p120 & 4K60 SDR/HDR) |
-| **AVerMedia Live Gamer DUO (GC570D)** | PCIe `1461:0054` (`1461:5700`) | VFIO (`opengc570d-userd`) | **Stable** | Contributor (`@PolygonPrincess`, PR #52) |
-| **HWS UHD (ACASIS VS2583 / AVMatrix VC12-4K)** | PCIe `8888:8581` / `1f33:8581` (`0007`) | VFIO (`openhws-userd`) | **Beta** | Contributor (PR #70) |
-| **AVerMedia Live Gamer ULTRA 2.1 (GC553G2)** | USB `07ca:2553` | USB/UVC (`gc553g2_control.py`) | **Experimental** | Protocol tested (`@accola88`); end-to-end Hub UI pending |
-
-### Features per Card
-
-| Feature | GC573 | GC570D (DUO) | HWS UHD | GC553G2 |
-|:---|:---:|:---:|:---:|:---:|
-| **Max Capture** | 4K60 / 1440p120 *(pass-through)* | Dual 1080p60 | Up to 4K60 / 1080p240 *(4K60 verified)* | 4K144 / 1440p120 / 1080p240 (MJPEG) |
-| **HDR → SDR Tonemapping** | Yes (Hable) | Yes (HDMI 1 LUT) | No | Hardware AT toggle |
-| **Audio** | LPCM 2.0/5.1/7.1, AC-3/DTS | Stereo LPCM (dual) | Stereo LPCM | USB Audio / PipeWire |
-| **Virtual Camera (`v4l2loopback` / `LD_PRELOAD`)** | Yes (`/dev/video10`, `/dev/video63`) | Yes (`/dev/video10-11`, `/dev/video60-61`) | Yes (`/dev/video10`, `/dev/video64`) | Native `/dev/videoX` (`uvcvideo`) |
-| **Custom EDID** | Yes (with SAD unification) | Internal / Downstream policy | No | Yes (`merge` / `copy` / `internal`) |
-| **RGB LED Control** | Yes | Yes | No | Yes (HID LampArray) |
-| **Frame Generation (LSFG-VK)** | Yes (2×/3×/4×) | No | No | No |
-| **Multiview & Multi-Card (`--all`)** | Yes | Yes | Yes | No |
-
-Details and per-card notes: [`docs/CARDS.md`](docs/CARDS.md).
+> **Quick Navigation:** [Quickstart](#quickstart) · [Supported Hardware](#supported-hardware) · [Install & IOMMU](docs/INSTALL.md) · [Controls & Hotkeys](docs/CONTROLS.md) · [OBS & Webcam](docs/OBS.md) · [Frame Gen (LSFG-VK)](docs/FRAMEGEN.md) · [Architecture](docs/ARCHITECTURE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
 ---
 
@@ -57,17 +33,38 @@ Launch the Console Hub (or start **EverLive** from your desktop application menu
 ./play.sh --all    # run all installed PCIe cards simultaneously
 ```
 
-Update from git (`play.sh` rebuilds modified binaries automatically):
+Update (`play.sh` rebuilds modified binaries automatically) or install strictly module-free without `v4l2loopback`:
 
 ```bash
 git pull && ./play.sh
-```
-
-For a strictly module-free setup without `v4l2loopback` (using `LD_PRELOAD` or PipeWire window capture instead), pass `--no-loopback` (and optionally `--with-preload` for `<App> (EverLive Camera)` launchers):
-
-```bash
 sudo ./install.sh --no-loopback --with-preload
 ```
+
+---
+
+## Supported Hardware
+
+| Card | Interface / ID | Engine | Status | Verified By |
+|:---|:---|:---|:---|:---|
+| **AVerMedia Live Gamer 4K (GC573)** | PCIe `1461:0054` (`1461:5730`) | VFIO (`opengc573-userd`) | **Stable** | Maintainer (PS5, 1440p120 & 4K60 SDR/HDR) |
+| **AVerMedia Live Gamer DUO (GC570D)** | PCIe `1461:0054` (`1461:5700`) | VFIO (`opengc570d-userd`) | **Stable** | Contributor (`@PolygonPrincess`, PR #52) |
+| **HWS UHD (ACASIS VS2583 / AVMatrix VC12-4K)** | PCIe `8888:8581` / `1f33:8581` (`0007`) | VFIO (`openhws-userd`) | **Beta** | Contributor (`@Scyllinice`, PR #70) |
+| **AVerMedia Live Gamer ULTRA 2.1 (GC553G2)** | USB `07ca:2553` | USB/UVC (`gc553g2_control.py`) | **Experimental** | Protocol tested (`@accola88`); Hub UI pending |
+
+### Features per Card
+
+| Feature | GC573 | GC570D (DUO) | HWS UHD | GC553G2 |
+|:---|:---:|:---:|:---:|:---:|
+| **Max Capture** | 4K60 / 1440p120 *(pass-through)* | Dual 1080p60 | 4K60 verified *(up to 1080p240 in code)* | 4K144 / 1440p120 / 1080p240 *(protocol tested)* |
+| **HDR → SDR Tonemapping** | Yes (Hable) | Yes (HDMI 1 LUT) | No | Hardware AT toggle *(protocol tested)* |
+| **Audio** | LPCM 2.0/5.1/7.1, AC-3/DTS | Stereo LPCM (dual) | Stereo LPCM | USB Audio / PipeWire |
+| **Virtual Camera (`v4l2loopback` / `LD_PRELOAD`)** | Yes (`/dev/video10`, `/dev/video63`) | Yes (`/dev/video10-11`, `/dev/video60-61` *(in validation)*) | Yes (`/dev/video10`, `/dev/video64`) | Native `/dev/videoX` (`uvcvideo`) |
+| **Custom EDID** | Yes (with SAD unification) | Internal / Downstream policy | No | Yes (`merge` / `copy` / `internal`) |
+| **RGB LED Control** | Yes | Yes | No | Yes (HID LampArray) |
+| **Frame Generation (LSFG-VK)** | Yes (2×/3×/4×) | No | No | No |
+| **Multiview & Multi-Card (`--all`)** | Yes | Yes | Yes | No |
+
+Details and per-card notes: [`docs/CARDS.md`](docs/CARDS.md).
 
 ---
 

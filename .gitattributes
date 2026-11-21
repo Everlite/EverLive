@@ -1,1 +1,2 @@
 *.inc linguist-language=C
+tools/opengc570d-userd/data/*.inc linguist-generated=true
