@@ -4204,7 +4204,7 @@ if HAS_QT:
                 return row
 
             self.inspector_tabbar = SegmentedControl(
-                [("Video", 0), ("Audio", 1), ("Capture", 2), ("System", 3)],
+                [("Video && Audio", 0), ("Capture", 1), ("System", 2)],
                 button_height=36,
                 object_name="inspectorTabbar")
             self.inspector_tabbar.setFixedHeight(ui_theme.CONTROL_H)
@@ -4215,12 +4215,10 @@ if HAS_QT:
             dock_layout.addWidget(self.inspector_tabs, 1)
 
             tab_video, lay_video = _make_tab_page()
-            tab_stream, lay_stream = _make_tab_page()
             tab_rec, lay_rec = _make_tab_page()
             tab_app, lay_app = _make_tab_page()
 
             self.inspector_tabs.addWidget(tab_video)
-            self.inspector_tabs.addWidget(tab_stream)
             self.inspector_tabs.addWidget(tab_rec)
             self.inspector_tabs.addWidget(tab_app)
             self.inspector_tabbar.currentIndexChanged.connect(
@@ -4280,7 +4278,7 @@ if HAS_QT:
             dock_layout.addWidget(card_edid)
 
             # =============================================================
-            # TAB 1: VIDEO & FRAME GENERATION
+            # TAB 1: VIDEO & AUDIO
             # =============================================================
             card_video, grid_video = _section("PICTURE & HDR", "#F287A7")
             grid_video.setColumnStretch(0, 1)
@@ -4570,7 +4568,7 @@ if HAS_QT:
             lay_video.addWidget(card_fg)
 
             # =============================================================
-            # TAB 2: AUDIO & SOUND ROUTING
+            # VIDEO & AUDIO TAB: SOUND ROUTING
             # =============================================================
             card_audio, grid_audio = _section("AUDIO", "#38BDF8")
             grid_audio.setColumnStretch(0, 1)
@@ -4596,7 +4594,7 @@ if HAS_QT:
                 "Playback channel layout. Auto follows the HDMI source; "
                 "5.1/7.1 fall back to an ITU-R BS.775 stereo downmix when "
                 "the audio sink cannot open them."), 0, 0, 1, 2)
-            lay_stream.addWidget(card_audio)
+            lay_video.addWidget(card_audio)
 
             # --- On-Screen Overlay Card (grouped cleanly!) ---
             card_osd, grid_osd = _section("ON-SCREEN OVERLAY", "#F287A7")
@@ -4986,23 +4984,21 @@ if HAS_QT:
             v4l2_row.addWidget(lbl_v4l2_obsolete, 0, Qt.AlignVCenter)
             grid_obs.addLayout(v4l2_row, 1, 0)
             note = QLabel()
-            note.setObjectName("helperNote")
+            note.setObjectName("hintText")
             note.setWordWrap(True)
-            note.setTextFormat(Qt.RichText)
             note.setText(
-                "<div style=\"line-height:150%\">GC553G2 exposes a native USB UVC camera — "
-                "add its /dev/videoX device directly in OBS / Discord (no v4l2loopback "
-                "or LD_PRELOAD needed).</div>"
+                "GC553G2 exposes a native USB UVC camera — add its "
+                "/dev/videoX device directly in OBS / Discord (no "
+                "v4l2loopback or LD_PRELOAD needed)."
                 if self.uvc_mode else
-                "<div style=\"line-height:150%\">PipeWire video &amp; "
-                "DMA-BUF Zero-Copy are always active without kernel "
-                "modules.</div>")
+                "PipeWire video & DMA-BUF Zero-Copy are always active "
+                "without kernel modules.")
             grid_obs.addWidget(note, 2, 0)
-            lay_stream.addWidget(card_obs)
-            lay_stream.addStretch(1)
+            lay_rec.addWidget(card_obs)
+            lay_rec.addStretch(1)
 
             # =============================================================
-            # TAB 3: HARDWARE, APP BEHAVIOR & KEYBOARD SHORTCUTS
+            # SYSTEM TAB: HARDWARE, APP BEHAVIOR & KEYBOARD SHORTCUTS
             # =============================================================
             card_hw, grid_hw = _section("HARDWARE RGB LED", "#F287A7")
             grid_hw.setColumnStretch(0, 1)

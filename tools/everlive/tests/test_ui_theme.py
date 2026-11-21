@@ -153,7 +153,8 @@ class TokenTests(unittest.TestCase):
                 "QFrame#handshakeCard",
                 "QPushButton#btnBar",
                 "QPushButton#btnStepper",
-                "QPushButton#btnMute"):
+                "QPushButton#btnMute",
+                "QLabel#helperNote"):
             self.assertNotIn(selector, stylesheet, selector)
 
         start = stylesheet.index("\nQPushButton {")

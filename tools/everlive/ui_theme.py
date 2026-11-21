@@ -443,10 +443,6 @@ QLabel#legacyBadge {
     font-weight: 700;
     letter-spacing: 0.5px;
 }
-QLabel#helperNote {
-    color: @LABEL@;
-    font-size: 13px;
-}
 QLabel#kbd {
     color: @TEXT@;
     background-color: #1E2634;
