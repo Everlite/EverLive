@@ -29,8 +29,6 @@
 #define EVERLIVE_OSD_ICON_DOT		0xF111
 #define EVERLIVE_OSD_ICON_HIDE		0xF070 /* eye-slash */
 #define EVERLIVE_OSD_ICON_CHART		0xF080 /* chart-bar */
-#define EVERLIVE_OSD_ICON_ELLIPSIS	0xF141
-#define EVERLIVE_OSD_ICON_KEYBOARD	0xF11C
 #define EVERLIVE_OSD_ICON_XMARK		0xF00D
 #define EVERLIVE_OSD_ICON_INPUT		0xF2F6 /* right-to-bracket */
 #define EVERLIVE_OSD_ICON_TABLE_CELLS	0xF00A /* table-cells */
@@ -50,8 +48,6 @@ enum everlive_osd_action {
 	EVERLIVE_OSD_ACTION_RECORD,
 	EVERLIVE_OSD_ACTION_STATS,
 	EVERLIVE_OSD_ACTION_HIDE,
-	EVERLIVE_OSD_ACTION_STATS_QUICKNAV,
-	EVERLIVE_OSD_ACTION_STATS_SHORTCUTS,
 	EVERLIVE_OSD_ACTION_STATS_CLOSE,
 	EVERLIVE_OSD_ACTION_INFO,
 	EVERLIVE_OSD_ACTION_COUNT,
@@ -80,10 +76,7 @@ struct everlive_osd_hitbox {
 	enum everlive_osd_action action;
 };
 
-struct everlive_osd_shortcut {
-	const char *keys;
-	const char *label;
-};
+#define EVERLIVE_OSD_STATS_MAX_LINES 16
 
 struct everlive_osd_stats {
 	SDL_Texture *texture;
@@ -94,16 +87,9 @@ struct everlive_osd_stats {
 	int viewport_h;
 	unsigned generation;
 	char cache_key[768];
-	struct everlive_osd_hitbox hits[3];
+	struct everlive_osd_hitbox hits[1];
 	int hit_count;
 	enum everlive_osd_action hover_action;
-
-	SDL_Texture *tooltip;
-	int tooltip_width;
-	int tooltip_height;
-	float tooltip_scale;
-	enum everlive_osd_action tooltip_action;
-	char tooltip_key[256];
 };
 
 struct everlive_osd_card {
@@ -193,18 +179,14 @@ bool everlive_osd_build_toast(SDL_Renderer *renderer, const char *text,
 			      SDL_Texture **texture, int *width, int *height,
 			      int *scale_out);
 
+int everlive_osd_stats_max_width(int viewport_w, int card_width,
+				 float scale);
 bool everlive_osd_build_stats(SDL_Renderer *renderer,
-			      const char *row1, const char *row2,
-			      const struct everlive_osd_shortcut *shortcuts,
-			      int shortcut_count,
+			      const char *const *lines, int line_count,
+			      int max_width,
 			      enum everlive_osd_action hover_action,
 			      float scale, int viewport_w, int viewport_h,
 			      struct everlive_osd_stats *out);
-bool everlive_osd_build_stats_tooltip(
-	SDL_Renderer *renderer, struct everlive_osd_stats *stats,
-	enum everlive_osd_action action,
-	const struct everlive_osd_shortcut *shortcuts, int shortcut_count,
-	float scale);
 void everlive_osd_place_stats(SDL_Rect *dst,
 			      const struct everlive_osd_stats *stats,
 			      bool bottom, const SDL_Rect *card_dest,
@@ -213,9 +195,6 @@ void everlive_osd_place_stats(SDL_Rect *dst,
 void everlive_osd_render_stats(SDL_Renderer *renderer,
 			       const struct everlive_osd_stats *stats,
 			       const SDL_Rect *dest, int win_w, int win_h);
-void everlive_osd_render_stats_tooltip(
-	SDL_Renderer *renderer, const struct everlive_osd_stats *stats,
-	const SDL_Rect *anchor, int viewport_w, int viewport_h);
 const struct everlive_osd_hitbox *everlive_osd_stats_hit(
 	const struct everlive_osd_stats *stats, int local_x, int local_y);
 void everlive_osd_destroy_stats(struct everlive_osd_stats *stats);

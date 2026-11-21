@@ -4658,8 +4658,7 @@ if HAS_QT:
             self.chk_quicknav.setToolTip(
                 "Auto-wakes the interactive control bar (HDMI, aspect, "
                 "scaling, volume, mute) on mouse movement; it auto-hides "
-                "after 3s. The stats Quick Navigation button and O hotkey "
-                "still force it.")
+                "after 3s. The O hotkey still forces it.")
             self.chk_quicknav.setChecked(
                 bool(self.saved_cfg.get("quicknav_enabled", True)))
             self.chk_quicknav.toggled.connect(self.on_quicknav_changed)
@@ -4668,8 +4667,7 @@ if HAS_QT:
             self.chk_quicknav_fs = QCheckBox("Quick Navigation: Fullscreen Only")
             self.chk_quicknav_fs.setToolTip(
                 "Only auto-wake the Quick Navigation bar in fullscreen mode. "
-                "The stats Quick Navigation button and O hotkey still force "
-                "it in windowed mode.")
+                "The O hotkey still forces it in windowed mode.")
             self.chk_quicknav_fs.setChecked(
                 bool(self.saved_cfg.get("quicknav_fs_only", False)))
             self.chk_quicknav_fs.setEnabled(self.chk_quicknav.isChecked())

@@ -117,17 +117,6 @@ static bool g_stats_dirty = true;
 static uint64_t g_stats_built_ms;
 static bool g_quicknav_forced;
 
-static const struct everlive_osd_shortcut g_stats_shortcuts[] = {
-	{ "F / F11", "Fullscreen" },
-	{ "1 / L", "Scaling mode" },
-	{ "P", "OSD position" },
-	{ "Tab / I", "Performance HUD" },
-	{ "O", "Quick navigation" },
-	{ "M", "Mute" },
-	{ "Up / Down", "Volume" },
-};
-#define STATS_SHORTCUT_COUNT \
-	((int)(sizeof(g_stats_shortcuts) / sizeof(g_stats_shortcuts[0])))
 static SDL_Texture *g_toast_texture;
 static char g_toast_built[128];
 static int g_toast_w;
@@ -1087,29 +1076,8 @@ static void hws_render_tooltip(SDL_Renderer *r, int win_w, int win_h,
 {
 	const struct everlive_osd_hitbox *anchor;
 	SDL_Rect screen;
-	int i;
 
-	if (g_popup_open)
-		return;
-	if (g_stats_hover_action != EVERLIVE_OSD_ACTION_NONE &&
-	    g_stats.texture) {
-		for (i = 0; i < g_stats.hit_count; i++) {
-			if (g_stats.hits[i].action != g_stats_hover_action)
-				continue;
-			screen.x = g_stats_dest.x + g_stats.hits[i].rect.x;
-			screen.y = g_stats_dest.y + g_stats.hits[i].rect.y;
-			screen.w = g_stats.hits[i].rect.w;
-			screen.h = g_stats.hits[i].rect.h;
-			if (everlive_osd_build_stats_tooltip(
-				    r, &g_stats, g_stats_hover_action,
-				    g_stats_shortcuts, STATS_SHORTCUT_COUNT,
-				    scale))
-				everlive_osd_render_stats_tooltip(
-					r, &g_stats, &screen, win_w, win_h);
-			return;
-		}
-	}
-	if (g_hover_action == EVERLIVE_OSD_ACTION_NONE)
+	if (g_popup_open || g_hover_action == EVERLIVE_OSD_ACTION_NONE)
 		return;
 	anchor = hws_card_hit(g_hover_action);
 	if (!anchor)
@@ -1283,22 +1251,13 @@ static bool hws_handle_mouse(SDL_Event *event, SDL_Window *win)
 	stats_action = stats_visible ? hws_hit_stats_raw(x, y) :
 		EVERLIVE_OSD_ACTION_NONE;
 	if (stats_action != EVERLIVE_OSD_ACTION_NONE) {
-		switch (stats_action) {
-		case EVERLIVE_OSD_ACTION_STATS_QUICKNAV:
-			quicknav_force();
-			toast("Quick Nav: On");
-			break;
-		case EVERLIVE_OSD_ACTION_STATS_CLOSE:
+		if (stats_action == EVERLIVE_OSD_ACTION_STATS_CLOSE) {
 			g_osd = false;
 			everlive_osd_destroy_stats(&g_stats);
 			g_stats_hover_action = EVERLIVE_OSD_ACTION_NONE;
 			g_stats_dirty = true;
 			hws_card_invalidate();
 			toast("Performance HUD: Off");
-			break;
-		case EVERLIVE_OSD_ACTION_STATS_SHORTCUTS:
-		default:
-			break;
 		}
 		return true;
 	}
@@ -1375,12 +1334,15 @@ static void hws_stats_update(SDL_Renderer *r, SDL_Window *win,
 			     int win_w, int win_h)
 {
 	struct hws_capture_status cs;
-	char row1[160];
-	char row2[384];
+	char lines[EVERLIVE_OSD_STATS_MAX_LINES][128];
+	const char *line_ptrs[EVERLIVE_OSD_STATS_MAX_LINES];
+	int line_count = 0;
+	int max_width;
 	int vol;
 	bool muted;
 	uint64_t now;
 	float scale;
+	int i;
 
 	if (!g_osd) {
 		if (g_stats.texture)
@@ -1395,29 +1357,42 @@ static void hws_stats_update(SDL_Renderer *r, SDL_Window *win,
 		return;
 
 	hws_capture_get_status(g_cap, &cs);
-	if (cs.signal)
-		snprintf(row1, sizeof(row1), "HWS UHD  %ux%u @ %.2f fps",
-			 cs.width, cs.height, cs.fps);
-	else if (cs.present && cs.interlaced)
-		snprintf(row1, sizeof(row1),
-			 "HWS UHD  interlaced input (unsupported)");
-	else
-		snprintf(row1, sizeof(row1), "HWS UHD  no signal");
-
 	vol = (int)lrintf(atomic_load(&g_gain) * 100.f);
 	muted = atomic_load(&g_muted);
-	snprintf(row2, sizeof(row2),
-		 "Frames %llu · lost %llu · restarts %llu · Audio L-PCM 48k vol %d%%%s · PCIe %s%s",
-		 (unsigned long long)cs.frames,
-		 (unsigned long long)cs.dropped,
-		 (unsigned long long)cs.restarts, vol,
-		 muted ? " [muted]" : "",
-		 *cs.link ? cs.link : "unknown",
-		 cs.hdcp ? " · HDCP active" : "");
-
 	scale = (float)win_h / 1080.0f;
-	everlive_osd_build_stats(r, row1, row2, g_stats_shortcuts,
-				 STATS_SHORTCUT_COUNT,
+
+#define ADD_STAT_LINE(...) \
+	do { \
+		if (line_count < EVERLIVE_OSD_STATS_MAX_LINES) \
+			snprintf(lines[line_count++], sizeof(lines[0]), \
+				 __VA_ARGS__); \
+	} while (0)
+	ADD_STAT_LINE("HWS UHD");
+	if (cs.signal) {
+		ADD_STAT_LINE("%ux%u", cs.width, cs.height);
+		ADD_STAT_LINE("%.2f FPS", cs.fps);
+	} else if (cs.present && cs.interlaced) {
+		ADD_STAT_LINE("Interlaced input");
+	} else {
+		ADD_STAT_LINE("No signal");
+	}
+	ADD_STAT_LINE("Frames %llu", (unsigned long long)cs.frames);
+	ADD_STAT_LINE("Lost %llu", (unsigned long long)cs.dropped);
+	ADD_STAT_LINE("Restarts %llu", (unsigned long long)cs.restarts);
+	ADD_STAT_LINE("Audio L-PCM 48k");
+	if (muted)
+		ADD_STAT_LINE("Muted");
+	else
+		ADD_STAT_LINE("Vol %d%%", vol);
+	if (*cs.link)
+		ADD_STAT_LINE("PCIe %s", cs.link);
+	if (cs.hdcp)
+		ADD_STAT_LINE("HDCP active");
+#undef ADD_STAT_LINE
+	for (i = 0; i < line_count; i++)
+		line_ptrs[i] = lines[i];
+	max_width = everlive_osd_stats_max_width(win_w, g_card.width, scale);
+	everlive_osd_build_stats(r, line_ptrs, line_count, max_width,
 				 g_stats_hover_action, scale,
 				 win_w, win_h, &g_stats);
 	g_stats_built_ms = now;
@@ -1451,8 +1426,7 @@ static void draw_osd(SDL_Renderer *r, SDL_Window *win, int out_w, int out_h)
 		everlive_osd_render_stats(r, &g_stats, &g_stats_dest,
 					  win_w, win_h);
 	}
-	if (card_visible ||
-	    g_stats_hover_action != EVERLIVE_OSD_ACTION_NONE)
+	if (card_visible)
 		hws_render_tooltip(r, win_w, win_h, scale);
 	if (card_visible)
 		hws_render_popup(r, win_w, win_h, scale);

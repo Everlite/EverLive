@@ -1827,21 +1827,6 @@ static enum everlive_osd_action g_stats_hover_action =
 static bool g_stats_dirty;
 static bool g_quicknav_forced;
 
-static const struct everlive_osd_shortcut g_stats_shortcuts[] = {
-	{ "F / F11", "Fullscreen" },
-	{ "G", "Frame generation" },
-	{ "A", "Aspect ratio" },
-	{ "L / 1", "Scaling mode" },
-	{ "P", "OSD position" },
-	{ "Tab / I", "Performance HUD" },
-	{ "O", "Quick navigation" },
-	{ "M", "Mute" },
-	{ "H", "HDR tonemapping" },
-	{ "Up / Down", "Volume" },
-};
-#define STATS_SHORTCUT_COUNT \
-	((int)(sizeof(g_stats_shortcuts) / sizeof(g_stats_shortcuts[0])))
-
 /* Quick Navigation bar state: auto-wakes on mouse motion/click/hotkey, auto-hides after 3s */
 static uint64_t g_quicknav_wake_ms;
 static bool g_quicknav_manual_hidden;
@@ -2140,13 +2125,12 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 		       unsigned audio_ch, uint32_t audio_rate,
 		       const char *hdr_text, const char *chroma_text)
 {
-	char line2[384];
-	char line3[128];
-	char tail[96] = "";
-	char scale_tag[32] = "";
-	char dma_tag[32] = "";
-	char ar_tag[24] = "";
-	char vsync_tag[24] = "";
+	char lines[EVERLIVE_OSD_STATS_MAX_LINES][128];
+	const char *line_ptrs[EVERLIVE_OSD_STATS_MAX_LINES];
+	char fg[128];
+	int line_count = 0;
+	int max_width;
+	int i;
 	int win_w = 0;
 	int win_h = 0;
 	float scale;
@@ -2176,37 +2160,50 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 	last_hud_ms = now_ms_val;
 	g_stats_dirty = false;
 
-	if (hdr_text && *hdr_text)
-		snprintf(tail, sizeof(tail), " | %s", hdr_text);
-	if (g_aspect != ASPECT_AUTO)
-		snprintf(ar_tag, sizeof(ar_tag), " | %s",
-			 aspect_label(g_aspect));
-	if (g_integer_factor > 0)
-		snprintf(scale_tag, sizeof(scale_tag), " | %dx",
-			 g_integer_factor);
-	if (g_osd_dma_ms > 0.0)
-		snprintf(dma_tag, sizeof(dma_tag), " | %4.1fms",
-			 g_osd_dma_ms);
-	if (g_vsync)
-		snprintf(vsync_tag, sizeof(vsync_tag), " | VSync");
-
 	SDL_GetWindowSize(window, &win_w, &win_h);
 	scale = (float)win_h / 1080.0f;
 
-	snprintf(line2, sizeof(line2),
-		 "%ux%u%s %.0fHz | %5.1f FPS%s%s%s%s | %s%s",
-		 in_w, in_h, interlaced ? "i" : "p",
-		 (double)rate_x100 / 100.0, fps,
-		 ar_tag, scale_tag, dma_tag, vsync_tag,
-		 audio_text, tail);
+#define ADD_STAT_LINE(...) \
+	do { \
+		if (line_count < EVERLIVE_OSD_STATS_MAX_LINES) \
+			snprintf(lines[line_count++], sizeof(lines[0]), \
+				 __VA_ARGS__); \
+	} while (0)
 
-	framegen_describe(line3, sizeof(line3));
-	if (!line3[0])
-		snprintf(line3, sizeof(line3), "Frame Gen: Off");
+	if (in_w && in_h)
+		ADD_STAT_LINE("%ux%u%s %.0fHz", in_w, in_h,
+			      interlaced ? "i" : "p",
+			      (double)rate_x100 / 100.0);
+	else
+		ADD_STAT_LINE("No signal");
+	ADD_STAT_LINE("%.1f FPS", fps);
+	if (chroma_text && *chroma_text)
+		ADD_STAT_LINE("%s", chroma_text);
+	if (audio_text && *audio_text)
+		ADD_STAT_LINE("%s", audio_text);
+	if (hdr_text && *hdr_text)
+		ADD_STAT_LINE("%s", hdr_text);
+	ADD_STAT_LINE("Aspect %s",
+		      g_aspect == ASPECT_AUTO ? "Auto" :
+		      aspect_label(g_aspect));
+	if (g_integer_factor > 0)
+		ADD_STAT_LINE("Scale %dx", g_integer_factor);
+	else
+		ADD_STAT_LINE("Scale Fit");
+	if (g_osd_dma_ms > 0.0)
+		ADD_STAT_LINE("DMA %.1f ms", g_osd_dma_ms);
+	if (g_vsync)
+		ADD_STAT_LINE("VSync");
+	framegen_describe(fg, sizeof(fg));
+	ADD_STAT_LINE("%s", fg[0] ? fg : "Frame Gen Off");
+#undef ADD_STAT_LINE
 
-	everlive_osd_build_stats(renderer, line2, line3,
-				 g_stats_shortcuts, STATS_SHORTCUT_COUNT,
-				 g_stats_hover_action, scale,
+	for (i = 0; i < line_count; i++)
+		line_ptrs[i] = lines[i];
+	max_width = everlive_osd_stats_max_width(win_w, g_card.width,
+						 scale);
+	everlive_osd_build_stats(renderer, line_ptrs, line_count,
+				 max_width, g_stats_hover_action, scale,
 				 win_w, win_h, &g_stats);
 }
 
@@ -2354,7 +2351,7 @@ static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
 		everlive_osd_render_stats(renderer, &g_stats, &g_stats_dest,
 					  win_w, win_h);
 	}
-	if (card_visible || g_stats_hover_action != EVERLIVE_OSD_ACTION_NONE)
+	if (card_visible)
 		osd_render_tooltip(renderer, win_w, win_h, scale);
 	if (card_visible)
 		osd_render_popup(renderer, win_w, win_h, scale);
@@ -2564,30 +2561,8 @@ static void osd_render_tooltip(SDL_Renderer *renderer, int win_w, int win_h,
 {
 	const struct everlive_osd_hitbox *anchor;
 	SDL_Rect screen;
-	int i;
 
-	if (g_popup_open)
-		return;
-	if (g_stats_hover_action != EVERLIVE_OSD_ACTION_NONE &&
-	    g_stats.texture) {
-		for (i = 0; i < g_stats.hit_count; i++) {
-			if (g_stats.hits[i].action != g_stats_hover_action)
-				continue;
-			screen.x = g_stats_dest.x + g_stats.hits[i].rect.x;
-			screen.y = g_stats_dest.y + g_stats.hits[i].rect.y;
-			screen.w = g_stats.hits[i].rect.w;
-			screen.h = g_stats.hits[i].rect.h;
-			if (everlive_osd_build_stats_tooltip(
-				    renderer, &g_stats, g_stats_hover_action,
-				    g_stats_shortcuts, STATS_SHORTCUT_COUNT,
-				    scale))
-				everlive_osd_render_stats_tooltip(
-					renderer, &g_stats, &screen,
-					win_w, win_h);
-			return;
-		}
-	}
-	if (g_hover_action == EVERLIVE_OSD_ACTION_NONE)
+	if (g_popup_open || g_hover_action == EVERLIVE_OSD_ACTION_NONE)
 		return;
 	anchor = osd_card_hit(g_hover_action);
 	if (!anchor)
@@ -2757,22 +2732,13 @@ static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
 	stats_action = (g_osd_enabled && g_stats.texture) ?
 		osd_hit_stats_raw(x, y) : EVERLIVE_OSD_ACTION_NONE;
 	if (stats_action != EVERLIVE_OSD_ACTION_NONE) {
-		switch (stats_action) {
-		case EVERLIVE_OSD_ACTION_STATS_QUICKNAV:
-			quicknav_force();
-			toast_trigger("Quick Nav: On");
-			break;
-		case EVERLIVE_OSD_ACTION_STATS_CLOSE:
+		if (stats_action == EVERLIVE_OSD_ACTION_STATS_CLOSE) {
 			g_osd_enabled = false;
 			everlive_osd_destroy_stats(&g_stats);
 			g_stats_hover_action = EVERLIVE_OSD_ACTION_NONE;
 			g_stats_dirty = true;
 			osd_card_invalidate();
 			toast_trigger("Performance HUD: Off");
-			break;
-		case EVERLIVE_OSD_ACTION_STATS_SHORTCUTS:
-		default:
-			break;
 		}
 		return true;
 	}

@@ -71,21 +71,6 @@ enum everlive_osd_mode {
 
 static enum everlive_osd_action g_hover_action = EVERLIVE_OSD_ACTION_NONE;
 
-static const struct everlive_osd_shortcut g_stats_shortcuts[] = {
-	{ "F / F11", "Fullscreen" },
-	{ "1 / 2", "HDMI input" },
-	{ "P", "Picture-in-picture" },
-	{ "A", "Aspect ratio" },
-	{ "L", "Scaling mode" },
-	{ "M", "Mute" },
-	{ "Tab", "Performance HUD" },
-	{ "O", "Quick navigation" },
-	{ "C", "OSD position" },
-	{ "Up / Down", "Volume" },
-};
-#define STATS_SHORTCUT_COUNT \
-	((int)(sizeof(g_stats_shortcuts) / sizeof(g_stats_shortcuts[0])))
-
 struct everlive_frame {
 	uint32_t width;
 	uint32_t height;
@@ -1249,9 +1234,7 @@ static void sdl_render_frame(struct everlive_state *st, struct everlive_sdl *sdl
 					sdl->renderer, &sdl->stats,
 					&sdl->stats_dest, win_w, win_h);
 			}
-			if (card_visible ||
-			    sdl->stats_hover_action !=
-				    EVERLIVE_OSD_ACTION_NONE)
+			if (card_visible)
 				sdl_render_tooltip(sdl, win_w, win_h, scale);
 			if (card_visible)
 				sdl_render_popup(sdl, win_w, win_h, scale);
@@ -1758,34 +1741,8 @@ static void sdl_render_tooltip(struct everlive_sdl *sdl, int win_w, int win_h,
 {
 	const struct everlive_osd_hitbox *anchor;
 	SDL_Rect screen;
-	int i;
 
-	if (sdl->popup_open)
-		return;
-	if (sdl->stats_hover_action != EVERLIVE_OSD_ACTION_NONE &&
-	    sdl->stats.texture) {
-		for (i = 0; i < sdl->stats.hit_count; i++) {
-			if (sdl->stats.hits[i].action !=
-			    sdl->stats_hover_action)
-				continue;
-			screen.x = sdl->stats_dest.x +
-				sdl->stats.hits[i].rect.x;
-			screen.y = sdl->stats_dest.y +
-				sdl->stats.hits[i].rect.y;
-			screen.w = sdl->stats.hits[i].rect.w;
-			screen.h = sdl->stats.hits[i].rect.h;
-			if (everlive_osd_build_stats_tooltip(
-				    sdl->renderer, &sdl->stats,
-				    sdl->stats_hover_action,
-				    g_stats_shortcuts, STATS_SHORTCUT_COUNT,
-				    scale))
-				everlive_osd_render_stats_tooltip(
-					sdl->renderer, &sdl->stats, &screen,
-					win_w, win_h);
-			return;
-		}
-	}
-	if (g_hover_action == EVERLIVE_OSD_ACTION_NONE)
+	if (sdl->popup_open || g_hover_action == EVERLIVE_OSD_ACTION_NONE)
 		return;
 	anchor = sdl_card_hit(sdl, g_hover_action);
 	if (!anchor)
@@ -1987,12 +1944,7 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 	stats_action = (stats_enabled && sdl->stats.texture) ?
 		sdl_hit_stats_raw(sdl, x, y) : EVERLIVE_OSD_ACTION_NONE;
 	if (stats_action != EVERLIVE_OSD_ACTION_NONE) {
-		switch (stats_action) {
-		case EVERLIVE_OSD_ACTION_STATS_QUICKNAV:
-			sdl_quicknav_force(sdl);
-			sdl_toast(sdl, "Quick Nav: On");
-			break;
-		case EVERLIVE_OSD_ACTION_STATS_CLOSE:
+		if (stats_action == EVERLIVE_OSD_ACTION_STATS_CLOSE) {
 			atomic_store_explicit(&st->osd, false,
 					      __ATOMIC_RELAXED);
 			everlive_osd_destroy_stats(&sdl->stats);
@@ -2000,10 +1952,6 @@ static bool sdl_handle_mouse(struct everlive_state *st,
 			sdl->stats_dirty = true;
 			sdl_card_invalidate(sdl);
 			sdl_toast(sdl, "Performance HUD: Off");
-			break;
-		case EVERLIVE_OSD_ACTION_STATS_SHORTCUTS:
-		default:
-			break;
 		}
 		return true;
 	}
@@ -2526,8 +2474,11 @@ static void *everlive_thread(void *arg)
 								  __ATOMIC_RELAXED);
 				bool stats_enabled = atomic_load_explicit(
 					&st->osd, __ATOMIC_RELAXED);
-				char line1[160];
-				char line2[160];
+				char lines[EVERLIVE_OSD_STATS_MAX_LINES][128];
+				const char *line_ptrs[EVERLIVE_OSD_STATS_MAX_LINES];
+				int line_count = 0;
+				int max_width;
+				int i;
 				int out_w = st->frame[port].width ?
 					(int)st->frame[port].width : 1920;
 				int out_h = st->frame[port].height ?
@@ -2552,24 +2503,46 @@ static void *everlive_thread(void *arg)
 					   sdl.stats_dirty ||
 					   now - sdl.stats_built_ns >=
 						   EVERLIVE_STATUS_NS) {
-					snprintf(line1, sizeof(line1),
-						 "EverLive DUO - %s  (%s%s)",
-						 shm_port_name(port),
-						 aspect_mode_label(aspect),
-						 scale == EVERLIVE_SCALE_INTEGER ?
-						 " Integer" : "");
-					snprintf(line2, sizeof(line2),
-						 "%ux%u -> %ux%u YUYV  |  %u Hz %u ch LPCM  |  Vol %s%d%%",
-						 shm_port_source_width(st, port),
-						 shm_port_source_height(st, port),
-						 out_w, out_h,
-						 shm_port_rate(st, port),
-						 shm_port_channels(st, port),
-						 muted ? "Muted/" : "", vol);
+#define ADD_STAT_LINE(...) \
+	do { \
+		if (line_count < EVERLIVE_OSD_STATS_MAX_LINES) \
+			snprintf(lines[line_count++], sizeof(lines[0]), \
+				 __VA_ARGS__); \
+	} while (0)
+					ADD_STAT_LINE("Input %s",
+						      shm_port_name(port));
+					if (shm_port_source_width(st, port) &&
+					    shm_port_source_height(st, port))
+						ADD_STAT_LINE("%ux%u -> %ux%u",
+							      shm_port_source_width(st, port),
+							      shm_port_source_height(st, port),
+							      out_w, out_h);
+					else
+						ADD_STAT_LINE("No signal");
+					ADD_STAT_LINE("YUYV");
+					if (shm_port_source_fps(st, port))
+						ADD_STAT_LINE("%u FPS",
+							      shm_port_source_fps(st, port));
+					ADD_STAT_LINE("%u Hz",
+						      shm_port_rate(st, port));
+					ADD_STAT_LINE("%u ch LPCM",
+						      shm_port_channels(st, port));
+					ADD_STAT_LINE("Vol %s%d%%",
+						      muted ? "Muted/" : "", vol);
+					ADD_STAT_LINE("Aspect %s",
+						      aspect_mode_label(aspect));
+					ADD_STAT_LINE("Scale %s",
+						      scale == EVERLIVE_SCALE_INTEGER ?
+						      "Integer" : "Fit");
+#undef ADD_STAT_LINE
+					for (i = 0; i < line_count; i++)
+						line_ptrs[i] = lines[i];
+					max_width = everlive_osd_stats_max_width(
+						win_w, sdl.card.width,
+						(float)win_h / 1080.0f);
 					everlive_osd_build_stats(
-						sdl.renderer, line1, line2,
-						g_stats_shortcuts,
-						STATS_SHORTCUT_COUNT,
+						sdl.renderer, line_ptrs,
+						line_count, max_width,
 						sdl.stats_hover_action,
 						(float)win_h / 1080.0f,
 						win_w, win_h, &sdl.stats);

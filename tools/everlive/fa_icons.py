@@ -82,7 +82,6 @@ ICONS = {
     "chart-bar": ("solid", "\uf080"),
     "microchip": ("solid", "\uf2db"),
     "disk": ("solid", "\uf0a0"),
-    "ellipsis": ("solid", "\uf141"),
     "xmark": ("solid", "\uf00d"),
     # brands
     "discord": ("brands", "\uf392"),
@@ -136,7 +135,6 @@ _FALLBACK_GLYPHS = {
     "chart-bar": "▥",
     "microchip": "▤",
     "disk": "▥",
-    "ellipsis": "…",
     "xmark": "×",
     "discord": "◉",
     "github": "◆",

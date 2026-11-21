@@ -44,8 +44,6 @@ class OsdThemeTests(unittest.TestCase):
     def test_stats_panel_icons(self):
         values = _defines(HEADER)
         self.assertEqual(values["ICON_CHART"], 0xF080)
-        self.assertEqual(values["ICON_ELLIPSIS"], 0xF141)
-        self.assertEqual(values["ICON_KEYBOARD"], 0xF11C)
         self.assertEqual(values["ICON_XMARK"], 0xF00D)
 
     def test_pip_uses_window_restore_and_fullscreen_uses_maximize(self):
