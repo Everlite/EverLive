@@ -84,5 +84,50 @@ class OsdModeTests(unittest.TestCase):
         self.assertEqual(window._ipc.calls, [])
 
 
+@unittest.skipUnless(everlive_viewer.HAS_QT, "PySide6 is not installed")
+class RecordingUiTests(unittest.TestCase):
+    class FakeRecorder:
+        def __init__(self, active=True):
+            self.is_recording = active
+            self.current_plan = SimpleNamespace(fps=60) if active else None
+
+        def format_elapsed(self):
+            return "00:01:23"
+
+        def format_size(self):
+            return "12.0 MB"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _window(self, active=True):
+        from PySide6.QtWidgets import QLabel
+        from ui_widgets import IconButton, StatusChip
+        return SimpleNamespace(
+            recorder=self.FakeRecorder(active),
+            _osd_recording_state=not active,
+            _ipc=None,
+            btn_record=IconButton("record", "Record"),
+            chip_bar_record=StatusChip("Recording", "danger"),
+            lbl_rec_status=QLabel("Standby"),
+        )
+
+    def test_recording_chip_is_conditional_and_exact(self):
+        window = self._window(active=True)
+        everlive_viewer.MainWindow._sync_recording_ui(window)
+        self.assertEqual(window.chip_bar_record.text(), "Recording")
+        self.assertFalse(window.chip_bar_record.isHidden())
+        self.assertTrue(window.btn_record.property("recording"))
+        self.assertEqual(window.btn_record.icon_name(), "stop")
+
+        window = self._window(active=False)
+        everlive_viewer.MainWindow._sync_recording_ui(window)
+        self.assertTrue(window.chip_bar_record.isHidden())
+        self.assertFalse(window.btn_record.property("recording"))
+        self.assertEqual(window.btn_record.icon_name(), "record")
+
+
 if __name__ == "__main__":
     unittest.main()

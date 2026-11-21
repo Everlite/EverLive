@@ -87,6 +87,8 @@ ENGINE_VFIO_TEXT = "● Userspace VFIO"
 V4L2_DEFAULT_DEVICE = "/dev/video10"
 # One breakpoint for the compact header label and compact chrome.
 HEADER_COMPACT_WIDTH = 1340
+# The EDID readout is the first telemetry detail to run out of room.
+DECK_EDID_WIDTH = 1440
 V4L2_DUO_SECOND_DEVICE = "/dev/video11"
 AUDIO_TAP_NODE = "everlive-capture-audio"
 
@@ -3713,18 +3715,6 @@ if HAS_QT:
                 self.btn_multiview.toggled.connect(self.on_multiview_toggled)
                 source_layout.addWidget(self.btn_multiview, 0, Qt.AlignVCenter)
 
-            # Picture-in-picture overlay over the main card's picture.
-            self.btn_pip = IconButton(
-                "window-restore",
-                "Picture-in-picture overlay: shows a webcam or 2nd capture source in a corner "
-                "of the picture and adds it to recordings. Settings: Record "
-                "→ Picture-in-Picture.",
-                checkable=True, size=ui_theme.CONTROL_H, icon_size=15)
-            self.btn_pip.setChecked(
-                bool(everlive_cam.normalize_settings(load_settings())["pip_enabled"]))
-            self.btn_pip.toggled.connect(self.on_pip_toggled)
-            source_layout.addWidget(self.btn_pip, 0, Qt.AlignVCenter)
-
             # Built for every card; _apply_card_profile() shows it on the DUO.
             saved_input = load_settings().get("duo_input", 0)
             self.combo_duo_input = QComboBox()
@@ -3782,6 +3772,28 @@ if HAS_QT:
                 self.btn_studio.setToolTip(
                     "Studio / headless mode requires the userspace VFIO engine.")
             action_layout.addWidget(self.btn_studio)
+
+            # Picture-in-picture overlay over the main card's picture.
+            self.btn_pip = IconButton(
+                "window-restore",
+                "Picture-in-picture overlay: shows a webcam or 2nd capture source in a corner "
+                "of the picture and adds it to recordings. Settings: Capture "
+                "→ Picture-in-Picture.",
+                checkable=True, size=ui_theme.CONTROL_H, icon_size=15)
+            self.btn_pip.setObjectName("actionButton")
+            self.btn_pip.setChecked(
+                bool(everlive_cam.normalize_settings(load_settings())["pip_enabled"]))
+            self.btn_pip.toggled.connect(self.on_pip_toggled)
+            action_layout.addWidget(self.btn_pip)
+
+            self.btn_record = IconButton(
+                "record", "Start Video Recording (Ctrl+R)",
+                size=ui_theme.CONTROL_H, icon_size=15,
+                color=ui_theme.DANGER, active_color=ui_theme.ON_ACCENT)
+            self.btn_record.setObjectName("actionRecord")
+            self.btn_record.setProperty("recording", False)
+            self.btn_record.clicked.connect(self.toggle_recording)
+            action_layout.addWidget(self.btn_record)
 
             self.btn_resync = IconButton(
                 "rotate",
@@ -4192,7 +4204,7 @@ if HAS_QT:
                 return row
 
             self.inspector_tabbar = SegmentedControl(
-                [("Video", 0), ("Audio", 1), ("Record", 2), ("System", 3)],
+                [("Video", 0), ("Audio", 1), ("Capture", 2), ("System", 3)],
                 button_height=36,
                 object_name="inspectorTabbar")
             self.inspector_tabbar.setFixedHeight(ui_theme.CONTROL_H)
@@ -4585,7 +4597,6 @@ if HAS_QT:
                 "5.1/7.1 fall back to an ITU-R BS.775 stereo downmix when "
                 "the audio sink cannot open them."), 0, 0, 1, 2)
             lay_stream.addWidget(card_audio)
-            lay_stream.addStretch(1)
 
             # --- On-Screen Overlay Card (grouped cleanly!) ---
             card_osd, grid_osd = _section("ON-SCREEN OVERLAY", "#F287A7")
@@ -4987,8 +4998,8 @@ if HAS_QT:
                 "DMA-BUF Zero-Copy are always active without kernel "
                 "modules.</div>")
             grid_obs.addWidget(note, 2, 0)
-            lay_rec.addWidget(card_obs)
-            lay_rec.addStretch(1)
+            lay_stream.addWidget(card_obs)
+            lay_stream.addStretch(1)
 
             # =============================================================
             # TAB 3: HARDWARE, APP BEHAVIOR & KEYBOARD SHORTCUTS
@@ -5343,14 +5354,7 @@ if HAS_QT:
             self.chip_bar_capture.setVisible(True)
             b_layout.addWidget(self.chip_bar_capture, 0, Qt.AlignVCenter)
 
-            self.btn_record = QPushButton("Record")
-            self.btn_record.setObjectName("btnGhost")
-            self.btn_record.setFixedSize(98, ui_theme.BUTTON_H)
-            self.btn_record.setCursor(Qt.PointingHandCursor)
-            self.btn_record.clicked.connect(self.toggle_recording)
-            b_layout.addWidget(self.btn_record, 0, Qt.AlignVCenter)
-
-            self.chip_bar_record = StatusChip("● REC 00:00", "danger")
+            self.chip_bar_record = StatusChip("Recording", "danger")
             self.chip_bar_record.setVisible(False)
             b_layout.addWidget(self.chip_bar_record, 0, Qt.AlignVCenter)
             self._sync_recording_ui()
@@ -5578,10 +5582,13 @@ if HAS_QT:
                 self.lbl_hints.setVisible(False)
             # The deck drops secondary readouts before they start clipping.
             for attr in ("lbl_hero_signal", "lbl_drops_counter",
-                         "lbl_fg_status", "lbl_kv_pclk"):
+                         "lbl_fg_status"):
                 widget = getattr(self, attr, None)
                 if widget is not None:
                     widget.setVisible(not narrow)
+            if hasattr(self, "lbl_kv_pclk"):
+                self.lbl_kv_pclk.setVisible(
+                    self.width() >= DECK_EDID_WIDTH)
             self._refresh_header_labels()
             self._apply_capture_controls()
 
@@ -5595,6 +5602,8 @@ if HAS_QT:
                 button for button in (
                     getattr(self, "btn_launch", None),
                     getattr(self, "btn_studio", None),
+                    getattr(self, "btn_pip", None),
+                    getattr(self, "btn_record", None),
                     getattr(self, "btn_resync", None),
                 )
                 if button is not None and not button.isHidden()
@@ -5865,7 +5874,7 @@ if HAS_QT:
                 self.btn_studio.setToolTip(
                     "Stop the headless streamer and release the capture card.")
             elif self._launch_mode == "gaming":
-                self.btn_launch.set_icon("video")
+                self.btn_launch.set_icon("stop")
                 self.btn_launch.setEnabled(True)
                 self.btn_launch.setToolTip(
                     "Local Capture Active — click to stop the gaming session")
@@ -7569,57 +7578,19 @@ if HAS_QT:
                     ipc.set_recording(active)
 
             if hasattr(self, "btn_record"):
-                if active:
-                    self.btn_record.setStyleSheet(
-                        "QPushButton#btnGhost {"
-                        f" background-color: {ui_theme.DANGER_SOLID};"
-                        f" border: 1px solid {ui_theme.DANGER_BORDER_BRIGHT};"
-                        f" color: {ui_theme.ON_ACCENT};"
-                        " font-weight: 700;"
-                        " padding: 0px 10px;"
-                        " min-height: 34px; max-height: 34px;"
-                        "}"
-                        "QPushButton#btnGhost:hover {"
-                        f" background-color: {ui_theme.DANGER_SOLID_HOVER};"
-                        f" border-color: {ui_theme.DANGER_HOVER_BORDER};"
-                        f" color: {ui_theme.ON_ACCENT};"
-                        "}")
-                else:
-                    self.btn_record.setStyleSheet(
-                        "QPushButton#btnGhost {"
-                        " padding: 0px 10px;"
-                        " min-height: 34px; max-height: 34px;"
-                        "}")
-                if fa_icons.available():
-                    self.btn_record.setText("Stop" if active else "Record")
-                    self.btn_record.setIcon(
-                        fa_icons.icon("stop", ui_theme.ON_ACCENT, 12) if active
-                        else fa_icons.icon("record", ui_theme.DANGER, 12,
-                                           active_color=ui_theme.DANGER))
-                    self.btn_record.setIconSize(QSize(12, 12))
-                else:
-                    glyph = fa_icons.fallback_text("stop" if active else "record")
-                    label = "Stop" if active else "Record"
-                    self.btn_record.setText(f"{glyph} {label}")
+                self.btn_record.set_icon(
+                    "stop" if active else "record",
+                    color=ui_theme.ON_ACCENT if active else ui_theme.DANGER)
                 self.btn_record.setToolTip(
                     "Stop Video Recording (Ctrl+R)" if active
                     else "Start Video Recording (Ctrl+R)")
+                if bool(self.btn_record.property("recording")) != active:
+                    self.btn_record.setProperty("recording", active)
+                    self.btn_record.style().unpolish(self.btn_record)
+                    self.btn_record.style().polish(self.btn_record)
 
             if hasattr(self, "chip_bar_record"):
-                if active and plan is not None:
-                    elapsed = self.recorder.format_elapsed()
-                    size_txt = self.recorder.format_size()
-                    chip_txt = f"● REC {elapsed} · {plan.fps} fps · {size_txt}"
-                    if self.chip_bar_record.state_text() != chip_txt:
-                        self.chip_bar_record.set_state(chip_txt, "danger")
-                    width = (self.chip_bar_record.fontMetrics().horizontalAdvance(chip_txt)
-                             + 34)
-                    self.chip_bar_record.setMinimumWidth(width)
-                    self.chip_bar_record.setSizePolicy(
-                        QSizePolicy.Minimum, QSizePolicy.Fixed)
-                    self.chip_bar_record.setVisible(True)
-                else:
-                    self.chip_bar_record.setVisible(False)
+                self.chip_bar_record.setVisible(active)
 
             if hasattr(self, "lbl_rec_status"):
                 if active and plan is not None:

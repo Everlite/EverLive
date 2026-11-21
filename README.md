@@ -310,7 +310,7 @@ While it runs, type `r` + Enter to start/stop recording, `s` for status and `q` 
 
 ## Webcam Picture-in-Picture
 
-The Console Hub can show a webcam in a corner of the main card's picture and put it into recordings. Turn it on with the **camera** button in the header or **Audio & Stream → Webcam → Picture-in-Picture**; the same card picks the camera, the mode (720p/1080p at 30 or 60 FPS; 720p60 by default), the corner and the size. The webcam starts and stops with capture.
+The Console Hub can show a webcam in a corner of the main card's picture and put it into recordings. Turn it on with the **picture-in-picture** button in the header or **Capture → Picture-in-Picture**; the same card picks the camera, the mode (720p/1080p at 30 or 60 FPS; 720p60 by default), the corner and the size. The webcam starts and stops with capture.
 
 The webcam is opened once by the bridge `everlive_camd` (built by `make`, in `tools/everlive-cam`), which publishes it into the frame store `/dev/shm/everlive_cam_v4l2_shm`. Everything else reads from there, so several programs can use the camera at the same time:
 

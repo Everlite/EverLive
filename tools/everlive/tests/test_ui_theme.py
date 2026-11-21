@@ -108,6 +108,10 @@ class TokenTests(unittest.TestCase):
         stylesheet = ui_theme.build_stylesheet()
         self.assertIn("QWidget#actionGroup", stylesheet)
         self.assertIn("QPushButton#actionStart", stylesheet)
+        self.assertIn("QPushButton#actionRecord", stylesheet)
+        self.assertIn('QPushButton#actionButton:checked', stylesheet)
+        self.assertIn(
+            'QPushButton#actionRecord[recording="true"]', stylesheet)
 
         start = stylesheet.index("QComboBox:on")
         block = stylesheet[start:stylesheet.index("}", start)]

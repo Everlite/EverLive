@@ -53,7 +53,6 @@ DANGER_BORDER = "#7A2A38"
 DANGER_SOLID = "#9E3342"
 DANGER_SOLID_HOVER = "#B53B4C"
 DANGER_BORDER_BRIGHT = "#FF5D5D"
-DANGER_HOVER_BORDER = "#FF7885"
 ON_ACCENT = "#FFFFFF"
 
 CHIP_BG = "#211F2E"
@@ -166,7 +165,6 @@ TOKENS = {
     "DANGER_SOLID": DANGER_SOLID,
     "DANGER_SOLID_HOVER": DANGER_SOLID_HOVER,
     "DANGER_BORDER_BRIGHT": DANGER_BORDER_BRIGHT,
-    "DANGER_HOVER_BORDER": DANGER_HOVER_BORDER,
     "ON_ACCENT": ON_ACCENT,
     "CHIP_BG": CHIP_BG,
     "CHIP_BORDER": CHIP_BORDER,
@@ -647,29 +645,35 @@ QWidget#actionGroup {
     border-radius: 6px;
 }
 QPushButton#actionButton,
-QPushButton#actionStart {
+QPushButton#actionStart,
+QPushButton#actionRecord {
     border: none;
     border-radius: 0px;
     padding: 0px;
 }
 QPushButton#actionButton[actionPos="first"],
-QPushButton#actionStart[actionPos="first"] {
+QPushButton#actionStart[actionPos="first"],
+QPushButton#actionRecord[actionPos="first"] {
     border-top-left-radius: 6px;
     border-bottom-left-radius: 6px;
 }
 QPushButton#actionButton[actionPos="last"],
-QPushButton#actionStart[actionPos="last"] {
+QPushButton#actionStart[actionPos="last"],
+QPushButton#actionRecord[actionPos="last"] {
     border-top-right-radius: 6px;
     border-bottom-right-radius: 6px;
 }
 QPushButton#actionButton[actionPos="only"],
-QPushButton#actionStart[actionPos="only"] {
+QPushButton#actionStart[actionPos="only"],
+QPushButton#actionRecord[actionPos="only"] {
     border-radius: 6px;
 }
 QPushButton#actionButton[actionPos="first"],
 QPushButton#actionButton[actionPos="middle"],
 QPushButton#actionStart[actionPos="first"],
-QPushButton#actionStart[actionPos="middle"] {
+QPushButton#actionStart[actionPos="middle"],
+QPushButton#actionRecord[actionPos="first"],
+QPushButton#actionRecord[actionPos="middle"] {
     border-right: 1px solid @GROUP_BORDER@;
 }
 QPushButton#actionStart {
@@ -680,14 +684,28 @@ QPushButton#actionStart:hover {
     background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
         stop:0 #2B9679, stop:1 #40BA98);
 }
-QPushButton#actionButton {
+QPushButton#actionButton,
+QPushButton#actionRecord {
     background-color: transparent;
 }
-QPushButton#actionButton:hover {
+QPushButton#actionButton:hover,
+QPushButton#actionRecord:hover {
     background-color: @SURFACE_HOVER@;
+}
+QPushButton#actionButton:checked {
+    background-color: @BLUE@;
+}
+QPushButton#actionButton:checked:hover {
+    background-color: @BLUE_HOVER@;
 }
 QPushButton#actionButton:disabled {
     background-color: transparent;
+}
+QPushButton#actionRecord[recording="true"] {
+    background-color: @DANGER_BG@;
+}
+QPushButton#actionRecord[recording="true"]:hover {
+    background-color: @DANGER_SOLID@;
 }
 
 /* Buttons */
