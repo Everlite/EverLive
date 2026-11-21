@@ -85,6 +85,8 @@ except Exception:
         _gc553g2_control = None
 ENGINE_VFIO_TEXT = "● Userspace VFIO"
 V4L2_DEFAULT_DEVICE = "/dev/video10"
+# One breakpoint for the compact header label and compact chrome.
+HEADER_COMPACT_WIDTH = 1340
 V4L2_DUO_SECOND_DEVICE = "/dev/video11"
 AUDIO_TAP_NODE = "everlive-capture-audio"
 
@@ -2710,7 +2712,7 @@ if HAS_QT:
                 p.drawArc(rect, 90 * 16, span_deg)
 
             # Center value
-            val_font = QFont("JetBrains Mono", 8)
+            val_font = QFont(ui_theme.MONO_FAMILY, 8)
             val_font.setPixelSize(12 if len(self.value_text) > 4 else 13)
             val_font.setBold(True)
             p.setFont(val_font)
@@ -2789,7 +2791,7 @@ if HAS_QT:
                 p.drawRoundedRect(fill_rect, 3.0, 3.0)
 
             # Right monospace value
-            val_font = QFont("JetBrains Mono", 8)
+            val_font = QFont(ui_theme.MONO_FAMILY, 8)
             val_font.setPixelSize(13)
             val_font.setBold(True)
             p.setFont(val_font)
@@ -2997,7 +2999,7 @@ if HAS_QT:
 
             # Top wordmark: EVERLIVE + cyan bar
             mark_y = 0.16 * h
-            mark_font = QFont("JetBrains Mono", max(9, int(round(16 * s))))
+            mark_font = QFont(ui_theme.MONO_FAMILY, max(9, int(round(16 * s))))
             mark_font.setBold(True)
             mark_font.setLetterSpacing(QFont.AbsoluteSpacing, max(2.0, 4.0 * s))
             p.setFont(mark_font)
@@ -3039,7 +3041,7 @@ if HAS_QT:
 
             # Headline: NO HDMI SIGNAL
             title_y = stand_top + stand_h + 40.0 * s
-            title_font = QFont("JetBrains Mono", max(14, int(round(34 * s))))
+            title_font = QFont(ui_theme.MONO_FAMILY, max(14, int(round(34 * s))))
             title_font.setBold(True)
             title_font.setLetterSpacing(QFont.AbsoluteSpacing, max(2.0, 4.0 * s))
             p.setFont(title_font)
@@ -3048,13 +3050,13 @@ if HAS_QT:
 
             # Subtitle: Waiting for console / input...
             sub_y = title_y + 60.0 * s
-            sub_font = QFont("JetBrains Mono", max(9, int(round(13 * s))))
+            sub_font = QFont(ui_theme.MONO_FAMILY, max(9, int(round(13 * s))))
             p.setFont(sub_font)
             p.setPen(QColor(100, 116, 139, 255))
             p.drawText(QRectF(0, sub_y, w, 26 * s), Qt.AlignHCenter | Qt.AlignTop, self._subtitle)
 
             # Footer: EVERLIVE  |  USERSPACE VFIO ENGINE
-            foot_font = QFont("JetBrains Mono", max(8, int(round(10 * s))))
+            foot_font = QFont(ui_theme.MONO_FAMILY, max(8, int(round(10 * s))))
             foot_font.setLetterSpacing(QFont.AbsoluteSpacing, max(1.0, 2.0 * s))
             p.setFont(foot_font)
             p.setPen(QColor(51, 65, 85, 230))
@@ -3079,7 +3081,7 @@ if HAS_QT:
 
             title = QLabel("Launch apps with the EverLive camera")
             title.setStyleSheet(
-                "color: #FFF6FB; font-size: 14px; font-weight: 700;")
+                f"color: {ui_theme.TEXT}; font-size: 16px; font-weight: 700;")
             root.addWidget(title)
 
             nodes = ", ".join(profile.preload_nodes) or "no nodes"
@@ -3164,7 +3166,8 @@ if HAS_QT:
 
                 text = QVBoxLayout()
                 name = QLabel(f"{app.name}  ·  {app.badge}")
-                name.setStyleSheet("color: #F7F4FC; font-weight: 600;")
+                name.setStyleSheet(
+                    f"color: {ui_theme.TEXT}; font-weight: 600;")
                 text.addWidget(name)
                 state = QLabel(
                     "Shortcut installed" if app_integrations.launcher_exists(app)
@@ -3179,7 +3182,7 @@ if HAS_QT:
                         "Experimental: Chromium's renderer sandbox may block "
                         "the virtual camera.")
                     warn.setObjectName("fieldLabel")
-                    warn.setStyleSheet("color: #F0B17B;")
+                    warn.setStyleSheet(f"color: {ui_theme.WARN};")
                     warn.setWordWrap(True)
                     text.addWidget(warn)
                 lay.addLayout(text, 1)
@@ -3205,7 +3208,7 @@ if HAS_QT:
                 else:
                     warn = QLabel("LD_PRELOAD cannot cross this sandbox.")
                     warn.setObjectName("fieldLabel")
-                    warn.setStyleSheet("color: #F0B17B;")
+                    warn.setStyleSheet(f"color: {ui_theme.WARN};")
                     lay.addWidget(warn)
 
                 self.body_layout.addWidget(row)
@@ -3383,8 +3386,10 @@ if HAS_QT:
             self.pci = str(card.get("pci") or "")
             self.setObjectName("multiviewTile")
             self.setStyleSheet(
-                "QFrame#multiviewTile { background-color: #07060E;"
-                " border: 1px solid #23202F; border-radius: 6px; }")
+                "QFrame#multiviewTile {"
+                f" background-color: {ui_theme.VIDEO_BG};"
+                f" border: 1px solid {ui_theme.BORDER};"
+                f" border-radius: {ui_theme.SEGMENT_RADIUS_CSS}; }}")
             lay = QVBoxLayout(self)
             lay.setContentsMargins(1, 1, 1, 1)
             lay.setSpacing(0)
@@ -3396,15 +3401,16 @@ if HAS_QT:
             bar_lay.setSpacing(8)
             self.lbl_name = QLabel(card_display_name(card), bar)
             self.lbl_name.setStyleSheet(
-                "color: #E7EBF2; font-size: 11.5px; font-weight: 700;"
+                f"color: {ui_theme.TEXT}; font-size: 11.5px; font-weight: 700;"
                 " letter-spacing: 0.4px;")
             bar_lay.addWidget(self.lbl_name)
             self.lbl_state = QLabel("Starting…", bar)
-            self.lbl_state.setStyleSheet("color: #9AA0B0; font-size: 11px;")
+            self.lbl_state.setStyleSheet(
+                f"color: {ui_theme.TEXT_MUTED}; font-size: 11px;")
             bar_lay.addWidget(self.lbl_state, 1)
             self.lbl_rec = QLabel("", bar)
             self.lbl_rec.setStyleSheet(
-                "color: #FF6B7A; font-size: 11px; font-weight: 700;")
+                f"color: {ui_theme.DANGER}; font-size: 11px; font-weight: 700;")
             bar_lay.addWidget(self.lbl_rec)
             self.btn_listen = IconButton(
                 "mute", "Listen to this card (its recording always has sound)",
@@ -3423,7 +3429,8 @@ if HAS_QT:
             bar_lay.addWidget(self.slider_vol)
             self.lbl_vol = QLabel(f"{self.slider_vol.value()}%", bar)
             self.lbl_vol.setFixedWidth(38)
-            self.lbl_vol.setStyleSheet("color: #9AA0B0; font-size: 11px;")
+            self.lbl_vol.setStyleSheet(
+                f"color: {ui_theme.TEXT_MUTED}; font-size: 11px;")
             bar_lay.addWidget(self.lbl_vol)
             lay.addWidget(bar)
 
@@ -3431,7 +3438,8 @@ if HAS_QT:
             self.host.setAttribute(Qt.WA_NativeWindow, True)
             self.host.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
             self.host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            self.host.setStyleSheet("background-color: #07060E;")
+            self.host.setStyleSheet(
+                f"background-color: {ui_theme.VIDEO_BG};")
             lay.addWidget(self.host, 1)
             _ = self.host.winId()
 
@@ -3594,6 +3602,7 @@ if HAS_QT:
 
             # Palette, spacing and control styling live in ui_theme.py so
             # the shell, inspector and dialogs share one source of truth.
+            ui_theme.ensure_fonts()
             self.setStyleSheet(ui_theme.build_stylesheet())
 
             central_widget = QWidget()
@@ -3706,7 +3715,7 @@ if HAS_QT:
 
             # Picture-in-picture overlay over the main card's picture.
             self.btn_pip = IconButton(
-                "camera",
+                "window-restore",
                 "Picture-in-picture overlay: shows a webcam or 2nd capture source in a corner "
                 "of the picture and adds it to recordings. Settings: Record "
                 "→ Picture-in-Picture.",
@@ -3875,7 +3884,8 @@ if HAS_QT:
             self.video_host.setAttribute(Qt.WA_NativeWindow, True)
             self.video_host.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
             self.video_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            self.video_host.setStyleSheet("background-color: #07060E;")
+            self.video_host.setStyleSheet(
+                f"background-color: {ui_theme.VIDEO_BG};")
             self.video_host.installEventFilter(self)
 
             # Webcam preview: a native sibling raised above video_host (and
@@ -4021,7 +4031,7 @@ if HAS_QT:
             fps_row.addWidget(self.lbl_fps_unit, 0, Qt.AlignBaseline)
             self.lbl_drops_counter = QLabel("0 drops · 0 underrun")
             self.lbl_drops_counter.setStyleSheet(
-                "color: #ACA5C0; font-family: 'JetBrains Mono', monospace; "
+                f"color: #ACA5C0; font-family: {ui_theme.MONO_STACK}; "
                 "font-size: 13px;")
             fps_row.addWidget(
                 self.lbl_drops_counter, 1,
@@ -4050,7 +4060,7 @@ if HAS_QT:
 
             self.lbl_budget_note = QLabel("Budget 16.7 ms / frame")
             self.lbl_budget_note.setStyleSheet(
-                "color: #94A3B8; font-family: 'JetBrains Mono', monospace; "
+                f"color: #94A3B8; font-family: {ui_theme.MONO_STACK}; "
                 "font-size: 13px;")
             seg3.addWidget(self.lbl_budget_note)
 
@@ -4897,7 +4907,7 @@ if HAS_QT:
             cam_ctrl_bar.addWidget(self.btn_cam_reset, 1)
 
             self.btn_cam_refresh = IconButton(
-                "arrow-rotate-right", "Reload hardware controls from device",
+                "rotate", "Reload hardware controls from device",
                 size=ui_theme.BUTTON_H, icon_size=15)
             self.btn_cam_refresh.clicked.connect(self._refresh_camera_controls)
             cam_ctrl_bar.addWidget(self.btn_cam_refresh, 0)
@@ -5322,11 +5332,8 @@ if HAS_QT:
                 self.slider_vol.setToolTip(
                     "Sets the PipeWire volume of the userspace SDL2 HDMI audio stream.")
 
-            self.lbl_audio_fmt = QLabel("No Audio")
-            self.lbl_audio_fmt.setObjectName("audioFormat")
-            self.lbl_audio_fmt.setFixedHeight(ui_theme.BUTTON_H)
+            self.lbl_audio_fmt = StatusChip("No Audio", "idle")
             self.lbl_audio_fmt.setMinimumWidth(124)
-            self.lbl_audio_fmt.setAlignment(Qt.AlignCenter)
             self.lbl_audio_fmt.setToolTip(
                 "Audio format detected by the userspace engine from the "
                 "IT6805 / SDL2 stream log.")
@@ -5384,7 +5391,7 @@ if HAS_QT:
             b_layout.addWidget(self.chk_popout, 0, Qt.AlignVCenter)
 
             self.btn_cinema_fs = IconButton(
-                "expand", "Cinema Fullscreen (F / F11)",
+                "maximize", "Cinema Fullscreen (F / F11)",
                 size=ui_theme.BUTTON_H, icon_size=15)
             self.btn_cinema_fs.setToolTip(
                 "Expand the embedded video stage to fullscreen "
@@ -5555,7 +5562,7 @@ if HAS_QT:
 
         def _apply_responsive_chrome(self):
             """Swap in compact header content before it starts clipping."""
-            narrow = self.width() < 1320
+            narrow = self.width() < HEADER_COMPACT_WIDTH
             if hasattr(self, "lbl_card_title"):
                 label = (getattr(self, "_card_short_label", "")
                          if narrow
@@ -5635,6 +5642,16 @@ if HAS_QT:
                 text += f" @ {rate}"
             return text, "active"
 
+        def _set_audio_status(self, text):
+            """Update the bottom-bar audio pill with the right semantic tone."""
+            if not hasattr(self, "lbl_audio_fmt"):
+                return
+            text = str(text or "No Audio")
+            tone = "idle" if text.strip().lower() == "no audio" else "active"
+            chip = self.lbl_audio_fmt
+            if chip.state_text() != text or chip.tone() != tone:
+                chip.set_state(text, tone)
+
         def _refresh_signal_badge(self):
             if not hasattr(self, "chip_bar_capture"):
                 return
@@ -5668,7 +5685,7 @@ if HAS_QT:
             # stays visible in both Simple and Advanced.
             show_launch = True
             if hasattr(self, "lbl_card_title"):
-                short = self.width() < 1340
+                short = self.width() < HEADER_COMPACT_WIDTH
                 card_label = (getattr(self, "_card_short_label", "")
                               if short
                               else getattr(self, "_card_full_label", ""))
@@ -5710,7 +5727,7 @@ if HAS_QT:
             self._sync_osd_mode()
             if hasattr(self, "btn_cinema_fs"):
                 self.btn_cinema_fs.set_icon(
-                    "compress" if self._cinema_fullscreen else "expand")
+                    "minimize" if self._cinema_fullscreen else "maximize")
                 self.btn_cinema_fs.setToolTip(
                     "Exit Cinema Fullscreen" if self._cinema_fullscreen
                     else "Cinema Fullscreen (F / F11)")
@@ -5930,7 +5947,7 @@ if HAS_QT:
                     f"Capture card is in use by {state['holder']} • "
                     "resumes automatically when they finish")
             if hasattr(self, "lbl_audio_fmt"):
-                self.lbl_audio_fmt.setText("No Audio")
+                self._set_audio_status("No Audio")
             return True
 
         def _handoff_resumed(self):
@@ -6050,7 +6067,7 @@ if HAS_QT:
                     self.lbl_card_title.setToolTip("Status: Standby")
             else:
                 self.lbl_background_service.setStyleSheet(
-                    "color: #F0B17B; font-size: 11px;")
+                    f"color: {ui_theme.WARN}; font-size: 11px;")
                 if self.lbl_card_title.toolTip().startswith(
                         "Status: Background service"):
                     self.lbl_card_title.setToolTip("Status: Standby")
@@ -6154,20 +6171,25 @@ if HAS_QT:
             ("F / F11 / Double-click", "Toggle Cinema Fullscreen"),
             ("Esc", "Exit Fullscreen"),
             ("G", "Cycle Frame Generation"),
-            ("Tab / O", "Toggle On-Screen Stats"),
-            ("P", "Cycle OSD Corner"),
+            ("Tab", "Toggle On-Screen Stats"),
             ("H", "Toggle HDR Tonemapping"),
-            ("L", "Cycle Scaling Mode"),
             ("M", "Mute Or Unmute Audio"),
             ("Ctrl+Shift+A", "Toggle Simple / Advanced View"),
             ("Ctrl+R", "Start / Stop Video Recording"),
             ("T", "Dock Remote Video"),
         )
 
+        ENGINE_SHORTCUT_ROWS = (
+            ("I", "Toggle Performance HUD"),
+            ("L", "Cycle Scaling Mode"),
+            ("O", "Toggle Quick Navigation Bar"),
+            ("P", "Toggle OSD Position (Top / Bottom)"),
+        )
+
         def _open_shortcuts_dialog(self):
             dialog = QDialog(self)
             dialog.setWindowTitle("EverLive Keyboard Shortcuts")
-            dialog.resize(560, 500)
+            dialog.resize(560, 610)
             dialog.setStyleSheet(CameraLauncherDialog.DIALOG_QSS)
 
             lay = QVBoxLayout(dialog)
@@ -6176,37 +6198,48 @@ if HAS_QT:
 
             title = QLabel("Keyboard Shortcuts")
             title.setStyleSheet(
-                "color: #E7EBF2; font-size: 15px; font-weight: 700;")
+                f"color: {ui_theme.TEXT}; font-size: 15px; font-weight: 700;")
             lay.addWidget(title)
 
             subtitle = QLabel(
-                "Shortcuts work while EverLive has focus. The engine window "
-                "accepts the same keys.")
+                "Hub shortcuts work while EverLive has focus. Engine-window "
+                "keys work when the video window has focus.")
             subtitle.setObjectName("hintText")
             subtitle.setWordWrap(True)
             lay.addWidget(subtitle)
 
-            grid = QGridLayout()
-            grid.setColumnStretch(0, 1)
-            grid.setColumnStretch(1, 0)
-            grid.setHorizontalSpacing(16)
-            grid.setVerticalSpacing(9)
-            for row, (keys, description) in enumerate(self.SHORTCUT_ROWS):
-                desc_label = QLabel(description)
-                desc_label.setObjectName("fieldLabel")
-                desc_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                grid.addWidget(desc_label, row, 0)
+            def _shortcut_grid(rows):
+                grid = QGridLayout()
+                grid.setColumnStretch(0, 1)
+                grid.setColumnStretch(1, 0)
+                grid.setHorizontalSpacing(16)
+                grid.setVerticalSpacing(9)
+                for row, (keys, description) in enumerate(rows):
+                    desc_label = QLabel(description)
+                    desc_label.setObjectName("fieldLabel")
+                    desc_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                    grid.addWidget(desc_label, row, 0)
 
-                key_box = QHBoxLayout()
-                key_box.setContentsMargins(0, 0, 0, 0)
-                key_box.setSpacing(4)
-                for part in keys.split(" / "):
-                    key_label = QLabel(part)
-                    key_label.setObjectName("kbd")
-                    key_label.setAlignment(Qt.AlignCenter)
-                    key_box.addWidget(key_label)
-                grid.addLayout(key_box, row, 1, Qt.AlignRight)
-            lay.addLayout(grid)
+                    key_box = QHBoxLayout()
+                    key_box.setContentsMargins(0, 0, 0, 0)
+                    key_box.setSpacing(4)
+                    for part in keys.split(" / "):
+                        key_label = QLabel(part)
+                        key_label.setObjectName("kbd")
+                        key_label.setAlignment(Qt.AlignCenter)
+                        key_box.addWidget(key_label)
+                    grid.addLayout(key_box, row, 1, Qt.AlignRight)
+                return grid
+
+            hub_heading = QLabel("HUB")
+            hub_heading.setObjectName("sectionTitle")
+            lay.addWidget(hub_heading)
+            lay.addLayout(_shortcut_grid(self.SHORTCUT_ROWS))
+
+            engine_heading = QLabel("ENGINE WINDOW")
+            engine_heading.setObjectName("sectionTitle")
+            lay.addWidget(engine_heading)
+            lay.addLayout(_shortcut_grid(self.ENGINE_SHORTCUT_ROWS))
             lay.addStretch(1)
 
             close = QPushButton("Close")
@@ -6542,7 +6575,7 @@ if HAS_QT:
                 return
 
             if hasattr(self, "lbl_audio_fmt"):
-                self.lbl_audio_fmt.setText(audio.get("label") or "No Audio")
+                self._set_audio_status(audio.get("label") or "No Audio")
 
             if signal_info.get("locked"):
                 interlace = "i" if signal_info.get("interlaced") else "p"
@@ -7268,7 +7301,7 @@ if HAS_QT:
                 lbl_title = QLabel(title)
                 lbl_title.setObjectName("fieldLabel")
                 lbl_val = QLabel(str(info.get("value", 0)))
-                lbl_val.setStyleSheet("color: #7AB8FF; font-weight: 600; font-size: 11px;")
+                lbl_val.setObjectName("numericValue")
                 h.addWidget(lbl_title, 1)
                 h.addWidget(lbl_val, 0)
                 lay.addLayout(h)
@@ -7294,10 +7327,24 @@ if HAS_QT:
                 lay.addWidget(control)
                 return box
 
+            def _camera_toggle(text: str, checked: bool, on_toggle,
+                               tooltip: str = ""):
+                """Wrap a dynamic camera checkbox in a Hub ToggleRow."""
+                row = ToggleRow(text, "", self._cam_ctrl_container)
+                chk = QCheckBox(row)
+                chk.setChecked(bool(checked))
+                if tooltip:
+                    chk.setToolTip(tooltip)
+                chk.toggled.connect(on_toggle)
+                chk.hide()
+                row.bind(chk)
+                return row
+
             row = 0
 
             # 1. Exposure & Lighting
-            exp_group = QGroupBox("Exposure && Lighting")
+            exp_group = QGroupBox("EXPOSURE && LIGHTING")
+            exp_group.setObjectName("cameraGroup")
             exp_lay = QGridLayout(exp_group)
             exp_lay.setContentsMargins(8, 10, 8, 8)
             exp_lay.setSpacing(8)
@@ -7329,10 +7376,13 @@ if HAS_QT:
 
             if "exposure_dynamic_framerate" in ctrls:
                 info = ctrls["exposure_dynamic_framerate"]
-                chk_dyn = QCheckBox("Dynamic Framerate in Low Light")
-                chk_dyn.setToolTip("When disabled, camera maintains full target FPS even in dimmer light (lower latency)")
-                chk_dyn.setChecked(bool(info.get("value", 1)))
-                chk_dyn.toggled.connect(lambda checked: self._on_camera_control_changed("exposure_dynamic_framerate", int(checked)))
+                chk_dyn = _camera_toggle(
+                    "Dynamic Framerate in Low Light",
+                    bool(info.get("value", 1)),
+                    lambda checked: self._on_camera_control_changed(
+                        "exposure_dynamic_framerate", int(checked)),
+                    "When disabled, camera maintains full target FPS even in "
+                    "dimmer light (lower latency)")
                 exp_lay.addWidget(chk_dyn, exp_row, 0, 1, 2)
                 exp_row += 1
 
@@ -7361,7 +7411,8 @@ if HAS_QT:
 
             # 2. Focus & Framing Group
             if any(k in ctrls for k in ("focus_automatic_continuous", "focus_auto", "focus_absolute", "zoom_absolute", "pan_absolute", "tilt_absolute")):
-                foc_group = QGroupBox("Focus && Framing")
+                foc_group = QGroupBox("FOCUS && FRAMING")
+                foc_group.setObjectName("cameraGroup")
                 foc_lay = QGridLayout(foc_group)
                 foc_lay.setContentsMargins(8, 10, 8, 8)
                 foc_lay.setSpacing(8)
@@ -7369,9 +7420,11 @@ if HAS_QT:
 
                 af_key = "focus_automatic_continuous" if "focus_automatic_continuous" in ctrls else "focus_auto" if "focus_auto" in ctrls else None
                 if af_key:
-                    chk_af = QCheckBox("Continuous Auto Focus")
-                    chk_af.setChecked(bool(ctrls[af_key].get("value", 1)))
-                    chk_af.toggled.connect(lambda checked, k=af_key: self._on_camera_control_changed(k, int(checked)))
+                    chk_af = _camera_toggle(
+                        "Continuous Auto Focus",
+                        bool(ctrls[af_key].get("value", 1)),
+                        lambda checked, k=af_key:
+                            self._on_camera_control_changed(k, int(checked)))
                     foc_lay.addWidget(chk_af, foc_row, 0, 1, 2)
                     foc_row += 1
 
@@ -7394,16 +7447,19 @@ if HAS_QT:
                 row += 1
 
             # 3. Image & Color Quality
-            col_group = QGroupBox("Color && Image Quality")
+            col_group = QGroupBox("COLOR && IMAGE QUALITY")
+            col_group.setObjectName("cameraGroup")
             col_lay = QGridLayout(col_group)
             col_lay.setContentsMargins(8, 10, 8, 8)
             col_lay.setSpacing(8)
             col_row = 0
 
             if "white_balance_automatic" in ctrls:
-                chk_wb = QCheckBox("Auto White Balance")
-                chk_wb.setChecked(bool(ctrls["white_balance_automatic"].get("value", 1)))
-                chk_wb.toggled.connect(lambda checked: self._on_camera_control_changed("white_balance_automatic", int(checked)))
+                chk_wb = _camera_toggle(
+                    "Auto White Balance",
+                    bool(ctrls["white_balance_automatic"].get("value", 1)),
+                    lambda checked: self._on_camera_control_changed(
+                        "white_balance_automatic", int(checked)))
                 col_lay.addWidget(chk_wb, col_row, 0, 1, 2)
                 col_row += 1
 
@@ -7516,17 +7572,17 @@ if HAS_QT:
                 if active:
                     self.btn_record.setStyleSheet(
                         "QPushButton#btnGhost {"
-                        " background-color: #9E3342;"
-                        " border: 1px solid #FF5D5D;"
-                        " color: #FFFFFF;"
+                        f" background-color: {ui_theme.DANGER_SOLID};"
+                        f" border: 1px solid {ui_theme.DANGER_BORDER_BRIGHT};"
+                        f" color: {ui_theme.ON_ACCENT};"
                         " font-weight: 700;"
                         " padding: 0px 10px;"
                         " min-height: 34px; max-height: 34px;"
                         "}"
                         "QPushButton#btnGhost:hover {"
-                        " background-color: #B53B4C;"
-                        " border-color: #FF7885;"
-                        " color: #FFFFFF;"
+                        f" background-color: {ui_theme.DANGER_SOLID_HOVER};"
+                        f" border-color: {ui_theme.DANGER_HOVER_BORDER};"
+                        f" color: {ui_theme.ON_ACCENT};"
                         "}")
                 else:
                     self.btn_record.setStyleSheet(
@@ -7537,9 +7593,9 @@ if HAS_QT:
                 if fa_icons.available():
                     self.btn_record.setText("Stop" if active else "Record")
                     self.btn_record.setIcon(
-                        fa_icons.icon("stop", "#FFFFFF", 12) if active
-                        else fa_icons.icon("record", "#FF6B7A", 12,
-                                           active_color="#FF8A96"))
+                        fa_icons.icon("stop", ui_theme.ON_ACCENT, 12) if active
+                        else fa_icons.icon("record", ui_theme.DANGER, 12,
+                                           active_color=ui_theme.DANGER))
                     self.btn_record.setIconSize(QSize(12, 12))
                 else:
                     glyph = fa_icons.fallback_text("stop" if active else "record")
@@ -8966,7 +9022,7 @@ if HAS_QT:
                         base_fps = float(getattr(self, "_fg_present_fps", 0.0) or 0.0) or fps
                         self.lbl_fps_hero.setText(f"{fg_output_fps:.0f}")
                         self.lbl_fps_hero.setStyleSheet(
-                            "color: #FF9EBC; font-family: 'JetBrains Mono', 'Fira Code', monospace; "
+                            f"color: #FF9EBC; font-family: {ui_theme.MONO_STACK}; "
                             "font-size: 24px; font-weight: 800; background: transparent; border: none;"
                         )
                         if hasattr(self, "lbl_fps_unit"):
@@ -8976,7 +9032,7 @@ if HAS_QT:
                     else:
                         self.lbl_fps_hero.setText(f"{fps:.1f}")
                         self.lbl_fps_hero.setStyleSheet(
-                            "color: #7EE8C8; font-family: 'JetBrains Mono', 'Fira Code', monospace; "
+                            f"color: #7EE8C8; font-family: {ui_theme.MONO_STACK}; "
                             "font-size: 24px; font-weight: 800; background: transparent; border: none;"
                         )
                         if hasattr(self, "lbl_fps_unit"):
@@ -8986,7 +9042,7 @@ if HAS_QT:
                 else:
                     self.lbl_fps_hero.setText("0.0")
                     self.lbl_fps_hero.setStyleSheet(
-                        "color: #FFF6FB; font-family: 'JetBrains Mono', 'Fira Code', monospace; "
+                        f"color: #FFF6FB; font-family: {ui_theme.MONO_STACK}; "
                         "font-size: 24px; font-weight: 800; background: transparent; border: none;"
                     )
                     if hasattr(self, "lbl_fps_unit"):
@@ -8997,12 +9053,12 @@ if HAS_QT:
                 self.lbl_drops_counter.setText(f"{drops} drops · {underruns} underrun")
                 if drops > 0 or underruns > 0:
                     self.lbl_drops_counter.setStyleSheet(
-                        "color: #F5C84B; font-family: 'JetBrains Mono', 'Fira Code', monospace; "
+                        f"color: #F5C84B; font-family: {ui_theme.MONO_STACK}; "
                         "font-size: 11px; font-weight: 700; background: transparent; border: none;"
                     )
                 else:
                     self.lbl_drops_counter.setStyleSheet(
-                        "color: #ACA5C0; font-family: 'JetBrains Mono', 'Fira Code', monospace; "
+                        f"color: #ACA5C0; font-family: {ui_theme.MONO_STACK}; "
                         "font-size: 11px; font-weight: 500; background: transparent; border: none;"
                     )
 
@@ -9308,12 +9364,15 @@ if HAS_QT:
             if not hasattr(self, "btn_mute"):
                 return
             icon_name = "mute" if self.muted else "volume"
-            self.btn_mute.set_icon(icon_name)
+            self.btn_mute.set_icon(
+                icon_name,
+                color=ui_theme.ON_ACCENT if self.muted else ui_theme.TEXT_MUTED)
             self.btn_mute.setToolTip(
                 "Unmute HDMI audio" if self.muted else "Mute HDMI audio")
             self.btn_mute.setStyleSheet(
-                "QPushButton#iconButton { background-color: #3B1D25; "
-                "border: 1px solid #7A2A38; }"
+                "QPushButton#iconButton {"
+                f" background-color: {ui_theme.DANGER_BG};"
+                f" border: 1px solid {ui_theme.DANGER_BORDER}; }}"
                 if self.muted else "")
 
         def on_volume_changed(self, val: int):
@@ -9422,7 +9481,7 @@ if HAS_QT:
                 if hasattr(self, "lbl_kv_audio"):
                     self.lbl_kv_audio.setText(audio_kv)
                 if hasattr(self, "lbl_audio_fmt"):
-                    self.lbl_audio_fmt.setText(self.streamer.audio_format_label())
+                    self._set_audio_status(self.streamer.audio_format_label())
                 self._update_telemetry_cards()
                 self._refresh_stage_overlay()
                 return
@@ -9470,7 +9529,7 @@ if HAS_QT:
             if hasattr(self, "lbl_kv_audio"):
                 self.lbl_kv_audio.setText("Standby")
             if hasattr(self, "lbl_audio_fmt"):
-                self.lbl_audio_fmt.setText("No Audio")
+                self._set_audio_status("No Audio")
             self._update_telemetry_cards()
             self._refresh_stage_overlay()
 
@@ -9482,7 +9541,7 @@ if HAS_QT:
                 # already drives the hero labels through _on_remote_status.
                 return
             if hasattr(self, "lbl_audio_fmt"):
-                self.lbl_audio_fmt.setText(
+                self._set_audio_status(
                     self.streamer.audio_format_label()
                     if self.streamer.is_running else "No Audio")
             if self.streamer.is_running:
@@ -9570,7 +9629,7 @@ if HAS_QT:
             info = self.streamer.get_signal_info()
             self._live = info
             if hasattr(self, "lbl_audio_fmt"):
-                self.lbl_audio_fmt.setText(
+                self._set_audio_status(
                     info.get("audio", "No Audio")
                     if info.get("locked") else "No Audio")
             if info["locked"]:

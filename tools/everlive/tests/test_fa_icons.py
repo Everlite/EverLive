@@ -3,13 +3,17 @@
 """Tests for the bundled Font Awesome icon helpers."""
 
 import os
+import re
 import sys
 import unittest
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import fa_icons  # noqa: E402
+
+VIEWER = Path(__file__).resolve().parents[1] / "everlive_viewer.py"
 
 
 class MappingTests(unittest.TestCase):
@@ -33,6 +37,14 @@ class MappingTests(unittest.TestCase):
         for name in fa_icons.ICONS:
             self.assertTrue(fa_icons.fallback_text(name), name)
 
+    def test_viewer_icon_names_exist(self):
+        text = VIEWER.read_text(encoding="utf-8")
+        used = set(re.findall(
+            r'(?:IconButton\(|set_icon\(|set_icon_name\()\s*"([^"]+)"',
+            text))
+        missing = sorted(used - set(fa_icons.ICONS))
+        self.assertEqual(missing, [])
+
 
 @unittest.skipUnless(fa_icons.HAS_QT, "PySide6 is not installed")
 class RenderTests(unittest.TestCase):
@@ -47,10 +59,19 @@ class RenderTests(unittest.TestCase):
 
     def test_icons_render(self):
         for name in ("play", "stop", "discord", "github", "help",
-                     "volume", "mute", "expand", "external"):
+                     "volume", "mute", "expand", "external",
+                     "maximize", "minimize"):
             icon = fa_icons.icon(name, "#E7EBF2", 18)
             self.assertFalse(icon.isNull(), name)
             self.assertFalse(icon.pixmap(18, 18).isNull(), name)
+
+    def test_checked_state_uses_active_colour(self):
+        from PySide6.QtGui import QIcon
+        icon = fa_icons.icon(
+            "camera", "#9AA0B0", 24, active_color="#FFFFFF")
+        off = icon.pixmap(24, 24, QIcon.Normal, QIcon.Off).toImage()
+        on = icon.pixmap(24, 24, QIcon.Normal, QIcon.On).toImage()
+        self.assertNotEqual(off, on)
 
     def test_brand_and_solid_families(self):
         self.assertEqual(fa_icons._FAMILIES.get("solid"),

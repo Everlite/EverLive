@@ -7,6 +7,7 @@ import re
 import sys
 import unittest
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import ui_theme  # noqa: E402
@@ -30,9 +31,10 @@ class TokenTests(unittest.TestCase):
         stylesheet = ui_theme.build_stylesheet()
         for selector in ("QFrame#headerBar", "QFrame#videoStageFrame",
                          "QFrame#cardFrame", "QFrame#bottomBar",
-                         "QTabWidget#inspectorTabs", "QWidget#segmentedControl",
+                         "QWidget#inspectorTabbar", "QWidget#segmentedControl",
                          "QPushButton#segmentButton", "QPushButton#iconButton",
-                         "QFrame#sourceGroup", "QLabel#statusChip"):
+                         "QFrame#sourceGroup", "QLabel#statusChip",
+                         "QGroupBox#cameraGroup"):
             self.assertIn(selector, stylesheet)
 
     def test_palette_matches_mockup_tokens(self):
@@ -44,7 +46,8 @@ class TokenTests(unittest.TestCase):
         stylesheet = ui_theme.build_stylesheet()
         for needle in ("QFrame#videoStageFrame",
                        "QFrame#telemetryDeck",
-                       "QFrame#cardFrame"):
+                       "QFrame#cardFrame",
+                       "QFrame#edidCard"):
             start = stylesheet.index(needle)
             block = stylesheet[start:stylesheet.index("}", start)]
             self.assertIn("border-radius: 12px", block, needle)
@@ -136,18 +139,28 @@ class TokenTests(unittest.TestCase):
         self.assertIn("background-color: #25334A", block)
         self.assertIn("width: 28px", block)
 
-    def test_audio_pill_matches_signal_chip_style(self):
+    def test_removed_dead_selectors(self):
         stylesheet = ui_theme.build_stylesheet()
-        start = stylesheet.index("QLabel#audioFormat")
-        block = stylesheet[start:stylesheet.index("}", start)]
-        self.assertIn("border-radius: 8px", block)
-        self.assertIn("padding: 0px 12px", block)
-        self.assertIn("font-size: 12.5px", block)
-        self.assertIn("font-weight: 600", block)
+        for selector in (
+                "QTabWidget#inspectorTabs",
+                "QLabel#audioFormat",
+                "QWidget#sourceSegments",
+                "QFrame#telemetryCard",
+                "QFrame#handshakeCard",
+                "QPushButton#btnBar",
+                "QPushButton#btnStepper",
+                "QPushButton#btnMute"):
+            self.assertNotIn(selector, stylesheet, selector)
 
         start = stylesheet.index("\nQPushButton {")
         block = stylesheet[start:stylesheet.index("}", start)]
         self.assertIn("min-height: 34px", block)
+
+    def test_shared_font_stacks_prefer_bundled_noto(self):
+        self.assertTrue(ui_theme.FONT_STACK.startswith('"Noto Sans"'))
+        self.assertTrue(ui_theme.MONO_STACK.startswith('"Noto Sans Mono"'))
+        self.assertEqual(ui_theme.FONT_FAMILY, "Noto Sans")
+        self.assertEqual(ui_theme.MONO_FAMILY, "Noto Sans Mono")
 
     def test_missing_tokens_reports_typos(self):
         found = ui_theme.missing_tokens("color: @NOT_A_TOKEN@;")
@@ -156,6 +169,24 @@ class TokenTests(unittest.TestCase):
     def test_radius_token_is_a_css_length(self):
         self.assertTrue(ui_theme.RADIUS_CSS.endswith("px"))
         self.assertEqual(re.sub(r"\d", "", ui_theme.RADIUS_CSS), "px")
+
+
+try:
+    from PySide6.QtWidgets import QApplication
+    HAS_QT = True
+except ImportError:
+    QApplication = None
+    HAS_QT = False
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 is not installed")
+class FontRegistrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_bundled_text_fonts_register(self):
+        self.assertTrue(ui_theme.ensure_fonts())
 
 
 if __name__ == "__main__":

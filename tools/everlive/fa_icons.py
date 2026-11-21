@@ -210,14 +210,12 @@ def icon(name: str, color: str = "#9AA0B0", size: int = 18,
 
     result = QIcon()
     normal = _render(name, color, size)
+    active = _render(name, active_color or color, size)
     result.addPixmap(normal, QIcon.Normal, QIcon.Off)
-    result.addPixmap(normal, QIcon.Normal, QIcon.On)
-    result.addPixmap(
-        _render(name, active_color or color, size), QIcon.Active, QIcon.Off)
-    result.addPixmap(
-        _render(name, active_color or color, size), QIcon.Active, QIcon.On)
-    result.addPixmap(
-        _render(name, active_color or color, size), QIcon.Selected, QIcon.On)
+    result.addPixmap(active, QIcon.Normal, QIcon.On)
+    result.addPixmap(active, QIcon.Active, QIcon.Off)
+    result.addPixmap(active, QIcon.Active, QIcon.On)
+    result.addPixmap(active, QIcon.Selected, QIcon.On)
     result.addPixmap(
         _render(name, disabled_color, size), QIcon.Disabled, QIcon.Off)
     return result

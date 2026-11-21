@@ -45,6 +45,7 @@
 #define EVERLIVE_OSD_BLUE	0x3B5B8C
 #define EVERLIVE_OSD_BLUE_BORDER	0x4A6FA5
 #define EVERLIVE_OSD_BLUE_TEXT	0xE4EEFF
+#define EVERLIVE_OSD_ON_ACCENT	0xFFFFFF
 #define EVERLIVE_OSD_CARD_ALPHA	240	/* bar transparency */
 
 /* Hub geometry and typography (multiply by HUB_SCALE * scale). */
