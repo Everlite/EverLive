@@ -60,7 +60,8 @@ class RenderTests(unittest.TestCase):
     def test_icons_render(self):
         for name in ("play", "stop", "discord", "github", "help",
                      "volume", "mute", "expand", "external",
-                     "maximize", "minimize"):
+                     "maximize", "minimize", "chart-bar", "ellipsis",
+                     "xmark", "keyboard"):
             icon = fa_icons.icon(name, "#E7EBF2", 18)
             self.assertFalse(icon.isNull(), name)
             self.assertFalse(icon.pixmap(18, 18).isNull(), name)

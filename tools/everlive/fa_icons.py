@@ -79,8 +79,11 @@ ICONS = {
     "trash": ("solid", "\uf1f8"),
     # telemetry
     "chart": ("solid", "\uf201"),
+    "chart-bar": ("solid", "\uf080"),
     "microchip": ("solid", "\uf2db"),
     "disk": ("solid", "\uf0a0"),
+    "ellipsis": ("solid", "\uf141"),
+    "xmark": ("solid", "\uf00d"),
     # brands
     "discord": ("brands", "\uf392"),
     "github": ("brands", "\uf09b"),
@@ -130,8 +133,11 @@ _FALLBACK_GLYPHS = {
     "download": "⤓",
     "trash": "🗑",
     "chart": "📈",
+    "chart-bar": "▥",
     "microchip": "▤",
     "disk": "▥",
+    "ellipsis": "…",
+    "xmark": "×",
     "discord": "◉",
     "github": "◆",
 }

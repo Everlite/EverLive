@@ -357,6 +357,53 @@ static void draw_text_tracked(SDL_Surface *surface, const char *text,
 		*out_w -= tracking;
 }
 
+static void elide_text(const char *text, TTF_Font *font, int size,
+		       int max_width, char *out, size_t out_size)
+{
+	static const char ellipsis[] = "\xE2\x80\xA6";
+	size_t len;
+	int ellipsis_w;
+
+	if (!out || out_size == 0)
+		return;
+	if (!text) {
+		out[0] = '\0';
+		return;
+	}
+	snprintf(out, out_size, "%s", text);
+	if (max_width <= 0 || text_width(out, font, size) <= max_width)
+		return;
+
+	ellipsis_w = text_width(ellipsis, font, size);
+	len = strlen(out);
+	while (len > 0) {
+		do {
+			len--;
+		} while (len > 0 &&
+			 ((unsigned char)out[len] & 0xc0) == 0x80);
+		out[len] = '\0';
+		if (text_width(out, font, size) + ellipsis_w <= max_width) {
+			if (strlen(out) + sizeof(ellipsis) <= out_size)
+				strcat(out, ellipsis);
+			return;
+		}
+	}
+	out[0] = '\0';
+}
+
+static uint32_t stats_text_hash(const char *row1, const char *row2)
+{
+	uint32_t hash = 2166136261u;
+	const char *p;
+
+	for (p = row1; p && *p; p++)
+		hash = (hash ^ (unsigned char)*p) * 16777619u;
+	hash = (hash ^ '\n') * 16777619u;
+	for (p = row2; p && *p; p++)
+		hash = (hash ^ (unsigned char)*p) * 16777619u;
+	return hash;
+}
+
 static void draw_glyph(SDL_Surface *surface, uint32_t codepoint, int size,
 		       int x, int y, uint32_t rgb, Uint8 alpha)
 {
@@ -425,6 +472,12 @@ static const char *action_label(enum everlive_osd_action action)
 		return "Performance Stats";
 	case EVERLIVE_OSD_ACTION_HIDE:
 		return "Hide overlay";
+	case EVERLIVE_OSD_ACTION_STATS_QUICKNAV:
+		return "Quick Navigation";
+	case EVERLIVE_OSD_ACTION_STATS_SHORTCUTS:
+		return "Keyboard Shortcuts";
+	case EVERLIVE_OSD_ACTION_STATS_CLOSE:
+		return "Close Stats";
 	default:
 		return NULL;
 	}
@@ -454,7 +507,11 @@ static const char *action_shortcut(enum everlive_osd_action action)
 	case EVERLIVE_OSD_ACTION_STATS:
 		return "Tab / I";
 	case EVERLIVE_OSD_ACTION_HIDE:
-		return "Tab / O";
+		return "O";
+	case EVERLIVE_OSD_ACTION_STATS_QUICKNAV:
+		return "O";
+	case EVERLIVE_OSD_ACTION_STATS_CLOSE:
+		return "Tab / I";
 	default:
 		return NULL;
 	}
@@ -1229,6 +1286,604 @@ bool everlive_osd_build_card(SDL_Renderer *renderer,
 			out->generation, s, viewport_w, viewport_h, width,
 			height, out->hit_count);
 	return true;
+}
+
+const struct everlive_osd_hitbox *everlive_osd_stats_hit(
+	const struct everlive_osd_stats *stats, int local_x, int local_y)
+{
+	int i;
+
+	if (!stats)
+		return NULL;
+	for (i = 0; i < stats->hit_count; i++) {
+		if (local_x >= stats->hits[i].rect.x &&
+		    local_x < stats->hits[i].rect.x + stats->hits[i].rect.w &&
+		    local_y >= stats->hits[i].rect.y &&
+		    local_y < stats->hits[i].rect.y + stats->hits[i].rect.h)
+			return &stats->hits[i];
+	}
+	return NULL;
+}
+
+void everlive_osd_destroy_stats(struct everlive_osd_stats *stats)
+{
+	if (!stats)
+		return;
+	if (stats->texture) {
+		SDL_DestroyTexture(stats->texture);
+		stats->texture = NULL;
+	}
+	if (stats->tooltip) {
+		SDL_DestroyTexture(stats->tooltip);
+		stats->tooltip = NULL;
+	}
+	stats->width = 0;
+	stats->height = 0;
+	stats->scale = 0.0f;
+	stats->viewport_w = 0;
+	stats->viewport_h = 0;
+	stats->cache_key[0] = '\0';
+	stats->hit_count = 0;
+	stats->hover_action = EVERLIVE_OSD_ACTION_NONE;
+	stats->tooltip_width = 0;
+	stats->tooltip_height = 0;
+	stats->tooltip_scale = 0.0f;
+	stats->tooltip_action = EVERLIVE_OSD_ACTION_NONE;
+	stats->tooltip_key[0] = '\0';
+}
+
+bool everlive_osd_build_stats(SDL_Renderer *renderer,
+			      const char *row1, const char *row2,
+			      const struct everlive_osd_shortcut *shortcuts,
+			      int shortcut_count,
+			      enum everlive_osd_action hover_action,
+			      float scale, int viewport_w, int viewport_h,
+			      struct everlive_osd_stats *out)
+{
+	char text1[512];
+	char text2[512];
+	char key[768];
+	SDL_Surface *surface;
+	SDL_Texture *texture;
+	float s = clamp_scale(scale);
+	float u = EVERLIVE_OSD_HUB_SCALE * s;
+	int pad_x = uscale(16.0f, u);
+	int pad_y = uscale(14.0f, u);
+	int control_h = uscale(36.0f, u);
+	int button = uscale(36.0f, u);
+	int icon_size = uscale(18.0f, u);
+	int icon_gap = uscale(10.0f, u);
+	int radius = uscale(12.0f, u);
+	int button_radius = uscale(8.0f, u);
+	int row1_size = uscale(14.0f, u);
+	int row2_size = uscale(12.5f, u);
+	int text_gap = uscale(6.0f, u);
+	int icon_area_w;
+	int side_margin;
+	int panel_max_w;
+	int text_max_w;
+	int icon_x;
+	int icon_y;
+	int text_x;
+	int text_y;
+	int row1_h;
+	int row2_h;
+	int text_h;
+	int content_h;
+	int text_w;
+	int panel_w;
+	int panel_h;
+	int i;
+
+	(void)shortcuts;
+	(void)shortcut_count;
+
+	if (!renderer || !out || !g_available)
+		return false;
+	if (viewport_w <= 0 || viewport_h <= 0)
+		return false;
+
+	if (pad_x < 10)
+		pad_x = 10;
+	if (pad_y < 8)
+		pad_y = 8;
+	if (control_h < 26)
+		control_h = 26;
+	if (button < 26)
+		button = 26;
+	if (icon_size < 12)
+		icon_size = 12;
+	if (icon_gap < 5)
+		icon_gap = 5;
+	if (radius < 6)
+		radius = 6;
+	if (button_radius < 4)
+		button_radius = 4;
+	if (row1_size < 11)
+		row1_size = 11;
+	if (row2_size < 10)
+		row2_size = 10;
+	if (text_gap < 4)
+		text_gap = 4;
+
+	icon_area_w = 3 * button + 2 * icon_gap;
+	side_margin = uscale(34.0f, u);
+	if (side_margin < 8)
+		side_margin = 8;
+	panel_max_w = viewport_w - 2 * side_margin;
+	if (panel_max_w < 1)
+		panel_max_w = viewport_w;
+	text_max_w = panel_max_w - 2 * pad_x - icon_area_w -
+		uscale(20.0f, u);
+	if (text_max_w < 80)
+		text_max_w = 80;
+
+	elide_text(row1 ? row1 : "", g_font_semibold, row1_size,
+		   text_max_w, text1, sizeof(text1));
+	elide_text(row2 ? row2 : "", g_font_mono, row2_size,
+		   text_max_w, text2, sizeof(text2));
+
+	snprintf(key, sizeof(key), "%08x|%d|%.3f|%dx%d",
+		 stats_text_hash(text1, text2), (int)hover_action, s,
+		 viewport_w, viewport_h);
+	if (out->texture && out->scale == s &&
+	    out->viewport_w == viewport_w && out->viewport_h == viewport_h &&
+	    strcmp(out->cache_key, key) == 0) {
+		out->hover_action = hover_action;
+		return true;
+	}
+
+	row1_h = text_height(g_font_semibold, row1_size);
+	row2_h = text_height(g_font_mono, row2_size);
+	text_h = row1_h + text_gap + row2_h;
+	content_h = control_h > text_h ? control_h : text_h;
+	text_w = text_width(text1, g_font_semibold, row1_size);
+	{
+		int w2 = text_width(text2, g_font_mono, row2_size);
+
+		if (w2 > text_w)
+			text_w = w2;
+	}
+	panel_w = pad_x * 2 + text_w + uscale(20.0f, u) + icon_area_w;
+	if (panel_w > panel_max_w)
+		panel_w = panel_max_w;
+	if (panel_w < icon_area_w + pad_x * 2 + uscale(20.0f, u) + 60)
+		panel_w = icon_area_w + pad_x * 2 + uscale(20.0f, u) + 60;
+	panel_h = pad_y * 2 + content_h;
+	if (panel_w < 1 || panel_h < 1)
+		return false;
+
+	surface = SDL_CreateRGBSurfaceWithFormat(0, panel_w, panel_h, 32,
+						 SDL_PIXELFORMAT_RGBA32);
+	if (!surface)
+		return false;
+	SDL_FillRect(surface, NULL, 0);
+	fill_rounded(surface, 0, 0, panel_w, panel_h, radius,
+		     surface_color(surface, EVERLIVE_OSD_CARD_BORDER, 255));
+	fill_rounded(surface, 1, 1, panel_w - 2, panel_h - 2,
+		     radius > 1 ? radius - 1 : 0,
+		     surface_color(surface, EVERLIVE_OSD_CARD_BG,
+				   EVERLIVE_OSD_CARD_ALPHA));
+
+	text_x = pad_x;
+	text_y = pad_y + (content_h - text_h) / 2;
+	draw_text(surface, text1, g_font_semibold, row1_size,
+		  text_x, text_y, EVERLIVE_OSD_TITLE, 255, NULL);
+	draw_text(surface, text2, g_font_mono, row2_size,
+		  text_x, text_y + row1_h + text_gap,
+		  EVERLIVE_OSD_TEXT_MUTED, 255, NULL);
+
+	icon_x = panel_w - pad_x - icon_area_w;
+	icon_y = pad_y + (content_h - button) / 2;
+	out->hit_count = 0;
+	for (i = 0; i < 3; i++) {
+		uint32_t glyph;
+		enum everlive_osd_action action;
+		bool hovered;
+
+		if (i == 0) {
+			glyph = EVERLIVE_OSD_ICON_ELLIPSIS;
+			action = EVERLIVE_OSD_ACTION_STATS_QUICKNAV;
+		} else if (i == 1) {
+			glyph = EVERLIVE_OSD_ICON_KEYBOARD;
+			action = EVERLIVE_OSD_ACTION_STATS_SHORTCUTS;
+		} else {
+			glyph = EVERLIVE_OSD_ICON_XMARK;
+			action = EVERLIVE_OSD_ACTION_STATS_CLOSE;
+		}
+		hovered = hover_action == action;
+		draw_icon_button(surface, icon_x + i * (button + icon_gap),
+				 icon_y, button, button_radius, glyph,
+				 icon_size, 0, 0,
+				 hovered ? EVERLIVE_OSD_TITLE :
+					   EVERLIVE_OSD_TEXT_MUTED,
+				 false, hovered);
+		out->hits[out->hit_count].rect = (SDL_Rect){
+			icon_x + i * (button + icon_gap), icon_y,
+			button, button
+		};
+		out->hits[out->hit_count].action = action;
+		out->hit_count++;
+	}
+
+	texture = SDL_CreateTextureFromSurface(renderer, surface);
+	SDL_FreeSurface(surface);
+	if (!texture)
+		return false;
+	SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+	SDL_SetTextureScaleMode(texture, SDL_ScaleModeLinear);
+
+	if (out->texture)
+		SDL_DestroyTexture(out->texture);
+	out->texture = texture;
+	out->width = panel_w;
+	out->height = panel_h;
+	out->scale = s;
+	out->viewport_w = viewport_w;
+	out->viewport_h = viewport_h;
+	out->hover_action = hover_action;
+	out->generation++;
+	snprintf(out->cache_key, sizeof(out->cache_key), "%s", key);
+	if (getenv("EVERLIVE_OSD_DEBUG"))
+		fprintf(stderr, "[OSD] stats gen=%u scale=%.2f %dx%d hits=%d\n",
+			out->generation, s, panel_w, panel_h, out->hit_count);
+	return true;
+}
+
+static uint32_t shortcut_hash(const struct everlive_osd_shortcut *rows,
+			      int count)
+{
+	uint32_t hash = 2166136261u;
+	int i;
+
+	if (!rows)
+		return 0;
+	for (i = 0; i < count; i++) {
+		const char *p = rows[i].keys;
+		const char *q = rows[i].label;
+
+		while (p && *p) {
+			hash = (hash ^ (unsigned char)*p++) * 16777619u;
+		}
+		hash = (hash ^ '|') * 16777619u;
+		while (q && *q) {
+			hash = (hash ^ (unsigned char)*q++) * 16777619u;
+		}
+		hash = (hash ^ '\n') * 16777619u;
+	}
+	return hash;
+}
+
+bool everlive_osd_build_stats_tooltip(
+	SDL_Renderer *renderer, struct everlive_osd_stats *stats,
+	enum everlive_osd_action action,
+	const struct everlive_osd_shortcut *shortcuts, int shortcut_count,
+	float scale)
+{
+	char key[256];
+	SDL_Surface *surface;
+	SDL_Texture *texture;
+	float s = clamp_scale(scale);
+	float u = EVERLIVE_OSD_HUB_SCALE * s;
+	int pad;
+	int gap;
+	int key_pad;
+	int radius;
+	int label_size;
+	int key_size;
+	int cap_h;
+	int cap_w;
+	int width;
+	int height;
+	uint32_t hash;
+
+	if (!renderer || !stats || !g_available)
+		return false;
+	if (action != EVERLIVE_OSD_ACTION_STATS_QUICKNAV &&
+	    action != EVERLIVE_OSD_ACTION_STATS_SHORTCUTS &&
+	    action != EVERLIVE_OSD_ACTION_STATS_CLOSE)
+		return false;
+	if (!shortcuts)
+		shortcut_count = 0;
+
+	hash = shortcut_hash(shortcuts, shortcut_count);
+	snprintf(key, sizeof(key), "%d|%.3f|%d|%08x",
+		 (int)action, s, shortcut_count, hash);
+	if (stats->tooltip && stats->tooltip_action == action &&
+	    stats->tooltip_scale == s &&
+	    strcmp(stats->tooltip_key, key) == 0)
+		return true;
+
+	label_size = uscale(EVERLIVE_OSD_TOOLTIP_SIZE, u);
+	key_size = uscale(EVERLIVE_OSD_KEY_SIZE, u);
+	if (label_size < 11)
+		label_size = 11;
+	if (key_size < 10)
+		key_size = 10;
+	pad = uscale(EVERLIVE_OSD_TOOLTIP_PAD, u);
+	gap = uscale(EVERLIVE_OSD_TOOLTIP_GAP, u);
+	key_pad = uscale(EVERLIVE_OSD_KEY_PAD_X, u);
+	radius = uscale(EVERLIVE_OSD_RADIUS_TOOLTIP, u);
+	if (pad < 8)
+		pad = 8;
+	if (gap < 8)
+		gap = 8;
+	if (key_pad < 4)
+		key_pad = 4;
+	if (radius < 6)
+		radius = 6;
+
+	if (action == EVERLIVE_OSD_ACTION_STATS_SHORTCUTS) {
+		const char *title = "KEYBOARD SHORTCUTS";
+		int title_size = uscale(12.0f, u);
+		int title_tracking = (int)(0.7f * u + 0.5f);
+		int title_h;
+		int row_h = 0;
+		int row_gap = uscale(5.0f, u);
+		int max_cap_w = 0;
+		int max_label_w = 0;
+		int i;
+
+		if (title_size < 11)
+			title_size = 11;
+		if (title_tracking < 1)
+			title_tracking = 1;
+		if (row_gap < 3)
+			row_gap = 3;
+		title_h = text_height(g_font_semibold, title_size);
+		for (i = 0; i < shortcut_count; i++) {
+			int key_w = text_width(shortcuts[i].keys, g_font_mono,
+					       key_size);
+			int label_w = text_width(shortcuts[i].label,
+						 g_font_regular, label_size);
+			int this_cap_h = text_height(g_font_mono, key_size) +
+				uscale(4.0f, u);
+			int this_row_h = this_cap_h > text_height(
+				g_font_regular, label_size) ?
+				this_cap_h :
+				text_height(g_font_regular, label_size);
+
+			if (key_w + key_pad * 2 > max_cap_w)
+				max_cap_w = key_w + key_pad * 2;
+			if (label_w > max_label_w)
+				max_label_w = label_w;
+			if (this_row_h > row_h)
+				row_h = this_row_h;
+		}
+		width = pad * 2 + max_cap_w + gap + max_label_w;
+		height = pad * 2 + title_h + row_gap;
+		if (shortcut_count > 0)
+			height += shortcut_count * row_h +
+				(shortcut_count - 1) * row_gap;
+		if (width < 1 || height < 1)
+			return false;
+
+		surface = SDL_CreateRGBSurfaceWithFormat(
+			0, width, height, 32, SDL_PIXELFORMAT_RGBA32);
+		if (!surface)
+			return false;
+		SDL_FillRect(surface, NULL, 0);
+		fill_rounded(surface, 0, 0, width, height, radius,
+			     surface_color(surface,
+					   EVERLIVE_OSD_TOOLTIP_BORDER, 255));
+		fill_rounded(surface, 1, 1, width - 2, height - 2,
+			     radius > 1 ? radius - 1 : 0,
+			     surface_color(surface,
+					   EVERLIVE_OSD_TOOLTIP_BG, 250));
+		draw_text_tracked(surface, title, g_font_semibold, title_size,
+				  pad, pad, EVERLIVE_OSD_TITLE, 255,
+				  title_tracking, NULL);
+		{
+			int y = pad + title_h + row_gap;
+
+			for (i = 0; i < shortcut_count; i++) {
+				int key_w = text_width(shortcuts[i].keys,
+						       g_font_mono, key_size);
+				int key_h = text_height(g_font_mono, key_size);
+				int this_cap_h = key_h + uscale(4.0f, u);
+				int cap_w = key_w + key_pad * 2;
+				int label_h = text_height(g_font_regular,
+							 label_size);
+
+				draw_chip(surface, pad,
+					  y + (row_h - this_cap_h) / 2,
+					  cap_w, this_cap_h,
+					  uscale(6.0f, u),
+					  EVERLIVE_OSD_KBD_BG,
+					  EVERLIVE_OSD_GROUP_BORDER);
+				draw_text(surface, shortcuts[i].keys,
+					  g_font_mono, key_size,
+					  pad + key_pad,
+					  y + (row_h - key_h) / 2,
+					  EVERLIVE_OSD_TITLE, 255, NULL);
+				draw_text(surface, shortcuts[i].label,
+					  g_font_regular, label_size,
+					  pad + max_cap_w + gap,
+					  y + (row_h - label_h) / 2,
+					  EVERLIVE_OSD_TITLE, 255, NULL);
+				y += row_h + row_gap;
+			}
+		}
+	} else {
+		const char *label = action_label(action);
+		const char *shortcut = action_shortcut(action);
+		int label_w;
+		int label_h;
+		int key_w;
+		int key_h;
+
+		if (!label || !shortcut)
+			return false;
+		label_w = text_width(label, g_font_semibold, label_size);
+		label_h = text_height(g_font_semibold, label_size);
+		key_w = text_width(shortcut, g_font_mono, key_size);
+		key_h = text_height(g_font_mono, key_size);
+		cap_h = key_h + uscale(4.0f, u);
+		cap_w = key_w + key_pad * 2;
+		width = pad * 2 + label_w + gap + cap_w;
+		height = pad * 2 + (label_h > cap_h ? label_h : cap_h);
+		if (width < 1 || height < 1)
+			return false;
+
+		surface = SDL_CreateRGBSurfaceWithFormat(
+			0, width, height, 32, SDL_PIXELFORMAT_RGBA32);
+		if (!surface)
+			return false;
+		SDL_FillRect(surface, NULL, 0);
+		fill_rounded(surface, 0, 0, width, height, radius,
+			     surface_color(surface,
+					   EVERLIVE_OSD_TOOLTIP_BORDER, 255));
+		fill_rounded(surface, 1, 1, width - 2, height - 2,
+			     radius > 1 ? radius - 1 : 0,
+			     surface_color(surface,
+					   EVERLIVE_OSD_TOOLTIP_BG, 250));
+		draw_text(surface, label, g_font_semibold, label_size,
+			  pad, (height - label_h) / 2,
+			  EVERLIVE_OSD_TITLE, 255, NULL);
+		draw_chip(surface, pad + label_w + gap,
+			  (height - cap_h) / 2, cap_w, cap_h,
+			  uscale(6.0f, u), EVERLIVE_OSD_KBD_BG,
+			  EVERLIVE_OSD_GROUP_BORDER);
+		draw_text(surface, shortcut, g_font_mono, key_size,
+			  pad + label_w + gap + key_pad,
+			  (height - key_h) / 2,
+			  EVERLIVE_OSD_TITLE, 255, NULL);
+	}
+
+	texture = SDL_CreateTextureFromSurface(renderer, surface);
+	SDL_FreeSurface(surface);
+	if (!texture)
+		return false;
+	SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+	SDL_SetTextureScaleMode(texture, SDL_ScaleModeLinear);
+	if (stats->tooltip)
+		SDL_DestroyTexture(stats->tooltip);
+	stats->tooltip = texture;
+	stats->tooltip_width = width;
+	stats->tooltip_height = height;
+	stats->tooltip_scale = s;
+	stats->tooltip_action = action;
+	snprintf(stats->tooltip_key, sizeof(stats->tooltip_key), "%s", key);
+	return true;
+}
+
+void everlive_osd_place_stats(SDL_Rect *dst,
+			      const struct everlive_osd_stats *stats,
+			      bool bottom, const SDL_Rect *card_dest,
+			      bool card_visible, float scale,
+			      int win_w, int win_h)
+{
+	int margin;
+	int gap;
+
+	if (!dst || !stats || stats->width <= 0 || stats->height <= 0)
+		return;
+	if (win_w <= 0 || win_h <= 0)
+		return;
+	margin = uscale(34.0f, EVERLIVE_OSD_HUB_SCALE * scale);
+	if (margin < 10)
+		margin = 10;
+	gap = uscale(EVERLIVE_OSD_GAP, EVERLIVE_OSD_HUB_SCALE * scale);
+	if (gap < 6)
+		gap = 6;
+
+	dst->w = stats->width;
+	dst->h = stats->height;
+	dst->x = win_w - margin - dst->w;
+	dst->y = bottom ? win_h - margin - dst->h : margin;
+	if (card_visible && card_dest) {
+		dst->y = bottom ? card_dest->y - gap - dst->h :
+			card_dest->y + card_dest->h + gap;
+	}
+	if (dst->x + dst->w > win_w - 8)
+		dst->x = win_w - dst->w - 8;
+	if (dst->x < 8)
+		dst->x = 8;
+	if (dst->y < 8)
+		dst->y = 8;
+	if (dst->y + dst->h > win_h - 8) {
+		int fallback = bottom ? margin : win_h - margin - dst->h;
+
+		if (fallback < 8)
+			fallback = 8;
+		if (fallback + dst->h > win_h - 8)
+			fallback = win_h - dst->h - 8;
+		dst->y = fallback < 8 ? 8 : fallback;
+	}
+}
+
+void everlive_osd_render_stats(SDL_Renderer *renderer,
+			       const struct everlive_osd_stats *stats,
+			       const SDL_Rect *dest, int win_w, int win_h)
+{
+	SDL_Rect draw;
+	int out_w = 0;
+	int out_h = 0;
+
+	if (!renderer || !stats || !stats->texture || !dest)
+		return;
+	if (win_w <= 0 || win_h <= 0)
+		return;
+	draw = *dest;
+	if (SDL_GetRendererOutputSize(renderer, &out_w, &out_h) == 0 &&
+	    out_w > 0 && out_h > 0) {
+		draw.x = lroundf((float)dest->x * (float)out_w / (float)win_w);
+		draw.y = lroundf((float)dest->y * (float)out_h / (float)win_h);
+		draw.w = lroundf((float)dest->w * (float)out_w / (float)win_w);
+		draw.h = lroundf((float)dest->h * (float)out_h / (float)win_h);
+	}
+	SDL_RenderCopy(renderer, stats->texture, NULL, &draw);
+}
+
+void everlive_osd_render_stats_tooltip(
+	SDL_Renderer *renderer, const struct everlive_osd_stats *stats,
+	const SDL_Rect *anchor, int viewport_w, int viewport_h)
+{
+	SDL_Rect dst;
+	SDL_Rect draw;
+	int gap;
+	int margin;
+	int out_w = 0;
+	int out_h = 0;
+	float s;
+
+	if (!renderer || !stats || !stats->tooltip || !anchor)
+		return;
+	if (viewport_w <= 0 || viewport_h <= 0)
+		return;
+	s = stats->tooltip_scale > 0.0f ? stats->tooltip_scale : 1.0f;
+	gap = iscale(8.0f * s);
+	margin = iscale(8.0f * s);
+	if (gap < 4)
+		gap = 4;
+	if (margin < 4)
+		margin = 4;
+	dst.w = stats->tooltip_width;
+	dst.h = stats->tooltip_height;
+	dst.x = anchor->x + (anchor->w - dst.w) / 2;
+	dst.y = anchor->y + anchor->h + gap;
+	if (dst.x < margin)
+		dst.x = margin;
+	if (dst.x + dst.w > viewport_w - margin)
+		dst.x = viewport_w - dst.w - margin;
+	if (dst.y + dst.h > viewport_h - margin) {
+		dst.y = anchor->y - dst.h - gap;
+		if (dst.y < margin)
+			dst.y = margin;
+	}
+	draw = dst;
+	if (SDL_GetRendererOutputSize(renderer, &out_w, &out_h) == 0 &&
+	    out_w > 0 && out_h > 0) {
+		draw.x = lroundf((float)dst.x * (float)out_w /
+				 (float)viewport_w);
+		draw.y = lroundf((float)dst.y * (float)out_h /
+				 (float)viewport_h);
+		draw.w = lroundf((float)dst.w * (float)out_w /
+				 (float)viewport_w);
+		draw.h = lroundf((float)dst.h * (float)out_h /
+				 (float)viewport_h);
+	}
+	SDL_RenderCopy(renderer, stats->tooltip, NULL, &draw);
 }
 
 bool everlive_osd_build_tooltip(SDL_Renderer *renderer,
