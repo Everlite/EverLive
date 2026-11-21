@@ -56,7 +56,7 @@ int main(int argc, char **argv)
 		       "  gc570d-ctl list\n"
 		       "  gc570d-ctl input <1|2>             (select HDMI IN 1 or HDMI IN 2)\n"
 		       "  gc570d-ctl osd <0|1>               (toggle the on-screen overlay)\n"
-		       "  gc570d-ctl osd_pos <tr|br|bl|tl>   (set OSD corner position)\n"
+		       "  gc570d-ctl osd_pos <top|bottom>    (set OSD screen edge)\n"
 		       "  gc570d-ctl pip <0|1>               (toggle picture-in-picture)\n"
 		       "  gc570d-ctl aspect <auto|16:9|4:3|stretch>\n"
 		       "  gc570d-ctl scale <fit|integer>\n"

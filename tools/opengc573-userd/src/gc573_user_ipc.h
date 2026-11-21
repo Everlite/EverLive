@@ -41,10 +41,14 @@ enum gc573_ipc_led_mode {
 };
 
 enum gc573_ipc_osd_pos {
-	GC573_IPC_OSD_TR = 0,
-	GC573_IPC_OSD_BR = 1,
-	GC573_IPC_OSD_BL = 2,
-	GC573_IPC_OSD_TL = 3,
+	GC573_IPC_OSD_TOP = 0,
+	GC573_IPC_OSD_BOTTOM = 1,
+};
+
+enum gc573_ipc_osd_mode {
+	GC573_IPC_OSD_MODE_AUTO = 0,
+	GC573_IPC_OSD_MODE_COMPACT = 1,
+	GC573_IPC_OSD_MODE_CARD = 2,
 };
 
 enum gc573_ipc_aspect {
@@ -78,6 +82,8 @@ enum gc573_ipc_mode {
 	GC573_IPC_CMD_EDID,
 	GC573_IPC_CMD_HOTPLUG,
 	GC573_IPC_CMD_HDR_EV,
+	GC573_IPC_CMD_OSD_MODE,
+	GC573_IPC_CMD_RECORD_STATE,
 };
 
 /*

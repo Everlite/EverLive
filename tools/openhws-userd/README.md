@@ -105,12 +105,13 @@ ignored. `--help` lists the rest.
 - Control socket (`$XDG_RUNTIME_DIR/everlive.sock`, `--ipc-socket`):
   `hello`, `ping`, `status.get`, `audio.volume.set`, `audio.mute.set`,
   `audio.channels.set` (stereo only), `osd.set`, `osd.position.set`,
-  `aspect.set`, `scale.set`, `mode.set` (gaming/headless, `parent_winid`),
-  `v4l2.set`, `toast.show`. Other methods return `-32601`. One EverLive engine
+  `osd.mode.set` (auto/compact/card), `record.state`, `aspect.set`,
+  `scale.set`, `mode.set` (gaming/headless, `parent_winid`), `v4l2.set`,
+  `toast.show`. Other methods return `-32601`. One EverLive engine
   can own the default socket at a time; use `--ipc-socket` to run this one
   next to another card's engine.
 - Hotkeys: `f` fullscreen, `a` aspect, `l` scaling, Up/Down volume, `m` mute,
-  `o` OSD, `p` OSD corner, `s` streamer mode, `F1` help, `q` quit.
+  `o` OSD, `p` OSD top/bottom, `s` streamer mode, `F1` help, `q` quit.
 
 ### Probe
 

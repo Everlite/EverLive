@@ -140,6 +140,7 @@ static void print_usage(const char *prog)
 	       "  runtime volume <0..150>\n"
 	       "  runtime mute <0|1>\n"
 	       "  runtime osd <0|1>\n"
+	       "  runtime osd-mode <auto|compact|card>\n"
 	       "  runtime mode <gaming|headless> [winid]\n\n"
 	       "Service & Bringup:\n"
 	       "  init                    Initialize capture card in background (passthrough/audio)\n"
@@ -739,6 +740,23 @@ static int cmd_runtime(int argc, char **argv)
 		snprintf(params, sizeof(params),
 			 "{\"enabled\":%s}", on ? "true" : "false");
 		return ctl_call("osd.set", params);
+	}
+
+	if (strcmp(topic, "osd-mode") == 0) {
+		const char *mode = argc >= 4 ? argv[3] : NULL;
+
+		if (!mode ||
+		    (strcasecmp(mode, "auto") != 0 &&
+		     strcasecmp(mode, "compact") != 0 &&
+		     strcasecmp(mode, "card") != 0 &&
+		     strcasecmp(mode, "full") != 0)) {
+			fprintf(stderr,
+				"runtime osd-mode needs auto, compact or card\n");
+			return 1;
+		}
+		snprintf(params, sizeof(params),
+			 "{\"mode\":\"%s\"}", mode);
+		return ctl_call("osd.mode.set", params);
 	}
 
 	if (strcmp(topic, "mode") == 0) {

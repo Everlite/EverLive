@@ -298,9 +298,10 @@ static void rpc_hello(int fd, const char *id)
 		     "\"methods\":[\"hello\",\"ping\",\"status.get\","
 		     "\"led.set\",\"led.mode.set\",\"audio.volume.set\","
 		     "\"audio.mute.set\",\"audio.channels.set\","
-		     "\"osd.set\",\"osd.position.set\",\"aspect.set\","
+		     "\"osd.set\",\"osd.position.set\",\"osd.mode.set\","
+		     "\"aspect.set\","
 		     "\"scale.set\",\"input.set\",\"pip.set\","
-		     "\"mode.set\",\"hotplug\",\"edid.set\"]}",
+		     "\"mode.set\",\"hotplug\",\"edid.set\",\"record.state\"]}",
 		     g_version, (long)getpid(), path_esc);
 	if (n > 0 && (size_t)n < sizeof(result))
 		rpc_reply(fd, id, result);
@@ -445,14 +446,45 @@ static void rpc_osd_pos(int fd, const char *id, const char *line)
 		rpc_error(fd, id, -32602, "invalid params: pos required");
 		return;
 	}
-	if (strcasecmp(pos, "tr") && strcasecmp(pos, "br") &&
+	if (strcasecmp(pos, "top") && strcasecmp(pos, "bottom") &&
+	    strcasecmp(pos, "tr") && strcasecmp(pos, "br") &&
 	    strcasecmp(pos, "bl") && strcasecmp(pos, "tl") &&
 	    strcasecmp(pos, "top-right") && strcasecmp(pos, "bottom-right") &&
 	    strcasecmp(pos, "bottom-left") && strcasecmp(pos, "top-left")) {
-		rpc_error(fd, id, -32602, "unknown pos: tr|br|bl|tl");
+		rpc_error(fd, id, -32602,
+			  "unknown pos: top|bottom (legacy corners accepted)");
 		return;
 	}
 	gc570d_everlive_set_osd_pos(pos);
+	rpc_ok(fd, id);
+}
+
+static void rpc_osd_mode(int fd, const char *id, const char *line)
+{
+	char mode[16];
+
+	if (!everlive_json_get_string(line, "mode", mode, sizeof(mode))) {
+		rpc_error(fd, id, -32602, "invalid params: mode required");
+		return;
+	}
+	if (strcasecmp(mode, "auto") && strcasecmp(mode, "compact") &&
+	    strcasecmp(mode, "card") && strcasecmp(mode, "full")) {
+		rpc_error(fd, id, -32602, "unknown mode: auto|compact|card");
+		return;
+	}
+	gc570d_everlive_set_osd_mode(mode);
+	rpc_ok(fd, id);
+}
+
+static void rpc_record_state(int fd, const char *id, const char *line)
+{
+	bool active;
+
+	if (!everlive_json_get_bool(line, "active", &active)) {
+		rpc_error(fd, id, -32602, "invalid params: active required");
+		return;
+	}
+	gc570d_everlive_set_recording(active);
 	rpc_ok(fd, id);
 }
 
@@ -656,6 +688,10 @@ static void rpc_dispatch(int fd, const char *id, const char *method,
 		rpc_osd(fd, id, line);
 	else if (strcmp(method, "osd.position.set") == 0)
 		rpc_osd_pos(fd, id, line);
+	else if (strcmp(method, "osd.mode.set") == 0)
+		rpc_osd_mode(fd, id, line);
+	else if (strcmp(method, "record.state") == 0)
+		rpc_record_state(fd, id, line);
 	else if (strcmp(method, "aspect.set") == 0)
 		rpc_aspect(fd, id, line);
 	else if (strcmp(method, "scale.set") == 0)

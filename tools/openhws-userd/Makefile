@@ -12,15 +12,19 @@ DEPFLAGS := -MMD -MP
 CORE_DIR      := ../libeverlive-core
 CORE_LIB      := $(CORE_DIR)/libeverlive_core.a
 CORE_V4L2_DIR := $(CORE_DIR)/v4l2
+OSD_DIR       := $(CORE_DIR)/osd
+OSD_OBJ       := $(OSD_DIR)/everlive_osd-hws.o
 
 VERSION ?= 1.0.0
 
 BASE_CFLAGS := $(CFLAGS) -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
-	-std=gnu11 -D_GNU_SOURCE -DHWS_ENGINE_VERSION='"$(VERSION)"' -Isrc -I$(CORE_DIR)
+	-std=gnu11 -D_GNU_SOURCE -DHWS_ENGINE_VERSION='"$(VERSION)"' -Isrc -I$(CORE_DIR) -I$(CORE_DIR)/osd
 override LDFLAGS += -pthread
 
 SDL_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl2 2>/dev/null)
 SDL_LIBS   := $(shell $(PKG_CONFIG) --libs sdl2 2>/dev/null)
+SDL_TTF_CFLAGS := $(shell $(PKG_CONFIG) --cflags SDL2_ttf 2>/dev/null)
+SDL_TTF_LIBS   := $(shell $(PKG_CONFIG) --libs SDL2_ttf 2>/dev/null)
 X11_CFLAGS := $(shell $(PKG_CONFIG) --cflags x11 2>/dev/null)
 X11_LIBS   := $(shell $(PKG_CONFIG) --libs x11 2>/dev/null)
 PW_CFLAGS  := $(shell $(PKG_CONFIG) --cflags libpipewire-0.3 2>/dev/null)
@@ -29,8 +33,8 @@ PW_LIBS    := $(shell $(PKG_CONFIG) --libs libpipewire-0.3 2>/dev/null)
 STREAMER_CFLAGS := $(BASE_CFLAGS) $(PW_CFLAGS)
 STREAMER_LIBS   := $(PW_LIBS) -lm
 ifneq ($(strip $(SDL_LIBS)),)
-STREAMER_CFLAGS += -DHAVE_SDL2 $(SDL_CFLAGS)
-STREAMER_LIBS   += $(SDL_LIBS)
+STREAMER_CFLAGS += -DHAVE_SDL2 $(SDL_CFLAGS) $(SDL_TTF_CFLAGS)
+STREAMER_LIBS   += $(SDL_LIBS) $(SDL_TTF_LIBS)
 endif
 ifneq ($(strip $(X11_LIBS)),)
 STREAMER_CFLAGS += -DHAVE_X11 $(X11_CFLAGS)
@@ -48,7 +52,7 @@ all: $(TARGETS)
 hws_user_probe: src/hws_user_probe.o $(HW_OBJS)
 	$(CC) $(BASE_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
 
-hws_user_streamer: src/hws_user_streamer.o $(STREAM_OBJS) $(HW_OBJS) $(CORE_LIB)
+hws_user_streamer: src/hws_user_streamer.o $(STREAM_OBJS) $(HW_OBJS) $(OSD_OBJ) $(CORE_LIB)
 	$(CC) $(STREAMER_CFLAGS) -o $@ $^ $(LDFLAGS) $(STREAMER_LIBS) -lrt
 
 libhwsuhd-v4l2.so: src/hwsuhd-v4l2.c \
@@ -70,11 +74,15 @@ libhwsuhd-v4l2.so: src/hwsuhd-v4l2.c \
 $(CORE_LIB):
 	$(MAKE) -C $(CORE_DIR)
 
+$(OSD_OBJ): $(OSD_DIR)/everlive_osd.c $(OSD_DIR)/everlive_osd.h \
+	    $(OSD_DIR)/everlive_osd_theme.h
+	$(CC) $(BASE_CFLAGS) $(SDL_CFLAGS) $(SDL_TTF_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
 src/hws_user_streamer.o src/hws_audio_tap.o: CFLAGS_EXTRA = $(STREAMER_CFLAGS)
 src/%.o: src/%.c
 	$(CC) $(if $(CFLAGS_EXTRA),$(CFLAGS_EXTRA),$(BASE_CFLAGS)) $(DEPFLAGS) -c -o $@ $<
 
--include $(wildcard src/*.d)
+-include $(wildcard src/*.d) $(OSD_OBJ:.o=.d)
 
 PREFIX ?= /usr/local
 DESTDIR ?=
@@ -107,6 +115,6 @@ uninstall-system:
 uninstall: uninstall-bin uninstall-system
 
 clean:
-	rm -f src/*.o src/*.d $(TARGETS)
+	rm -f src/*.o src/*.d $(OSD_OBJ) $(OSD_OBJ:.o=.d) $(TARGETS)
 
 .PHONY: all clean install install-bin install-system uninstall uninstall-bin uninstall-system

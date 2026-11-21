@@ -728,7 +728,9 @@ These methods are implemented when supported by the hardware, and must return er
 | `audio.mute.set` | `{"muted": true}` | Audio mute toggle (`true`/`false`) | GC573, GC570D |
 | `audio.channels.set`| `{"mode": "auto"}` | Layout: `auto\|stereo\|5.1\|7.1` (GC573); `auto\|stereo` (GC570D) | GC573, GC570D |
 | `osd.set` | `{"enabled": true}` | On-screen display toggle | GC573, GC570D |
-| `osd.position.set` | `{"pos": "tr"}` | OSD placement: `tr`, `br`, `bl`, `tl` (or `top-right`, etc.) | GC573, GC570D |
+| `osd.position.set` | `{"pos": "top"}` | OSD placement: `top`, `bottom` (legacy corners accepted) | GC573, GC570D, HWS UHD |
+| `osd.mode.set` | `{"mode": "card"}` | OSD style: `auto`, `compact`, `card` | GC573, GC570D, HWS UHD |
+| `record.state` | `{"active": true}` | Mirror the Hub recorder state in the OSD Record button | GC573, GC570D, HWS UHD |
 | `aspect.set` | `{"mode": "auto"}` | Aspect ratio: `auto`, `16:9`, `4:3`, `stretch` | GC573, GC570D |
 | `scale.set` | `{"mode": "fit"}` | Scaling: `fit`, `integer` | GC573, GC570D |
 | `mode.set` | `{"mode": "gaming"}` | Modes: `gaming`, `headless` | GC573 only (GC570D -> `-32601`) |
@@ -794,7 +796,7 @@ To ensure compatibility with the PySide6 Console Hub, `status.get` must return a
     },
     "osd": {
       "enabled": true,
-      "position": "top-right"
+      "position": "top"
     },
     "aspect": "auto",
     "scale": "fit",

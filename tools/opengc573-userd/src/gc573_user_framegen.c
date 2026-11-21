@@ -38,7 +38,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define FG_INPUT_SLOTS	3U
+#define FG_INPUT_SLOTS	8U
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
@@ -568,13 +568,12 @@ bool gc573_fg_apply_env(const struct gc573_fg_config *cfg,
 		unsetenv("LSFGVK_PERFORMANCE_MODE");
 
 	/*
-	 * Low-latency swapchain.  With frame generation off no lsfg-vk instance
-	 * exists at all, so leave the variable unset rather than exporting a stale
-	 * value from a previous session.  At 3x/4x lsfg-vk also needs extra
-	 * swapchain images to pace 2-3 synthetic frames per real frame without
-	 * swapchain starvation/artifacts.
+	 * Low-latency swapchain. With frame generation off no lsfg-vk instance
+	 * exists at all, so leave the variable unset.
+	 * At 120 Hz input on 240 Hz panels (or 3x/4x), LSFG-VK needs extra
+	 * swapchain images to pace companion frames without acquire stalls.
 	 */
-	if (cfg->mode == GC573_FG_OFF || !cfg->low_latency || mult >= 3)
+	if (cfg->mode == GC573_FG_OFF || !cfg->low_latency || mult >= 3 || cfg->multiplier >= 2)
 		unsetenv("LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT");
 	else
 		setenv("LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT", "1", 1);
@@ -1140,12 +1139,16 @@ static bool fg_source_is_fast(struct gc573_framegen *fg, uint64_t now)
 {
 	bool fast;
 
-	if (fg->source_hz_x100)
-		fast = fg->source_hz_x100 > GC573_FG_DEDUP_MIN_HZ_X100;
-	else if (fg->prev_raw_ts && now > fg->prev_raw_ts)
-		fast = (now - fg->prev_raw_ts) < 24000ULL;
-	else
+	if (fg->source_hz_x100) {
+		fast = (fg->source_hz_x100 > GC573_FG_DEDUP_MIN_HZ_X100 &&
+			fg->source_hz_x100 <= GC573_FG_DEDUP_MAX_HZ_X100);
+	} else if (fg->prev_raw_ts && now > fg->prev_raw_ts) {
+		uint64_t dt = now - fg->prev_raw_ts;
+		/* Between 11 ms (90 Hz) and 24 ms (41 Hz) */
+		fast = (dt >= 11000ULL && dt < 24000ULL);
+	} else {
 		fast = true;	/* unknown: assume a 60 Hz container */
+	}
 
 	fg->prev_raw_ts = now;
 	return fast;
@@ -1476,7 +1479,11 @@ bool gc573_framegen_take(struct gc573_framegen *fg, const uint8_t **pixels)
 		return false;
 	}
 
-	/* Coalesce to the newest: presentation latency stays at one frame. */
+	/*
+	 * When the presentation loop runs at full speed, count stays 0 or 1.
+	 * If presentation slows down, coalesce immediately to the newest frame
+	 * so stale frames do not accumulate latency.
+	 */
 	while (fg->count > 1U) {
 		unsigned int old = fg->queue[fg->tail];
 

@@ -96,13 +96,21 @@ ASPECT_OPTIONS = [
 ]
 ASPECT_KEYS = {key for _, key in ASPECT_OPTIONS}
 
-OSD_POSITIONS = ("tr", "br", "bl", "tl")
+OSD_POSITIONS = ("top", "bottom")
 OSD_POSITION_OPTIONS = [
-    ("Top Right", "tr"),
-    ("Bottom Right", "br"),
-    ("Bottom Left", "bl"),
-    ("Top Left", "tl"),
+    ("Top", "top"),
+    ("Bottom", "bottom"),
 ]
+OSD_POSITION_ALIASES = {
+    "tr": "top", "tl": "top", "top-right": "top", "top-left": "top",
+    "br": "bottom", "bl": "bottom", "bottom-right": "bottom",
+    "bottom-left": "bottom",
+}
+
+
+def normalize_osd_position(pos: str) -> str:
+    pos = OSD_POSITION_ALIASES.get(pos, pos)
+    return pos if pos in OSD_POSITIONS else "top"
 
 SCALE_OPTIONS = [
     ("Aspect Fit (Bilinear)", "fit"),
@@ -148,7 +156,9 @@ DEFAULT_SETTINGS = {
     "v4l2_loopback": False,
     "aspect_ratio": "auto",
     "osd_enabled": True,
-    "osd_position": "tr",
+    "osd_position": "top",
+    "quicknav_enabled": True,
+    "quicknav_fs_only": False,
     "audio_tap": False,
     "hdr_tonemap": True,
     "hdr_exposure": 0.0,
@@ -197,8 +207,8 @@ def load_settings() -> dict:
         settings["aspect_ratio"] = "auto"
     if not isinstance(settings.get("osd_enabled"), bool):
         settings["osd_enabled"] = True
-    if settings.get("osd_position") not in OSD_POSITIONS:
-        settings["osd_position"] = "tr"
+    settings["osd_position"] = normalize_osd_position(
+        settings.get("osd_position"))
     if not isinstance(settings.get("audio_tap"), bool):
         settings["audio_tap"] = False
     if not isinstance(settings.get("hdr_tonemap"), bool):
@@ -1471,6 +1481,9 @@ class GameStreamer:
         if "[HUB] TOGGLE_FULLSCREEN" in line:
             self._pending_hub_actions.append("toggle_fullscreen")
             return
+        if "[HUB] TOGGLE_RECORD" in line:
+            self._pending_hub_actions.append("toggle_record")
+            return
         if "[HUB] EXIT_FULLSCREEN" in line:
             self._pending_hub_actions.append("exit_fullscreen")
             return
@@ -1963,8 +1976,7 @@ class GameStreamer:
                 cmd.append("--streamer-mode")
             else:
                 cmd.append("--osd" if osd else "--no-osd")
-        if osd_pos not in ("tr", "br", "bl", "tl"):
-            osd_pos = "tr"
+        osd_pos = normalize_osd_position(osd_pos)
         cmd.extend(["--osd-pos", osd_pos])
 
         if aspect is None:
@@ -2074,7 +2086,7 @@ class GameStreamer:
                     headless: bool = False,
                     aspect: Optional[str] = None,
                     osd: bool = True,
-                    osd_pos: str = "tr",
+                    osd_pos: str = "top",
                     audio_tap: Optional[str] = None,
                     hdr: bool = True,
                     hdr_exposure: float = 0.0,
@@ -2160,8 +2172,7 @@ class GameStreamer:
                 cmd.append("--streamer-mode")
             else:
                 cmd.append("--osd" if osd else "--no-osd")
-        if osd_pos not in ("tr", "br", "bl", "tl"):
-            osd_pos = "tr"
+        osd_pos = normalize_osd_position(osd_pos)
         cmd.extend(["--osd-pos", osd_pos])
 
         if aspect is None:
@@ -2291,7 +2302,7 @@ class GameStreamer:
             return False
         return True
 
-    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None, osd: bool = True, osd_pos: str = "tr", audio_tap: Optional[str] = None, hdr: bool = True, hdr_exposure: float = 0.0, scale: str = "fit", framegen: str = "off", fg_multiplier: int = 2, fg_backend: str = "lsfg", fg_dedup: bool = False, fg_flow_scale: float = 1.0, fg_perf_mode: bool = False, fg_low_latency: bool = True, parent_winid: Optional[int] = None) -> bool:
+    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None, osd: bool = True, osd_pos: str = "top", audio_tap: Optional[str] = None, hdr: bool = True, hdr_exposure: float = 0.0, scale: str = "fit", framegen: str = "off", fg_multiplier: int = 2, fg_backend: str = "lsfg", fg_dedup: bool = False, fg_flow_scale: float = 1.0, fg_perf_mode: bool = False, fg_low_latency: bool = True, parent_winid: Optional[int] = None) -> bool:
         if self.is_running:
             return True
 
@@ -3871,6 +3882,8 @@ if HAS_QT:
             # Webcam preview: a native sibling raised above video_host (and
             # the engine window inside it).
             self.pip_host = PipPreview(self.stage_grid_host)
+            # The preview is display-only; never let it steal OSD clicks.
+            self.pip_host.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             self.pip_host.hide()
 
             host_inner_layout = QVBoxLayout(self.video_host)
@@ -4427,6 +4440,13 @@ if HAS_QT:
                 "FRAME GENERATION", "#BB96F3", fg_head_right)
             grid_fg.setColumnStretch(0, 1)
 
+            lbl_fg_exp = QLabel("EXPERIMENTAL")
+            lbl_fg_exp.setObjectName("fieldLabel")
+            lbl_fg_exp.setStyleSheet(
+                "color: #BB96F3; font-size: 11px; font-weight: 700;"
+                " letter-spacing: 0.6px; margin-top: 0px; margin-bottom: 4px;")
+            card_fg.layout().insertWidget(1, lbl_fg_exp)
+
             self.combo_fg_backend = _shrinkable(QComboBox())
             for text, key in FRAMEGEN_BACKEND_OPTIONS:
                 self.combo_fg_backend.addItem(text, key)
@@ -4573,18 +4593,18 @@ if HAS_QT:
             self.combo_osd_pos = _shrinkable(QComboBox())
             for text, key in OSD_POSITION_OPTIONS:
                 self.combo_osd_pos.addItem(text, key)
-            saved_pos = self.saved_cfg.get("osd_position", "tr")
+            saved_pos = self.saved_cfg.get("osd_position", "top")
             pos_idx = self.combo_osd_pos.findData(saved_pos)
             if pos_idx >= 0:
                 self.combo_osd_pos.setCurrentIndex(pos_idx)
             self.combo_osd_pos.setToolTip(
-                "Forwarded as --osd-pos. Top Right is the default so the "
-                "overlay never covers console navigation.")
+                "Forwarded as --osd-pos. Top is the default; the bar is "
+                "centered on the chosen screen edge.")
             self.combo_osd_pos.setEnabled(self.chk_osd.isChecked())
             self.combo_osd_pos.currentIndexChanged.connect(self.on_osd_pos_changed)
             self.osd_pos_field = _stacked_field(
                 "OSD Position", self.combo_osd_pos,
-                "Screen corner for the On-Screen Stats overlay (Hotkey: P).")
+                "Top or bottom screen edge for the OSD bar (Hotkey: P).")
             self.osd_pos_effect = QGraphicsOpacityEffect(self.osd_pos_field)
             self.osd_pos_effect.setOpacity(1.0)
             self.osd_pos_field.setGraphicsEffect(self.osd_pos_effect)
@@ -4601,6 +4621,25 @@ if HAS_QT:
                 self.combo_osd_pos.setToolTip(
                     "Built-in engine stats OSD is available on VFIO PCIe cards.")
 
+            self.chk_quicknav = QCheckBox("Quick Navigation Bar (Auto-Hide)")
+            self.chk_quicknav.setToolTip(
+                "Shows interactive control bar (HDMI, aspect, scaling, volume, mute) "
+                "on mouse movement (Auto-Hides after 3s). Hotkey: O.")
+            self.chk_quicknav.setChecked(
+                bool(self.saved_cfg.get("quicknav_enabled", True)))
+            self.chk_quicknav.toggled.connect(self.on_quicknav_changed)
+            grid_osd.addWidget(_toggle(self.chk_quicknav), 2, 0, 1, 2)
+
+            self.chk_quicknav_fs = QCheckBox("Quick Navigation: Fullscreen Only")
+            self.chk_quicknav_fs.setToolTip(
+                "Only wake the Quick Navigation bar in fullscreen mode, "
+                "keeping windowed view strictly clean.")
+            self.chk_quicknav_fs.setChecked(
+                bool(self.saved_cfg.get("quicknav_fs_only", False)))
+            self.chk_quicknav_fs.setEnabled(self.chk_quicknav.isChecked())
+            self.chk_quicknav_fs.toggled.connect(self.on_quicknav_fs_changed)
+            grid_osd.addWidget(_toggle(self.chk_quicknav_fs), 3, 0, 1, 2)
+
             self.chk_streamer = QCheckBox("Clean Feed (Hide All Overlays)")
             self.chk_streamer.setToolTip(
                 "Hides mouse cursor, HUD and overlays for clean recordings.")
@@ -4609,7 +4648,7 @@ if HAS_QT:
                 lambda val: save_settings({"streamer_mode": val}))
             self.chk_streamer.toggled.connect(
                 lambda _val: self._update_osd_controls())
-            grid_osd.addWidget(_toggle(self.chk_streamer), 2, 0, 1, 2)
+            grid_osd.addWidget(_toggle(self.chk_streamer), 4, 0, 1, 2)
             lay_video.addWidget(card_osd)
             lay_video.addStretch(1)
             self._update_osd_controls()
@@ -5426,6 +5465,8 @@ if HAS_QT:
             for act in pending:
                 if act == "toggle_fullscreen":
                     self.toggle_cinema_fullscreen()
+                elif act == "toggle_record":
+                    self.toggle_recording()
                 elif act == "exit_fullscreen":
                     self._exit_cinema_fullscreen()
                 elif isinstance(act, tuple) and act[0] == "fg_mult":
@@ -5650,8 +5691,24 @@ if HAS_QT:
             if getattr(self, "_cinema_fullscreen", False):
                 self._set_cinema_fullscreen(False)
 
+        def _sync_osd_mode(self):
+            """Sync OSD mode (card, compact, or auto) and recording state."""
+            if self._ipc is None or not self._ipc.connected:
+                return
+            mode = "card"
+            if hasattr(self, "chk_quicknav") and not self.chk_quicknav.isChecked():
+                mode = "compact"
+            elif hasattr(self, "chk_quicknav_fs") and self.chk_quicknav_fs.isChecked():
+                mode = "card" if getattr(self, "_cinema_fullscreen", False) else "compact"
+            self._ipc.set_osd_mode(mode)
+            active = bool(
+                getattr(self, "recorder", None) and self.recorder.is_recording)
+            self._ipc.set_recording(active)
+            self._osd_recording_state = active
+
         def _set_cinema_fullscreen(self, enabled: bool):
             self._cinema_fullscreen = bool(enabled)
+            self._sync_osd_mode()
             if hasattr(self, "btn_cinema_fs"):
                 self.btn_cinema_fs.set_icon(
                     "compress" if self._cinema_fullscreen else "expand")
@@ -6197,7 +6254,7 @@ if HAS_QT:
                 f"HDR tonemap: {'on' if self.chk_hdr.isChecked() else 'off'}",
                 f"Exposure: {self.spin_hdr_exposure.value():+.1f} EV",
                 f"OSD: {'on' if self.chk_osd.isChecked() else 'off'}"
-                f" ({_value(self.saved_cfg.get('osd_position'), 'tr')})",
+                f" ({_value(self.saved_cfg.get('osd_position'), 'top')})",
                 f"Background service: {service_state}",
                 f"Service unit: {unit_path}",
                 f"Video node: {_value(getattr(self.streamer, 'vdev', None))}",
@@ -6287,6 +6344,7 @@ if HAS_QT:
                       f"v{self._ipc.version or '?'}")
                 if self._remote:
                     self._set_remote_ui(True)
+                self._sync_osd_mode()
                 self._poll_remote_status()
             else:
                 self._ipc_timer.stop()
@@ -6572,6 +6630,7 @@ if HAS_QT:
                 self.chk_osd.blockSignals(False)
 
             pos = osd.get("position")
+            pos = OSD_POSITION_ALIASES.get(pos, pos)
             if pos in OSD_POSITIONS:
                 idx = self.combo_osd_pos.findData(pos)
                 if idx >= 0 and idx != self.combo_osd_pos.currentIndex():
@@ -7448,6 +7507,12 @@ if HAS_QT:
             active = bool(getattr(self, "recorder", None) and self.recorder.is_recording)
             plan = self.recorder.current_plan if active else None
 
+            if getattr(self, "_osd_recording_state", None) != active:
+                self._osd_recording_state = active
+                ipc = getattr(self, "_ipc", None)
+                if ipc is not None and ipc.connected:
+                    ipc.set_recording(active)
+
             if hasattr(self, "btn_record"):
                 if active:
                     self.btn_record.setStyleSheet(
@@ -7717,9 +7782,8 @@ if HAS_QT:
                 if aspect not in ASPECT_KEYS:
                     aspect = "auto"
                 want_osd = self.chk_osd.isChecked()
-                osd_pos = self.combo_osd_pos.currentData() or "tr"
-                if osd_pos not in OSD_POSITIONS:
-                    osd_pos = "tr"
+                osd_pos = normalize_osd_position(
+                    self.combo_osd_pos.currentData() or "top")
                 want_isolated_rec_tap = (
                     not self.duo_mode
                     and hasattr(self, "combo_rec_audio")
@@ -8281,6 +8345,23 @@ if HAS_QT:
             self.combo_osd_pos.setEnabled(allowed)
             if hasattr(self, "osd_pos_effect"):
                 self.osd_pos_effect.setOpacity(1.0 if allowed else 0.45)
+            clean_feed = self.chk_streamer.isChecked()
+            if hasattr(self, "chk_quicknav"):
+                self.chk_quicknav.setEnabled(not clean_feed)
+            if hasattr(self, "chk_quicknav_fs"):
+                qn_active = bool(getattr(self, "chk_quicknav", None) and self.chk_quicknav.isChecked())
+                self.chk_quicknav_fs.setEnabled(qn_active and not clean_feed)
+
+        def on_quicknav_changed(self, enabled: bool):
+            self.saved_cfg["quicknav_enabled"] = bool(enabled)
+            save_settings({"quicknav_enabled": bool(enabled)})
+            self._update_osd_controls()
+            self._sync_osd_mode()
+
+        def on_quicknav_fs_changed(self, enabled: bool):
+            self.saved_cfg["quicknav_fs_only"] = bool(enabled)
+            save_settings({"quicknav_fs_only": bool(enabled)})
+            self._sync_osd_mode()
 
         def on_osd_changed(self, enabled: bool):
             self.saved_cfg["osd_enabled"] = bool(enabled)
@@ -8295,9 +8376,8 @@ if HAS_QT:
                       "to toggle the running overlay.")
 
         def on_osd_pos_changed(self, *_):
-            pos = self.combo_osd_pos.currentData() or "tr"
-            if pos not in OSD_POSITIONS:
-                pos = "tr"
+            pos = normalize_osd_position(
+                self.combo_osd_pos.currentData() or "top")
             self.saved_cfg["osd_position"] = pos
             save_settings({"osd_position": pos})
             if self._ipc is not None and self._ipc.connected:

@@ -75,11 +75,13 @@ class EmbedAndAudioTests(unittest.TestCase):
     def test_parent_winid(self) -> None:
         cmd, env = em.build_engine_command(HWS, "/bin/hws", socket="/s", parent_winid=0x3a00007)
         self.assertEqual(cmd[-2:], ["--parent-winid", str(0x3a00007)])
+        self.assertIn("--no-osd", cmd)
         self.assertEqual(env["EVERLIVE_PARENT_WINID"], str(0x3a00007))
         self.assertEqual(env["SDL_VIDEODRIVER"], "x11")
         # The GC570D engine reads the environment only.
         cmd, env = em.build_engine_command(GC570D, "/bin/duo", socket="/s", parent_winid=42)
         self.assertNotIn("--parent-winid", cmd)
+        self.assertIn("--no-osd", cmd)
         self.assertEqual(env["EVERLIVE_PARENT_WINID"], "42")
 
     def test_headless_ignores_parent(self) -> None:

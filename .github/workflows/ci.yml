@@ -22,6 +22,7 @@ jobs:
             clang \
             pkg-config \
             libsdl2-dev \
+            libsdl2-ttf-dev \
             libavcodec-dev \
             libswresample-dev \
             libswscale-dev \
@@ -33,6 +34,9 @@ jobs:
 
       - name: Compile everything (GCC)
         run: make -j"$(nproc)"
+
+      - name: Compile HWS UHD engine (GCC, opt-in)
+        run: make hwsuhd
 
       - name: Unit tests (GCC)
         run: make -C tests clean test
@@ -50,7 +54,7 @@ jobs:
           for module in everlive_client.py card_profile.py service_manager.py app_integrations.py everlive_recorder.py gc553g2_control.py ui_theme.py ui_widgets.py fa_icons.py everlive_multi.py everlive_cam.py; do
             test -f "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive/$module"
           done
-          for asset in fonts/fa-solid-900.ttf fonts/fa-brands-400.ttf fonts/LICENSE.txt fonts/chevron-down.png; do
+          for asset in fonts/fa-solid-900.ttf fonts/fa-brands-400.ttf fonts/LICENSE.txt fonts/chevron-down.png fonts/NotoSans-Regular.ttf fonts/NotoSans-SemiBold.ttf fonts/NotoSans-ExtraBold.ttf fonts/NotoSansMono-SemiBold.ttf fonts/NotoSans-LICENSE.txt; do
             test -f "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive/$asset"
           done
           test -f "$RUNNER_TEMP/stage/usr/lib/libeverlive-vk-pacer.so"
@@ -65,6 +69,7 @@ jobs:
         run: |
           make clean
           make CC=clang -j"$(nproc)"
+          make CC=clang hwsuhd
           make CC=clang -C tests clean test
 
       - name: Sanitizer run
@@ -85,6 +90,7 @@ jobs:
           python3 -m py_compile tools/everlive/ui_theme.py
           python3 -m py_compile tools/everlive/ui_widgets.py
           python3 -m py_compile tools/everlive/fa_icons.py
+          python3 -m py_compile tools/everlive/gen_osd_theme.py
           python3 -m py_compile tools/everlive/everlive_multi.py
           python3 -m py_compile tools/everlive/everlive_cam.py
 

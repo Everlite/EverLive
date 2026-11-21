@@ -100,7 +100,7 @@ gc573_user_streamer [PCI_ADDRESS] [OPTIONS]
   --fg-perf            Enable LSFGVK performance mode
   --fg-low-latency     Preserve Vulkan swapchain image count for lower latency
   --osd / --no-osd     Stats overlay on/off (--streamer-mode = hidden overlay + cursor)
-  --osd-pos POS        tr|br|bl|tl (default: tr)
+  --osd-pos POS        top|bottom (default: top)
   --v4l2 DEVICE        Write native YUYV frames to a v4l2loopback device
   --loopback [DEVICE]  Shorthand for --v4l2 (default: /dev/video10)
   --headless           No SDL window; capture, V4L2 output and audio only
@@ -118,7 +118,7 @@ gc573_user_streamer [PCI_ADDRESS] [OPTIONS]
 Game-window hotkeys: <kbd>f</kbd>/<kbd>F11</kbd> fullscreen, <kbd>1</kbd>/<kbd>l</kbd> scaling (fit/integer),
 <kbd>g</kbd> frame generation mode, <kbd>h</kbd> HDR tonemapper, <kbd>a</kbd> aspect ratio,
 <kbd>↑</kbd>/<kbd>↓</kbd> (or <kbd>+</kbd>/<kbd>-</kbd>) volume, <kbd>m</kbd> mute, <kbd>F1</kbd>/<kbd>?</kbd> help overlay,
-<kbd>p</kbd> OSD position, <kbd>o</kbd>/<kbd>i</kbd>/<kbd>Tab</kbd> stats overlay, <kbd>s</kbd>/<kbd>F10</kbd> overlay + cursor, <kbd>Esc</kbd>/<kbd>q</kbd> quit.
+<kbd>p</kbd> OSD top/bottom, <kbd>o</kbd>/<kbd>i</kbd>/<kbd>Tab</kbd> stats overlay, <kbd>s</kbd>/<kbd>F10</kbd> overlay + cursor, <kbd>Esc</kbd>/<kbd>q</kbd> quit.
 
 ## Remote Control Socket
 
@@ -136,7 +136,7 @@ socket and the Control Hub attaches to it as a read-only **Remote Session**.
 
 Methods: `hello`, `ping`, `status.get`, and the write path
 `led.set`, `led.mode.set`, `audio.volume.set`, `audio.mute.set`, `audio.channels.set`,
-`osd.set`, `osd.position.set`, `aspect.set`, `scale.set`, `framegen.set`, `mode.set`, `v4l2.set`, `hdr.set`.
+`osd.set`, `osd.position.set`, `osd.mode.set`, `record.state`, `aspect.set`, `scale.set`, `framegen.set`, `mode.set`, `v4l2.set`, `hdr.set`.
 Mutations are queued into a lock-free ring and applied by the render thread, so
 they never touch the DMA path; the audio gain uses a 20 ms linear ramp instead
 of pausing the device. The snapshot is published once per second from the

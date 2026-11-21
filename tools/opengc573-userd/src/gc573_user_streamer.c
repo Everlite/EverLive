@@ -32,7 +32,7 @@
 #include "gc573_user_fg_native.h"
 #include "gc573_camera.h"
 #include "gc573_user_log.h"
-#include "gc573_user_font8x8.h"
+#include "everlive_osd.h"
 #include "everlive_handoff.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_syswm.h>
@@ -410,47 +410,43 @@ static float g_hdr_exposure_ev;
 static enum gc573_hdr_type g_hdr_announced = GC573_HDR_SDR;
 
 enum osd_position {
-	OSD_POS_TR,
-	OSD_POS_BR,
-	OSD_POS_BL,
-	OSD_POS_TL,
+	OSD_POS_TOP,
+	OSD_POS_BOTTOM,
 	OSD_POS_COUNT,
 };
 
-static enum osd_position g_osd_pos = OSD_POS_TR;
+static enum osd_position g_osd_pos = OSD_POS_TOP;
+
+/* Auto follows the SDL window; Hub cinema fullscreen can force the card. */
+enum osd_mode {
+	OSD_MODE_AUTO,
+	OSD_MODE_COMPACT,
+	OSD_MODE_CARD,
+};
+
+static enum osd_mode g_osd_mode = OSD_MODE_CARD;
+static int g_recording_flag;
+static enum everlive_osd_action g_hover_action = EVERLIVE_OSD_ACTION_NONE;
 
 static const char *osd_pos_name(enum osd_position pos)
 {
-	switch (pos) {
-	case OSD_POS_BR:
-		return "bottom-right";
-	case OSD_POS_BL:
-		return "bottom-left";
-	case OSD_POS_TL:
-		return "top-left";
-	default:
-		return "top-right";
-	}
+	return pos == OSD_POS_BOTTOM ? "bottom" : "top";
 }
 
 static bool parse_osd_pos(const char *value, enum osd_position *out)
 {
 	if (!value || !*value)
 		return false;
-	if (!strcasecmp(value, "tr") || !strcasecmp(value, "top-right")) {
-		*out = OSD_POS_TR;
+	if (!strcasecmp(value, "top") || !strcasecmp(value, "tr") ||
+	    !strcasecmp(value, "tl") || !strcasecmp(value, "top-right") ||
+	    !strcasecmp(value, "top-left")) {
+		*out = OSD_POS_TOP;
 		return true;
 	}
-	if (!strcasecmp(value, "br") || !strcasecmp(value, "bottom-right")) {
-		*out = OSD_POS_BR;
-		return true;
-	}
-	if (!strcasecmp(value, "bl") || !strcasecmp(value, "bottom-left")) {
-		*out = OSD_POS_BL;
-		return true;
-	}
-	if (!strcasecmp(value, "tl") || !strcasecmp(value, "top-left")) {
-		*out = OSD_POS_TL;
+	if (!strcasecmp(value, "bottom") || !strcasecmp(value, "br") ||
+	    !strcasecmp(value, "bl") || !strcasecmp(value, "bottom-right") ||
+	    !strcasecmp(value, "bottom-left")) {
+		*out = OSD_POS_BOTTOM;
 		return true;
 	}
 	return false;
@@ -769,7 +765,7 @@ static void print_usage(const char *prog)
 	printf("  --integer-scale   Alias for --scale integer.\n");
 	printf("  --osd             Show the on-screen stats overlay (default).\n");
 	printf("  --no-osd          Hide the overlay (same as --streamer-mode).\n");
-	printf("  --osd-pos POS     tr|br|bl|tl (default: tr, 'p' cycles).\n");
+	printf("  --osd-pos POS     top|bottom (default: top, 'p' toggles).\n");
 	printf("  -s, --streamer-mode  Clean feed: no OSD, cursor hidden.\n");
 	printf("  --v4l2 DEVICE     Write native YUYV frames to a v4l2loopback output.\n");
 	printf("                    Example: --v4l2 /dev/video10\n");
@@ -1095,6 +1091,22 @@ static void stop_led_worker(void)
 	__atomic_store_n(&g_led_stop, 1, __ATOMIC_RELEASE);
 	pthread_join(g_led_thread, NULL);
 	g_led_thread_running = false;
+}
+
+static const char *colorspace_short(uint8_t colorspace)
+{
+	switch (colorspace) {
+	case GC573_USER_COLORSPACE_RGB:
+		return "RGB";
+	case GC573_USER_COLORSPACE_YCBCR422:
+		return "YUV";
+	case GC573_USER_COLORSPACE_YCBCR444:
+		return "YUV 4:4:4";
+	case GC573_USER_COLORSPACE_YCBCR420:
+		return "YUV 4:2:0";
+	default:
+		return "YUV";
+	}
 }
 
 static const char *colorspace_name(uint8_t colorspace)
@@ -1779,18 +1791,14 @@ static int configure_and_start(struct gc573_vfio_ctx *ctx,
 }
 
 static void framegen_describe(char *out, size_t len);
-
-/*
- * Minimal bitmap-font OSD.  The text is rasterised into an ARGB surface only
- * when its content or pixel scale changes, then composited over the video
- * with a semi-transparent background.  Costs nothing in the steady state.
- */
-#define OSD_BULLET 0x1f
-
-/* Subtle 4x4 bullet glyph; the bitmap font only covers ASCII. */
-static const uint8_t osd_bullet[8] = {
-	0x00, 0x00, 0x18, 0x3c, 0x3c, 0x18, 0x00, 0x00,
-};
+static float float_from_bits(uint32_t bits);
+static uint32_t float_to_bits(float value);
+static uint32_t g_audio_gain_bits;
+static int g_audio_mute_flag;
+static unsigned long g_parent_winid;
+static int g_embed_last_w;
+static int g_embed_last_h;
+static void toast_trigger(const char *msg);
 
 struct osd_overlay {
 	SDL_Texture *texture;
@@ -1801,6 +1809,63 @@ struct osd_overlay {
 };
 
 static struct osd_overlay g_osd;
+static struct everlive_osd_card g_card;
+static struct everlive_osd_popup g_popup;
+static enum everlive_osd_popup_kind g_popup_kind;
+static bool g_popup_open;
+static bool g_popup_dragging;
+static bool g_popup_dirty;
+static float g_popup_scale;
+static int g_popup_selected;
+static int g_popup_hover = -1;
+static int g_popup_volume = 100;
+static bool g_osd_font_init_attempted;
+static SDL_Rect g_card_dest;
+static SDL_Rect g_popup_dest;
+static bool g_osd_card_was_active;
+
+/* Quick Navigation bar state: auto-wakes on mouse motion/click/hotkey, auto-hides after 3s */
+static uint64_t g_quicknav_wake_ms;
+static bool g_quicknav_manual_hidden;
+
+static void quicknav_wake(void)
+{
+	g_quicknav_wake_ms = now_ms();
+	g_quicknav_manual_hidden = false;
+}
+
+static void quicknav_hide(void)
+{
+	g_quicknav_manual_hidden = true;
+	g_quicknav_wake_ms = 0;
+	g_popup_open = false;
+	g_popup_dragging = false;
+	g_popup_kind = EVERLIVE_OSD_POPUP_NONE;
+	g_popup_hover = -1;
+	g_hover_action = EVERLIVE_OSD_ACTION_NONE;
+}
+
+static bool quicknav_is_active(void)
+{
+	if (g_quicknav_manual_hidden)
+		return false;
+	if (g_popup_open || g_popup_dragging || g_hover_action != EVERLIVE_OSD_ACTION_NONE)
+		return true;
+	return (now_ms() - g_quicknav_wake_ms < 3000ULL);
+}
+
+static void quicknav_sync_cursor(void)
+{
+	if (g_parent_winid != 0)
+		return;
+	static int last_cursor_state = -1;
+	int show = quicknav_is_active() ? SDL_ENABLE : SDL_DISABLE;
+	if (show != last_cursor_state) {
+		SDL_ShowCursor(show);
+		last_cursor_state = show;
+	}
+}
+
 /* Centred F1 help card; separate texture so the stats OSD stays intact. */
 static struct osd_overlay g_help;
 static bool g_help_overlay;
@@ -1808,6 +1873,8 @@ static bool g_help_overlay;
 static struct osd_overlay g_toast;
 static uint64_t g_toast_until_ms;
 static char g_toast_text[64];
+static enum everlive_osd_tone g_toast_tone = EVERLIVE_OSD_TONE_NEUTRAL;
+static int g_toast_scale;
 
 /* Filled by the render loop for the OSD latency readout. */
 static double g_osd_dma_ms;
@@ -1826,6 +1893,8 @@ static void toast_destroy(void)
 	g_toast.text[0] = '\0';
 	g_toast_until_ms = 0;
 	g_toast_text[0] = '\0';
+	g_toast_tone = EVERLIVE_OSD_TONE_NEUTRAL;
+	g_toast_scale = 0;
 }
 
 static void osd_destroy(void)
@@ -1838,6 +1907,11 @@ static void osd_destroy(void)
 	g_osd.height = 0;
 	g_osd.scale = 0;
 	g_osd.text[0] = '\0';
+	everlive_osd_destroy_card(&g_card);
+	everlive_osd_destroy_popup(&g_popup);
+	g_popup_open = false;
+	g_popup_kind = EVERLIVE_OSD_POPUP_NONE;
+	g_popup_hover = -1;
 	toast_destroy();
 }
 
@@ -1855,154 +1929,147 @@ static void help_destroy(void)
 	g_help_overlay = false;
 }
 
-static int osd_pad_for_scale(int scale)
+static bool osd_window_is_fullscreen(SDL_Window *window)
 {
-	return 10 + (scale - 1) * 4;
+	Uint32 flags;
+
+	if (!window)
+		return false;
+	flags = SDL_GetWindowFlags(window);
+	return (flags & (SDL_WINDOW_FULLSCREEN |
+			 SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0;
 }
 
-static int osd_gap_for_scale(int scale)
+static bool osd_card_active(SDL_Window *window)
 {
-	return 4 * scale;
+	if (g_osd_mode == OSD_MODE_CARD)
+		return true;
+	if (g_osd_mode == OSD_MODE_COMPACT)
+		return false;
+	return osd_window_is_fullscreen(window);
 }
 
-static int osd_border_for_scale(int scale)
+static void osd_output_label(char *out, size_t n, int w, int h,
+			     bool interlaced, uint32_t rate_x100)
 {
-	return scale > 1 ? 2 : 1;
-}
+	double rate = (double)rate_x100 / 100.0;
+	char scan = interlaced ? 'i' : 'p';
 
-static void osd_draw_text(SDL_Surface *surface, const char *text, int scale)
-{
-	const int pad = osd_pad_for_scale(scale);
-	const int line_height = 8 * scale;
-	const int line_gap = osd_gap_for_scale(scale);
-	Uint32 fg = SDL_MapRGBA(surface->format, 235, 242, 255, 255);
-	int x = pad;
-	int y = pad;
-
-	for (const char *p = text; *p; p++) {
-		const uint8_t *bitmap;
-		unsigned char glyph;
-
-		if (*p == '\n') {
-			x = pad;
-			y += line_height + line_gap;
-			continue;
-		}
-
-		glyph = (unsigned char)*p;
-		if (glyph == (unsigned char)OSD_BULLET) {
-			bitmap = osd_bullet;
-		} else {
-			if (glyph > 127)
-				glyph = '?';
-			bitmap = font8x8_basic[glyph];
-		}
-
-		for (int row = 0; row < 8; row++) {
-			uint8_t bits = bitmap[row];
-
-			for (int col = 0; col < 8; col++) {
-				Uint32 *px;
-
-				if (!(bits & (1 << col)))
-					continue;
-				for (int sy = 0; sy < scale; sy++) {
-					px = (Uint32 *)((Uint8 *)surface->pixels +
-							(y + row * scale + sy) *
-							surface->pitch);
-					for (int sx = 0; sx < scale; sx++)
-						px[x + col * scale + sx] = fg;
-				}
-			}
-		}
-		x += 8 * scale;
+	switch (h) {
+	case 2160:
+		snprintf(out, n, "2160%c%.0f", scan, rate);
+		break;
+	case 1440:
+		snprintf(out, n, "1440%c%.0f", scan, rate);
+		break;
+	case 1080:
+		snprintf(out, n, "1080%c%.0f", scan, rate);
+		break;
+	case 720:
+		snprintf(out, n, "720%c%.0f", scan, rate);
+		break;
+	default:
+		snprintf(out, n, "%ux%u%c%.0f", (unsigned)w, (unsigned)h,
+			 scan, rate);
+		break;
 	}
+}
+
+static void osd_card_invalidate(void)
+{
+	g_card.cache_key[0] = '\0';
+}
+
+static void osd_card_update(SDL_Renderer *renderer, SDL_Window *window,
+			    uint32_t in_w, uint32_t in_h, bool interlaced,
+			    uint32_t rate_x100, const char *chroma_text,
+			    unsigned audio_ch, uint32_t audio_rate)
+{
+	char title[128];
+	char details[220];
+	char input_label[32];
+	int win_w = 0;
+	int win_h = 0;
+	float scale;
+	float gain;
+	struct everlive_osd_snapshot snap;
+
+	if (!renderer || !window)
+		return;
+
+	if (!everlive_osd_available()) {
+		if (!g_osd_font_init_attempted) {
+			g_osd_font_init_attempted = true;
+			everlive_osd_init();
+		}
+		if (!everlive_osd_available())
+			return;
+	}
+
+	SDL_GetWindowSize(window, &win_w, &win_h);
+	if (win_w <= 0 || win_h <= 0)
+		return;
+
+	if (g_card.texture && g_card.cache_key[0] != '\0' &&
+	    win_w == g_card.viewport_w && win_h == g_card.viewport_h)
+		return;
+
+	scale = (float)win_h / 1080.0f;
+	if (in_w && in_h)
+		osd_output_label(input_label, sizeof(input_label), in_w, in_h,
+				 interlaced, rate_x100);
+	else
+		snprintf(input_label, sizeof(input_label), "No signal");
+	snprintf(title, sizeof(title), "GC573");
+	if (audio_ch == 0)
+		audio_ch = 2;
+	if (audio_rate == 0)
+		audio_rate = 48000;
+	snprintf(details, sizeof(details), "%s • %s • %u ch %u Hz",
+		 input_label,
+		 chroma_text && *chroma_text ? chroma_text : "YUV",
+		 audio_ch, audio_rate);
+
+	gain = float_from_bits(__atomic_load_n(&g_audio_gain_bits,
+					      __ATOMIC_RELAXED));
+	memset(&snap, 0, sizeof(snap));
+	snap.title = title;
+	snap.details = details;
+	snap.signal_live = in_w > 0 && in_h > 0;
+	snap.show_input = false;
+	snap.input_index = -1;
+	snap.aspect_index = g_aspect;
+	snap.scale_integer = g_scale_mode == SCALE_INTEGER;
+	snap.pip = false;
+	snap.muted = __atomic_load_n(&g_audio_mute_flag, __ATOMIC_RELAXED) != 0;
+	snap.fullscreen = osd_window_is_fullscreen(window);
+	snap.recording = __atomic_load_n(&g_recording_flag, __ATOMIC_RELAXED) != 0;
+	snap.stats_active = g_osd_enabled;
+	snap.interactive = !g_headless;
+	snap.hover_action = g_hover_action;
+	snap.volume_pct = (int)(gain * 100.0f + 0.5f);
+
+	if (!everlive_osd_build_card(renderer, &snap, scale, win_w, win_h,
+				     &g_card))
+		return;
 }
 
 static void osd_build(SDL_Renderer *renderer, int scale, const char *text,
 		      struct osd_overlay *out)
 {
-	const int pad = osd_pad_for_scale(scale);
-	const int line_height = 8 * scale;
-	const int line_gap = osd_gap_for_scale(scale);
-	const int border = osd_border_for_scale(scale);
-	unsigned int max_len = 0;
-	unsigned int line_len = 0;
-	unsigned int lines = 1;
-	SDL_Surface *surface;
-	SDL_Texture *texture;
-	SDL_Rect edge;
-	Uint32 bg;
-	Uint32 border_color;
-	int width;
-	int height;
-
 	if (!renderer || !out)
 		return;
-
-	for (const char *p = text;; p++) {
-		if (*p == '\n' || *p == '\0') {
-			if (line_len > max_len)
-				max_len = line_len;
-			line_len = 0;
-			if (*p == '\0')
-				break;
-			lines++;
-			continue;
+	if (!everlive_osd_available()) {
+		if (!g_osd_font_init_attempted) {
+			g_osd_font_init_attempted = true;
+			everlive_osd_init();
 		}
-		line_len++;
+		if (!everlive_osd_available())
+			return;
 	}
-
-	/*
-	 * Use the exact line width (numeric fields in osd_update use fixed
-	 * widths so the box neither twitches nor wastes space on the right).
-	 */
-
-	width = pad * 2 + (int)max_len * 8 * scale;
-	height = pad * 2 + (int)lines * line_height +
-		 ((int)lines - 1) * line_gap;
-
-	/*
-	 * RGBA32 is byte-order-correct R, G, B, A in memory, which is what
-	 * SDL_CreateTextureFromSurface() expects for the OSD overlay on both the
-	 * OpenGL and the Vulkan SDL renderer.
-	 */
-	surface = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32,
-						 SDL_PIXELFORMAT_RGBA32);
-	if (!surface)
+	if (!everlive_osd_build_text(renderer, text, 1080, &out->texture,
+				     &out->width, &out->height, NULL))
 		return;
-
-	bg = SDL_MapRGBA(surface->format, 22, 20, 37, 222);
-	SDL_FillRect(surface, NULL, bg);
-
-	border_color = SDL_MapRGBA(surface->format, 187, 150, 243, 96);
-	edge.x = 0;
-	edge.y = 0;
-	edge.w = width;
-	edge.h = border;
-	SDL_FillRect(surface, &edge, border_color);
-	edge.y = height - border;
-	SDL_FillRect(surface, &edge, border_color);
-	edge.y = 0;
-	edge.w = border;
-	edge.h = height;
-	SDL_FillRect(surface, &edge, border_color);
-	edge.x = width - border;
-	SDL_FillRect(surface, &edge, border_color);
-
-	osd_draw_text(surface, text, scale);
-
-	texture = SDL_CreateTextureFromSurface(renderer, surface);
-	SDL_FreeSurface(surface);
-	if (!texture)
-		return;
-	SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-
-	if (out->texture)
-		SDL_DestroyTexture(out->texture);
-	out->texture = texture;
-	out->width = width;
-	out->height = height;
 	out->scale = scale;
 	snprintf(out->text, sizeof(out->text), "%s", text);
 }
@@ -2041,7 +2108,8 @@ static void osd_note_dma_age(uint64_t age_us)
 static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 		       uint32_t in_w, uint32_t in_h, bool interlaced,
 		       uint32_t rate_x100, double fps, const char *audio_text,
-		       const char *hdr_text)
+		       unsigned audio_ch, uint32_t audio_rate,
+		       const char *hdr_text, const char *chroma_text)
 {
 	char line2[384];
 	char line3[128];
@@ -2053,33 +2121,55 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 	char vsync_tag[24] = "";
 	int win_h = 0;
 	int scale;
+	static uint64_t last_hud_ms;
+	uint64_t now_ms_val;
 
-	if (!g_osd_enabled || !window)
+	if (!window)
 		return;
 
+	if (osd_card_active(window) && quicknav_is_active()) {
+		osd_card_update(renderer, window, in_w, in_h, interlaced,
+				rate_x100, chroma_text, audio_ch, audio_rate);
+		g_osd_card_was_active = true;
+	}
+
+	if (!g_osd_enabled) {
+		if (g_osd.texture) {
+			SDL_DestroyTexture(g_osd.texture);
+			g_osd.texture = NULL;
+			g_osd.text[0] = '\0';
+		}
+		return;
+	}
+
+	now_ms_val = now_ms();
+	if (g_osd.texture && now_ms_val - last_hud_ms < 500)
+		return;
+	last_hud_ms = now_ms_val;
+
 	if (hdr_text && *hdr_text)
-		snprintf(tail, sizeof(tail), " %c %s", OSD_BULLET, hdr_text);
+		snprintf(tail, sizeof(tail), " | %s", hdr_text);
 	if (g_aspect != ASPECT_AUTO)
-		snprintf(ar_tag, sizeof(ar_tag), " %c %s",
-			 OSD_BULLET, aspect_label(g_aspect));
+		snprintf(ar_tag, sizeof(ar_tag), " | %s",
+			 aspect_label(g_aspect));
 	if (g_integer_factor > 0)
-		snprintf(scale_tag, sizeof(scale_tag), " %c %dx",
-			 OSD_BULLET, g_integer_factor);
+		snprintf(scale_tag, sizeof(scale_tag), " | %dx",
+			 g_integer_factor);
 	if (g_osd_dma_ms > 0.0)
-		snprintf(dma_tag, sizeof(dma_tag), " %c %4.1fms",
-			 OSD_BULLET, g_osd_dma_ms);
+		snprintf(dma_tag, sizeof(dma_tag), " | %4.1fms",
+			 g_osd_dma_ms);
 	if (g_vsync)
-		snprintf(vsync_tag, sizeof(vsync_tag), " %c VSync", OSD_BULLET);
+		snprintf(vsync_tag, sizeof(vsync_tag), " | VSync");
 
 	SDL_GetWindowSize(window, NULL, &win_h);
 	scale = osd_scale_for_height(win_h);
 
 	snprintf(line2, sizeof(line2),
-		 "%ux%u%s %.0fHz %c %5.1f FPS%s%s%s%s %c %s%s",
+		 "%ux%u%s %.0fHz | %5.1f FPS%s%s%s%s | %s%s",
 		 in_w, in_h, interlaced ? "i" : "p",
-		 (double)rate_x100 / 100.0, OSD_BULLET, fps,
+		 (double)rate_x100 / 100.0, fps,
 		 ar_tag, scale_tag, dma_tag, vsync_tag,
-		 OSD_BULLET, audio_text, tail);
+		 audio_text, tail);
 
 	framegen_describe(line3, sizeof(line3));
 
@@ -2094,15 +2184,32 @@ static void osd_update(SDL_Renderer *renderer, SDL_Window *window,
 	osd_rebuild(renderer, scale, text);
 }
 
-static void osd_destination(SDL_Rect *dst, int win_w, int win_h)
+static void osd_scale_rect(SDL_Rect *dst, const SDL_Rect *src,
+			   SDL_Renderer *renderer, int win_w, int win_h)
+{
+	int out_w = 0;
+	int out_h = 0;
+
+	if (src->w <= 0 || src->h <= 0 || win_w <= 0 || win_h <= 0 ||
+	    !renderer || SDL_GetRendererOutputSize(renderer, &out_w, &out_h) < 0 ||
+	    out_w <= 0 || out_h <= 0) {
+		*dst = *src;
+		return;
+	}
+	dst->x = lroundf((float)src->x * (float)out_w / (float)win_w);
+	dst->y = lroundf((float)src->y * (float)out_h / (float)win_h);
+	dst->w = lroundf((float)src->w * (float)out_w / (float)win_w);
+	dst->h = lroundf((float)src->h * (float)out_h / (float)win_h);
+}
+
+static void osd_hud_place(SDL_Rect *dst, int win_w, int win_h)
 {
 	int margin = g_osd.scale >= 3 ? 24 : (g_osd.scale == 2 ? 16 : 10);
-	bool right = g_osd_pos == OSD_POS_TR || g_osd_pos == OSD_POS_BR;
-	bool bottom = g_osd_pos == OSD_POS_BR || g_osd_pos == OSD_POS_BL;
+	bool bottom = g_osd_pos == OSD_POS_BOTTOM;
 
 	dst->w = g_osd.width;
 	dst->h = g_osd.height;
-	dst->x = right ? win_w - margin - dst->w : margin;
+	dst->x = win_w - margin - dst->w;
 	dst->y = bottom ? win_h - margin - dst->h : margin;
 	if (dst->x < 0)
 		dst->x = 0;
@@ -2110,19 +2217,510 @@ static void osd_destination(SDL_Rect *dst, int win_w, int win_h)
 		dst->y = 0;
 }
 
+static void osd_place(SDL_Rect *dst, int width, int height, float scale,
+		     int win_w, int win_h)
+{
+	int margin = (int)(34.0f * scale + 0.5f);
+	bool bottom = g_osd_pos == OSD_POS_BOTTOM;
+
+	if (margin < 10)
+		margin = 10;
+	dst->w = width;
+	dst->h = height;
+	dst->x = (win_w - width) / 2;
+	dst->y = bottom ? win_h - margin - height : margin;
+	if (dst->x < 0)
+		dst->x = 0;
+	if (dst->y < 0)
+		dst->y = 0;
+}
+
+static const struct everlive_osd_hitbox *osd_card_hit(
+	enum everlive_osd_action action)
+{
+	for (int i = 0; i < g_card.hit_count; i++) {
+		if (g_card.hits[i].action == action)
+			return &g_card.hits[i];
+	}
+	return NULL;
+}
+
+static void osd_popup_build(SDL_Renderer *renderer, float scale)
+{
+	if (!g_popup_open)
+		return;
+	{
+		const struct everlive_osd_hitbox *anchor =
+			g_popup_kind == EVERLIVE_OSD_POPUP_ASPECT
+				? osd_card_hit(EVERLIVE_OSD_ACTION_ASPECT)
+				: NULL;
+		int min_width = anchor ? anchor->rect.w : 0;
+
+		everlive_osd_build_popup(renderer, g_popup_kind,
+					 g_popup_selected, g_popup_hover,
+					 g_popup_volume, min_width,
+					 g_osd_pos == OSD_POS_BOTTOM, scale,
+					 &g_popup);
+	}
+	g_popup_scale = scale;
+	g_popup_dirty = false;
+}
+
+static void osd_render_popup(SDL_Renderer *renderer, int win_w, int win_h,
+			     float scale)
+{
+	const struct everlive_osd_hitbox *anchor;
+	enum everlive_osd_action action =
+		g_popup_kind == EVERLIVE_OSD_POPUP_ASPECT
+			? EVERLIVE_OSD_ACTION_ASPECT : EVERLIVE_OSD_ACTION_VOLUME;
+
+	if (!g_popup_open)
+		return;
+	if (!g_popup.texture || g_popup_dirty ||
+	    fabsf(g_popup_scale - scale) > 0.001f)
+		osd_popup_build(renderer, scale);
+	if (!g_popup.texture)
+		return;
+	anchor = osd_card_hit(action);
+	if (!anchor)
+		return;
+	g_popup_dest.x = g_card_dest.x + anchor->rect.x;
+	g_popup_dest.y = g_card_dest.y + anchor->rect.y + anchor->rect.h +
+			 (g_popup_kind == EVERLIVE_OSD_POPUP_ASPECT ? 0 : 8);
+	g_popup_dest.w = g_popup.width;
+	g_popup_dest.h = g_popup.height;
+	if (g_popup_dest.x + g_popup_dest.w > win_w - 10)
+		g_popup_dest.x = win_w - g_popup_dest.w - 10;
+	if (g_popup_dest.x < 10)
+		g_popup_dest.x = 10;
+	if (g_popup_dest.y + g_popup_dest.h > win_h - 10) {
+		g_popup_dest.y = g_card_dest.y + anchor->rect.y -
+				 g_popup.height -
+				 (g_popup_kind == EVERLIVE_OSD_POPUP_ASPECT ?
+				  0 : 8);
+		if (g_popup_dest.y < 10)
+			g_popup_dest.y = 10;
+	}
+	{
+		SDL_Rect draw;
+
+		osd_scale_rect(&draw, &g_popup_dest, renderer, win_w, win_h);
+		SDL_RenderCopy(renderer, g_popup.texture, NULL, &draw);
+	}
+}
+
+static void osd_render_tooltip(SDL_Renderer *renderer, int win_w, int win_h,
+			       float scale);
+
 static void osd_render(SDL_Renderer *renderer, SDL_Window *window)
 {
 	int win_w = 0;
 	int win_h = 0;
 	SDL_Rect dst;
 
-	if (!g_osd_enabled || !g_osd.texture)
+	if (!window)
 		return;
 
 	SDL_GetWindowSize(window, &win_w, &win_h);
-	osd_destination(&dst, win_w, win_h);
-	SDL_RenderCopy(renderer, g_osd.texture, NULL, &dst);
+	if (osd_card_active(window) && quicknav_is_active() && g_card.texture) {
+		float scale = (float)win_h / 1080.0f;
+
+		osd_place(&dst, g_card.width, g_card.height, scale,
+			  win_w, win_h);
+		SDL_Rect draw;
+
+		g_card_dest = dst;
+		osd_scale_rect(&draw, &dst, renderer, win_w, win_h);
+		SDL_RenderCopy(renderer, g_card.texture, NULL, &draw);
+		osd_render_tooltip(renderer, win_w, win_h, scale);
+		osd_render_popup(renderer, win_w, win_h, scale);
+	}
+	if (!g_osd_enabled || !g_osd.texture)
+		return;
+	osd_hud_place(&dst, win_w, win_h);
+	{
+		SDL_Rect draw;
+
+		osd_scale_rect(&draw, &dst, renderer, win_w, win_h);
+		SDL_RenderCopy(renderer, g_osd.texture, NULL, &draw);
+	}
 }
+
+static int osd_volume_percent(void)
+{
+	float gain = float_from_bits(__atomic_load_n(&g_audio_gain_bits,
+						     __ATOMIC_RELAXED));
+	int pct = (int)(gain * 100.0f + 0.5f);
+
+	return pct < 0 ? 0 : (pct > 150 ? 150 : pct);
+}
+
+static void osd_apply_volume(int pct)
+{
+	if (pct < 0)
+		pct = 0;
+	if (pct > 150)
+		pct = 150;
+	__atomic_store_n(&g_audio_gain_bits,
+			 float_to_bits((float)pct / 100.0f),
+			 __ATOMIC_RELAXED);
+	if (pct > 0)
+		__atomic_store_n(&g_audio_mute_flag, 0, __ATOMIC_RELAXED);
+	g_popup_volume = pct;
+	g_popup_dirty = true;
+	osd_card_invalidate();
+}
+
+static void osd_apply_mute(bool muted)
+{
+	__atomic_store_n(&g_audio_mute_flag, muted ? 1 : 0, __ATOMIC_RELAXED);
+	osd_card_invalidate();
+}
+
+static void osd_toggle_fullscreen(SDL_Window *window)
+{
+	uint32_t flags;
+	bool enable;
+
+	if (g_parent_winid != 0) {
+		printf("[HUB] TOGGLE_FULLSCREEN\n");
+		fflush(stdout);
+		return;
+	}
+	flags = SDL_GetWindowFlags(window);
+	enable = !(flags & SDL_WINDOW_FULLSCREEN_DESKTOP);
+	SDL_SetWindowFullscreen(window, enable ?
+				SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+	osd_card_invalidate();
+}
+
+static void osd_cycle_scale(SDL_Window *window)
+{
+	char title[128];
+	char message[64];
+	const char *label = g_scale_mode == SCALE_INTEGER ?
+		"Integer" : "Bilinear";
+
+	g_scale_mode = (enum stream_scale)
+		((g_scale_mode + 1) % SCALE_COUNT);
+	label = g_scale_mode == SCALE_INTEGER ? "Integer" : "Bilinear";
+	snprintf(title, sizeof(title), "EverLive — Scaling: %s", label);
+	snprintf(message, sizeof(message), "Scale: %s", label);
+	SDL_SetWindowTitle(window, title);
+	toast_trigger(message);
+	osd_card_invalidate();
+}
+
+static void osd_open_popup(enum everlive_osd_popup_kind kind)
+{
+	g_popup_hover = -1;
+	g_popup_kind = kind;
+	g_popup_open = true;
+	g_popup_dirty = true;
+	if (kind == EVERLIVE_OSD_POPUP_VOLUME)
+		g_popup_volume = osd_volume_percent();
+	if (kind == EVERLIVE_OSD_POPUP_ASPECT)
+		g_popup_selected = g_aspect;
+	everlive_osd_destroy_popup(&g_popup);
+	osd_card_invalidate();
+}
+
+static void osd_close_popup(void)
+{
+	g_popup_open = false;
+	g_popup_dragging = false;
+	g_popup_kind = EVERLIVE_OSD_POPUP_NONE;
+	g_popup_hover = -1;
+	everlive_osd_destroy_popup(&g_popup);
+}
+
+static enum everlive_osd_action osd_hit_card_raw(int x, int y)
+{
+	SDL_Point point = { x - g_card_dest.x, y - g_card_dest.y };
+
+	if (!g_card.texture || g_card_dest.w <= 0)
+		return EVERLIVE_OSD_ACTION_NONE;
+	for (int i = 0; i < g_card.hit_count; i++) {
+		if (SDL_PointInRect(&point, &g_card.hits[i].rect))
+			return g_card.hits[i].action;
+	}
+	return EVERLIVE_OSD_ACTION_NONE;
+}
+
+static enum everlive_osd_action osd_hit_card(int x, int y)
+{
+	enum everlive_osd_action hit = osd_hit_card_raw(x, y);
+
+	if (getenv("EVERLIVE_OSD_DEBUG"))
+		fprintf(stderr,
+			"[OSD] click %d,%d local=%d,%d dest=%d,%d %dx%d gen=%u hit=%d\n",
+			x, y, x - g_card_dest.x, y - g_card_dest.y,
+			g_card_dest.x, g_card_dest.y, g_card_dest.w,
+			g_card_dest.h, g_card.generation, hit);
+	return hit;
+}
+
+static void osd_set_hover(enum everlive_osd_action action)
+{
+	enum everlive_osd_action old = g_hover_action;
+	bool visual_old;
+	bool visual_new;
+
+	if (old == action)
+		return;
+	g_hover_action = action;
+	visual_old = old != EVERLIVE_OSD_ACTION_NONE &&
+		     old != EVERLIVE_OSD_ACTION_INFO;
+	visual_new = action != EVERLIVE_OSD_ACTION_NONE &&
+		     action != EVERLIVE_OSD_ACTION_INFO;
+	if (visual_old || visual_new)
+		osd_card_invalidate();
+	if (getenv("EVERLIVE_OSD_DEBUG"))
+		fprintf(stderr, "[OSD] hover=%d\n", action);
+}
+
+static void osd_update_hover(SDL_Window *window, int x, int y)
+{
+	int win_w = 0;
+	int win_h = 0;
+
+	if (!window || g_headless || !quicknav_is_active() || g_popup_open ||
+	    !osd_card_active(window) || !g_card.texture) {
+		osd_set_hover(EVERLIVE_OSD_ACTION_NONE);
+		return;
+	}
+	SDL_GetWindowSize(window, &win_w, &win_h);
+	if (win_w <= 0 || win_h <= 0 || x < 0 || y < 0 ||
+	    x >= win_w || y >= win_h) {
+		osd_set_hover(EVERLIVE_OSD_ACTION_NONE);
+		return;
+	}
+	osd_place(&g_card_dest, g_card.width, g_card.height,
+		  (float)win_h / 1080.0f, win_w, win_h);
+	osd_set_hover(osd_hit_card_raw(x, y));
+}
+
+static void osd_render_tooltip(SDL_Renderer *renderer, int win_w, int win_h,
+			       float scale)
+{
+	const struct everlive_osd_hitbox *anchor;
+	SDL_Rect screen;
+
+	if (g_popup_open || g_hover_action == EVERLIVE_OSD_ACTION_NONE)
+		return;
+	anchor = osd_card_hit(g_hover_action);
+	if (!anchor)
+		return;
+	screen.x = g_card_dest.x + anchor->rect.x;
+	screen.y = g_card_dest.y + anchor->rect.y;
+	screen.w = anchor->rect.w;
+	screen.h = anchor->rect.h;
+	if (g_hover_action == EVERLIVE_OSD_ACTION_INFO) {
+		if (everlive_osd_build_details(renderer, &g_card, scale))
+			everlive_osd_render_details(renderer, &g_card, &screen,
+						    win_w, win_h);
+		return;
+	}
+	if (everlive_osd_build_tooltip(renderer, &g_card, g_hover_action,
+				       scale))
+		everlive_osd_render_tooltip(renderer, &g_card, &screen,
+					    win_w, win_h);
+}
+
+static bool osd_volume_track_event(int x, bool press)
+{
+	SDL_Rect track = g_popup.volume_track;
+	int rel;
+	int pct;
+
+	if (!g_popup_open || g_popup.kind != EVERLIVE_OSD_POPUP_VOLUME)
+		return false;
+	rel = x - (g_popup_dest.x + track.x);
+	if (rel < 0)
+		rel = 0;
+	if (rel > track.w)
+		rel = track.w;
+	pct = track.w > 0 ? (rel * 150 + track.w / 2) / track.w : 0;
+	if (press)
+		g_popup_dragging = true;
+	if (g_popup_dragging)
+		osd_apply_volume(pct);
+	return true;
+}
+
+static void osd_update_popup_hover(int x, int y)
+{
+	SDL_Point point = { x, y };
+	SDL_Point local;
+	int hover = -1;
+	int i;
+
+	if (!g_popup_open || g_popup.kind != EVERLIVE_OSD_POPUP_ASPECT) {
+		if (g_popup_hover != -1)
+			g_popup_hover = -1;
+		return;
+	}
+	if (g_popup_dest.w > 0 && SDL_PointInRect(&point, &g_popup_dest)) {
+		local.x = x - g_popup_dest.x;
+		local.y = y - g_popup_dest.y;
+		for (i = 0; i < 4; i++) {
+			if (SDL_PointInRect(&local, &g_popup.aspect_rows[i])) {
+				hover = i;
+				break;
+			}
+		}
+	}
+	if (hover != g_popup_hover) {
+		g_popup_hover = hover;
+		g_popup_dirty = true;
+	}
+}
+
+static bool osd_handle_mouse(SDL_Window *window, const SDL_Event *event)
+{
+	enum everlive_osd_action action;
+	SDL_Point point;
+	int x;
+	int y;
+
+	if (!window || g_headless)
+		return false;
+	if (!osd_card_active(window) || !g_card.texture)
+		return false;
+
+	if (event->type == SDL_MOUSEMOTION) {
+		if (event->motion.xrel != 0 || event->motion.yrel != 0)
+			quicknav_wake();
+	} else if (event->type == SDL_MOUSEBUTTONDOWN) {
+		quicknav_wake();
+	}
+
+	if (!quicknav_is_active())
+		return false;
+
+	{
+		int win_w = 0;
+		int win_h = 0;
+
+		SDL_GetWindowSize(window, &win_w, &win_h);
+		if (win_w > 0 && win_h > 0) {
+			osd_place(&g_card_dest, g_card.width, g_card.height,
+				  (float)win_h / 1080.0f, win_w, win_h);
+		}
+	}
+	if (event->type == SDL_MOUSEMOTION)
+		osd_update_hover(window, event->motion.x, event->motion.y);
+	else if (event->type == SDL_MOUSEBUTTONDOWN ||
+		 event->type == SDL_MOUSEBUTTONUP)
+		osd_update_hover(window, event->button.x, event->button.y);
+	if (g_popup_open) {
+		if (event->type == SDL_MOUSEMOTION)
+			osd_update_popup_hover(event->motion.x, event->motion.y);
+		else if (event->type == SDL_MOUSEBUTTONDOWN ||
+			 event->type == SDL_MOUSEBUTTONUP)
+			osd_update_popup_hover(event->button.x, event->button.y);
+	}
+
+	if (event->type == SDL_MOUSEBUTTONUP && event->button.button == SDL_BUTTON_LEFT) {
+		g_popup_dragging = false;
+		return true;
+	}
+	if (event->type == SDL_MOUSEMOTION) {
+		if (g_popup_dragging)
+			return osd_volume_track_event(event->motion.x, false);
+		return false;
+	}
+	if (event->type != SDL_MOUSEBUTTONDOWN ||
+	    event->button.button != SDL_BUTTON_LEFT)
+		return false;
+	x = event->button.x;
+	y = event->button.y;
+
+	if (g_popup_open) {
+		/* Window-space first; popup internals use local space. */
+		point.x = x;
+		point.y = y;
+		if (g_popup_dest.w > 0 && SDL_PointInRect(&point, &g_popup_dest)) {
+			if (g_popup.kind == EVERLIVE_OSD_POPUP_VOLUME) {
+				osd_volume_track_event(x, true);
+			} else if (g_popup.kind == EVERLIVE_OSD_POPUP_ASPECT) {
+				static const char *const names[] = {
+					"Auto", "16:9", "4:3", "Stretch"
+				};
+				SDL_Point local = { x - g_popup_dest.x,
+						    y - g_popup_dest.y };
+				int i;
+
+				for (i = 0; i < 4; i++) {
+					if (SDL_PointInRect(&local,
+							    &g_popup.aspect_rows[i])) {
+						char msg[64];
+
+						g_aspect = (enum stream_aspect)i;
+						snprintf(msg, sizeof(msg),
+							 "Aspect: %s", names[i]);
+						toast_trigger(msg);
+						osd_card_invalidate();
+						break;
+					}
+				}
+				osd_close_popup();
+			}
+			return true;
+		}
+		osd_close_popup();
+	}
+
+	action = osd_hit_card(x, y);
+	if (event->button.clicks >= 2 &&
+	    action == EVERLIVE_OSD_ACTION_NONE) {
+		osd_toggle_fullscreen(window);
+		toast_trigger("Fullscreen toggled");
+		return true;
+	}
+	switch (action) {
+	case EVERLIVE_OSD_ACTION_ASPECT:
+		osd_open_popup(EVERLIVE_OSD_POPUP_ASPECT);
+		break;
+	case EVERLIVE_OSD_ACTION_SCALE:
+		osd_cycle_scale(window);
+		break;
+	case EVERLIVE_OSD_ACTION_VOLUME:
+		osd_open_popup(EVERLIVE_OSD_POPUP_VOLUME);
+		break;
+	case EVERLIVE_OSD_ACTION_MUTE: {
+		bool next = __atomic_load_n(&g_audio_mute_flag,
+					    __ATOMIC_RELAXED) == 0;
+
+		osd_apply_mute(next);
+		toast_trigger(next ? "Mute: On" : "Mute: Off");
+		break;
+	}
+	case EVERLIVE_OSD_ACTION_FULLSCREEN:
+		osd_toggle_fullscreen(window);
+		toast_trigger("Fullscreen toggled");
+		break;
+	case EVERLIVE_OSD_ACTION_RECORD:
+		printf("[HUB] TOGGLE_RECORD\n");
+		fflush(stdout);
+		break;
+	case EVERLIVE_OSD_ACTION_STATS:
+		g_osd_enabled = !g_osd_enabled;
+		toast_trigger(g_osd_enabled ? "Performance HUD: On" : "Performance HUD: Off");
+		osd_card_invalidate();
+		break;
+	case EVERLIVE_OSD_ACTION_HIDE:
+		quicknav_hide();
+		toast_trigger("Quick Nav: hidden");
+		printf("[OSD] Quick Nav: off\n");
+		fflush(stdout);
+		break;
+	default:
+		break;
+	}
+	return action != EVERLIVE_OSD_ACTION_NONE;
+}
+
 
 /* F1 help card.  Built lazily, re-rasterised only on scale or text change. */
 static const char g_help_text[] =
@@ -2135,7 +2733,8 @@ static const char g_help_text[] =
 	"Up / Down  Volume Up / Down (5%) [or + / -]\n"
 	"M          Audio Mute Toggle\n"
 	"P          OSD Position (TR/BR/BL/TL)\n"
-	"Tab / I    OSD Stats Overlay Toggle\n"
+	"Tab / I    OSD Performance Overlay Toggle\n"
+	"O          Quick Navigation Bar Toggle\n"
 	"F1 / ?     Close Help Overlay\n"
 	"Esc / Q    Quit Streamer";
 
@@ -2171,25 +2770,35 @@ static void help_render(SDL_Renderer *renderer, SDL_Window *window)
 	SDL_RenderCopy(renderer, g_help.texture, NULL, &dst);
 }
 
-static void toast_trigger(const char *msg)
+static void toast_trigger_tone(const char *msg, enum everlive_osd_tone tone)
 {
 	struct timespec ts;
 
 	if (!msg || !*msg)
 		return;
 	snprintf(g_toast_text, sizeof(g_toast_text), "%s", msg);
+	g_toast_tone = tone;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	g_toast_until_ms = (uint64_t)ts.tv_sec * 1000U +
 			   (uint64_t)(ts.tv_nsec / 1000000L) + 2500U;
 }
 
+static void toast_trigger(const char *msg)
+{
+	toast_trigger_tone(msg, EVERLIVE_OSD_TONE_NEUTRAL);
+}
+
 static void toast_render(SDL_Renderer *renderer, SDL_Window *window)
 {
 	struct timespec ts;
+
+	if (g_popup_open)
+		return;
 	uint64_t now;
 	int win_w = 0;
 	int win_h = 0;
 	int scale;
+	int scale_key;
 	SDL_Rect dst;
 
 	if (!g_toast_text[0])
@@ -2205,21 +2814,174 @@ static void toast_render(SDL_Renderer *renderer, SDL_Window *window)
 		return;
 
 	scale = osd_scale_for_height(win_h);
-	if (scale != g_toast.scale || strcmp(g_toast.text, g_toast_text) != 0)
-		osd_build(renderer, scale, g_toast_text, &g_toast);
+	scale_key = (int)((float)win_h / 1080.0f * 1000.0f + 0.5f);
+	if (g_toast.texture &&
+	    g_toast_scale == scale_key &&
+	    strcmp(g_toast.text, g_toast_text) == 0)
+		goto have_toast;
+	if (!everlive_osd_build_toast(renderer, g_toast_text, g_toast_tone,
+				      win_h, &g_toast.texture,
+				      &g_toast.width, &g_toast.height,
+				      &g_toast_scale))
+		return;
+	g_toast.scale = scale;
+	snprintf(g_toast.text, sizeof(g_toast.text), "%s", g_toast_text);
+have_toast:
 	if (!g_toast.texture)
 		return;
 
 	dst.w = g_toast.width;
 	dst.h = g_toast.height;
 	dst.x = (win_w - dst.w) / 2;
-	dst.y = win_h - dst.h - (scale >= 3 ? 36 : (scale == 2 ? 24 : 16));
-	if (dst.x < 0)
-		dst.x = 0;
-	if (dst.y < 0)
-		dst.y = 0;
+	{
+		int gap = (int)(EVERLIVE_OSD_NOTIFY_GAP *
+				EVERLIVE_OSD_HUB_SCALE *
+				(float)win_h / 1080.0f + 0.5f);
+		int edge = (int)(EVERLIVE_OSD_BAR_PAD_X *
+				 EVERLIVE_OSD_HUB_SCALE *
+				 (float)win_h / 1080.0f + 0.5f);
+
+		if (gap < 6)
+			gap = 6;
+		if (edge < 8)
+			edge = 8;
+		if (osd_card_active(window) && quicknav_is_active() &&
+		    g_card_dest.h > 0) {
+			if (g_osd_pos == OSD_POS_BOTTOM)
+				dst.y = g_card_dest.y - dst.h - gap;
+			else
+				dst.y = g_card_dest.y + g_card_dest.h + gap;
+		} else {
+			dst.y = g_osd_pos == OSD_POS_BOTTOM ?
+				win_h - dst.h - edge : edge;
+		}
+	}
+	if (dst.x < 8)
+		dst.x = 8;
+	if (dst.y < 8)
+		dst.y = 8;
+	if (dst.y + dst.h > win_h - 8)
+		dst.y = win_h - dst.h - 8;
 
 	SDL_RenderCopy(renderer, g_toast.texture, NULL, &dst);
+}
+
+static bool g_embed_mouse_down;
+static uint64_t g_embed_click_ms;
+static int g_embed_click_x;
+static int g_embed_click_y;
+
+static void embed_poll_pointer(SDL_Window *window)
+{
+#if defined(SDL_VIDEO_DRIVER_X11)
+	SDL_SysWMinfo info;
+	Display *dpy;
+	Window xwin;
+	Window root_ret;
+	Window child_ret;
+	int root_x = 0;
+	int root_y = 0;
+	int win_x = 0;
+	int win_y = 0;
+	int local_x = 0;
+	int local_y = 0;
+	unsigned int mask = 0;
+	bool down;
+
+	if (!window || g_parent_winid == 0) {
+		g_embed_mouse_down = false;
+		return;
+	}
+	{
+		static uint64_t last_poll_ms;
+		uint64_t poll_now = now_ms();
+
+		if (poll_now - last_poll_ms < 33)
+			return;
+		last_poll_ms = poll_now;
+	}
+	SDL_VERSION(&info.version);
+	if (!SDL_GetWindowWMInfo(window, &info) ||
+	    info.subsystem != SDL_SYSWM_X11 || !info.info.x11.display)
+		return;
+	dpy = info.info.x11.display;
+	xwin = info.info.x11.window;
+	if (!XQueryPointer(dpy, DefaultRootWindow(dpy), &root_ret, &child_ret,
+			   &root_x, &root_y, &win_x, &win_y, &mask))
+		return;
+	if (!XTranslateCoordinates(dpy, DefaultRootWindow(dpy), xwin,
+				   root_x, root_y, &local_x, &local_y,
+				   &child_ret))
+		return;
+	{
+		int ww = 0;
+		int wh = 0;
+
+		/* X11 reports physical pixels; SDL mouse events are logical. */
+		SDL_GetWindowSize(window, &ww, &wh);
+		if (g_embed_last_w > 0 && g_embed_last_h > 0 && ww > 0 && wh > 0) {
+			local_x = (local_x * ww + g_embed_last_w / 2) / g_embed_last_w;
+			local_y = (local_y * wh + g_embed_last_h / 2) / g_embed_last_h;
+		}
+	}
+	(void)win_x;
+	(void)win_y;
+	{
+		static int last_local_x = -1;
+		static int last_local_y = -1;
+
+		if (abs(local_x - last_local_x) > 1 || abs(local_y - last_local_y) > 1) {
+			quicknav_wake();
+			last_local_x = local_x;
+			last_local_y = local_y;
+		}
+	}
+	osd_update_hover(window, local_x, local_y);
+	if (g_popup_open)
+		osd_update_popup_hover(local_x, local_y);
+	down = (mask & Button1Mask) != 0;
+	if (down && !g_embed_mouse_down) {
+		SDL_Event event;
+		uint64_t now = now_ms();
+		int clicks = (now - g_embed_click_ms < 450ULL &&
+			      abs(local_x - g_embed_click_x) < 8 &&
+			      abs(local_y - g_embed_click_y) < 8) ? 2 : 1;
+
+		memset(&event, 0, sizeof(event));
+		event.type = SDL_MOUSEBUTTONDOWN;
+		event.button.button = SDL_BUTTON_LEFT;
+		event.button.state = SDL_PRESSED;
+		event.button.clicks = (Uint8)clicks;
+		event.button.x = local_x;
+		event.button.y = local_y;
+		osd_handle_mouse(window, &event);
+		g_embed_click_ms = now;
+		g_embed_click_x = local_x;
+		g_embed_click_y = local_y;
+	} else if (down && g_embed_mouse_down) {
+		SDL_Event event;
+
+		memset(&event, 0, sizeof(event));
+		event.type = SDL_MOUSEMOTION;
+		event.motion.x = local_x;
+		event.motion.y = local_y;
+		event.motion.state = SDL_BUTTON_LMASK;
+		osd_handle_mouse(window, &event);
+	} else if (!down && g_embed_mouse_down) {
+		SDL_Event event;
+
+		memset(&event, 0, sizeof(event));
+		event.type = SDL_MOUSEBUTTONUP;
+		event.button.button = SDL_BUTTON_LEFT;
+		event.button.state = SDL_RELEASED;
+		event.button.x = local_x;
+		event.button.y = local_y;
+		osd_handle_mouse(window, &event);
+	}
+	g_embed_mouse_down = down;
+#else
+	(void)window;
+#endif
 }
 
 static void fit_destination(SDL_Rect *dst, int win_w, int win_h,
@@ -5693,15 +6455,12 @@ static bool framegen_prepare_vulkan(void)
 
 	ready = gc573_fg_apply_env(&cfg, &probe);
 	gc573_fg_write_toml(&cfg, &probe);
-	{
-		double src_hz = (double)g_fg_source_hz_x100 / 100.0;
-		double target_hz = gc573_fg_target_output_hz(&cfg, src_hz);
-		bool pacer_ok = gc573_fg_prepare_pacer(&cfg, src_hz);
-
-		if (pacer_ok && target_hz > 10.0 && target_hz < 235.0)
-			pr_info("Vulkan present pacer active (target %.1f Hz)",
-				target_hz);
-	}
+	/*
+	 * Pacer Layer: disabled for both LSFG and AFMF when input is high refresh (> 90 Hz).
+	 * LSFG-VK and AFMF have their own internal presentation pacing. A downstream pacer layer
+	 * intercepts both real and companion frames and sleeps in the render thread, cutting 120 FPS in half.
+	 */
+	gc573_fg_update_pacer_hz(0.0);
 
 	if (g_framegen) {
 		gc573_framegen_set_probe(g_framegen, &probe);
@@ -5726,9 +6485,6 @@ static bool framegen_prepare_vulkan(void)
  * window.  The GPU presents straight to the child surface without passing
  * through Qt compositing (0.0 ms added latency).
  */
-static unsigned long g_parent_winid;
-static int g_embed_last_w;
-static int g_embed_last_h;
 static uint64_t g_embed_last_sync_ms;
 static bool g_has_saved_win;
 static int g_saved_win_x;
@@ -5875,12 +6631,12 @@ static void embed_window_attach(SDL_Window *window)
 	 * hotkeys, double-click fullscreen and cursor visibility stay owned
 	 * by the Control Hub.
 	 */
+	/* Keep pointer events on the child so the OSD card stays clickable
+	 * inside the Hub viewport.  Keep keyboard focus with the Hub. */
 	memset(&self_attr, 0, sizeof(self_attr));
 	if (XGetWindowAttributes(dpy, sdl_xwin, &self_attr)) {
 		long mask = self_attr.your_event_mask &
-			    ~(ButtonPressMask | ButtonReleaseMask |
-			      PointerMotionMask | KeyPressMask |
-			      KeyReleaseMask);
+			    ~(KeyPressMask | KeyReleaseMask);
 		XSelectInput(dpy, sdl_xwin, mask);
 	}
 
@@ -6023,6 +6779,8 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 	if (want_vk) {
 		(void)framegen_prepare_vulkan();
 		SDL_SetHint(SDL_HINT_RENDER_DRIVER, "vulkan");
+		/* Vulkan frame generation requires FIFO presentation (VSync) to pace frames into VBlanks. */
+		SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
 		flags |= SDL_WINDOW_VULKAN;
 		renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
 	} else {
@@ -6094,9 +6852,9 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 
 	if (want_vk && !g_fg_fallback) {
 		g_present_driver = PRESENT_DRIVER_VULKAN;
-		/* lsfg-vk only doubles present() calls it actually sees. */
+		/* Vulkan frame generation requires FIFO presentation (VSync) to pace frames into VBlanks. */
 		if (SDL_RenderSetVSync(*renderer, 1) < 0)
-			pr_warn("Vulkan renderer rejected VSync; lsfg-vk pacing may jitter");
+			pr_warn("Vulkan renderer rejected VSync; framegen pacing may jitter");
 	} else {
 		g_present_driver = PRESENT_DRIVER_OPENGL;
 		if (SDL_RenderSetVSync(*renderer, use_gl_vsync ? 1 : 0) < 0 &&
@@ -6470,6 +7228,21 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 		if (cmd->a >= 0 && cmd->a < (int32_t)OSD_POS_COUNT)
 			g_osd_pos = (enum osd_position)cmd->a;
 		printf("[IPC] OSD position: %s\n", osd_pos_name(g_osd_pos));
+		break;
+	case GC573_IPC_CMD_RECORD_STATE:
+		__atomic_store_n(&g_recording_flag, cmd->a ? 1 : 0,
+				 __ATOMIC_RELAXED);
+		osd_card_invalidate();
+		printf("[IPC] Recording: %s\n", cmd->a ? "on" : "off");
+		break;
+	case GC573_IPC_CMD_OSD_MODE:
+		if (cmd->a >= 0 && cmd->a <= OSD_MODE_CARD) {
+			g_osd_mode = (enum osd_mode)cmd->a;
+			osd_card_invalidate();
+			g_osd.scale = -1;
+			g_osd_card_was_active = true;
+		}
+		printf("[IPC] OSD mode: %d\n", cmd->a);
 		break;
 	case GC573_IPC_CMD_ASPECT:
 		if (cmd->a >= 0 && cmd->a < (int32_t)ASPECT_COUNT)
@@ -7037,9 +7810,9 @@ int main(int argc, char *argv[])
 	}
 
 	if (osd_pos_spec && !parse_osd_pos(osd_pos_spec, &g_osd_pos)) {
-		fprintf(stderr, "[OSD] Unknown position '%s'; using top-right\n",
+		fprintf(stderr, "[OSD] Unknown position '%s'; using top\n",
 			osd_pos_spec);
-		g_osd_pos = OSD_POS_TR;
+		g_osd_pos = OSD_POS_TOP;
 	}
 
 	gc573_user_log_init();
@@ -7346,7 +8119,7 @@ int main(int argc, char *argv[])
 		printf("[*] Userspace streamer active (headless). Send SIGINT/SIGTERM to exit.\n");
 	} else {
 		printf("[*] Userspace streamer active. Press 'q' or ESC to exit, F1 for the hotkey list,\n");
-		printf("    'f' fullscreen, 'a' aspect, '1'/'l' scaling, 'p' OSD position, Tab/'o' OSD,\n");
+		printf("    'f' fullscreen, 'a' aspect, '1'/'l' scaling, 'p' OSD top/bottom, Tab/'o' OSD,\n");
 		printf("    '↑'/'↓'/'+'/'-' volume, 'm' mute, 'g' frame generation.\n");
 		printf("[OSD] Start: fullscreen=%s vsync=%s aspect=%s scale=%s overlay=%s pos=%s framegen=%s flow=%d%% perf=%s\n",
 		       g_fullscreen ? "on" : "off",
@@ -7421,11 +8194,22 @@ int main(int argc, char *argv[])
 		SDL_Event event;
 		uint64_t now;
 
-		if (window && g_parent_winid && !g_headless)
+		if (window && g_parent_winid && !g_headless) {
 			embed_window_sync_size(window);
+			embed_poll_pointer(window);
+		}
 
 		while (SDL_PollEvent(&event)) {
+			if (g_parent_winid != 0 &&
+			    (event.type == SDL_MOUSEBUTTONDOWN ||
+			     event.type == SDL_MOUSEBUTTONUP ||
+			     event.type == SDL_MOUSEMOTION))
+				continue;
+			if (osd_handle_mouse(window, &event))
+				continue;
 			if (event.type == SDL_WINDOWEVENT) {
+				if (event.window.event == SDL_WINDOWEVENT_LEAVE)
+					osd_set_hover(EVERLIVE_OSD_ACTION_NONE);
 				if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED && g_parent_winid != 0) {
 #if defined(SDL_VIDEO_DRIVER_X11)
 					embed_revert_focus(window);
@@ -7445,6 +8229,11 @@ int main(int argc, char *argv[])
 					g_trace_requested = true;
 				g_running = 0;
 			} else if (event.type == SDL_KEYDOWN && !g_headless) {
+				if (g_popup_open &&
+				    event.key.keysym.sym == SDLK_ESCAPE) {
+					osd_close_popup();
+					continue;
+				}
 				if (event.key.keysym.sym == SDLK_ESCAPE) {
 					/* First Esc only dismisses the help card. */
 					if (g_help_overlay) {
@@ -7583,12 +8372,21 @@ int main(int argc, char *argv[])
 						 scale_name(g_scale_mode));
 					SDL_SetWindowTitle(window, title);
 				} else if (event.key.keysym.sym == SDLK_TAB ||
-					   event.key.keysym.sym == SDLK_i ||
-					   event.key.keysym.sym == SDLK_o) {
+					   event.key.keysym.sym == SDLK_i) {
 					g_osd_enabled = !g_osd_enabled;
-					printf("[OSD] Overlay: %s\n",
+					printf("[OSD] Performance HUD: %s\n",
 					       g_osd_enabled ? "on" : "off");
 					fflush(stdout);
+					toast_trigger(g_osd_enabled ?
+						      "Performance HUD: On" : "Performance HUD: Off");
+				} else if (event.key.keysym.sym == SDLK_o) {
+					if (quicknav_is_active()) {
+						quicknav_hide();
+						toast_trigger("Quick Nav: Off");
+					} else {
+						quicknav_wake();
+						toast_trigger("Quick Nav: On");
+					}
 				} else if (event.key.keysym.sym == SDLK_s ||
 					   event.key.keysym.sym == SDLK_F10) {
 					g_osd_enabled = !g_osd_enabled;
@@ -7621,6 +8419,7 @@ int main(int argc, char *argv[])
 #endif
 			}
 		}
+		quicknav_sync_cursor();
 		if (!g_running)
 			break;
 
@@ -8350,22 +9149,34 @@ int main(int argc, char *argv[])
 							output_width * 2U);
 					}
 					if (texture && output_width && output_height) {
-						char audio_text[64];
-						const char *audio_desc =
-							audio_osd_text(
-								&audio, audio_text,
-								sizeof(audio_text));
+						static uint64_t last_osd_update_us = 0;
+						uint64_t now_osd_us = now_us();
 
-						osd_update(
-							renderer, window,
-							input_width, input_height,
-							current_sig.interlaced,
-							input_rate_x100,
-							displayed_fps,
-							audio_desc,
-							gc573_hdr_active() ?
-							gc573_hdr_label() :
-							NULL);
+						if (now_osd_us - last_osd_update_us >= 50000ULL) {
+							char audio_text[64];
+							const char *audio_desc =
+								audio_osd_text(
+									&audio, audio_text,
+									sizeof(audio_text));
+
+							last_osd_update_us = now_osd_us;
+							osd_update(
+								renderer, window,
+								input_width, input_height,
+								current_sig.interlaced,
+								input_rate_x100,
+								displayed_fps,
+								audio_desc,
+								audio.playback.channels ?
+									audio.playback.channels : 2,
+								audio.format_rate ?
+									audio.format_rate : 48000,
+								gc573_hdr_active() ?
+								gc573_hdr_label() :
+								NULL,
+								colorspace_short(
+									current_sig.colorspace));
+						}
 						if (fg_native &&
 						    render_frame_native_gl(
 							    window, renderer,
@@ -8519,8 +9330,14 @@ int main(int argc, char *argv[])
 						   current_sig.interlaced,
 						   input_rate_x100,
 						   displayed_fps, audio_desc,
+						   audio.playback.channels ?
+							audio.playback.channels : 2,
+						   audio.format_rate ?
+							audio.format_rate : 48000,
 						   gc573_hdr_active() ?
-						   gc573_hdr_label() : NULL);
+						   gc573_hdr_label() : NULL,
+						   colorspace_short(
+							   current_sig.colorspace));
 					render_frame(window, renderer, texture,
 						     aspect_ratio(g_aspect, video_aspect),
 						     (int)output_width,

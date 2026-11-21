@@ -2503,7 +2503,7 @@ static void gc570d_handle_ctl_client(int client_fd)
 		fprintf(fp, "Triggering hardware re-initialization...\n");
 		g_reinit_requested = true;
 	} else {
-		fprintf(fp, "Commands: status | reinit | input <1|2> | osd <0|1> | osd_pos <tr|br|bl|tl> | pip <0|1> | aspect <auto|16:9|4:3|stretch> | scale <fit|integer> | volume <0..150> | mute <0|1> | list | show <node> | action <node> [1|0] | led <colorful|breathing|static|off>\n");
+		fprintf(fp, "Commands: status | reinit | input <1|2> | osd <0|1> | osd_pos <top|bottom> | pip <0|1> | aspect <auto|16:9|4:3|stretch> | scale <fit|integer> | volume <0..150> | mute <0|1> | list | show <node> | action <node> [1|0] | led <colorful|breathing|static|off>\n");
 	}
 
 	fclose(fp);
@@ -2921,7 +2921,7 @@ static void print_usage(const char *prog)
 	printf("  --osd              Show the on-screen overlay (default)\n");
 	printf("  --no-osd           Hide the overlay (same as --streamer-mode)\n");
 	printf("  --streamer-mode    Clean feed: no OSD\n");
-	printf("  --osd-pos POS      tr|br|bl|tl (default: tr)\n");
+	printf("  --osd-pos POS      top|bottom (default: top)\n");
 	printf("  --aspect MODE      auto|16:9|4:3|stretch (default: auto)\n");
 	printf("  --scale MODE       fit|integer (default: fit)\n");
 	printf("  -v, --volume VOL   Initial SDL2 audio volume (0.0-1.5 or 0-150)\n");
@@ -2951,7 +2951,7 @@ int main(int argc, char **argv)
 		.volume_pct = 100,
 		.aspect = "auto",
 		.scale = "fit",
-		.osd_pos = "tr",
+		.osd_pos = "top",
 		.v4l2 = { NULL, NULL },
 		.title = "EverLive DUO",
 	};

@@ -356,8 +356,22 @@ if QSocketNotifier is not None:
             return self.request("osd.set", {"enabled": bool(enabled)})
 
         def set_osd_position(self, pos: str) -> bool:
-            """pos: ``tr`` | ``br`` | ``bl`` | ``tl``."""
+            """pos: ``top`` | ``bottom`` (legacy corner names are mapped)."""
             return self.request("osd.position.set", {"pos": str(pos)})
+
+        def set_osd_mode(self, mode: str) -> bool:
+            """mode: ``auto`` | ``compact`` | ``card``.
+
+            ``auto`` follows the SDL window's fullscreen state, ``compact``
+            forces the stats readout, and ``card`` forces the fullscreen
+            identity card even when the engine is embedded in the Hub.
+            """
+            return self.request("osd.mode.set",
+                                {"mode": str(mode).strip().lower()})
+
+        def set_recording(self, active: bool) -> bool:
+            """Mirror the Hub recorder state on the engine OSD."""
+            return self.request("record.state", {"active": bool(active)})
 
         def set_aspect(self, mode: str) -> bool:
             """mode: ``auto`` | ``16:9`` | ``4:3`` | ``stretch``."""

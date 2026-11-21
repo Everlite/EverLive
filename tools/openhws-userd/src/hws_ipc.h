@@ -41,10 +41,14 @@ enum hws_ipc_led_mode {
 };
 
 enum hws_ipc_osd_pos {
-	HWS_IPC_OSD_TR = 0,
-	HWS_IPC_OSD_BR = 1,
-	HWS_IPC_OSD_BL = 2,
-	HWS_IPC_OSD_TL = 3,
+	HWS_IPC_OSD_TOP = 0,
+	HWS_IPC_OSD_BOTTOM = 1,
+};
+
+enum hws_ipc_osd_mode {
+	HWS_IPC_OSD_MODE_AUTO = 0,
+	HWS_IPC_OSD_MODE_COMPACT = 1,
+	HWS_IPC_OSD_MODE_CARD = 2,
 };
 
 enum hws_ipc_aspect {
@@ -67,6 +71,7 @@ enum hws_ipc_mode {
 	HWS_IPC_CMD_AUDIO_MUTE,
 	HWS_IPC_CMD_OSD_ENABLE,
 	HWS_IPC_CMD_OSD_POSITION,
+	HWS_IPC_CMD_OSD_MODE,
 	HWS_IPC_CMD_ASPECT,
 	HWS_IPC_CMD_MODE,
 	HWS_IPC_CMD_V4L2,
@@ -78,6 +83,7 @@ enum hws_ipc_mode {
 	HWS_IPC_CMD_EDID,
 	HWS_IPC_CMD_HOTPLUG,
 	HWS_IPC_CMD_HDR_EV,
+	HWS_IPC_CMD_RECORD_STATE,
 };
 
 /*

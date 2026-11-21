@@ -45,7 +45,11 @@ VIEWER_PY := everlive_client.py card_profile.py service_manager.py \
              ui_theme.py ui_widgets.py fa_icons.py everlive_multi.py \
              everlive_cam.py
 VIEWER_ASSETS := fonts/fa-solid-900.ttf fonts/fa-brands-400.ttf \
-                 fonts/LICENSE.txt fonts/chevron-down.png
+                 fonts/LICENSE.txt fonts/chevron-down.png \
+                 fonts/NotoSans-Regular.ttf fonts/NotoSans-SemiBold.ttf \
+                 fonts/NotoSans-ExtraBold.ttf \
+                 fonts/NotoSansMono-SemiBold.ttf \
+                 fonts/NotoSans-LICENSE.txt
 
 GC570D_RUNDIR := $(EVERLIVE_LIBDIR)/$(GC570D_DIR)
 GC570D_SED := sed -e 's|/usr/local/libexec/|$(GC570D_RUNDIR)/|g' \
@@ -53,7 +57,7 @@ GC570D_SED := sed -e 's|/usr/local/libexec/|$(GC570D_RUNDIR)/|g' \
 
 L := $(DESTDIR)$(EVERLIVE_LIBDIR)
 
-.PHONY: all core gc573 gc570d hwsuhd cam test check asan clean install uninstall
+.PHONY: all core gc573 gc570d hwsuhd cam test check asan clean install uninstall osd-theme
 
 all: core gc573 gc570d cam
 
@@ -78,6 +82,9 @@ hwsuhd: core
 test: all
 	+$(MAKE) -C $(TESTS_DIR) test
 	$(PYTHON) -m unittest discover -s tools/everlive/tests
+
+osd-theme:
+	$(PYTHON) tools/everlive/gen_osd_theme.py
 
 check: test
 

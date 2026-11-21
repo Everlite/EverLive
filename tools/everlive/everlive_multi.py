@@ -146,8 +146,10 @@ def build_engine_command(
         if headless:
             cmd.append("--headless")
         elif embed > 0:
-            cmd.extend(["--parent-winid", str(embed)])
+            cmd.extend(["--no-osd", "--parent-winid", str(embed)])
     if embed > 0:
+        if model == MODEL_GC570D:
+            cmd.append("--no-osd")
         # The GC570D engine only reads the environment variable.
         env["EVERLIVE_PARENT_WINID"] = str(embed)
         env["SDL_VIDEODRIVER"] = "x11"

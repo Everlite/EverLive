@@ -78,7 +78,7 @@ downstream display EDID; without it the internal 4K60 bridge EDID is used.
 | `↑` / `↓` (or `+` / `-`) | Volume up / down (in 5% steps) |
 | `M` | Toggle audio mute |
 | `Tab` / `O` | Toggle the OSD |
-| `C` | Cycle OSD corner position |
+| `C` | Toggle OSD top/bottom |
 | `F` / `F11` | Toggle fullscreen |
 | `Esc` / `Q` | Quit |
 
