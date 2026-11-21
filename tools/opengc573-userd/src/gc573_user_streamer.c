@@ -6504,6 +6504,9 @@ static void embed_forward_key(SDL_Window *window, const SDL_Event *ev, KeySym fa
 		case SDLK_EQUALS: sym = XK_plus; break;
 		case SDLK_MINUS:
 		case SDLK_KP_MINUS: sym = XK_minus; break;
+		case SDLK_F1: sym = XK_F1; break;
+		case SDLK_r: sym = XK_r; break;
+		case SDLK_t: sym = XK_t; break;
 		default: break;
 		}
 	}

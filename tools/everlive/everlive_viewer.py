@@ -5488,6 +5488,9 @@ if HAS_QT:
             sc_vdown = QShortcut(QKeySequence("-"), self)
             sc_vdown.setContext(win_ctx)
             sc_vdown.activated.connect(lambda: self._step_volume(-5))
+            sc_help = QShortcut(QKeySequence("F1"), self)
+            sc_help.setContext(win_ctx)
+            sc_help.activated.connect(self.on_help_clicked)
 
         def _cycle_osd_position(self):
             if not hasattr(self, "combo_osd_pos"):
