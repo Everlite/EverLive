@@ -165,15 +165,27 @@ parse_args "$@"
 if [ "$EUID" -ne 0 ]; then
     echo -e "${YELLOW}[*] Für die System- und Hardware-Rechte-Installation werden Root-Rechte benötigt.${NC}"
     echo -e "${YELLOW}[*] Starte mit sudo neu...${NC}"
-    exec sudo bash "$0" "$@"
+    if ! command -v sudo >/dev/null 2>&1; then
+        echo -e "${RED}[!] sudo ist nicht installiert. Bitte als root ausführen.${NC}" >&2
+        exit 1
+    fi
+    # Pass the invoking user explicitly: SUDO_USER is not set when the script
+    # is started from a root shell or an environment that resets it.
+    exec sudo env \
+        "EVERLIVE_TARGET_USER=${USER}" \
+        "EVERLIVE_TARGET_HOME=${HOME}" \
+        bash "$0" "$@"
 fi
 
-# Echten Benutzer ermitteln (nicht root)
-TARGET_USER="${SUDO_USER:-$USER}"
+# Echten Benutzer ermitteln (nicht root).  Prefer the explicitly forwarded
+# user, then sudo's SUDO_USER, then logname from a root shell.
+TARGET_USER="${EVERLIVE_TARGET_USER:-${SUDO_USER:-$(logname 2>/dev/null || true)}}"
+[ -n "${TARGET_USER}" ] || TARGET_USER="${USER}"
 TARGET_HOME="$(getent passwd "${TARGET_USER}" 2>/dev/null | cut -d: -f6)"
-[ -z "${TARGET_HOME}" ] && TARGET_HOME="${HOME}"
+[ -n "${TARGET_HOME}" ] || TARGET_HOME="${EVERLIVE_TARGET_HOME:-${HOME}}"
 
 echo -e "[*] Ziel-Benutzer: ${GREEN}${TARGET_USER}${NC}"
+echo -e "[*] Ziel-Home   : ${GREEN}${TARGET_HOME}${NC}"
 echo -e "[*] Linux Kernel : ${GREEN}$(uname -r)${NC}"
 echo -e "[*] Architektur  : ${GREEN}100% Userspace VFIO (Blob-Free Ring 3)${NC}"
 
@@ -848,7 +860,7 @@ echo -e "  ${BLUE}everlive${NC}       ${GREEN}# installierte Hub-Version${NC}"
 echo -e "  ${BLUE}./play.sh${NC}      ${GREEN}# direkt aus diesem Checkout${NC}"
 echo -e ""
 echo -e "Hub      : ${APP_BINDIR}/everlive (v${INSTALLED_VERSION})"
-echo -e "Desktop  : ~/.local/share/applications/everlive.desktop"
+echo -e "Desktop  : ${APPS_DIR}/everlive.desktop"
 echo -e "Config   : ~/.config/everlive/"
 echo -e "Socket   : \$XDG_RUNTIME_DIR/everlive.sock"
 echo -e ""

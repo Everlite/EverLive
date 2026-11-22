@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Installer left an old Console Hub behind:** `install.sh` now installs the current Hub, Python modules, fonts, icons, webcam bridge and `everlive` launcher through a new `make install-app` target. Previously it only built the engines and wrote a desktop entry into the checkout, so a system copy from an earlier `make install` (or a stale `/usr/local/bin/everlive`) kept launching the old UI. `uninstall.sh` now removes the system-wide app tree, launcher, desktop entry and icons as well, with package-ownership guards for `/usr` files.
 - **Root-owned build artifacts:** `install.sh` now builds as the checkout owner (falling back to a root build when needed) and hands any remaining root-owned files back to the invoking user, so later `make` runs no longer fail with permission errors.
+- **“Userspace Engine Missing” on installed Hub:** the Hub now resolves engine binaries from the application tree first and falls back to `PATH` (`/usr/local/bin` or `/usr/bin`), and card binding checks the system locations too. A packaged/`install.sh` layout no longer reports the engine as missing when `gc573_user_streamer` or `opengc570d-userd` lives outside the app tree.
+- **Desktop entry target user:** `install.sh` forwards the invoking user and home explicitly when it self-elevates, so `./install.sh` writes the menu entry into the right `~/.local/share/applications` instead of a root-owned home.
 
 ---
 
