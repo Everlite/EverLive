@@ -178,8 +178,16 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # Echten Benutzer ermitteln (nicht root).  Prefer the explicitly forwarded
-# user, then sudo's SUDO_USER, then logname from a root shell.
+# user, then sudo's SUDO_USER, then logname.  A root shell without SUDO_USER
+# falls back to the checkout owner so the desktop entry does not land in /root.
 TARGET_USER="${EVERLIVE_TARGET_USER:-${SUDO_USER:-$(logname 2>/dev/null || true)}}"
+if [ -z "${TARGET_USER}" ] || { [ "${TARGET_USER}" = "root" ] && \
+        [ -z "${EVERLIVE_TARGET_USER:-}" ] && [ -z "${SUDO_USER:-}" ]; }; then
+    CHECKOUT_OWNER="$(stat -c '%U' "${SCRIPT_DIR}" 2>/dev/null || true)"
+    if [ -n "${CHECKOUT_OWNER}" ] && [ "${CHECKOUT_OWNER}" != "root" ]; then
+        TARGET_USER="${CHECKOUT_OWNER}"
+    fi
+fi
 [ -n "${TARGET_USER}" ] || TARGET_USER="${USER}"
 TARGET_HOME="$(getent passwd "${TARGET_USER}" 2>/dev/null | cut -d: -f6)"
 [ -n "${TARGET_HOME}" ] || TARGET_HOME="${EVERLIVE_TARGET_HOME:-${HOME}}"
