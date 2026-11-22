@@ -11,7 +11,8 @@ sudo ./install.sh
 ### What `install.sh` Configures
 - **Dependencies:** SDL2, SDL2_ttf, FFmpeg dev libs, `libcap`, PipeWire/WirePlumber, `xcb-util-cursor`, PySide6, and build tools.
 - **Permissions & VFIO:** udev rules (`/etc/udev/rules.d/70-everlive.rules`), early-boot `vfio-pci` autobind for AVerMedia PCIe cards (`1461:0054`, `1461:0055`), `memlock` limits (`/etc/security/limits.d/99-everlive-memlock.conf`), `cap_ipc_lock` on capture binaries, and blacklisting of the legacy `open_gc573` module. (HWS UHD cards bind via `hws-vfio-bind.sh` / `99-hwsuhd-vfio.rules`.)
-- **Binaries & Service:** Builds `libeverlive-core`, `opengc573-userd`, `opengc570d-userd`, and `everlive-cam`, and installs `libeverlive-core`, `opengc573-userd`, `opengc570d-userd`, `everlive-ctl`, `everlive-service`, and `everlive.service`. (`tools/everlive-cam` and `tools/openhws-userd` are installed via `sudo make install` / `sudo make hwsuhd install`, or launched directly from the repo by `play.sh`.)
+- **Binaries & Service:** Builds `libeverlive-core`, `opengc573-userd`, `opengc570d-userd`, and `everlive-cam`, and installs `libeverlive-core`, `opengc573-userd`, `opengc570d-userd`, `everlive-ctl`, `everlive-service`, and `everlive.service`. (`tools/openhws-userd` is installed via `sudo make hwsuhd install`, or launched directly from the repo by `play.sh`.)
+- **Console Hub & Launcher:** installs the current Hub, fonts, icons, and webcam bridge into `/usr/local/lib/everlive`, creates `/usr/local/bin/everlive`, and refreshes the desktop entry. Re-running the installer replaces a copy left behind by an older `make install`, so the menu and terminal always start the current UI.
 - **Audio & Video Sinks:** Isolated PipeWire audio sink (`EverLive Capture Audio`), optional `v4l2loopback` nodes (`/dev/video10`, `/dev/video11`), and desktop launcher.
 
 ### Installer Options (`sudo ./install.sh --help`)

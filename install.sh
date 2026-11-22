@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive v2.0.0 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573) & Live Gamer DUO (GC570D)
+# EverLive v2.0.1 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573) & Live Gamer DUO (GC570D)
 # ==============================================================================
 # Installiert den 100% blob-freien Userspace VFIO-Treiber, udev-Hardware-Rechte,
 # Speicher-Locking-Limits und die EverLive Desktop-App für HDMI Console Gaming.
@@ -17,6 +17,13 @@ USERD_DIR="${SCRIPT_DIR}/tools/opengc573-userd"
 GC570D_DIR="${SCRIPT_DIR}/tools/opengc570d-userd"
 VIEWER_DIR="${SCRIPT_DIR}/tools/everlive"
 
+# System-wide application copy produced by `make install-app`.  Both the
+# `everlive` launcher and the menu entry point here, so re-running install.sh
+# always replaces a previously installed Hub instead of leaving it stale.
+APP_LIBDIR="/usr/local/lib/everlive"
+APP_BINDIR="/usr/local/bin"
+APP_VIEWER_DIR="${APP_LIBDIR}/tools/everlive"
+
 # ANSI Farben
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -25,7 +32,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}===================================================================${NC}"
-echo -e "${BLUE}   EverLive (2.0.0) - GC573 & GC570D Gaming Suite Installer   ${NC}"
+echo -e "${BLUE}   EverLive (2.0.1) - GC573 & GC570D Gaming Suite Installer   ${NC}"
 echo -e "${BLUE}===================================================================${NC}"
 
 # Optionale Virtual Camera: standardmäßig ja, per --no-loopback abschaltbar.
@@ -455,7 +462,26 @@ detect_and_install_deps
 
 # 3. Userspace VFIO Engine kompilieren
 echo -e "\n${BLUE}[2/5] Kompiliere EverLive Userspace VFIO Engine...${NC}"
-make -C "${SCRIPT_DIR}" -j"$(nproc)"
+# Build as the checkout owner so install.sh does not leave root-owned object
+# files behind.  Fall back to a root build when the checkout is not writable.
+if [ "${TARGET_USER}" = "root" ]; then
+    make -C "${SCRIPT_DIR}" -j"$(nproc)"
+elif ! sudo -u "${TARGET_USER}" env "HOME=${TARGET_HOME}" \
+        make -C "${SCRIPT_DIR}" -j"$(nproc)"; then
+    make -C "${SCRIPT_DIR}" -j"$(nproc)"
+fi
+
+# The Hub itself is Python, so it needs an explicit install step.  This
+# replaces the system-wide player (and the everlive launcher) with the current
+# checkout instead of leaving an older copy from a previous install behind.
+make -C "${SCRIPT_DIR}" install-app
+
+# `install-app` may still touch build targets as root; hand any root-owned
+# checkout files back to the invoking user.
+if [ "${TARGET_USER}" != "root" ]; then
+    find "${SCRIPT_DIR}" -xdev -user root \
+        -exec chown "${TARGET_USER}:${TARGET_USER}" {} + 2>/dev/null || true
+fi
 
 # Never leave build artifacts world-writable, and keep binaries setcap-safe.
 chmod 0755 "${USERD_DIR}/gc573_user_streamer" "${USERD_DIR}/everlive_userd" \
@@ -489,12 +515,26 @@ echo -e "${GREEN}[+] Userspace VFIO Engines erfolgreich gebaut & berechtigt!${NC
 echo -e "\n[*] Prüfe Python-Umgebung für EverLive Studio..."
 if ! sudo -u "${TARGET_USER}" python3 -c 'import PySide6' >/dev/null 2>&1; then
     echo -e "${YELLOW}[*] PySide6 nicht systemweit gefunden. Richte venv für EverLive Studio ein...${NC}"
-    if [ ! -d "${VIEWER_DIR}/.venv" ]; then
-        sudo -u "${TARGET_USER}" python3 -m venv "${VIEWER_DIR}/.venv" 2>/dev/null || python3 -m venv "${VIEWER_DIR}/.venv"
-        chown -R "${TARGET_USER}:${TARGET_USER}" "${VIEWER_DIR}/.venv" 2>/dev/null || true
+
+    # The installed Hub is the canonical app, so give it its own environment.
+    # Drop a dangling venv symlink left by a removed checkout first.
+    if [ -L "${APP_VIEWER_DIR}/.venv" ] && [ ! -e "${APP_VIEWER_DIR}/.venv" ]; then
+        rm -f "${APP_VIEWER_DIR}/.venv"
     fi
-    if [ -x "${VIEWER_DIR}/.venv/bin/pip" ]; then
-        sudo -u "${TARGET_USER}" "${VIEWER_DIR}/.venv/bin/pip" install --upgrade pip PySide6 2>/dev/null || "${VIEWER_DIR}/.venv/bin/pip" install --upgrade pip PySide6
+    if [ ! -d "${APP_VIEWER_DIR}/.venv" ]; then
+        sudo -u "${TARGET_USER}" python3 -m venv "${APP_VIEWER_DIR}/.venv" 2>/dev/null || python3 -m venv "${APP_VIEWER_DIR}/.venv"
+        chown -R "${TARGET_USER}:${TARGET_USER}" "${APP_VIEWER_DIR}/.venv" 2>/dev/null || true
+    fi
+    if [ -x "${APP_VIEWER_DIR}/.venv/bin/pip" ]; then
+        sudo -u "${TARGET_USER}" "${APP_VIEWER_DIR}/.venv/bin/pip" install --upgrade pip PySide6 2>/dev/null || "${APP_VIEWER_DIR}/.venv/bin/pip" install --upgrade pip PySide6
+    fi
+    # Let `./play.sh` reuse the installed environment unless the checkout
+    # already has its own venv.
+    if [ -L "${VIEWER_DIR}/.venv" ] && [ ! -e "${VIEWER_DIR}/.venv" ]; then
+        rm -f "${VIEWER_DIR}/.venv"
+    fi
+    if [ ! -e "${VIEWER_DIR}/.venv" ]; then
+        ln -sfn "${APP_VIEWER_DIR}/.venv" "${VIEWER_DIR}/.venv" 2>/dev/null || true
     fi
 fi
 echo -e "${GREEN}[+] Python GUI-Umgebung bereit!${NC}"
@@ -638,11 +678,11 @@ echo -e "\n${BLUE}[5/5] Installiere EverLive Desktop-Starter & Anwendungs-Icon i
 APPS_DIR="${TARGET_HOME}/.local/share/applications"
 mkdir -p "${APPS_DIR}"
 
-# The repository path is normally space-free; quote it only when needed so the
-# Exec= line stays exactly "<abs path>/play.sh" otherwise.
-case "${SCRIPT_DIR}" in
-    *" "*) DESKTOP_EXEC="\"${SCRIPT_DIR}/play.sh\"" ;;
-    *)     DESKTOP_EXEC="${SCRIPT_DIR}/play.sh" ;;
+# The system-wide launcher is refreshed by `make install-app`; point the user
+# entry at it so the menu never falls back to an older checkout/app copy.
+case "${APP_BINDIR}/everlive" in
+    *" "*) DESKTOP_EXEC="\"${APP_BINDIR}/everlive\"" ;;
+    *)     DESKTOP_EXEC="${APP_BINDIR}/everlive" ;;
 esac
 
 ICONS_BASE="${TARGET_HOME}/.local/share/icons/hicolor"
@@ -683,6 +723,48 @@ chown -R "${TARGET_USER}:${TARGET_USER}" "${APPS_DIR}/everlive.desktop" 2>/dev/n
 rm -f "${APPS_DIR}/everlive-experimental.desktop" 2>/dev/null || true
 rm -f "${APPS_DIR}/everlive-intern.desktop" 2>/dev/null || true
 rmdir "${TARGET_HOME}/.config/everlive-experimental" 2>/dev/null || true
+
+# Refresh menu/icon caches so desktops pick up the replaced entry immediately.
+# User caches must be rewritten as the target user, not root.
+run_as_target() {
+    if [ "${TARGET_USER}" = "root" ]; then
+        "$@"
+    else
+        sudo -u "${TARGET_USER}" env "HOME=${TARGET_HOME}" "$@"
+    fi
+}
+
+refresh_desktop_caches() {
+    local dir cache
+
+    # Older installers could leave root-owned caches in the user tree, which
+    # makes the user-level update below fail silently.
+    for cache in "${APPS_DIR}/mimeinfo.cache" "${APPS_DIR}/intent.cache" \
+                 "${ICONS_BASE}/icon-theme.cache"; do
+        if [ -e "$cache" ]; then
+            chown "${TARGET_USER}:${TARGET_USER}" "$cache" 2>/dev/null || true
+        fi
+    done
+
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        run_as_target update-desktop-database "${APPS_DIR}" >/dev/null 2>&1 || true
+        for dir in /usr/local/share/applications /usr/share/applications; do
+            if [ -d "$dir" ]; then
+                update-desktop-database "$dir" >/dev/null 2>&1 || true
+            fi
+        done
+    fi
+
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        run_as_target gtk-update-icon-cache -f -t "${ICONS_BASE}" >/dev/null 2>&1 || true
+        for dir in /usr/local/share/icons/hicolor /usr/share/icons/hicolor; do
+            if [ -d "$dir" ]; then
+                gtk-update-icon-cache -f -t "$dir" >/dev/null 2>&1 || true
+            fi
+        done
+    fi
+}
+refresh_desktop_caches
 
 # Optional: reversible, per-process LD_PRELOAD camera launchers. These are
 # separate "(EverLive Camera)" entries, so the original application launchers
@@ -754,17 +836,26 @@ else
     print_manual_preload_hint
 fi
 
+INSTALLED_VERSION="$(sed -n 's/^__version__ = "\([^"]*\)".*/\1/p' "${APP_VIEWER_DIR}/everlive_viewer.py" 2>/dev/null | head -n 1 || true)"
+INSTALLED_VERSION="${INSTALLED_VERSION:-unknown}"
+
 echo -e "\n${GREEN}===================================================================${NC}"
-echo -e "${GREEN}   EverLive v2.0.0 erfolgreich installiert!                        ${NC}"
+echo -e "${GREEN}   EverLive v2.0.1 erfolgreich installiert!                        ${NC}"
 echo -e "${GREEN}===================================================================${NC}"
 echo -e "Du kannst EverLive ab sofort direkt über dein Startmenü"
 echo -e "starten (Eintrag \"EverLive\"), oder im Terminal mit:"
-echo -e "  ${BLUE}./play.sh${NC}"
+echo -e "  ${BLUE}everlive${NC}       ${GREEN}# installierte Hub-Version${NC}"
+echo -e "  ${BLUE}./play.sh${NC}      ${GREEN}# direkt aus diesem Checkout${NC}"
 echo -e ""
-echo -e "Launcher : ~/.local/share/applications/everlive.desktop"
+echo -e "Hub      : ${APP_BINDIR}/everlive (v${INSTALLED_VERSION})"
+echo -e "Desktop  : ~/.local/share/applications/everlive.desktop"
 echo -e "Config   : ~/.config/everlive/"
 echo -e "Socket   : \$XDG_RUNTIME_DIR/everlive.sock"
 echo -e ""
 echo -e "Frame Generation im Spielfenster: 'g' = Off -> 60->120 -> 30->60."
 echo -e "Voraussetzung: lsfg-vk 2.0 + Lossless Scaling in Steam (Beta-Branch 'lsfg-vk')."
+if command -v pgrep >/dev/null 2>&1 && pgrep -f "tools/everlive/everlive_viewer.py" >/dev/null 2>&1; then
+    echo -e ""
+    echo -e "${YELLOW}[!] Eine EverLive-Instanz läuft noch. Bitte beenden und neu starten, damit die neue UI geladen wird.${NC}"
+fi
 echo -e "Viel Spaß beim Zocken mit 60->120 / 30->60 FPS!"

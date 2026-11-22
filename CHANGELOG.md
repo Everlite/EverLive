@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.1] - 2026-11-22
+
+### Fixed
+- **Installer left an old Console Hub behind:** `install.sh` now installs the current Hub, Python modules, fonts, icons, webcam bridge and `everlive` launcher through a new `make install-app` target. Previously it only built the engines and wrote a desktop entry into the checkout, so a system copy from an earlier `make install` (or a stale `/usr/local/bin/everlive`) kept launching the old UI. `uninstall.sh` now removes the system-wide app tree, launcher, desktop entry and icons as well, with package-ownership guards for `/usr` files.
+- **Root-owned build artifacts:** `install.sh` now builds as the checkout owner (falling back to a root build when needed) and hands any remaining root-owned files back to the invoking user, so later `make` runs no longer fail with permission errors.
+
+---
+
 ## [2.0.0] - 2026-11-21
 
 ### Fixed

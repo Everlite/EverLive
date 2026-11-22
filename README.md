@@ -1,6 +1,6 @@
 # EverLive — Linux Console Gaming Suite & Userspace Driver
 
-[![Version](https://img.shields.io/badge/version-v2.0.0-blue.svg)](https://github.com/Everlite/EverLive/releases)
+[![Version](https://img.shields.io/badge/version-v2.0.1-blue.svg)](https://github.com/Everlite/EverLive/releases)
 [![Status](https://img.shields.io/badge/GC573-verified%20(1440p120%20%2B%204K60)-brightgreen.svg)](docs/CARDS.md)
 [![Driver](https://img.shields.io/badge/driver-Userspace%20VFIO%20(Blob--Free)-2e7d32.svg)](docs/ARCHITECTURE.md)
 [![Kernel Modules](https://img.shields.io/badge/DKMS-None%20Required-success.svg)](docs/INSTALL.md)
@@ -28,15 +28,17 @@ sudo ./install.sh
 Launch the Console Hub (or start **EverLive** from your desktop application menu):
 
 ```bash
-./play.sh          # interactive Console Hub
+everlive           # installed Console Hub
+./play.sh          # run directly from this checkout
 ./play.sh --tray   # start minimized in system tray
 ./play.sh --all    # run all installed PCIe cards simultaneously
 ```
 
-Update (`play.sh` rebuilds modified binaries automatically) or install strictly module-free without `v4l2loopback`:
+Update the installed Hub (`install.sh` replaces the system-wide copy) or install strictly module-free without `v4l2loopback`:
 
 ```bash
-git pull && ./play.sh
+git pull && sudo ./install.sh   # refresh the system-wide Hub and engines
+./play.sh                       # or run directly from this checkout
 sudo ./install.sh --no-loopback --with-preload
 ```
 
