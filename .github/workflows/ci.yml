@@ -62,6 +62,22 @@ jobs:
           test -x "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive-cam/everlive_camd"
           make uninstall DESTDIR="$RUNNER_TEMP/stage" PREFIX=/usr
 
+      - name: Staged app-only install and uninstall
+        run: |
+          make install-app DESTDIR="$RUNNER_TEMP/appstage" PREFIX=/usr
+          test -x "$RUNNER_TEMP/appstage/usr/bin/everlive"
+          test -x "$RUNNER_TEMP/appstage/usr/bin/everlive_camd"
+          test -x "$RUNNER_TEMP/appstage/usr/lib/everlive/play.sh"
+          test -x "$RUNNER_TEMP/appstage/usr/lib/everlive/tools/everlive/everlive_viewer.py"
+          test -f "$RUNNER_TEMP/appstage/usr/share/applications/everlive.desktop"
+          test -f "$RUNNER_TEMP/appstage/usr/share/icons/hicolor/48x48/apps/everlive.png"
+          test -f "$RUNNER_TEMP/appstage/usr/lib/libeverlive-cam-v4l2.so"
+          make uninstall-app DESTDIR="$RUNNER_TEMP/appstage" PREFIX=/usr
+          test ! -e "$RUNNER_TEMP/appstage/usr/lib/everlive"
+          test ! -e "$RUNNER_TEMP/appstage/usr/bin/everlive"
+          test ! -e "$RUNNER_TEMP/appstage/usr/bin/everlive_camd"
+          test ! -e "$RUNNER_TEMP/appstage/usr/share/applications/everlive.desktop"
+
       - name: Frame generation cadence self-test
         run: make -C tools/opengc573-userd framegen-selftest
 

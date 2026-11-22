@@ -52,7 +52,7 @@ except ImportError:  # imported as a module from another working directory
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
                                  paused_state as handoff_paused_state)
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 CONFIG_DIR = os.path.expanduser("~/.config/everlive")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
@@ -606,7 +606,16 @@ def userd_dir(model: str = MODEL_GC573) -> str:
 
 
 def userd_bin(name: str, model: str = MODEL_GC573) -> str:
-    return os.path.join(userd_dir(model), name)
+    """Resolve an engine helper from the app tree or the system PATH.
+
+    A source checkout keeps the binaries in ``tools/<engine>/``; a packaged or
+    ``install.sh`` layout installs them into ``/usr/local/bin`` (or ``/usr/bin``)
+    while the Hub itself lives under ``.../lib/everlive``.
+    """
+    local = os.path.join(userd_dir(model), name)
+    if os.path.isfile(local) and os.access(local, os.X_OK):
+        return local
+    return shutil.which(name) or local
 
 
 def _stop_vfio_daemon(wait_s: float = 0.8):
@@ -8367,7 +8376,8 @@ if HAS_QT:
             folder, name = scripts.get(card["model"], ("", ""))
             here = os.path.dirname(os.path.abspath(__file__))
             candidates = [os.path.join(here, "..", folder, name),
-                          f"/usr/local/libexec/{name}", f"/usr/libexec/{name}"]
+                          f"/usr/local/libexec/{name}", f"/usr/libexec/{name}",
+                          f"/usr/local/bin/{name}", f"/usr/bin/{name}"]
             script = next((os.path.normpath(c) for c in candidates
                            if folder and os.access(c, os.X_OK)), None)
             if script is None or not shutil.which("pkexec"):

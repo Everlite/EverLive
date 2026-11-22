@@ -14,7 +14,7 @@
 #include "gc570d-jsonrpc.h"
 
 #ifndef EVERLIVE_VERSION
-#define EVERLIVE_VERSION "2.0.0"
+#define EVERLIVE_VERSION "2.0.1"
 #endif
 
 #include <dirent.h>

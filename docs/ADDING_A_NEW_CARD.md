@@ -755,7 +755,7 @@ To ensure compatibility with the PySide6 Console Hub, `status.get` must return a
   "id": 1,
   "result": {
     "proto": 1,
-    "version": "2.0.0",
+    "version": "2.0.1",
     "pid": 21080,
     "headless": false,
     "streaming": true,
