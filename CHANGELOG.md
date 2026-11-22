@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Root-owned build artifacts:** `install.sh` now builds as the checkout owner (falling back to a root build when needed) and hands any remaining root-owned files back to the invoking user, so later `make` runs no longer fail with permission errors.
 - **“Userspace Engine Missing” on installed Hub:** the Hub now resolves engine binaries from the application tree first and falls back to `PATH` (`/usr/local/bin` or `/usr/bin`), and card binding checks the system locations too. A packaged/`install.sh` layout no longer reports the engine as missing when `gc573_user_streamer` or `opengc570d-userd` lives outside the app tree.
 - **Desktop entry target user:** `install.sh` forwards the invoking user and home explicitly when it self-elevates, and falls back to the checkout owner when started from a plain root shell, so the menu entry lands in the right `~/.local/share/applications` instead of a root-owned home.
+- **KDE menu category:** install/uninstall now rebuild KDE's `ksycoca` cache (`kbuildsycoca6`/`kbuildsycoca5`) after changing the desktop entry, so EverLive appears under its categories immediately instead of only in search.
 
 ---
 

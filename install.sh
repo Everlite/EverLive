@@ -783,6 +783,14 @@ refresh_desktop_caches() {
             fi
         done
     fi
+
+    # KDE's application launcher has its own ksycoca cache; without this the
+    # new entry is searchable but can be missing from its categories.
+    if command -v kbuildsycoca6 >/dev/null 2>&1; then
+        run_as_target kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
+    elif command -v kbuildsycoca5 >/dev/null 2>&1; then
+        run_as_target kbuildsycoca5 --noincremental >/dev/null 2>&1 || true
+    fi
 }
 refresh_desktop_caches
 

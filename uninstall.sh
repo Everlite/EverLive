@@ -204,5 +204,20 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
         fi
     done
 fi
+if command -v kbuildsycoca6 >/dev/null 2>&1; then
+    if [ "${TARGET_USER}" != "root" ]; then
+        sudo -u "${TARGET_USER}" env "HOME=${TARGET_HOME}" \
+            kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
+    else
+        kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
+    fi
+elif command -v kbuildsycoca5 >/dev/null 2>&1; then
+    if [ "${TARGET_USER}" != "root" ]; then
+        sudo -u "${TARGET_USER}" env "HOME=${TARGET_HOME}" \
+            kbuildsycoca5 --noincremental >/dev/null 2>&1 || true
+    else
+        kbuildsycoca5 --noincremental >/dev/null 2>&1 || true
+    fi
+fi
 
 echo "[+] EverLive wurde sauber deinstalliert."
