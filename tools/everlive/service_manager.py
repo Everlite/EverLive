@@ -10,7 +10,10 @@ is Qt-free so it can be unit-tested and reused by CLI tooling.
 from __future__ import annotations
 
 import os
+import re
+import shlex
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -251,6 +254,24 @@ def logs(lines: int = 120) -> str:
     return "No service log is available yet."
 
 
+_V4L2_NODE_RE = re.compile(r"^/dev/video[0-9]{1,3}$")
+
+
+def validate_v4l2_device(device: str) -> str:
+    """Validate a ``--v4l2`` node path before writing it to ``service.env``."""
+    if not device or not _V4L2_NODE_RE.match(device):
+        raise ValueError(f"Invalid V4L2 device node: {device!r}")
+    if os.path.lexists(device):
+        real = os.path.realpath(device)
+        if not _V4L2_NODE_RE.match(real):
+            raise ValueError(f"V4L2 device {device!r} resolves outside /dev/video*: {real!r}")
+        st = os.stat(real)
+        if not stat.S_ISCHR(st.st_mode):
+            raise ValueError(f"V4L2 device {device!r} is not a character device")
+        return real
+    return device
+
+
 def read_service_args() -> str:
     try:
         text = SERVICE_ENV.read_text(encoding="utf-8")
@@ -269,10 +290,10 @@ def read_service_args() -> str:
 def write_service_args(v4l2_device: str = "", audio_tap: bool = False) -> str:
     parts = []
     if v4l2_device:
-        parts.extend(["--v4l2", v4l2_device])
+        parts.extend(["--v4l2", validate_v4l2_device(v4l2_device)])
     if audio_tap:
         parts.extend(["--audio-tap", AUDIO_TAP_NODE])
-    args = " ".join(parts)
+    args = " ".join(shlex.quote(p) for p in parts)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     SERVICE_ENV.write_text(
         "# Managed by the EverLive Console Hub.\n"
