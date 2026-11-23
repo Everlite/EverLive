@@ -688,22 +688,15 @@ def _start_duo_service():
 
 
 def _raise_memlock_limit():
-    """Native 4K frames need ~17 MB of pinned VFIO memory.
+    """Raise the soft memlock limit to the existing hard limit.
 
-    The GUI launches the streamer directly (not via play-intern.sh), so it
-    must raise its own soft limit before fork/exec.  This is best-effort;
-    the streamer reports a clean error if the hard limit is still too small.
+    Native 4K frames need pinned VFIO memory.  The installed engine binaries
+    carry cap_ipc_lock=+ep, so this is only a bounded fallback for systems
+    where setcap is unavailable.  Never request an unlimited limit here.
     """
     try:
         import resource
         soft, hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
-        try:
-            resource.setrlimit(resource.RLIMIT_MEMLOCK,
-                               (resource.RLIM_INFINITY,
-                                resource.RLIM_INFINITY))
-            return
-        except (ValueError, OSError):
-            pass
         if soft != hard:
             try:
                 resource.setrlimit(resource.RLIMIT_MEMLOCK, (hard, hard))
@@ -8385,8 +8378,9 @@ if HAS_QT:
                     f"{label} is not bound to vfio-pci; run ./play.sh once.")
                 return
             args = [script, "--bind"]
-            if card["model"] == MODEL_HWSUHD:
-                args.append(card["pci"])
+            pci = card.get("pci")
+            if pci:
+                args.extend(["--bdf", pci])
             self._set_vfio_notice(
                 "Preparing Capture Card",
                 f"Binding {label} to vfio-pci…", seconds=30.0)

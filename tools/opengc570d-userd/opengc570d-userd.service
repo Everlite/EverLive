@@ -19,9 +19,8 @@ Type=simple
 ExecStart=/usr/local/bin/opengc570d-userd --headless --loopback
 Restart=on-failure
 RestartSec=2
-# VFIO DMA pinning; the binary also carries cap_ipc_lock=+ep when installed
-# by gc570d-vfio-bind.sh.
-LimitMEMLOCK=infinity
+# VFIO DMA pinning is provided by cap_ipc_lock=+ep on the installed binary.
+# When setcap is unavailable the installer adds a bounded LimitMEMLOCK drop-in.
 
 [Install]
 WantedBy=default.target

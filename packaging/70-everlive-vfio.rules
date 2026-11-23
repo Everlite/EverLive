@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# /dev/vfio/vfio is the shared VFIO container node.  It is a misc device
+# (SUBSYSTEM=="misc"), not a "vfio" group device.  The distro default is
+# MODE="0666"; restrict it to the video group without a seat ACL.
+#
+# Per-card group nodes (/dev/vfio/<iommu_group>) are deliberately not listed
+# here: the bind helper changes only the node belonging to the card it bound.
+SUBSYSTEM=="misc", KERNEL=="vfio", GROUP="video", MODE="0660"

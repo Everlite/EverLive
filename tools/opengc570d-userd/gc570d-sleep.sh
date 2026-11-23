@@ -9,7 +9,7 @@ case "${1:-post}" in
         exit 0
         ;;
     post|resume|*)
-        /usr/local/libexec/gc570d-vfio-bind.sh || true
+        /usr/local/libexec/gc570d-vfio-bind.sh --bind || true
         sleep 1
         for rdir in /run/user/*; do
             [ -d "$rdir" ] || continue

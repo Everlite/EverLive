@@ -1,0 +1,43 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# everlive-setcap -- apply cap_ipc_lock=+ep to installed EverLive engines.
+#
+# Usage: everlive-setcap BIN [BIN...]
+#
+# Missing binaries are ignored so one installer can list every engine it may
+# have built.  A non-zero exit means at least one existing binary could not be
+# given the capability or did not report it afterwards.
+
+set -eu
+
+PROG=${0##*/}
+status=0
+
+if [ $# -eq 0 ]; then
+	exit 0
+fi
+
+if ! command -v setcap >/dev/null 2>&1; then
+	printf '%s: setcap is not available; cannot grant cap_ipc_lock\n' "$PROG" >&2
+	exit 1
+fi
+
+for bin in "$@"; do
+	[ -f "$bin" ] || continue
+
+	if ! setcap cap_ipc_lock=+ep "$bin" 2>/dev/null; then
+		printf '%s: cannot set cap_ipc_lock on %s\n' "$PROG" "$bin" >&2
+		status=1
+		continue
+	fi
+
+	if command -v getcap >/dev/null 2>&1; then
+		if ! getcap "$bin" 2>/dev/null | grep -q 'cap_ipc_lock'; then
+			printf '%s: %s does not report cap_ipc_lock\n' "$PROG" "$bin" >&2
+			status=1
+		fi
+	fi
+done
+
+exit "$status"
