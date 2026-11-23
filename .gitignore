@@ -14,6 +14,11 @@ Module.symvers
 .module-common.o
 .tmp_versions/
 
+# Local backup/patch leftovers — must never be committed
+*.bak
+*.orig
+*.rej
+
 # Lokaler RE-Ordner — niemals auf GitHub
 do not push do github/
 
