@@ -14,6 +14,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Release hygiene (no patchers or compiled binaries)
+        run: python3 tools/check_tree_hygiene.py
+
+      - name: Release archive hygiene
+        run: |
+          mkdir -p "$RUNNER_TEMP/archive"
+          git archive --format=tar HEAD | tar -x -C "$RUNNER_TEMP/archive"
+          python3 tools/check_tree_hygiene.py --tree "$RUNNER_TEMP/archive"
+
       - name: Install userspace dependencies
         run: |
           sudo apt-get update -o Acquire::Retries=5

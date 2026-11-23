@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **VFIO permissions are now scoped per card:** binding uses subsystem-qualified udev rules and a shared `everlive-vfio-bind` helper. Only the matched card's `/dev/vfio/<iommu_group>` is set to `root:video 0660`; `/dev/vfio/vfio` is handled by one generic container rule, and unrelated VFIO group nodes are no longer touched. The broad `SUBSYSTEM=="vfio"` rule and `TAG+="uaccess"` were removed. GC573 and GC570D cannot claim each other, and `vfio-pci/new_id` plus the global `options vfio-pci ids=` binding were replaced by `driver_override` and per-BDF bind.
 - **Bounded memlock instead of unlimited:** `LimitMEMLOCK=infinity` and the unlimited `limits.d` files were removed. `cap_ipc_lock=+ep` is applied to every installed engine, including HWS, and a bounded 1 GiB fallback with `LimitMEMLOCK=1G` drop-ins is installed only when `setcap` is unavailable.
 
+### Removed
+- Removed the unused binary-patching helpers from `tools/`. EverLive ships only
+  source-built components; no released library is modified after build. CI now
+  rejects patch tooling, backup files and compiled binaries in the tree.
+
 ---
 
 ## [2.0.1] - 2026-11-22
