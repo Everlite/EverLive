@@ -6,13 +6,38 @@ on:
   pull_request:
     branches: [ main, dev, 'exp/*' ]
 
+permissions:
+  contents: read
+
 jobs:
+  actionlint:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Run actionlint
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$tmp_dir"' EXIT
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz" \
+            -o "$tmp_dir/actionlint.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $tmp_dir/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$tmp_dir/actionlint.tar.gz" -C "$tmp_dir" actionlint
+          "$tmp_dir/actionlint"
+
   build:
     runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Release hygiene (no patchers or compiled binaries)
         run: python3 tools/check_tree_hygiene.py
