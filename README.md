@@ -13,6 +13,9 @@
 
 > **Quick Navigation:** [Quickstart](#quickstart) · [Supported Hardware](#supported-hardware) · [Install & IOMMU](docs/INSTALL.md) · [Controls & Hotkeys](docs/CONTROLS.md) · [OBS & Webcam](docs/OBS.md) · [Frame Gen (LSFG-VK)](docs/FRAMEGEN.md) · [Architecture](docs/ARCHITECTURE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
+![EverLive v2 Console Hub — GC573 1440p with LSFG-VK 4x Frame Generation, Telemetry Deck, and Performance OSD](docs/everlive_v2_hub_preview.png)
+*EverLive v2 Console Hub running GC573 (`2560×1440p` with HDR→SDR tonemapping, `LSFG-VK 4×` 30p dedup → `120 FPS`, live Telemetry Deck, and on-screen OSD).*
+
 ---
 
 ## Quickstart
