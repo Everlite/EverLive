@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- Removed the unused binary-patching helpers from `tools/`. EverLive ships only
+  source-built components; no released library is modified after build. CI now
+  rejects patch tooling, backup files and compiled binaries in the tree.
+
 ---
 
 ## [2.0.1] - 2026-11-22
