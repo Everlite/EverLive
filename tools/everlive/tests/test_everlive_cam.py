@@ -209,6 +209,7 @@ class RecordingPlanTests(unittest.TestCase):
                 source_setting="window",
                 window_id=12345,
                 window_rect=(1920, 1440, 2560, 1440),
+                display=":0",
                 fps_setting="240",
                 gsr_bin="/usr/bin/gpu-screen-recorder",
                 audio_source="everlive.monitor",
