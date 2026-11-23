@@ -17,7 +17,7 @@
 EverLive operates **100% in unprivileged userspace (Ring 3)** via the upstream Linux Virtual Function I/O framework (`vfio-pci`):
 
 * **IOMMU Memory Safety:** DMA transfers are strictly governed and bounded by the system's hardware IOMMU (Intel VT-d / AMD-Vi). The hardware capture card cannot access or corrupt arbitrary kernel memory or other processes' memory spaces.
-* **Non-Root Execution:** EverLive does not require root privileges or setuid binaries to run. Access to the card is granted via standard Linux group permissions (`/etc/udev/rules.d/70-everlive.rules`) and bounded memory-locking limits (`CAP_IPC_LOCK` / `RLIMIT_MEMLOCK`).
+* **Non-Root Execution:** EverLive does not require root privileges or setuid binaries to run. Access is granted per card: only the matched card's `/dev/vfio/<iommu_group>` node is set to `root:video 0660`, and `/dev/vfio/vfio` is restricted by a single container-node udev rule. `cap_ipc_lock=+ep` on the engine binaries provides DMA page pinning; a bounded 1 GiB `memlock` fallback is installed only when `setcap` is unavailable. No global `vfio-pci ids=` or `new_id` binding is used.
 * **Kernel Integrity:** EverLive does not load out-of-tree kernel modules, does not taint the kernel (`sys_init_module`), and is fully compatible with strict UEFI Secure Boot policies.
 
 ---

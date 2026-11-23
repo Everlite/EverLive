@@ -19,7 +19,8 @@ Type=simple
 ExecStart=/usr/local/bin/everlive-service
 Restart=on-failure
 RestartSec=2
-LimitMEMLOCK=infinity
+# VFIO DMA pinning is provided by cap_ipc_lock=+ep on the installed engine.
+# When setcap is unavailable the installer adds a bounded LimitMEMLOCK drop-in.
 
 [Install]
 WantedBy=default.target

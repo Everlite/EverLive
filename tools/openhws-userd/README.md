@@ -24,7 +24,7 @@ AVerMedia card is installed. GC573/GC570D defaults are unchanged.
 | `hws_user_streamer` | the engine: SDL window or headless, v4l2loopback, frame store, PipeWire audio tap, control socket |
 | `libhwsuhd-v4l2.so` | `LD_PRELOAD` camera `/dev/video64` for OBS, Discord, browsers |
 | `hws_user_probe` | bring-up and diagnostics (frame/WAV dumps, `--regs`) |
-| `hws-vfio-bind.sh` | runtime bind/restore of this card only |
+| `hws-vfio-bind.sh` | shim for the shared `everlive-vfio-bind` helper (this card only) |
 | `99-hwsuhd-vfio.rules` | optional: bind at boot (`make install-system`) |
 
 ## Hardware model
@@ -64,7 +64,7 @@ upstream scaler may come back at a different resolution).
 ```sh
 make hwsuhd                       # from the repo root (core + this engine)
 
-sudo SUDO_USER=$USER tools/openhws-userd/hws-vfio-bind.sh --bind
+sudo tools/openhws-userd/hws-vfio-bind.sh --bind   # then run as a video-group user
 
 EVERLIVE_CARD=hwsuhd ./play.sh    # Console Hub on this card
 EVERLIVE_CARD=hwsuhd ./play.sh --cli --v4l2 /dev/video10   # engine directly
@@ -86,7 +86,8 @@ sudo make -C tools/openhws-userd install   # /usr/local/{bin,lib,libexec} + rule
 
 The rule matches subsystem `0x0007` only, sets `driver_override=vfio-pci`
 before the kernel driver loads, keeps the card in D0, disables its bus reset
-and gives `/dev/vfio/<group>` to group `video`.
+and lets the shared `everlive-vfio-bind` helper set only
+`/dev/vfio/<group>` to `root:video 0660`.
 
 ### Engine
 
@@ -120,9 +121,9 @@ tools/openhws-userd/hws_user_probe --seconds 15 --frame /tmp/frame --wav /tmp/au
 ```
 
 `hws_user_probe --regs` prints identity, PCIe link and input registers
-without starting capture. The probe needs `cap_ipc_lock` or a memlock limit of
-about 70 MiB for three frame slots; `--bind` sets the capability on the
-binary.
+without starting capture. The probe needs `cap_ipc_lock`; the installers and
+`--bind` apply it to the binary. A bounded memlock fallback is used only when
+`setcap` is unavailable.
 
 ## Measured (FPGA 122, PCIe 5 GT/s x4)
 

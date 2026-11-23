@@ -3,7 +3,7 @@
 # EverLive v2.0.1 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573) & Live Gamer DUO (GC570D)
 # ==============================================================================
 # Installiert den 100% blob-freien Userspace VFIO-Treiber, udev-Hardware-Rechte,
-# Speicher-Locking-Limits und die EverLive Desktop-App für HDMI Console Gaming.
+# cap_ipc_lock für die Engines und die EverLive Desktop-App für HDMI Console Gaming.
 #
 # Kein DKMS, keine Kernel-Header, kein Kernel-Neukompilieren für EverLive selbst!
 # Optional (nur Virtual Camera): v4l2loopback aus dem Distributions-Repo.
@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_DIR="${SCRIPT_DIR}/tools/libeverlive-core"
 USERD_DIR="${SCRIPT_DIR}/tools/opengc573-userd"
 GC570D_DIR="${SCRIPT_DIR}/tools/opengc570d-userd"
+HWS_DIR="${SCRIPT_DIR}/tools/openhws-userd"
 VIEWER_DIR="${SCRIPT_DIR}/tools/everlive"
 
 # System-wide application copy produced by `make install-app`.  Both the
@@ -518,17 +519,38 @@ make -C "${CORE_DIR}" install
 # Install the GC573 engine binaries into /usr/local/bin with cap_ipc_lock.
 make -C "${USERD_DIR}" install
 
-# Install the GC570D helpers (udev rule, memlock, systemd unit, sleep hook)
-# through the engine's own Makefile so both installers stay in sync.
+# Install the GC570D helpers (udev rule, systemd unit, sleep hook) through the
+# engine's own Makefile so both installers stay in sync.
 make -C "${GC570D_DIR}" install
 
-# GC573 currently ships its bind helper from install.sh.
+# Install the shared bind helpers and compatibility wrappers.   udev rules use
+# the libexec copies; the /usr/local/bin copies keep old path lookups working.
+install -d /usr/local/libexec
+install -m 0755 "${SCRIPT_DIR}/packaging/libexec/everlive-vfio-bind" \
+    "${SCRIPT_DIR}/packaging/libexec/everlive-setcap" /usr/local/libexec/
+install -m 0755 "${USERD_DIR}/vfio_pci_bind.sh" \
+    "${GC570D_DIR}/gc570d-vfio-bind.sh" /usr/local/libexec/
 install -m 0755 "${USERD_DIR}/vfio_pci_bind.sh" /usr/local/bin/vfio_pci_bind.sh
+install -m 0755 "${GC570D_DIR}/gc570d-vfio-bind.sh" /usr/local/bin/gc570d-vfio-bind.sh
 
-setcap cap_ipc_lock=+ep "${USERD_DIR}/gc573_user_streamer" 2>/dev/null || true
-setcap cap_ipc_lock=+ep /usr/local/bin/gc573_user_streamer 2>/dev/null || true
-setcap cap_ipc_lock=+ep "${GC570D_DIR}/opengc570d-userd" 2>/dev/null || true
-setcap cap_ipc_lock=+ep /usr/local/bin/opengc570d-userd 2>/dev/null || true
+if [ -x "${SCRIPT_DIR}/packaging/libexec/everlive-setcap" ]; then
+    "${SCRIPT_DIR}/packaging/libexec/everlive-setcap" \
+        "${USERD_DIR}/gc573_user_streamer" \
+        "${USERD_DIR}/gc573_user_probe" \
+        "${USERD_DIR}/gc573_user_diag" \
+        /usr/local/bin/gc573_user_streamer \
+        /usr/local/bin/gc573_user_probe \
+        /usr/local/bin/gc573_user_diag \
+        "${GC570D_DIR}/opengc570d-userd" \
+        /usr/local/bin/opengc570d-userd \
+        "${HWS_DIR}/hws_user_streamer" \
+        "${HWS_DIR}/hws_user_probe" \
+        /usr/local/bin/hws_user_streamer \
+        /usr/local/bin/hws_user_probe 2>/dev/null || true
+else
+    setcap cap_ipc_lock=+ep /usr/local/bin/gc573_user_streamer 2>/dev/null || true
+    setcap cap_ipc_lock=+ep /usr/local/bin/opengc570d-userd 2>/dev/null || true
+fi
 echo -e "${GREEN}[+] Userspace VFIO Engines erfolgreich gebaut & berechtigt!${NC}"
 
 # Python GUI-Umgebung (PySide6) für Benutzer prüfen und bei Bedarf einrichten
@@ -645,11 +667,11 @@ EOF
 
 ensure_pipewire_capture_sink
 
-# 5. Udev-Rechte für vfio-pci & unbegrenzten Memlock einrichten
-echo -e "\n${BLUE}[4/5] Richte VFIO Hardware-Zugriffsrechte (udev), Boot-Autobind & Memlock ein...${NC}"
+# 5. Udev-Rechte für vfio-pci einrichten (per-Karte, ohne globales new_id)
+echo -e "\n${BLUE}[4/5] Richte VFIO Hardware-Zugriffsrechte (udev) & Boot-Autobind ein...${NC}"
 
-# Boot-Autobind: vfio-pci beim Kernel-Start laden und Karte binden,
-# damit EverLive ohne Sudo-Passwortabfrage direkt nach dem Booten starten kann.
+# Boot-Autobind: vfio-pci beim Kernel-Start laden.  Die udev-Regeln binden
+# danach nur die passende Karte per BDF und Subsystem an vfio-pci.
 mkdir -p /etc/modules-load.d /etc/modprobe.d
 cat > /etc/modules-load.d/everlive-vfio.conf <<EOF
 vfio
@@ -657,38 +679,58 @@ vfio_pci
 vfio_iommu_type1
 EOF
 
-cat > /etc/modprobe.d/everlive-vfio.conf <<EOF
-# EverLive: Auto-bind AVerMedia Live Gamer 4K (GC573), Live Gamer BOLT (GC555)
-# and Live Gamer DUO (GC570D, same 1461:0054 device ID) to vfio-pci at boot
-options vfio-pci ids=1461:0054,1461:0055
-EOF
+# Alte globale ID-Bindung aus früheren Installationen entfernen.
+rm -f /etc/modprobe.d/everlive-vfio.conf /usr/lib/modprobe.d/everlive-vfio.conf
 
-# Memlock Limits für native 4K DMA Mappings (nur Mitglieder der video-Gruppe)
-mkdir -p /etc/security/limits.d
-cat > /etc/security/limits.d/99-everlive-memlock.conf <<EOF
-# EverLive VFIO DMA memory pinning (video group only)
-@video  soft    memlock   unlimited
-@video  hard    memlock   unlimited
-EOF
+# Kein unbegrenztes memlock mehr.  cap_ipc_lock ist der primäre Mechanismus;
+# ohne setcap wird eine begrenzte Fallback-Datei installiert.
+rm -f /etc/security/limits.d/99-gc570d-memlock.conf
+if command -v setcap >/dev/null 2>&1; then
+    rm -f /etc/security/limits.d/99-everlive-memlock.conf
+    rm -f /etc/systemd/user/everlive.service.d/10-memlock.conf \
+          /etc/systemd/user/opengc570d-userd.service.d/10-memlock.conf
+    rm -f /usr/lib/systemd/user/everlive.service.d/10-memlock.conf \
+          /usr/lib/systemd/user/opengc570d-userd.service.d/10-memlock.conf
+    rmdir /etc/systemd/user/everlive.service.d \
+          /etc/systemd/user/opengc570d-userd.service.d \
+          /usr/lib/systemd/user/everlive.service.d \
+          /usr/lib/systemd/user/opengc570d-userd.service.d 2>/dev/null || true
+else
+    install -Dm0644 "${SCRIPT_DIR}/packaging/99-everlive-memlock-fallback.conf" \
+        /etc/security/limits.d/99-everlive-memlock.conf
+    install -d /etc/systemd/user/everlive.service.d \
+        /etc/systemd/user/opengc570d-userd.service.d
+    printf '[Service]\nLimitMEMLOCK=1G\n' > /etc/systemd/user/everlive.service.d/10-memlock.conf
+    printf '[Service]\nLimitMEMLOCK=1G\n' > /etc/systemd/user/opengc570d-userd.service.d/10-memlock.conf
+fi
 
-# Udev-Regel: Bindet AVerMedia GC573 (1461:0054 / 1461:5550) an vfio-pci
-# sowie USB/HID-Rechte für Live Gamer ULTRA 2.1 (GC553G2, 07ca:2553)
+# Udev-Regeln: GC573/BOLT und GC570D werden über Vendor/Device/Subsystem
+# getrennt; der gemeinsame Container-Knoten wird einmal generisch gesetzt.
 cat > /etc/udev/rules.d/70-everlive.rules <<EOF
 # AVerMedia Live Gamer 4K (GC573) & Live Gamer BOLT (GC555) - Userspace VFIO Mode
-ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1461", ATTR{device}=="0x0054", ATTR{driver_override}="vfio-pci"
-ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1461", ATTR{device}=="0x0055", ATTR{driver_override}="vfio-pci"
-SUBSYSTEM=="vfio", MODE="0660", TAG+="uaccess", GROUP="video"
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1461", ATTR{device}=="0x0054", ATTR{subsystem_vendor}=="0x1461", ATTR{subsystem_device}=="0x5730", ATTR{driver_override}="vfio-pci", RUN+="/usr/local/libexec/vfio_pci_bind.sh --udev %k"
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1461", ATTR{device}=="0x0055", ATTR{driver_override}="vfio-pci", RUN+="/usr/local/libexec/vfio_pci_bind.sh --udev %k"
 # AVerMedia Live Gamer ULTRA 2.1 (GC553G2, USB 07ca:2553 + HID LampArray 07ca:d553)
 SUBSYSTEM=="usb", ATTR{idVendor}=="07ca", ATTR{idProduct}=="2553", MODE="0660", TAG+="uaccess", GROUP="video"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="07ca", ATTRS{idProduct}=="d553", MODE="0660", TAG+="uaccess", GROUP="video"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="07ca", ATTRS{idProduct}=="2553", MODE="0660", TAG+="uaccess", GROUP="video"
 EOF
 
-udevadm control --reload-rules 2>/dev/null || true
-udevadm trigger 2>/dev/null || true
+# /dev/vfio/vfio is a misc device; keep it out of the per-card scripts.
+cat > /etc/udev/rules.d/70-everlive-vfio.rules <<EOF
+# The shared VFIO container node; group nodes are set per card after binding.
+SUBSYSTEM=="misc", KERNEL=="vfio", GROUP="video", MODE="0660"
+EOF
 
-# Bind direkt ausführen, falls Karte schon im Slot ist
+udevadm control --reload-rules 2>/dev/null || true
+udevadm trigger --action=add --subsystem-match=pci --attr-match=vendor=0x1461 2>/dev/null || \
+    udevadm trigger 2>/dev/null || true
+udevadm settle 2>/dev/null || true
+
+# Bind direkt ausführen, falls die Karte schon im Slot ist.  Beide Helfer
+# prüfen Vendor/Device/Subsystem und binden nur ihre eigene Karte.
 "${USERD_DIR}/vfio_pci_bind.sh" --bind 2>/dev/null || true
+"${GC570D_DIR}/gc570d-vfio-bind.sh" --bind 2>/dev/null || true
 
 # Benutzer zur video & audio Gruppe hinzufügen falls nötig
 usermod -aG video,audio "${TARGET_USER}" 2>/dev/null || true

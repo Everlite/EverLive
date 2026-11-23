@@ -121,23 +121,26 @@ LIBEXECDIR := $(DESTDIR)$(PREFIX)/libexec
 SYSTEMD_USER_DIR := $(DESTDIR)$(PREFIX)/lib/systemd/user
 SYSTEM_SLEEP_DIR := $(DESTDIR)/usr/lib/systemd/system-sleep
 UDEV_RULES_DIR := $(DESTDIR)/etc/udev/rules.d
-LIMITS_DIR := $(DESTDIR)/etc/security/limits.d
 
 install-bin: all
 	install -d $(BINDIR) $(LIBDIR)
 	install -m 0755 opengc570d-userd gc570d-ctl $(BINDIR)/
-	command -v setcap >/dev/null 2>&1 && setcap cap_ipc_lock=+ep $(BINDIR)/opengc570d-userd 2>/dev/null || true
+	@if [ -x ../../packaging/libexec/everlive-setcap ]; then \
+		../../packaging/libexec/everlive-setcap $(BINDIR)/opengc570d-userd 2>/dev/null || true; \
+	elif command -v setcap >/dev/null 2>&1; then \
+		setcap cap_ipc_lock=+ep $(BINDIR)/opengc570d-userd 2>/dev/null || true; \
+	fi
 	install -m 0644 libgc570d-v4l2.so $(LIBDIR)/
 
 install-system:
-	install -d $(LIBEXECDIR) $(SYSTEMD_USER_DIR) $(SYSTEM_SLEEP_DIR) $(UDEV_RULES_DIR) $(LIMITS_DIR)
-	install -m 0755 gc570d-vfio-bind.sh $(LIBEXECDIR)/
+	install -d $(LIBEXECDIR) $(SYSTEMD_USER_DIR) $(SYSTEM_SLEEP_DIR) $(UDEV_RULES_DIR)
+	install -m 0755 gc570d-vfio-bind.sh ../../packaging/libexec/everlive-vfio-bind ../../packaging/libexec/everlive-setcap $(LIBEXECDIR)/
 	sed 's|/usr/local|$(PREFIX)|g' gc570d-sleep.sh > $(LIBEXECDIR)/gc570d-sleep.sh
 	chmod 0755 $(LIBEXECDIR)/gc570d-sleep.sh
 	install -m 0755 $(LIBEXECDIR)/gc570d-sleep.sh $(SYSTEM_SLEEP_DIR)/gc570d-sleep.sh
 	sed 's|/usr/local|$(PREFIX)|g' 99-gc570d-vfio.rules > $(UDEV_RULES_DIR)/99-gc570d-vfio.rules
 	chmod 0644 $(UDEV_RULES_DIR)/99-gc570d-vfio.rules
-	install -m 0644 99-gc570d-memlock.conf $(LIMITS_DIR)/99-gc570d-memlock.conf
+	install -m 0644 ../../packaging/70-everlive-vfio.rules $(UDEV_RULES_DIR)/70-everlive-vfio.rules
 	sed 's|/usr/local|$(PREFIX)|g' opengc570d-userd.service > $(SYSTEMD_USER_DIR)/opengc570d-userd.service
 	chmod 0644 $(SYSTEMD_USER_DIR)/opengc570d-userd.service
 	install -m 0644 gc570d.conf.example $(DESTDIR)/etc/gc570d.conf.example
@@ -150,9 +153,14 @@ uninstall-bin:
 
 uninstall-system:
 	rm -f $(LIBEXECDIR)/gc570d-vfio-bind.sh $(LIBEXECDIR)/gc570d-sleep.sh
+	@if [ ! -e $(LIBEXECDIR)/vfio_pci_bind.sh ] && [ ! -e $(LIBEXECDIR)/hws-vfio-bind.sh ]; then \
+		rm -f $(LIBEXECDIR)/everlive-vfio-bind $(LIBEXECDIR)/everlive-setcap; \
+	fi
 	rm -f $(SYSTEM_SLEEP_DIR)/gc570d-sleep.sh
 	rm -f $(UDEV_RULES_DIR)/99-gc570d-vfio.rules
-	rm -f $(LIMITS_DIR)/99-gc570d-memlock.conf
+	@if [ ! -e $(UDEV_RULES_DIR)/70-everlive.rules ] && [ ! -e $(UDEV_RULES_DIR)/99-hwsuhd-vfio.rules ]; then \
+		rm -f $(UDEV_RULES_DIR)/70-everlive-vfio.rules; \
+	fi
 	rm -f $(SYSTEMD_USER_DIR)/opengc570d-userd.service
 	rm -f $(DESTDIR)/etc/gc570d.conf.example
 

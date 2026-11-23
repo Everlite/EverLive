@@ -94,23 +94,36 @@ UDEV_RULES_DIR := $(DESTDIR)/etc/udev/rules.d
 install-bin: all
 	install -d $(BINDIR) $(LIBDIR) $(LIBEXECDIR)
 	install -m 0755 hws_user_streamer hws_user_probe $(BINDIR)/
-	command -v setcap >/dev/null 2>&1 && setcap cap_ipc_lock=+ep $(BINDIR)/hws_user_streamer 2>/dev/null || true
-	command -v setcap >/dev/null 2>&1 && setcap cap_ipc_lock=+ep $(BINDIR)/hws_user_probe 2>/dev/null || true
+	@if [ -x ../../packaging/libexec/everlive-setcap ]; then \
+		../../packaging/libexec/everlive-setcap \
+			$(BINDIR)/hws_user_streamer \
+			$(BINDIR)/hws_user_probe 2>/dev/null || true; \
+	elif command -v setcap >/dev/null 2>&1; then \
+		setcap cap_ipc_lock=+ep $(BINDIR)/hws_user_streamer $(BINDIR)/hws_user_probe 2>/dev/null || true; \
+	fi
 	install -m 0644 libhwsuhd-v4l2.so $(LIBDIR)/
-	install -m 0755 hws-vfio-bind.sh $(LIBEXECDIR)/
+	install -m 0755 hws-vfio-bind.sh ../../packaging/libexec/everlive-vfio-bind ../../packaging/libexec/everlive-setcap $(LIBEXECDIR)/
 
 install-system:
 	install -d $(UDEV_RULES_DIR)
-	install -m 0644 99-hwsuhd-vfio.rules $(UDEV_RULES_DIR)/99-hwsuhd-vfio.rules
+	sed 's|/usr/local|$(PREFIX)|g' 99-hwsuhd-vfio.rules > $(UDEV_RULES_DIR)/99-hwsuhd-vfio.rules
+	chmod 0644 $(UDEV_RULES_DIR)/99-hwsuhd-vfio.rules
+	install -m 0644 ../../packaging/70-everlive-vfio.rules $(UDEV_RULES_DIR)/70-everlive-vfio.rules
 
 install: install-bin install-system
 
 uninstall-bin:
 	rm -f $(BINDIR)/hws_user_streamer $(BINDIR)/hws_user_probe
 	rm -f $(LIBDIR)/libhwsuhd-v4l2.so $(LIBEXECDIR)/hws-vfio-bind.sh
+	@if [ ! -e $(LIBEXECDIR)/vfio_pci_bind.sh ] && [ ! -e $(LIBEXECDIR)/gc570d-vfio-bind.sh ]; then \
+		rm -f $(LIBEXECDIR)/everlive-vfio-bind $(LIBEXECDIR)/everlive-setcap; \
+	fi
 
 uninstall-system:
 	rm -f $(UDEV_RULES_DIR)/99-hwsuhd-vfio.rules
+	@if [ ! -e $(UDEV_RULES_DIR)/70-everlive.rules ] && [ ! -e $(UDEV_RULES_DIR)/99-gc570d-vfio.rules ]; then \
+		rm -f $(UDEV_RULES_DIR)/70-everlive-vfio.rules; \
+	fi
 
 uninstall: uninstall-bin uninstall-system
 

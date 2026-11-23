@@ -14,6 +14,7 @@ PYTHON          ?= python3
 PREFIX          ?= /usr/local
 DESTDIR         ?=
 BINDIR          ?= $(PREFIX)/bin
+LIBEXECDIR      ?= $(PREFIX)/libexec
 DATADIR         ?= $(PREFIX)/share
 LIBDIR          ?= $(PREFIX)/lib
 INCLUDEDIR      ?= $(PREFIX)/include
@@ -136,15 +137,40 @@ install-system: all
 	install -m0755 $(CORE_DIR)/everlive-ctl $(CORE_DIR)/everlive-service.sh $(L)/$(CORE_DIR)/
 	$(GC570D_SED) $(GC570D_DIR)/gc570d-sleep.sh > $(L)/$(GC570D_DIR)/gc570d-sleep.sh
 	chmod 0755 $(L)/$(GC570D_DIR)/gc570d-sleep.sh
-	# VFIO binding, udev rules, modprobe and memlock limits
-	install -Dm0644 $(PKG_DIR)/70-everlive.rules $(DESTDIR)$(SYSLIBDIR)/udev/rules.d/70-everlive.rules
-	install -d $(DESTDIR)$(SYSLIBDIR)/udev/rules.d
-	$(GC570D_SED) $(GC570D_DIR)/99-gc570d-vfio.rules > $(DESTDIR)$(SYSLIBDIR)/udev/rules.d/99-gc570d-vfio.rules
+	# Shared VFIO bind/permission helpers and udev rules.
+	install -d $(DESTDIR)$(LIBEXECDIR) $(DESTDIR)$(SYSLIBDIR)/udev/rules.d
+	install -m0755 $(PKG_DIR)/libexec/everlive-vfio-bind $(PKG_DIR)/libexec/everlive-setcap $(DESTDIR)$(LIBEXECDIR)/
+	install -m0755 $(GC573_DIR)/vfio_pci_bind.sh $(GC570D_DIR)/gc570d-vfio-bind.sh $(DESTDIR)$(LIBEXECDIR)/
+	sed 's|/usr/local|$(PREFIX)|g' $(PKG_DIR)/70-everlive.rules > $(DESTDIR)$(SYSLIBDIR)/udev/rules.d/70-everlive.rules
+	chmod 0644 $(DESTDIR)$(SYSLIBDIR)/udev/rules.d/70-everlive.rules
+	sed 's|/usr/local|$(PREFIX)|g' $(GC570D_DIR)/99-gc570d-vfio.rules > $(DESTDIR)$(SYSLIBDIR)/udev/rules.d/99-gc570d-vfio.rules
 	chmod 0644 $(DESTDIR)$(SYSLIBDIR)/udev/rules.d/99-gc570d-vfio.rules
-	install -Dm0644 $(PKG_DIR)/everlive-vfio.modprobe.conf $(DESTDIR)$(SYSLIBDIR)/modprobe.d/everlive-vfio.conf
+	install -m0644 $(PKG_DIR)/70-everlive-vfio.rules $(DESTDIR)$(SYSLIBDIR)/udev/rules.d/70-everlive-vfio.rules
+	# Old install.sh copies in /etc override package rules and may contain the
+	# broad VFIO permission rule; remove only that generated variant.
+	@for f in $(DESTDIR)/etc/udev/rules.d/70-everlive.rules \
+	           $(DESTDIR)/etc/udev/rules.d/99-gc570d-vfio.rules; do \
+		if [ -f "$$f" ] && grep -q 'SUBSYSTEM=="vfio"' "$$f"; then rm -f "$$f"; fi; \
+	done
 	install -Dm0644 $(PKG_DIR)/everlive-v4l2loopback.modprobe.conf $(DESTDIR)$(SYSLIBDIR)/modprobe.d/everlive-v4l2loopback.conf
 	install -Dm0644 $(PKG_DIR)/everlive-vfio.modules-load.conf $(DESTDIR)$(SYSLIBDIR)/modules-load.d/everlive-vfio.conf
-	install -Dm0644 $(PKG_DIR)/99-everlive-memlock.conf $(DESTDIR)$(SYSCONFDIR)/security/limits.d/99-everlive-memlock.conf
+	# Do not leave the old global ID binding behind on upgrade.
+	rm -f $(DESTDIR)$(SYSLIBDIR)/modprobe.d/everlive-vfio.conf
+	# cap_ipc_lock is the primary memlock mechanism.  Install a bounded
+	# limits.d/unit drop-in only when setcap is unavailable on this host.
+	rm -f $(DESTDIR)$(SYSCONFDIR)/security/limits.d/99-gc570d-memlock.conf
+	@if ! command -v setcap >/dev/null 2>&1; then \
+		install -Dm0644 $(PKG_DIR)/99-everlive-memlock-fallback.conf $(DESTDIR)$(SYSCONFDIR)/security/limits.d/99-everlive-memlock.conf; \
+		install -d $(DESTDIR)$(SYSLIBDIR)/systemd/user/everlive.service.d \
+			$(DESTDIR)$(SYSLIBDIR)/systemd/user/opengc570d-userd.service.d; \
+		printf '[Service]\nLimitMEMLOCK=1G\n' > $(DESTDIR)$(SYSLIBDIR)/systemd/user/everlive.service.d/10-memlock.conf; \
+		printf '[Service]\nLimitMEMLOCK=1G\n' > $(DESTDIR)$(SYSLIBDIR)/systemd/user/opengc570d-userd.service.d/10-memlock.conf; \
+	else \
+		rm -f $(DESTDIR)$(SYSCONFDIR)/security/limits.d/99-everlive-memlock.conf \
+			$(DESTDIR)$(SYSCONFDIR)/security/limits.d/99-gc570d-memlock.conf; \
+		rm -f $(DESTDIR)$(SYSLIBDIR)/systemd/user/everlive.service.d/10-memlock.conf \
+			$(DESTDIR)$(SYSLIBDIR)/systemd/user/opengc570d-userd.service.d/10-memlock.conf; \
+	fi
 	# GC570D resume hook and per-user service
 	install -d $(DESTDIR)$(SYSLIBDIR)/systemd/system-sleep $(DESTDIR)$(SYSLIBDIR)/systemd/user
 	ln -sf $(GC570D_RUNDIR)/gc570d-sleep.sh $(DESTDIR)$(SYSLIBDIR)/systemd/system-sleep/gc570d-sleep.sh
@@ -176,11 +202,20 @@ uninstall-system:
 	      $(DESTDIR)$(LIBDIR)/libgc573-v4l2.so \
 	      $(DESTDIR)$(LIBDIR)/libeverlive-vk-pacer.so
 	rm -f $(DESTDIR)$(SYSLIBDIR)/udev/rules.d/70-everlive.rules
+	rm -f $(DESTDIR)$(SYSLIBDIR)/udev/rules.d/70-everlive-vfio.rules
 	rm -f $(DESTDIR)$(SYSLIBDIR)/udev/rules.d/99-gc570d-vfio.rules
+	rm -f $(DESTDIR)$(LIBEXECDIR)/everlive-vfio-bind
+	rm -f $(DESTDIR)$(LIBEXECDIR)/everlive-setcap
+	rm -f $(DESTDIR)$(LIBEXECDIR)/vfio_pci_bind.sh
+	rm -f $(DESTDIR)$(LIBEXECDIR)/gc570d-vfio-bind.sh
 	rm -f $(DESTDIR)$(SYSLIBDIR)/modprobe.d/everlive-vfio.conf
 	rm -f $(DESTDIR)$(SYSLIBDIR)/modprobe.d/everlive-v4l2loopback.conf
 	rm -f $(DESTDIR)$(SYSLIBDIR)/modules-load.d/everlive-vfio.conf
 	rm -f $(DESTDIR)$(SYSCONFDIR)/security/limits.d/99-everlive-memlock.conf
+	rm -f $(DESTDIR)$(SYSLIBDIR)/systemd/user/everlive.service.d/10-memlock.conf
+	rm -f $(DESTDIR)$(SYSLIBDIR)/systemd/user/opengc570d-userd.service.d/10-memlock.conf
+	rmdir $(DESTDIR)$(SYSLIBDIR)/systemd/user/everlive.service.d 2>/dev/null || true
+	rmdir $(DESTDIR)$(SYSLIBDIR)/systemd/user/opengc570d-userd.service.d 2>/dev/null || true
 	rm -f $(DESTDIR)$(SYSLIBDIR)/systemd/system-sleep/gc570d-sleep.sh
 	rm -f $(DESTDIR)$(SYSLIBDIR)/systemd/user/opengc570d-userd.service
 	rm -f $(DESTDIR)$(SYSDATADIR)/pipewire/pipewire.conf.d/50-everlive-capture.conf

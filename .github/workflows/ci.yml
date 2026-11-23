@@ -60,6 +60,12 @@ jobs:
           test -f "$RUNNER_TEMP/stage/usr/lib/libeverlive-vk-pacer.so"
           test -f "$RUNNER_TEMP/stage/usr/lib/libeverlive-cam-v4l2.so"
           test -x "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive-cam/everlive_camd"
+          test -x "$RUNNER_TEMP/stage/usr/libexec/everlive-vfio-bind"
+          test -x "$RUNNER_TEMP/stage/usr/libexec/everlive-setcap"
+          test -f "$RUNNER_TEMP/stage/usr/lib/udev/rules.d/70-everlive-vfio.rules"
+          if command -v setcap >/dev/null 2>&1; then
+            test ! -e "$RUNNER_TEMP/stage/etc/security/limits.d/99-everlive-memlock.conf"
+          fi
           make uninstall DESTDIR="$RUNNER_TEMP/stage" PREFIX=/usr
 
       - name: Staged app-only install and uninstall
@@ -117,7 +123,42 @@ jobs:
           bash -n uninstall.sh
           bash -n play.sh
           bash -n build.sh
-          bash -n tools/opengc573-userd/vfio_pci_bind.sh
-          bash -n tools/opengc570d-userd/gc570d-vfio-bind.sh
+          sh -n packaging/libexec/everlive-vfio-bind
+          sh -n packaging/libexec/everlive-setcap
+          sh -n tools/opengc573-userd/vfio_pci_bind.sh
+          sh -n tools/opengc570d-userd/gc570d-vfio-bind.sh
+          sh -n tools/openhws-userd/hws-vfio-bind.sh
           bash -n tools/opengc570d-userd/gc570d-sleep.sh
           bash -n tools/libeverlive-core/everlive-service.sh
+
+      - name: Verify VFIO permission invariants
+        run: |
+          fail() { echo "ERROR: $*" >&2; exit 1; }
+          if grep -R "new_id" packaging tools --include='*.sh' --include='*.rules' --include='*.conf'; then
+            fail "new_id must not be used"
+          fi
+          if grep -E 'SUBSYSTEM=="vfio".*TAG\+="uaccess"' packaging/70-everlive.rules; then
+            fail "VFIO group nodes must not use uaccess"
+          fi
+          if grep -R 'TAG+="uaccess"' packaging/70-everlive-vfio.rules \
+               tools/opengc570d-userd/99-gc570d-vfio.rules \
+               tools/openhws-userd/99-hwsuhd-vfio.rules; then
+            fail "VFIO rules must not use uaccess"
+          fi
+          if grep -R --exclude-dir=__pycache__ 'LimitMEMLOCK=infinity' tools \
+               --include='*.service' --include='*.py' --include='*.sh'; then
+            fail "unlimited LimitMEMLOCK is not allowed"
+          fi
+          if grep -R -E 'memlock[[:space:]]+unlimited' packaging --include='*.conf' \
+               tools --include='*.conf'; then
+            fail "unlimited memlock is not allowed"
+          fi
+          if grep -R -E 'options[[:space:]]+vfio-pci[[:space:]]+ids=' packaging --include='*.conf' \
+               tools --include='*.conf'; then
+            fail "global vfio-pci ids= binding is not allowed"
+          fi
+          if command -v udevadm >/dev/null 2>&1 && udevadm verify --help >/dev/null 2>&1; then
+            udevadm verify packaging/70-everlive.rules packaging/70-everlive-vfio.rules \
+              tools/opengc570d-userd/99-gc570d-vfio.rules \
+              tools/openhws-userd/99-hwsuhd-vfio.rules
+          fi

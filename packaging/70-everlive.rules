@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # EverLive: AVerMedia Live Gamer 4K (GC573), Live Gamer BOLT (GC555) and
 # Live Gamer DUO (GC570D) use the userspace VFIO engine.
-ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1461", ATTR{device}=="0x0054", ATTR{driver_override}="vfio-pci"
-ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1461", ATTR{device}=="0x0055", ATTR{driver_override}="vfio-pci"
-SUBSYSTEM=="vfio", MODE="0660", TAG+="uaccess", GROUP="video"
+#
+# Binding is per BDF and subsystem-qualified.  The shared helper writes
+# driver_override and binds only the matched device, so a GC573 and a GC570D
+# that share 1461:0054 cannot claim each other.
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1461", ATTR{device}=="0x0054", ATTR{subsystem_vendor}=="0x1461", ATTR{subsystem_device}=="0x5730", ATTR{driver_override}="vfio-pci", RUN+="/usr/local/libexec/vfio_pci_bind.sh --udev %k"
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1461", ATTR{device}=="0x0055", ATTR{driver_override}="vfio-pci", RUN+="/usr/local/libexec/vfio_pci_bind.sh --udev %k"
+
+# AVerMedia Live Gamer ULTRA 2.1 (GC553G2, USB 07ca:2553 + HID LampArray 07ca:d553)
+SUBSYSTEM=="usb", ATTR{idVendor}=="07ca", ATTR{idProduct}=="2553", MODE="0660", TAG+="uaccess", GROUP="video"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="07ca", ATTRS{idProduct}=="d553", MODE="0660", TAG+="uaccess", GROUP="video"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="07ca", ATTRS{idProduct}=="2553", MODE="0660", TAG+="uaccess", GROUP="video"

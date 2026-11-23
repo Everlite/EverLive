@@ -53,7 +53,7 @@ As of **EverLive v1.0.0**, this userspace engine is the default, primary driver 
 | **`gc573_user_video.[ch]`** | Mode table, timings verification, and FPGA VIP configuration. |
 | **`gc573_user_fpga.[ch]`** | Artix-7 FPGA register definitions and RGB lighting control. |
 | **`gc573_vfio.[ch]`** | Low-level VFIO container, group, device, and IOMMU DMA mapping primitives. |
-| **`vfio_pci_bind.sh`** | Utility script to bind or unbind the capture card to/from `vfio-pci`. |
+| **`vfio_pci_bind.sh`** | Shim for the shared `everlive-vfio-bind` helper (bind, restore, status). |
 
 ---
 
@@ -168,9 +168,9 @@ While paused, the Control Hub shows **Capture Paused** and offers
 `$XDG_RUNTIME_DIR/everlive.paused`.
 
 - Auth: `SO_PEERCRED` / `SO_PEERGROUPS`. Only users who have group access to
-  the card's `/dev/vfio/<group>` node (the `video` group in the shipped udev
-  rule) may ask. A user who reaches the node only through a logind ACL is not
-  recognised.
+  the card's `/dev/vfio/<group>` node (set to `root:video 0660` by
+  `everlive-vfio-bind`) may ask. A user who reaches the node only through a
+  logind ACL is not recognised.
 - A second instance started by the *same* user still fails as before.
   `EVERLIVE_HANDOFF_SAME_USER=1` lifts that for testing with one account.
 - Capture in the yielding session stops for as long as the other user holds

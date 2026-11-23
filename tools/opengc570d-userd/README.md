@@ -25,13 +25,14 @@ without PipeWire the capture rings and control socket remain available.
 
 ## Permissions and interrupts
 
-VFIO pins every DMA buffer, so the daemon needs either `CAP_IPC_LOCK` on the
-binary (`cap_ipc_lock=+ep`) or an `RLIMIT_MEMLOCK` large enough for both video
-rings. The packaged `99-gc570d-memlock.conf` and the per-user systemd unit
-raise the memlock budget; alternatively, grant the file capability. No root
-privileges are needed once either is in place. Rebuilding with `make` replaces
-the binary and clears its file capability, so re-apply `cap_ipc_lock=+ep` if
-you rely on the capability instead of a session memlock limit.
+VFIO pins every DMA buffer, so the daemon needs `CAP_IPC_LOCK` on the binary
+(`cap_ipc_lock=+ep`). The installers apply it with
+`packaging/libexec/everlive-setcap`; no unlimited memlock limit is shipped.
+If `setcap` is unavailable, the installer adds a bounded 1 GiB `@video`
+fallback plus a bounded `LimitMEMLOCK=1G` user-unit drop-in. No root
+privileges are needed once the capability is in place. Rebuilding with `make`
+replaces the binary and clears its file capability, so re-apply
+`cap_ipc_lock=+ep`.
 
 VFIO interrupts are allocated MSI-first. INTx is only a fallback because its
 mask/unmask path can stall the bridge I2C engine on some hosts. When INTx or
@@ -135,9 +136,10 @@ everlive-ctl runtime mode gaming "$WINDOW_ID"   # 0 = standalone window
 ## Installation
 
 `make install` installs the daemon, `gc570d-ctl`, the optional preload bridge,
-the udev rule, the VFIO bind helper, the memlock limits and a per-user systemd
-unit. `PREFIX` defaults to `/usr/local`; the udev rule and sleep hook are
-rewritten to match the chosen prefix.
+the subsystem-qualified udev rule, the shared VFIO bind helper and a per-user
+systemd unit. `PREFIX` defaults to `/usr/local`; the udev rule and sleep hook
+are rewritten to match the chosen prefix. No unlimited memlock file is
+installed; `cap_ipc_lock=+ep` is applied to the daemon.
 
 ```sh
 sudo make -C tools/opengc570d-userd install

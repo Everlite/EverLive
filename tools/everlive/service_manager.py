@@ -35,7 +35,6 @@ Type=simple
 ExecStart={exec_start}
 Restart=on-failure
 RestartSec=2
-LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=default.target

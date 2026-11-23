@@ -4,7 +4,7 @@
 # everlive-service.sh — Universal Background Capture Service for EverLive
 #
 # Automatically detects the installed card (GC570D, GC573), ensures vfio-pci
-# binding, raises DMA memlock limits, and runs the capture engine in headless mode.
+# binding, ensures cap_ipc_lock, and runs the capture engine in headless mode.
 # Keeps HDMI passthrough, PipeWire audio, and virtual cameras active at all times.
 # ==============================================================================
 set -euo pipefail
@@ -298,21 +298,25 @@ if [ "$IS_BOUND" -eq 0 ] && [ -n "$CARD_PCI" ]; then
     if [ ! -L "$driver_link" ] || [ "$(basename "$(readlink -f "$driver_link")")" != "vfio-pci" ]; then
         echo "[*] everlive-service: Device not bound to vfio-pci. Executing bind script..."
         if [ -x "${BIND_SCRIPT}" ]; then
+            BIND_ARGS=(--bind)
+            [ -n "$CARD_PCI" ] && BIND_ARGS+=(--bdf "$CARD_PCI")
             if [ "$EUID" -ne 0 ]; then
                 if command -v pkexec >/dev/null 2>&1 && [ ! -t 0 ]; then
-                    pkexec "${BIND_SCRIPT}" --bind || true
+                    pkexec "${BIND_SCRIPT}" "${BIND_ARGS[@]}" || true
                 else
-                    sudo "${BIND_SCRIPT}" --bind || true
+                    sudo "${BIND_SCRIPT}" "${BIND_ARGS[@]}" || true
                 fi
             else
-                "${BIND_SCRIPT}" --bind || true
+                "${BIND_SCRIPT}" "${BIND_ARGS[@]}" || true
             fi
         fi
     fi
 fi
 
-# 4. Set memlock ulimit
-ulimit -S -l unlimited 2>/dev/null || ulimit -S -l "$(ulimit -H -l)" 2>/dev/null || true
+# 4. Raise soft memlock to the existing hard limit as a bounded fallback.
+# cap_ipc_lock below is the primary mechanism; never request an unlimited
+# limit here.
+ulimit -S -l "$(ulimit -H -l)" 2>/dev/null || true
 
 # 5. Ensure cap_ipc_lock on engine binary
 if [ -f "${ENGINE_BIN}" ] && command -v setcap >/dev/null 2>&1; then
