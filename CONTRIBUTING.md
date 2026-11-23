@@ -50,6 +50,16 @@ Interested in contributing hardware reverse-engineering findings or building an 
 
 ---
 
+## 🔒 Security Invariants
+
+All code and packaging changes must preserve these core invariants (see [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)):
+- **No `sh -c` with user data:** Always pass argument arrays to subprocesses; never interpolate device names, PipeWire nodes, file paths, or BDFs into shell strings.
+- **No privileged user-writable paths:** `pkexec` and `sudo` helpers must only execute root-owned, non-writable binaries under `/usr/` (never relative checkout paths) and must validate BDF/device arguments before touching sysfs or `/dev`.
+- **No unverified downloads:** Every downloaded archive or release tarball must be pinned and verified against a SHA-256 checksum (fail-closed) before inspection or extraction.
+- **No world-writable device nodes:** Never use `0666` permissions, `TAG+="uaccess"` on `/dev/vfio/*`, global `vfio-pci ids=`/`new_id`, or `LimitMEMLOCK=infinity`.
+
+---
+
 ## 🎮 Hardware Testing
 
 We are especially interested in test reports for:
