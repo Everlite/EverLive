@@ -46,6 +46,19 @@ sudo make install                                       # optional system-wide i
 
 `./build.sh` wraps the top-level `make`. Arch Linux `PKGBUILD` files (`everlive` and `everlive-git`) live in [`packaging/arch/`](../packaging/arch/).
 
+### Updating Pinned Release Checksums
+
+Whenever bumping a pinned version, always update the version and its SHA-256 checksum together:
+
+- **Optional `lsfg-vk` fallback in `install.sh`:** update `LSFG_VK_VERSION` and `LSFG_VK_SHA256` together after verifying the archive checksum:
+  ```bash
+  curl --proto '=https' --tlsv1.2 --fail --location -fsSL "https://builds.lsfg-vk.dev/lsfg-vk-<VERSION>.tar.xz" | sha256sum
+  ```
+- **Arch release package (`packaging/arch/everlive/PKGBUILD`):** bump `pkgver`, push/tag `v<pkgver>`, and regenerate `packaging/arch/everlive/SHA256SUMS` + `sha256sums` together:
+  ```bash
+  ./packaging/arch/everlive/update-checksums.sh
+  ```
+
 ---
 
 ## IOMMU & PCIe Group Setup
