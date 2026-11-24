@@ -30,15 +30,33 @@ from typing import Dict, List, Optional, Tuple
 
 
 REC_FPS_OPTIONS = [
-    ("Auto (Match FPS)", "auto"),
-    ("240 FPS (4× FG)", "240"),
-    ("180 FPS (3× FG)", "180"),
+    ("Auto (Match Source)", "auto"),
+    ("240 FPS", "240"),
+    ("180 FPS", "180"),
     ("144 FPS", "144"),
-    ("120 FPS (2× FG)", "120"),
+    ("120 FPS", "120"),
     ("60 FPS", "60"),
     ("30 FPS", "30"),
 ]
 REC_FPS_KEYS = {key for _, key in REC_FPS_OPTIONS}
+
+
+def fps_options_for_refresh(max_hz: float) -> List[Tuple[str, str]]:
+    """Filter ``REC_FPS_OPTIONS`` to frame rates supported by the display."""
+    if max_hz <= 0:
+        return list(REC_FPS_OPTIONS)
+    limit = int(round(max_hz)) + 2
+    filtered = [
+        (label, key) for label, key in REC_FPS_OPTIONS
+        if key == "auto" or int(key) <= limit
+    ]
+    if len(filtered) <= 1:
+        return [
+            ("Auto (Match Source)", "auto"),
+            ("60 FPS", "60"),
+            ("30 FPS", "30"),
+        ]
+    return filtered
 
 REC_SOURCE_OPTIONS = [
     ("Auto (SHM / Viewport)", "auto"),
@@ -137,6 +155,7 @@ class RecordingPlan:
     height: int
     audio_source: Optional[str]
     pip: Optional[PipOverlay] = None
+    stop_signal: Optional[int] = None
 
 
 def _read_xdg_videos_dir() -> str:
@@ -459,6 +478,11 @@ def _supports_input_thread_queue(ffmpeg_bin: str) -> bool:
     return supported
 
 
+def find_gpu_screen_recorder() -> Optional[str]:
+    """Return the path to ``gpu-screen-recorder`` when installed."""
+    return shutil.which("gpu-screen-recorder")
+
+
 def build_recording_plan(
     *,
     output_dir: str = "",
@@ -478,12 +502,14 @@ def build_recording_plan(
     quality_setting: str = "high",
     container_format: str = "mkv",
     window_id: Optional[int] = None,
+    window_rect: Optional[Tuple[int, int, int, int]] = None,
     display: Optional[str] = None,
     audio_source: Optional[str] = None,
     vaapi_device: Optional[str] = None,
     resolved_encoder: Optional[str] = None,
     filename: Optional[str] = None,
     ffmpeg_bin: str = "ffmpeg",
+    gsr_bin: Optional[str] = None,
     pip: Optional[PipOverlay] = None,
 ) -> RecordingPlan:
     """Build a complete ``RecordingPlan`` (command, env, output path)."""
@@ -506,6 +532,41 @@ def build_recording_plan(
     qp_val, crf_val = _QUALITY_QP.get(qual, (18, 18))
     container = "mp4" if str(container_format).lower() == "mp4" else "mkv"
     out_path = _unique_output_path(output_dir, model, fps, container, filename=filename)
+
+    gsr = gsr_bin if gsr_bin is not None else (
+        find_gpu_screen_recorder() if (source == "window" and window_rect is not None) else None
+    )
+    if source == "window" and window_rect is not None and gsr:
+        rx, ry, rw, rh = (int(v) for v in window_rect)
+        rw = max(2, rw & ~1)
+        rh = max(2, rh & ~1)
+        gsr_codec = "hevc" if "hevc" in encoder else "h264"
+        gsr_qual = "ultra" if qual == "ultra" else ("medium" if qual == "balanced" else "high")
+        gsr_cmd: List[str] = [
+            gsr,
+            "-w", f"{rw}x{rh}+{rx}+{ry}",
+            "-c", container,
+            "-f", str(fps),
+            "-k", gsr_codec,
+            "-q", gsr_qual,
+            "-cursor", "no",
+        ]
+        if audio_source:
+            gsr_cmd.extend(["-a", audio_source])
+        gsr_cmd.extend(["-o", out_path])
+        return RecordingPlan(
+            cmd=gsr_cmd,
+            env={},
+            output_path=out_path,
+            fps=fps,
+            source=source,
+            encoder=f"gsr:{gsr_codec}",
+            width=rw,
+            height=rh,
+            audio_source=audio_source,
+            pip=pip,
+            stop_signal=signal.SIGINT,
+        )
 
     env: Dict[str, str] = {}
     cmd: List[str] = [ffmpeg_bin, "-hide_banner", "-loglevel", "warning"]
@@ -566,22 +627,37 @@ def build_recording_plan(
     if audio_source:
         cmd.extend(["-f", "pulse", *queue_args, "-i", audio_source])
 
-    def video_filter(chain: str) -> List[str]:
+    def video_filter(chain: str, use_vaapi_overlay: bool = False) -> List[str]:
         if pip is None:
             return ["-vf", chain]
         if pip.rect is not None:
             rx, ry, rw, rh = (int(v) for v in pip.rect)
-            scale = f"{max(2, rw)}:{max(2, rh)}"
-            ox, oy = str(max(0, rx)), str(max(0, ry))
+            pw = max(2, rw & ~1)
+            ph = max(2, rh & ~1)
+            ox, oy = max(0, rx), max(0, ry)
         else:
-            _x, _y, w, _h = pip_geometry(pip, even_w, even_h)
+            _x, _y, pw, ph = pip_geometry(pip, even_w, even_h)
+            pw = max(2, int(pw) & ~1)
+            ph = max(2, int(ph) & ~1)
             margin = int(round(even_w * pip.margin_pct / 100))
             corner = pip.corner if pip.corner in PIP_CORNERS else "br"
-            scale = f"{w}:-2"
-            ox = f"main_w-overlay_w-{margin}" if corner in ("br", "tr") else str(margin)
-            oy = f"main_h-overlay_h-{margin}" if corner in ("br", "bl") else str(margin)
-        graph = (f"[1:v]scale={scale}[pip];"
-                 f"[0:v][pip]overlay={ox}:{oy}:eof_action=pass,{chain}[v]")
+            ox = max(0, even_w - pw - margin) if corner in ("br", "tr") else margin
+            oy = max(0, even_h - ph - margin) if corner in ("br", "bl") else margin
+        scale = f"{pw}:{ph}"
+        if use_vaapi_overlay:
+            graph = (
+                f"[0:v]setpts=PTS-STARTPTS,{chain}[main];"
+                f"[1:v]setpts=PTS-STARTPTS,scale={scale},"
+                f"format=nv12,hwupload[pip];"
+                f"[main][pip]overlay_vaapi=x={ox}:y={oy}:eof_action=pass[v]"
+            )
+        else:
+            graph = (
+                f"[0:v]setpts=PTS-STARTPTS[main];"
+                f"[1:v]setpts=PTS-STARTPTS,scale={scale}[pip];"
+                f"[main][pip]overlay=x={ox}:y={oy}:eof_action=pass:"
+                f"shortest=0:repeatlast=1,{chain}[v]"
+            )
         args = ["-filter_complex", graph, "-map", "[v]"]
         if audio_source:
             args.extend(["-map", "2:a"])
@@ -589,7 +665,10 @@ def build_recording_plan(
 
     if encoder in ("h264_vaapi", "hevc_vaapi"):
         cmd.extend([
-            *video_filter("scale=trunc(iw/2)*2:trunc(ih/2)*2,format=nv12,hwupload"),
+            *video_filter(
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=nv12,hwupload",
+                use_vaapi_overlay=True,
+            ),
             "-c:v", encoder,
             "-qp", str(qp_val),
         ])
@@ -798,8 +877,16 @@ class EverLiveRecorder:
         plan = self._plan
 
         if proc.poll() is None:
-            # Writing 'q' lets ffmpeg write the MKV cue / MP4 moov atom cleanly.
-            if proc.stdin is not None:
+            if plan is not None and plan.stop_signal is not None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), plan.stop_signal)
+                except OSError:
+                    try:
+                        proc.send_signal(plan.stop_signal)
+                    except OSError:
+                        pass
+            elif proc.stdin is not None:
+                # Writing 'q' lets ffmpeg write the MKV cue / MP4 moov atom cleanly.
                 try:
                     proc.stdin.write(b"q\n")
                     proc.stdin.flush()

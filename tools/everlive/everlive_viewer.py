@@ -4719,15 +4719,28 @@ if HAS_QT:
             grid_rec.setColumnStretch(1, 1)
 
             self.combo_rec_fps = _shrinkable(QComboBox())
-            for text, key in everlive_recorder.REC_FPS_OPTIONS:
+            screen_hz = 0.0
+            try:
+                cur_scr = self.screen()
+                if cur_scr is not None:
+                    screen_hz = float(cur_scr.refreshRate() or 0.0)
+                if screen_hz <= 0.0:
+                    app_inst = QApplication.instance()
+                    if app_inst is not None:
+                        screen_hz = max(
+                            (float(s.refreshRate() or 0.0) for s in app_inst.screens()),
+                            default=0.0,
+                        )
+            except Exception:
+                screen_hz = 0.0
+            for text, key in everlive_recorder.fps_options_for_refresh(screen_hz):
                 self.combo_rec_fps.addItem(text, key)
             rfps_idx = self.combo_rec_fps.findData(
                 self.saved_cfg.get("rec_fps", "auto"))
             if rfps_idx >= 0:
                 self.combo_rec_fps.setCurrentIndex(rfps_idx)
             self.combo_rec_fps.setToolTip(
-                "Target output frame rate. 'Auto' matches capture FPS and "
-                "scales with active Frame Generation (up to 240 FPS).")
+                "Target output frame rate (filtered to your display's refresh rate).")
             self.combo_rec_fps.currentIndexChanged.connect(
                 lambda *_: save_settings(
                     {"rec_fps": self.combo_rec_fps.currentData() or "auto"}))
@@ -7797,6 +7810,20 @@ if HAS_QT:
             win_id = (
                 self._get_video_host_winid()
                 if self._is_embedded_gaming_active() else None)
+            win_rect = None
+            if win_id is not None and hasattr(self, "video_host"):
+                try:
+                    tl = self.video_host.mapToGlobal(QPointF(0, 0).toPoint())
+                    sz = self.video_host.size()
+                    dpr = float(self.video_host.devicePixelRatioF() or 1.0)
+                    win_rect = (
+                        int(round(tl.x() * dpr)),
+                        int(round(tl.y() * dpr)),
+                        max(2, int(round(sz.width() * dpr)) & ~1),
+                        max(2, int(round(sz.height() * dpr)) & ~1),
+                    )
+                except Exception:
+                    win_rect = None
             preload_lib = (
                 app_integrations.find_preload_library(self.card_profile)
                 if self.vfio_mode else None)
@@ -7852,13 +7879,15 @@ if HAS_QT:
                     self.combo_rec_format.currentData()
                     if hasattr(self, "combo_rec_format") else "mkv"),
                 window_id=win_id,
+                window_rect=win_rect,
                 audio_source=audio_source,
             )
             plan = everlive_recorder.build_recording_plan(**plan_args)
-            pip = self._webcam_recording_overlay(plan)
-            if pip is not None:
-                plan_args["pip"] = pip
-                plan = everlive_recorder.build_recording_plan(**plan_args)
+            if plan.stop_signal is None:
+                pip = self._webcam_recording_overlay(plan)
+                if pip is not None:
+                    plan_args["pip"] = pip
+                    plan = everlive_recorder.build_recording_plan(**plan_args)
             mv = self._mv_runner
             stamp = everlive_multi.take_stamp()
             if mv is not None:

@@ -161,8 +161,8 @@ class RecordingPlanTests(unittest.TestCase):
         self.assertEqual(inputs, ["/dev/video63", "/dev/video65", "everlive.monitor"])
         self.assertNotIn("-vf", cmd)
         graph = cmd[cmd.index("-filter_complex") + 1]
-        self.assertIn("[1:v]scale=960:-2[pip]", graph)
-        self.assertIn("overlay=main_w-overlay_w-96:main_h-overlay_h-96", graph)
+        self.assertIn("scale=960:540[pip]", graph)
+        self.assertIn("overlay=x=2784:y=1524", graph)
         self.assertTrue(graph.endswith("format=yuv420p[v]"))
         maps = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
         self.assertEqual(maps, ["[v]", "2:a"])
@@ -173,7 +173,7 @@ class RecordingPlanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan = _plan(tmp, pip=pip, width=1920, height=1080)
         graph = plan.cmd[plan.cmd.index("-filter_complex") + 1]
-        self.assertIn("overlay=48:48", graph)
+        self.assertIn("overlay=x=48:y=48", graph)
         maps = [plan.cmd[i + 1] for i, a in enumerate(plan.cmd) if a == "-map"]
         self.assertEqual(maps, ["[v]"])
 
@@ -182,8 +182,8 @@ class RecordingPlanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan = _plan(tmp, pip=pip)
         graph = plan.cmd[plan.cmd.index("-filter_complex") + 1]
-        self.assertIn("[1:v]scale=400:224[pip]", graph)
-        self.assertIn("overlay=1582:856:", graph)
+        self.assertIn("scale=400:224[pip]", graph)
+        self.assertIn("overlay=x=1582:y=856:", graph)
 
     def test_vaapi_chain_kept_after_overlay(self) -> None:
         pip = rec.PipOverlay(preload_library=CAM_LIB)
@@ -192,7 +192,32 @@ class RecordingPlanTests(unittest.TestCase):
                          resolved_encoder="h264_vaapi",
                          vaapi_device="/dev/dri/renderD128")
         graph = plan.cmd[plan.cmd.index("-filter_complex") + 1]
-        self.assertTrue(graph.endswith("format=nv12,hwupload[v]"))
+        self.assertIn("format=nv12,hwupload", graph)
+        self.assertIn("overlay_vaapi=", graph)
+        self.assertTrue(graph.endswith("[v]"))
+
+    def test_fps_options_for_refresh(self) -> None:
+        opts_144 = [k for _, k in rec.fps_options_for_refresh(143.98)]
+        self.assertEqual(opts_144, ["auto", "144", "120", "60", "30"])
+        for label, _ in rec.REC_FPS_OPTIONS:
+            self.assertNotIn("FG", label)
+
+    def test_window_capture_uses_gpu_screen_recorder_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = _plan(
+                tmp,
+                source_setting="window",
+                window_id=12345,
+                window_rect=(1920, 1440, 2560, 1440),
+                display=":0",
+                fps_setting="240",
+                gsr_bin="/usr/bin/gpu-screen-recorder",
+                audio_source="everlive.monitor",
+            )
+        self.assertEqual(plan.cmd[0], "/usr/bin/gpu-screen-recorder")
+        self.assertIn("2560x1440+1920+1440", plan.cmd)
+        self.assertIn("240", plan.cmd)
+        self.assertIsNotNone(plan.stop_signal)
 
 
 if __name__ == "__main__":
