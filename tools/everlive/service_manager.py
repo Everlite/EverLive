@@ -38,6 +38,14 @@ Type=simple
 ExecStart={exec_start}
 Restart=on-failure
 RestartSec=2
+# Safe user-unit hardening.  Keep NoNewPrivileges=, ProtectSystem=,
+# ProtectHome= and PrivateTmp= off until the VFIO memlock path no longer
+# depends on cap_ipc_lock=+ep on the installed engine.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+LockPersonality=yes
+RestrictSUIDSGID=yes
 
 [Install]
 WantedBy=default.target
