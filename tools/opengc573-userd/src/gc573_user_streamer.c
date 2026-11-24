@@ -26,6 +26,7 @@
 #include "gc573_user_bitstream.h"
 #include "gc573_user_nosignal.h"
 #include "gc573_user_ipc.h"
+#include "everlive_ipc.h"
 #include "gc573_user_audio_tap.h"
 #include "gc573_user_hdr.h"
 #include "gc573_user_framegen.h"
@@ -8095,9 +8096,18 @@ int main(int argc, char *argv[])
 		int ipc_ret = gc573_ipc_start(EVERLIVE_VERSION,
 					      ipc_socket_override);
 
-		if (ipc_ret < 0)
+		if (ipc_ret < 0) {
+			if (everlive_ipc_is_security_error(ipc_ret)) {
+				char msg[512];
+
+				everlive_ipc_describe_error(ipc_ret, NULL, msg,
+							    sizeof(msg));
+				pr_warn("%s", msg);
+				return 1;
+			}
 			pr_warn("IPC control socket unavailable (%s); continuing without remote control",
 				strerror(-ipc_ret));
+		}
 	}
 
 	if (audio_tap_node) {

@@ -19,8 +19,10 @@ if [ -f "${SCRIPT_DIR}/tools/everlive/everlive_display.c" ]; then
     SDL_FLAGS="$(pkg-config --cflags --libs sdl2 2>/dev/null || sdl2-config --cflags --libs 2>/dev/null || true)"
     if [ -n "${SDL_FLAGS}" ]; then
         gcc -O3 -o "${SCRIPT_DIR}/tools/everlive/everlive_display" \
-            "${SCRIPT_DIR}/tools/everlive/everlive_display.c" ${SDL_FLAGS} \
-            -lGL -lm -lX11 -lpthread
+            "${SCRIPT_DIR}/tools/everlive/everlive_display.c" \
+            "${SCRIPT_DIR}/tools/everlive/everlive_audio_probe.c" \
+            "${SCRIPT_DIR}/tools/libeverlive-core/third_party/jsmn.c" \
+            ${SDL_FLAGS} -lGL -lm -lX11 -lpthread
         chmod 0755 "${SCRIPT_DIR}/tools/everlive/everlive_display" 2>/dev/null || true
     fi
 fi

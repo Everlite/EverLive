@@ -14,12 +14,15 @@ CORE_V4L2_DIR := $(CORE_DIR)/v4l2
 GC573_DIR  := ../tools/opengc573-userd
 GC570D_DIR := ../tools/opengc570d-userd
 GC570D_SRC := $(GC570D_DIR)/src
+EVERLIVE_DIR := ../tools/everlive
 V4L2_TEST_DSOS := test_gc573-v4l2.so test_gc570d-v4l2.so
 
 INCLUDES := -I$(CORE_DIR) -I$(GC570D_SRC) -I$(GC570D_DIR) -I$(GC573_DIR)/src
 DEFS_GC570D := -DGC570D_USERSPACE
 
 CORE_LIB := $(CORE_DIR)/libeverlive_core.a
+JSMN_SRC := $(CORE_DIR)/third_party/jsmn.c
+AUDIO_PROBE_SRC := $(EVERLIVE_DIR)/everlive_audio_probe.c
 SANITIZE := -fsanitize=address,undefined -fno-omit-frame-pointer
 TSAN_FLAGS := -fsanitize=thread -fno-omit-frame-pointer
 
@@ -32,7 +35,7 @@ endif
 
 TARGETS := test_card_registry test_frame_convert test_framestore test_ctl_proto \
            test_json_rpc test_v4l2_shim test_v4l2_preload test_handoff \
-           test_edid test_config test_framegen
+           test_ipc test_edid test_config test_framegen test_audio_probe
 
 all: $(TARGETS)
 
@@ -104,6 +107,9 @@ v4l2-preload: test_v4l2_preload $(V4L2_TEST_DSOS)
 test_handoff: test_handoff.c $(CORE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ $< $(CORE_LIB) -pthread
 
+test_ipc: test_ipc.c $(CORE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ $< $(CORE_LIB)
+
 # --- GC570D -------------------------------------------------------------
 # These two provide their own kernel-shim stubs, so they must compile the
 # engine modules directly and must NOT link the core archive.
@@ -113,6 +119,11 @@ test_edid: test_edid.c $(GC570D_SRC)/gc570d-receiver.c \
 
 test_config: test_config.c $(GC570D_SRC)/gc570d-config.c
 	$(CC) $(CFLAGS) $(INCLUDES) $(DEFS_GC570D) -o $@ $^
+
+# --- everlive_display ----------------------------------------------------
+# The audio probe is pure parsing/validation: no SDL, no PipeWire, no root.
+test_audio_probe: test_audio_probe.c $(AUDIO_PROBE_SRC) $(JSMN_SRC)
+	$(CC) $(CFLAGS) -o $@ test_audio_probe.c $(AUDIO_PROBE_SRC) $(JSMN_SRC)
 
 # --- GC573 --------------------------------------------------------------
 PACER_LIB := $(GC573_DIR)/libeverlive-vk-pacer.so
@@ -135,6 +146,9 @@ test: all
 	@./test_v4l2_shim
 	@$(MAKE) --no-print-directory v4l2-preload
 	@./test_handoff
+	@./test_ipc
+	@echo "=== everlive_display ==="
+	@./test_audio_probe
 	@echo "=== GC570D (Live Gamer DUO) ==="
 	@./test_edid
 	@./test_config

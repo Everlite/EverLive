@@ -127,11 +127,15 @@ process can never open the card. Instead of failing with "an external instance
 already owns the device", the streamer publishes its state over a Unix domain
 socket and the Control Hub attaches to it as a read-only **Remote Session**.
 
-- Path: `$XDG_RUNTIME_DIR/everlive.sock` (fallback `/run/user/<uid>`, then
-  `/tmp/everlive-<uid>`), mode `0600`.
-- Auth: `SO_PEERCRED` — only clients with the streamer's own UID are accepted.
-- Ownership: an `flock` on `everlive.sock.lock` is authoritative. A socket left
-  behind by a crash is detected and removed on the next start.
+- Path: `$XDG_RUNTIME_DIR/everlive.sock` (fallback `/run/user/<euid>`, then
+  `/tmp/everlive-<euid>`), mode `0600`. Every existing runtime directory must be
+  a real `0700` directory owned by `geteuid()`; symlinks and foreign or
+  permissive directories are rejected at startup.
+- Auth: `SO_PEERCRED` — only clients with the streamer's own effective UID are
+  accepted.
+- Ownership: an `flock` on `everlive.sock.lock` is authoritative. The lock file
+  is opened `O_NOFOLLOW` and must be a regular file owned by `geteuid()`. A
+  socket left behind by a crash is detected and removed on the next start.
 - Transport: newline-delimited JSON-RPC 2.0, max 64 KiB per line.
 
 Methods: `hello`, `ping`, `status.get`, and the write path

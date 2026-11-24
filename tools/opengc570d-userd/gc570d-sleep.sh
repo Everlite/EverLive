@@ -16,12 +16,9 @@ case "${1:-post}" in
             uid=$(basename "$rdir")
             user=$(id -nu "$uid" 2>/dev/null || true)
             [ -n "$user" ] || continue
-            if [ -S "$rdir/gc570d/control.sock" ]; then
-                su - "$user" -c "XDG_RUNTIME_DIR=$rdir /usr/local/bin/gc570d-ctl reinit" >/dev/null 2>&1 || \
-                systemctl --machine="${user}@.host" --user restart opengc570d-userd.service >/dev/null 2>&1 || true
-            else
-                systemctl --machine="${user}@.host" --user try-restart opengc570d-userd.service >/dev/null 2>&1 || true
-            fi
+            # Reinit over the control socket is debug-gated; restart the
+            # user unit instead so resume recovery never depends on it.
+            systemctl --machine="${user}@.host" --user try-restart opengc570d-userd.service >/dev/null 2>&1 || true
         done
         ;;
 esac

@@ -110,7 +110,8 @@ frame store directly and does not replace the v4l2loopback path.
 The daemon serves the unified newline-delimited JSON-RPC 2.0 protocol on
 `$XDG_RUNTIME_DIR/everlive.sock` (used by `everlive-ctl` and the Console Hub)
 as well as the legacy text protocol on `$XDG_RUNTIME_DIR/gc570d/control.sock`
-used by `gc570d-ctl`:
+used by `gc570d-ctl`. When `XDG_RUNTIME_DIR` is unset, the same private
+`/run/user/<uid>/` or `/tmp/gc570d-<uid>/` fallback rules apply to both sides.
 
 ```sh
 gc570d-ctl status
@@ -118,11 +119,28 @@ gc570d-ctl input 2                 # switch the window to HDMI IN 2
 gc570d-ctl osd 0                  # hide the overlay
 gc570d-ctl pip 1                  # enable picture-in-picture
 gc570d-ctl led colorful            # colorful | breathing | static | off
-gc570d-ctl action splitter_windows_bridge_edid 1
-gc570d-ctl action splitter_windows_edid_copy 1
-gc570d-ctl action it68051_hpd 1   # pulse HDMI IN 1 hot-plug
-gc570d-ctl action it6802_hpd 1    # pulse HDMI IN 2 hot-plug
 ```
+
+Both sockets only accept clients with the daemon's own UID. The runtime
+directory must be a real `0700` directory owned by that UID; a foreign or
+permissive path aborts daemon startup instead of being reused.
+
+The raw diagnostic commands `reinit` and `action <node>` are debug-gated. They
+require `EVERLIVE_DEBUG_CONTROL=1` in the **daemon** environment:
+
+```sh
+systemctl --user set-environment EVERLIVE_DEBUG_CONTROL=1
+systemctl --user restart opengc570d-userd.service
+
+gc570d-ctl reinit
+gc570d-ctl action splitter_windows_bridge_edid 1
+gc570d-ctl action it68051_hpd 1   # pulse HDMI IN 1 hot-plug
+```
+
+Normal controls stay available without the debug flag. The Hub uses the
+JSON-RPC feature methods (`hotplug`, `edid.set`, `led.mode.set`, and so on) for
+its DUO controls. On resume, `gc570d-sleep.sh` restarts the user unit rather
+than issuing the gated `reinit` command.
 
 The unified socket also accepts `mode.set`, which swaps only the presentation
 layer.  The Console Hub uses it to dock a headless session into its viewport

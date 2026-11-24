@@ -39,6 +39,7 @@
 #include "hws_camera.h"
 #include "hws_capture.h"
 #include "hws_ipc.h"
+#include "everlive_ipc.h"
 #include "hws_log.h"
 #include "hws_nosignal.h"
 #include "hws_user_regs.h"
@@ -2063,8 +2064,22 @@ int main(int argc, char **argv)
 		else
 			fprintf(stderr, "[HWS-USER][WARN] audio tap %s unavailable\n", audio_tap);
 	}
-	if (use_ipc && hws_ipc_start(HWS_ENGINE_VERSION, ipc_socket) < 0)
-		fprintf(stderr, "[HWS-USER][WARN] control socket unavailable (another EverLive engine running?)\n");
+	if (use_ipc) {
+		int ipc_ret = hws_ipc_start(HWS_ENGINE_VERSION, ipc_socket);
+
+		if (ipc_ret < 0) {
+			if (everlive_ipc_is_security_error(ipc_ret)) {
+				char msg[512];
+
+				everlive_ipc_describe_error(ipc_ret, NULL, msg,
+							    sizeof(msg));
+				fprintf(stderr, "[HWS-USER][ERR] %s\n", msg);
+				return 1;
+			}
+			fprintf(stderr,
+				"[HWS-USER][WARN] control socket unavailable (another EverLive engine running?)\n");
+		}
+	}
 
 #ifdef HAVE_SDL2
 	if (SDL_Init(0) < 0) {

@@ -312,10 +312,67 @@ check_steam_lsfg_dll() {
     return 0
 }
 
+# Gepinnte optionale lsfg-vk Release-Version (Version + SHA-256 immer gemeinsam aktualisieren; siehe docs/INSTALL.md)
+LSFG_VK_VERSION="2.0.0"
+LSFG_VK_ARCHIVE="lsfg-vk-${LSFG_VK_VERSION}.tar.xz"
+LSFG_VK_URL="https://builds.lsfg-vk.dev/${LSFG_VK_ARCHIVE}"
+LSFG_VK_SHA256="08bdbdf373a111022df87dac7aa87e3b564bb841f961552e3ca85fea12b5aa74"
+
+_install_pinned_lsfg_vk() {
+    local archive_url="${LSFG_VK_URL}"
+    local expected_sha="${LSFG_VK_SHA256}"
+    local archive_name="${LSFG_VK_ARCHIVE}"
+    local tmp_dir=""
+    local tmp_tar=""
+    local tar_list=""
+
+    if ! [[ "${expected_sha}" =~ ^[a-fA-F0-9]{64}$ ]]; then
+        echo -e "${RED}[!] Ungültige gepinnte SHA-256-Prüfsumme für ${archive_name} — überspringe lsfg-vk.${NC}"
+        return 1
+    fi
+
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        echo -e "${YELLOW}[!] sha256sum nicht verfügbar — überspringe unverifizierten Download von ${archive_name}.${NC}"
+        return 1
+    fi
+
+    tmp_dir="$(mktemp -d)"
+    chmod 700 "${tmp_dir}"
+    trap 'rm -rf -- "${tmp_dir}"' RETURN
+    tmp_tar="${tmp_dir}/${archive_name}"
+
+    echo -e "[*] Lade gepinntes lsfg-vk Paket (${archive_name})..."
+    if ! curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            --max-time 60 "${archive_url}" -o "${tmp_tar}"; then
+        echo -e "${YELLOW}[!] Download von ${archive_name} fehlgeschlagen — überspringe lsfg-vk.${NC}"
+        return 1
+    fi
+
+    if ! printf '%s  %s\n' "${expected_sha}" "${tmp_tar}" | sha256sum -c - >/dev/null 2>&1; then
+        echo -e "${RED}[!] SHA-256-Prüfung für ${archive_name} fehlgeschlagen — überspringe lsfg-vk.${NC}"
+        return 1
+    fi
+
+    if ! tar_list="$(tar -tJf "${tmp_tar}" 2>/dev/null)" || [ -z "${tar_list}" ] ||
+       printf '%s\n' "${tar_list}" | grep -qE '(^/|(^|/)\.\.(/|$))'; then
+        echo -e "${RED}[!] Ungültige Archivpfade in ${archive_name} — überspringe lsfg-vk.${NC}"
+        return 1
+    fi
+
+    if [ "${TARGET_USER}" != "root" ]; then
+        chown -R "${TARGET_USER}" "${tmp_dir}"
+        sudo -u "${TARGET_USER}" mkdir -p "${TARGET_HOME}/.local"
+        sudo -u "${TARGET_USER}" tar --no-same-owner --no-same-permissions -xJf "${tmp_tar}" -C "${TARGET_HOME}/.local"
+    else
+        mkdir -p "${TARGET_HOME}/.local"
+        tar --no-same-owner --no-same-permissions -xJf "${tmp_tar}" -C "${TARGET_HOME}/.local"
+    fi
+}
+
 # Optionaler 2x Frame-Generation-Layer (lsfg-vk 2.0). Darf den Installer niemals
 # abbrechen: bei Fehlern bleibt EverLive im nativen Modus voll funktionsfähig.
 ensure_lsfg_vk() {
-    echo -e "\n${BLUE}[*] Prüfe optionalen Frame-Generation-Layer (lsfg-vk 2.0)...${NC}"
+    echo -e "\n${BLUE}[*] Prüfe optionalen Frame-Generation-Layer (lsfg-vk ${LSFG_VK_VERSION})...${NC}"
 
     if has_lsfg_vk_layer; then
         echo -e "${GREEN}[+] lsfg-vk 2.0 Vulkan-Layer ist bereits installiert.${NC}"
@@ -346,45 +403,9 @@ ensure_lsfg_vk() {
         fi
 
         # 3. Universeller Fallback (Ubuntu/Debian/Fedora/Arch ohne AUR-Helper):
-        #    Offizielles lsfg-vk 2.0 Release-Archiv von builds.lsfg-vk.dev nach ~/.local
+        #    Gepinntes lsfg-vk Release-Archiv mit harter SHA-256-Prüfung (fail-closed)
         if ! has_lsfg_vk_layer && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
-            local archive_rel=""
-            local archive_url=""
-            local tmp_tar=""
-
-            archive_rel="$(curl -fsSL --max-time 10 https://builds.lsfg-vk.dev/ 2>/dev/null | \
-                sed -n 's/.*href="\([^"]*\.tar\.xz\)">&gt;&gt; Latest release.*/\1/p' | head -n 1 || true)"
-            if ! [[ "${archive_rel}" =~ ^[A-Za-z0-9._/-]+\.tar\.xz$ ]] || [[ "${archive_rel}" == *".."* ]]; then
-                archive_rel="lsfg-vk-2.0.0.tar.xz"
-            fi
-            archive_url="https://builds.lsfg-vk.dev/${archive_rel}"
-
-            echo -e "[*] Lade offizielles lsfg-vk 2.0 Paket (${archive_rel})..."
-            tmp_tar="$(mktemp /tmp/everlive-lsfg-vk.XXXXXX.tar.xz)"
-            if curl -fsSL --max-time 60 "${archive_url}" -o "${tmp_tar}" &&
-               tar -tJf "${tmp_tar}" >/dev/null 2>&1 &&
-               ! tar -tJf "${tmp_tar}" | grep -qE '(^/|\.\.)'; then
-                local sha_expected=""
-                sha_expected="$(curl -fsSL --max-time 10 "${archive_url}.sha256" 2>/dev/null | awk '{print $1}' | head -n 1 || true)"
-                if [[ "${sha_expected}" =~ ^[a-fA-F0-9]{64}$ ]] && command -v sha256sum >/dev/null 2>&1; then
-                    if ! echo "${sha_expected}  ${tmp_tar}" | sha256sum -c - >/dev/null 2>&1; then
-                        echo -e "${RED}[!] SHA-256-Prüfung für ${archive_rel} fehlgeschlagen — Abbruch.${NC}"
-                        rm -f "${tmp_tar}"
-                        tmp_tar=""
-                    fi
-                fi
-                if [ -n "${tmp_tar}" ]; then
-                    chmod 644 "${tmp_tar}"
-                    if [ "${TARGET_USER}" != "root" ]; then
-                        sudo -u "${TARGET_USER}" mkdir -p "${TARGET_HOME}/.local"
-                        sudo -u "${TARGET_USER}" tar --no-same-owner --no-same-permissions -xJf "${tmp_tar}" -C "${TARGET_HOME}/.local" || true
-                    else
-                        mkdir -p "${TARGET_HOME}/.local"
-                        tar --no-same-owner --no-same-permissions -xJf "${tmp_tar}" -C "${TARGET_HOME}/.local" || true
-                    fi
-                fi
-            fi
-            rm -f "${tmp_tar}"
+            _install_pinned_lsfg_vk || true
         fi
 
         if has_lsfg_vk_layer; then

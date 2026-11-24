@@ -65,8 +65,10 @@ struct everlive_framestore_frame {
 /*
  * Create (or truncate and reinitialise) a store.
  *
- * The object is created 0600.  Returns NULL on invalid arguments, allocation
- * failure, SHM creation failure, or mapping failure.
+ * The object is created 0600 and owned by geteuid().  An existing object is
+ * reused only when it is a regular file owned by geteuid(); a pre-created
+ * foreign object is rejected.  Returns NULL on invalid arguments, ownership or
+ * mode failure, allocation failure, SHM creation failure, or mapping failure.
  */
 struct everlive_framestore *
 everlive_framestore_create(const struct everlive_framestore_config *cfg);
@@ -74,9 +76,10 @@ everlive_framestore_create(const struct everlive_framestore_config *cfg);
 /*
  * Attach to an existing store read-only.
  *
- * Validates magic, version, geometry fields and the object size.  Returns
- * NULL when the object does not exist or does not match the current ABI.
- * Never unlinks the object.
+ * Validates the object is a regular file owned by geteuid() with mode 0600,
+ * then validates magic, version, geometry fields and the object size.
+ * Returns NULL when the object does not exist, is foreign or permissive, or
+ * does not match the current ABI.  Never unlinks the object.
  */
 struct everlive_framestore *everlive_framestore_attach(const char *name);
 

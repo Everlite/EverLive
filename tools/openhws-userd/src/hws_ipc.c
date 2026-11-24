@@ -805,8 +805,8 @@ static void ipc_client_read(struct ipc_server *s, struct ipc_client *c)
 static void ipc_accept_all(struct ipc_server *s)
 {
 	for (;;) {
-		struct ucred cred;
-		socklen_t clen = sizeof(cred);
+		uid_t peer_uid = (uid_t)-1;
+		pid_t peer_pid = -1;
 		struct ipc_client *c;
 		struct epoll_event ev;
 		int fd = accept4(s->listen_fd, NULL, NULL,
@@ -823,8 +823,10 @@ static void ipc_accept_all(struct ipc_server *s)
 		 * check keeps the guarantee even if an administrator widens the
 		 * permissions or the socket is rebound in a shared directory.
 		 */
-		if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &clen) < 0 ||
-		    cred.uid != getuid()) {
+		if (everlive_ipc_peer_identity(fd, &peer_uid, &peer_pid) < 0 ||
+		    peer_uid != geteuid()) {
+			pr_warn("IPC client rejected: uid=%u pid=%d",
+				(unsigned int)peer_uid, (int)peer_pid);
 			close(fd);
 			continue;
 		}
@@ -926,16 +928,9 @@ int hws_ipc_start(const char *version, const char *socket_override)
 
 	/* 2. Take the lock file — this is the authoritative ownership test. */
 	stage = "lock file";
-	snprintf(s->lock_path, sizeof(s->lock_path), "%.107s.lock", s->path);
-	s->lock_fd = open(s->lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-	if (s->lock_fd < 0) {
-		ret = -errno;
+	ret = everlive_ipc_acquire_socket_lock(s->path, &s->lock_fd);
+	if (ret < 0)
 		goto fail;
-	}
-	if (flock(s->lock_fd, LOCK_EX | LOCK_NB) < 0) {
-		ret = (errno == EWOULDBLOCK) ? -EADDRINUSE : -errno;
-		goto fail;
-	}
 
 	/* 3. A leftover socket without a live lock owner is stale. */
 	if (access(s->path, F_OK) == 0)
@@ -952,9 +947,17 @@ int hws_ipc_start(const char *version, const char *socket_override)
 		ret = -errno;
 		goto fail;
 	}
-	if (bind(s->listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		ret = -errno;
-		goto fail;
+	{
+		mode_t old_umask = umask(077);
+		int bind_ret = bind(s->listen_fd, (struct sockaddr *)&addr,
+				    sizeof(addr));
+		int bind_err = errno;
+
+		(void)umask(old_umask);
+		if (bind_ret < 0) {
+			ret = -bind_err;
+			goto fail;
+		}
 	}
 	(void)chmod(s->path, 0600);
 	if (listen(s->listen_fd, HWS_IPC_MAX_CLIENTS) < 0) {
