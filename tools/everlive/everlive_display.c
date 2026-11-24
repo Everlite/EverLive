@@ -12,6 +12,13 @@
  * - Native borderless fullscreen toggle (F11 / f / double-click)
  */
 
+/* glibc declares environ in <unistd.h> only under _GNU_SOURCE.  SDL's
+ * pkg-config supplies -D_GNU_SOURCE on some distros (Arch) but not on
+ * Debian/Ubuntu, so define it here to keep the build self-contained. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
