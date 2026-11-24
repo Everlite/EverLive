@@ -156,6 +156,9 @@ jobs:
       - name: Sanitizer run
         run: make -C tests asan
 
+      - name: ThreadSanitizer V4L2 tests
+        run: make -C tests tsan
+
       - name: Clean
         run: make clean
 
