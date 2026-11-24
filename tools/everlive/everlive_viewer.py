@@ -8,6 +8,7 @@ Desktop Studio with low-latency direct-DMA preview for Linux gaming.
 import sys
 import os
 import signal
+import stat
 import subprocess
 import time
 import argparse
@@ -18,6 +19,26 @@ import threading
 import shutil
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List
+
+_VALID_BDF_RE = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
+
+
+def _trusted_helper(path: str) -> bool:
+    """Return True only when ``path`` is a root-owned non-writable /usr binary."""
+    if not path or os.path.islink(path):
+        return False
+    try:
+        real = os.path.realpath(path)
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if not (real == "/usr" or real.startswith("/usr/")):
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    if st.st_uid != 0 or (st.st_mode & 0o022) != 0:
+        return False
+    return os.access(path, os.X_OK)
 
 if os.environ.get("DISPLAY") and "--cli" not in sys.argv:
     os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
@@ -8360,26 +8381,38 @@ if HAS_QT:
             self._bind_card(card, label)
 
         def _bind_card(self, card: Dict[str, Optional[str]], label: str):
-            """Hand ``card`` to vfio-pci with its bind script (pkexec)."""
+            """Hand ``card`` to vfio-pci with its trusted bind script (pkexec)."""
             scripts = {
-                MODEL_GC573: ("opengc573-userd", "vfio_pci_bind.sh"),
-                MODEL_GC570D: ("opengc570d-userd", "gc570d-vfio-bind.sh"),
-                MODEL_HWSUHD: ("openhws-userd", "hws-vfio-bind.sh"),
+                MODEL_GC573: "vfio_pci_bind.sh",
+                MODEL_GC570D: "gc570d-vfio-bind.sh",
+                MODEL_HWSUHD: "hws-vfio-bind.sh",
             }
-            folder, name = scripts.get(card["model"], ("", ""))
-            here = os.path.dirname(os.path.abspath(__file__))
-            candidates = [os.path.join(here, "..", folder, name),
-                          f"/usr/local/libexec/{name}", f"/usr/libexec/{name}",
-                          f"/usr/local/bin/{name}", f"/usr/bin/{name}"]
-            script = next((os.path.normpath(c) for c in candidates
-                           if folder and os.access(c, os.X_OK)), None)
+            name = scripts.get(card["model"], "")
+            candidates = (
+                [
+                    f"/usr/local/libexec/{name}",
+                    f"/usr/libexec/{name}",
+                    f"/usr/local/bin/{name}",
+                    f"/usr/bin/{name}",
+                ]
+                if name
+                else []
+            )
+            script = next(
+                (os.path.normpath(c) for c in candidates if _trusted_helper(c)),
+                None,
+            )
             if script is None or not shutil.which("pkexec"):
                 self._card_switch_failed(
-                    f"{label} is not bound to vfio-pci; run ./play.sh once.")
+                    f"{label} is not bound to vfio-pci; run sudo ./install.sh or ./play.sh once.")
                 return
             args = [script, "--bind"]
             pci = card.get("pci")
             if pci:
+                if not _VALID_BDF_RE.match(pci):
+                    self._card_switch_failed(
+                        f"Refusing to bind {label}: invalid PCI address {pci!r}.")
+                    return
                 args.extend(["--bdf", pci])
             self._set_vfio_notice(
                 "Preparing Capture Card",

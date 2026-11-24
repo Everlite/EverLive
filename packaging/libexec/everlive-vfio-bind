@@ -147,11 +147,24 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
+is_valid_bdf() {
+	case "$1" in
+		[0-9a-f][0-9a-f][0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f].[0-7])
+			return 0
+			;;
+	esac
+	return 1
+}
+
 [ -n "$CARD" ] || die "--card is required"
 case "$CARD" in
 	gc573|gc570d|hwsuhd) ;;
 	*) die "unknown card: $CARD" ;;
 esac
+
+if [ -n "$BDF" ] && ! is_valid_bdf "$BDF"; then
+	die "invalid PCI BDF: $BDF"
+fi
 
 current_driver() {
 	if [ -L "$SYSFS_PCI/$1/driver" ]; then
