@@ -36,6 +36,14 @@ static struct everlive_framestore *g_framestore;
 static uint8_t *g_yuyv_scratch;
 static size_t g_yuyv_scratch_cap;
 
+#ifdef EVERLIVE_V4L2_TESTING
+static unsigned long g_test_mmap_calls;
+static unsigned long g_test_munmap_calls;
+static unsigned long g_test_close_calls;
+static long g_test_live_maps;
+static int g_test_fail_mmap_after = -1;
+#endif
+
 static const struct everlive_v4l2_card *state_card(void)
 {
 	return g_card ? g_card : everlive_v4l2_card_descriptor();
@@ -43,26 +51,82 @@ static const struct everlive_v4l2_card *state_card(void)
 
 static void *state_mmap(size_t length)
 {
+	void *p;
+
+#ifdef EVERLIVE_V4L2_TESTING
+	g_test_mmap_calls++;
+	if (g_test_fail_mmap_after == 0) {
+		errno = ENOMEM;
+		return MAP_FAILED;
+	}
+	if (g_test_fail_mmap_after > 0)
+		g_test_fail_mmap_after--;
+#endif
+
 #if defined(SYS_mmap)
-	return (void *)syscall(SYS_mmap, NULL, length, PROT_READ | PROT_WRITE,
-			       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	p = (void *)syscall(SYS_mmap, NULL, length, PROT_READ | PROT_WRITE,
+			    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 #elif defined(SYS_mmap2)
-	return (void *)syscall(SYS_mmap2, NULL, length, PROT_READ | PROT_WRITE,
-			       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	p = (void *)syscall(SYS_mmap2, NULL, length, PROT_READ | PROT_WRITE,
+			    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 #else
 #error "everlive_v4l2_state requires SYS_mmap or SYS_mmap2"
 #endif
+
+#ifdef EVERLIVE_V4L2_TESTING
+	if (p != MAP_FAILED)
+		g_test_live_maps++;
+#endif
+	return p;
 }
 
 static int state_munmap(void *addr, size_t length)
 {
-	return (int)syscall(SYS_munmap, addr, length);
+	int ret;
+
+#ifdef EVERLIVE_V4L2_TESTING
+	g_test_munmap_calls++;
+#endif
+	ret = (int)syscall(SYS_munmap, addr, length);
+#ifdef EVERLIVE_V4L2_TESTING
+	if (ret == 0 && g_test_live_maps > 0)
+		g_test_live_maps--;
+#endif
+	return ret;
 }
 
 static int state_close(int fd)
 {
+#ifdef EVERLIVE_V4L2_TESTING
+	g_test_close_calls++;
+#endif
 	return (int)syscall(SYS_close, fd);
 }
+
+#ifdef EVERLIVE_V4L2_TESTING
+void everlive_v4l2_test_reset_hooks(void)
+{
+	g_test_mmap_calls = 0;
+	g_test_munmap_calls = 0;
+	g_test_close_calls = 0;
+	g_test_fail_mmap_after = -1;
+}
+
+void everlive_v4l2_test_fail_mmap_after(int successful_mmaps)
+{
+	g_test_fail_mmap_after = successful_mmaps;
+}
+
+void everlive_v4l2_test_get_counters(struct everlive_v4l2_test_counters *out)
+{
+	if (!out)
+		return;
+	out->mmap_calls = g_test_mmap_calls;
+	out->munmap_calls = g_test_munmap_calls;
+	out->close_calls = g_test_close_calls;
+	out->live_maps = g_test_live_maps;
+}
+#endif
 
 static struct everlive_framestore *get_framestore(void)
 {
@@ -415,6 +479,16 @@ int everlive_v4l2_open_count(void)
 	return atomic_load_explicit(&g_open_handle_count, memory_order_relaxed);
 }
 
+static void release_buffers(struct everlive_v4l2_handle *h)
+{
+	for (unsigned int i = 0; i < EVERLIVE_V4L2_MAX_BUFS; i++) {
+		if (h->bufs[i].addr && h->bufs[i].size)
+			state_munmap(h->bufs[i].addr, h->bufs[i].size);
+		memset(&h->bufs[i], 0, sizeof(h->bufs[i]));
+	}
+	h->req_count = 0;
+}
+
 static int handle_virtual_ioctl(struct everlive_v4l2_handle *h,
 				unsigned long request, void *arg)
 {
@@ -664,15 +738,9 @@ static int handle_virtual_ioctl(struct everlive_v4l2_handle *h,
 			ret = -1;
 			break;
 		}
-		for (unsigned int i = 0; i < EVERLIVE_V4L2_MAX_BUFS; i++) {
-			if (h->bufs[i].addr && h->bufs[i].size)
-				state_munmap(h->bufs[i].addr, h->bufs[i].size);
-			memset(&h->bufs[i], 0, sizeof(h->bufs[i]));
-		}
-		if (rb->count == 0) {
-			h->req_count = 0;
+		release_buffers(h);
+		if (rb->count == 0)
 			break;
-		}
 		if (rb->count < 2)
 			rb->count = 2;
 		if (rb->count > EVERLIVE_V4L2_MAX_BUFS)
@@ -682,6 +750,7 @@ static int handle_virtual_ioctl(struct everlive_v4l2_handle *h,
 			void *p = state_mmap(sz);
 
 			if (p == MAP_FAILED) {
+				release_buffers(h);
 				errno = ENOMEM;
 				ret = -1;
 				break;
@@ -689,13 +758,17 @@ static int handle_virtual_ioctl(struct everlive_v4l2_handle *h,
 			h->bufs[i].addr = p;
 			h->bufs[i].size = sz;
 		}
-		h->req_count = rb->count;
+		if (ret == 0)
+			h->req_count = rb->count;
 		break;
 	}
 	case VIDIOC_QUERYBUF: {
 		struct v4l2_buffer *b = arg;
 
-		if (!b || b->index >= h->req_count) {
+		if (!b || h->req_count > EVERLIVE_V4L2_MAX_BUFS ||
+		    b->index >= h->req_count ||
+		    b->index >= EVERLIVE_V4L2_MAX_BUFS ||
+		    !h->bufs[b->index].addr || !h->bufs[b->index].size) {
 			errno = EINVAL;
 			ret = -1;
 			break;
@@ -717,7 +790,10 @@ static int handle_virtual_ioctl(struct everlive_v4l2_handle *h,
 	case VIDIOC_QBUF: {
 		struct v4l2_buffer *b = arg;
 
-		if (!b || b->index >= h->req_count) {
+		if (!b || h->req_count > EVERLIVE_V4L2_MAX_BUFS ||
+		    b->index >= h->req_count ||
+		    b->index >= EVERLIVE_V4L2_MAX_BUFS ||
+		    !h->bufs[b->index].addr || !h->bufs[b->index].size) {
 			errno = EINVAL;
 			ret = -1;
 			break;
@@ -736,12 +812,13 @@ static int handle_virtual_ioctl(struct everlive_v4l2_handle *h,
 		int pr;
 		uint64_t expirations;
 
-		if (!b) {
+		if (!b || h->req_count > EVERLIVE_V4L2_MAX_BUFS) {
 			errno = EINVAL;
 			ret = -1;
 			break;
 		}
-		for (uint32_t i = 0; i < h->req_count; i++) {
+		for (uint32_t i = 0;
+		     i < h->req_count && i < EVERLIVE_V4L2_MAX_BUFS; i++) {
 			if (h->bufs[i].queued) {
 				found = (int)i;
 				break;
@@ -749,6 +826,11 @@ static int handle_virtual_ioctl(struct everlive_v4l2_handle *h,
 		}
 		if (found < 0 || !h->streaming) {
 			errno = EAGAIN;
+			ret = -1;
+			break;
+		}
+		if (!h->bufs[found].addr || !h->bufs[found].size) {
+			errno = EINVAL;
 			ret = -1;
 			break;
 		}
@@ -889,10 +971,7 @@ int everlive_v4l2_close_virtual(int fd)
 		return -1;
 	}
 
-	for (unsigned int i = 0; i < EVERLIVE_V4L2_MAX_BUFS; i++) {
-		if (h->bufs[i].addr && h->bufs[i].size)
-			state_munmap(h->bufs[i].addr, h->bufs[i].size);
-	}
+	release_buffers(h);
 	ret = state_close(fd);
 	memset(h, 0, sizeof(*h));
 	atomic_fetch_sub_explicit(&g_open_handle_count, 1,
@@ -905,8 +984,10 @@ int everlive_v4l2_dup_virtual(int oldfd, int newfd)
 	struct everlive_v4l2_handle *old = find_handle(oldfd);
 	int slot = -1;
 
-	if (!old)
+	if (!old) {
+		errno = EBADF;
 		return -1;
+	}
 
 	for (unsigned int i = 0; i < EVERLIVE_V4L2_MAX_FDS; i++) {
 		if (!g_handles[i].in_use) {
@@ -914,8 +995,10 @@ int everlive_v4l2_dup_virtual(int oldfd, int newfd)
 			break;
 		}
 	}
-	if (slot < 0)
+	if (slot < 0) {
+		errno = EMFILE;
 		return -1;
+	}
 
 	g_handles[slot] = *old;
 	g_handles[slot].fd = newfd;
@@ -941,16 +1024,20 @@ void *everlive_v4l2_mmap_buffer(int fd, uint64_t offset)
 	const struct everlive_v4l2_card *card = state_card();
 	struct everlive_v4l2_handle *h = find_handle(fd);
 	uint64_t delta;
-	unsigned int idx;
+	uint64_t idx;
 
 	if (!h || !card || offset < card->mmap_base || !card->mmap_stride)
 		return NULL;
 
 	delta = offset - card->mmap_base;
-	idx = (unsigned int)(delta / card->mmap_stride);
-	if (idx < h->req_count && h->bufs[idx].addr)
-		return h->bufs[idx].addr;
-	return NULL;
+	if (delta % card->mmap_stride)
+		return NULL;
+	idx = delta / card->mmap_stride;
+	if (idx >= EVERLIVE_V4L2_MAX_BUFS || idx >= h->req_count)
+		return NULL;
+	if (!h->bufs[idx].addr || !h->bufs[idx].size)
+		return NULL;
+	return h->bufs[idx].addr;
 }
 
 bool everlive_v4l2_munmap_buffer(void *addr)
@@ -997,6 +1084,9 @@ void everlive_v4l2_state_shutdown(void)
 		everlive_framestore_destroy(g_framestore);
 		g_framestore = NULL;
 	}
+	free(g_yuyv_scratch);
+	g_yuyv_scratch = NULL;
+	g_yuyv_scratch_cap = 0;
 	g_card = NULL;
 }
 

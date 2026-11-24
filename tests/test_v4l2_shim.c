@@ -4,6 +4,7 @@
  * machine.  The libc interposer is intentionally not linked here.
  */
 
+#include <dirent.h>
 #include <errno.h>
 #include <linux/videodev2.h>
 #include <stdarg.h>
@@ -303,6 +304,36 @@ static void test_state_machine(void)
 				       test_card.mmap_base +
 				       3ULL * test_card.mmap_stride) == NULL);
 	CHECK(everlive_v4l2_mmap_buffer(fd, 0) == NULL);
+	CHECK(everlive_v4l2_mmap_buffer(fd,
+				       (uint64_t)test_card.mmap_base - 1) == NULL);
+	CHECK(everlive_v4l2_mmap_buffer(fd,
+				       test_card.mmap_base + 1ULL) == NULL);
+	CHECK(everlive_v4l2_mmap_buffer(fd,
+				       test_card.mmap_base +
+				       test_card.mmap_stride + 1ULL) == NULL);
+	CHECK(everlive_v4l2_mmap_buffer(
+		      fd, test_card.mmap_base +
+			  (((uint64_t)1 << 32) * test_card.mmap_stride)) ==
+	      NULL);
+	CHECK(everlive_v4l2_mmap_buffer(fd, UINT64_MAX) == NULL);
+	CHECK(everlive_v4l2_mmap_buffer(
+		      fd, test_card.mmap_base +
+			  EVERLIVE_V4L2_MAX_BUFS * test_card.mmap_stride) ==
+	      NULL);
+
+	/* Defensive bounds checks must hold even if state is corrupted. */
+	h->req_count = EVERLIVE_V4L2_MAX_BUFS + 1;
+	buf.index = EVERLIVE_V4L2_MAX_BUFS;
+	buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	buf.memory = V4L2_MEMORY_MMAP;
+	CHECK(everlive_v4l2_ioctl(h, VIDIOC_QUERYBUF, &buf) == -1);
+	CHECK(errno == EINVAL);
+	CHECK(everlive_v4l2_ioctl(h, VIDIOC_QBUF, &buf) == -1);
+	CHECK(errno == EINVAL);
+	CHECK(everlive_v4l2_ioctl(h, VIDIOC_DQBUF, &buf) == -1);
+	CHECK(errno == EINVAL);
+	h->req_count = 2;
+	buf.index = 0;
 
 	CHECK(everlive_v4l2_ioctl(h, VIDIOC_QBUF, &buf) == 0);
 	memset(&buf, 0, sizeof(buf));
@@ -325,6 +356,8 @@ static void test_state_machine(void)
 	memset(&buf, 0, sizeof(buf));
 	buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	buf.memory = V4L2_MEMORY_MMAP;
+	/* DQBUF overwrites the caller's index; it is not an input selector. */
+	buf.index = UINT32_MAX;
 	CHECK(everlive_v4l2_ioctl(h, VIDIOC_DQBUF, &buf) == 0);
 	CHECK(buf.index == 0);
 	CHECK(buf.bytesused == frame_bytes);
@@ -386,6 +419,214 @@ static void test_state_machine(void)
 	free(readback);
 }
 
+static void set_format(struct everlive_v4l2_handle *h, uint32_t width,
+		       uint32_t height)
+{
+	struct v4l2_format fmt;
+
+	memset(&fmt, 0, sizeof(fmt));
+	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	fmt.fmt.pix.width = width;
+	fmt.fmt.pix.height = height;
+	fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+	CHECK(everlive_v4l2_ioctl(h, VIDIOC_S_FMT, &fmt) == 0);
+}
+
+static int count_open_fds(void)
+{
+	DIR *dir = opendir("/proc/self/fd");
+	struct dirent *ent;
+	int count = 0;
+
+	CHECK(dir != NULL);
+	while ((ent = readdir(dir)) != NULL) {
+		if (strcmp(ent->d_name, ".") != 0 &&
+		    strcmp(ent->d_name, "..") != 0)
+			count++;
+	}
+	CHECK(closedir(dir) == 0);
+	return count;
+}
+
+static void test_reqbufs_rollback(void)
+{
+	struct everlive_v4l2_buffer zero_bufs[EVERLIVE_V4L2_MAX_BUFS] = { 0 };
+	struct everlive_v4l2_test_counters counters;
+	struct everlive_v4l2_handle *h;
+	struct v4l2_requestbuffers rb;
+	int fd;
+
+	cleanup();
+	CHECK(everlive_v4l2_state_init(everlive_v4l2_card_descriptor()) == 0);
+	fd = everlive_v4l2_open_virtual(0);
+	CHECK(fd >= 0);
+	h = everlive_v4l2_find_handle(fd);
+	CHECK(h != NULL);
+	set_format(h, 640, 360);
+
+	everlive_v4l2_test_reset_hooks();
+	everlive_v4l2_test_get_counters(&counters);
+	CHECK(counters.live_maps == 0);
+
+	memset(&rb, 0, sizeof(rb));
+	rb.count = 4;
+	rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	rb.memory = V4L2_MEMORY_MMAP;
+	everlive_v4l2_test_fail_mmap_after(2);
+	errno = 0;
+	CHECK(everlive_v4l2_ioctl(h, VIDIOC_REQBUFS, &rb) == -1);
+	CHECK(errno == ENOMEM);
+	CHECK(rb.count == 4);
+	CHECK(h->req_count == 0);
+	CHECK(memcmp(h->bufs, zero_bufs, sizeof(zero_bufs)) == 0);
+
+	everlive_v4l2_test_get_counters(&counters);
+	CHECK(counters.mmap_calls == 3);
+	CHECK(counters.munmap_calls == 2);
+	CHECK(counters.live_maps == 0);
+
+	for (uint32_t i = 0; i < 4; i++) {
+		CHECK(everlive_v4l2_mmap_buffer(
+			      fd, test_card.mmap_base +
+					  (uint64_t)i * test_card.mmap_stride) ==
+		      NULL);
+	}
+	{
+		struct v4l2_buffer buf;
+
+		memset(&buf, 0, sizeof(buf));
+		buf.index = 0;
+		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		buf.memory = V4L2_MEMORY_MMAP;
+		CHECK(everlive_v4l2_ioctl(h, VIDIOC_QUERYBUF, &buf) == -1);
+		CHECK(errno == EINVAL);
+	}
+
+	/* The handle must remain usable after a failed allocation. */
+	everlive_v4l2_test_fail_mmap_after(-1);
+	CHECK(everlive_v4l2_ioctl(h, VIDIOC_REQBUFS, &rb) == 0);
+	CHECK(h->req_count == 4);
+	everlive_v4l2_test_get_counters(&counters);
+	CHECK(counters.live_maps == 4);
+
+	CHECK(everlive_v4l2_close_virtual(fd) == 0);
+	everlive_v4l2_test_get_counters(&counters);
+	CHECK(counters.live_maps == 0);
+	CHECK(everlive_v4l2_open_count() == 0);
+	cleanup();
+}
+
+static void test_multi_fd_cleanup(void)
+{
+	struct everlive_v4l2_handle *h0;
+	struct everlive_v4l2_handle *h1;
+	struct v4l2_requestbuffers rb;
+	struct everlive_v4l2_test_counters counters;
+	void *h1_buf1;
+	int baseline_fds;
+	int fd0;
+	int fd1;
+
+	cleanup();
+	baseline_fds = count_open_fds();
+	CHECK(everlive_v4l2_state_init(everlive_v4l2_card_descriptor()) == 0);
+	everlive_v4l2_test_reset_hooks();
+
+	fd0 = everlive_v4l2_open_virtual(0);
+	fd1 = everlive_v4l2_open_virtual(1);
+	CHECK(fd0 >= 0 && fd0 != fd1 && fd1 >= 0);
+	h0 = everlive_v4l2_find_handle(fd0);
+	h1 = everlive_v4l2_find_handle(fd1);
+	CHECK(h0 != NULL && h1 != NULL && h0 != h1);
+	set_format(h0, 640, 360);
+	set_format(h1, 1280, 720);
+
+	memset(&rb, 0, sizeof(rb));
+	rb.count = 2;
+	rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	rb.memory = V4L2_MEMORY_MMAP;
+	CHECK(everlive_v4l2_ioctl(h0, VIDIOC_REQBUFS, &rb) == 0);
+	CHECK(h0->req_count == 2);
+	rb.count = 3;
+	CHECK(everlive_v4l2_ioctl(h1, VIDIOC_REQBUFS, &rb) == 0);
+	CHECK(h1->req_count == 3);
+	CHECK(h0->bufs[0].size == 640U * 360U * 2U);
+	CHECK(h1->bufs[0].size == 1280U * 720U * 2U);
+
+	for (uint32_t i = 0; i < h0->req_count; i++) {
+		CHECK(h0->bufs[i].addr != NULL);
+		for (uint32_t j = 0; j < h1->req_count; j++) {
+			CHECK(h1->bufs[j].addr != NULL);
+			CHECK(h0->bufs[i].addr != h1->bufs[j].addr);
+		}
+	}
+
+	CHECK(everlive_v4l2_mmap_buffer(
+		      fd1, test_card.mmap_base +
+				  2ULL * test_card.mmap_stride) ==
+	      h1->bufs[2].addr);
+	CHECK(everlive_v4l2_mmap_buffer(
+		      fd0, test_card.mmap_base +
+				  2ULL * test_card.mmap_stride) ==
+	      NULL);
+
+	{
+		struct v4l2_buffer buf;
+
+		memset(&buf, 0, sizeof(buf));
+		buf.index = 0;
+		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		buf.memory = V4L2_MEMORY_MMAP;
+		CHECK(everlive_v4l2_ioctl(h0, VIDIOC_QBUF, &buf) == 0);
+		CHECK(h0->bufs[0].queued);
+		CHECK(!h1->bufs[0].queued);
+	}
+	{
+		int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+		CHECK(everlive_v4l2_ioctl(h0, VIDIOC_STREAMON, &type) == 0);
+		CHECK(h0->streaming);
+		CHECK(!h1->streaming);
+	}
+
+	everlive_v4l2_test_get_counters(&counters);
+	CHECK(counters.live_maps == 5);
+	h1_buf1 = h1->bufs[1].addr;
+	CHECK(everlive_v4l2_close_virtual(fd0) == 0);
+	CHECK(everlive_v4l2_find_handle(fd0) == NULL);
+	CHECK(everlive_v4l2_find_handle(fd1) == h1);
+	CHECK(h1->bufs[1].addr == h1_buf1);
+	CHECK(everlive_v4l2_open_count() == 1);
+	everlive_v4l2_test_get_counters(&counters);
+	CHECK(counters.live_maps == 3);
+
+	CHECK(everlive_v4l2_close_virtual(fd1) == 0);
+	CHECK(everlive_v4l2_open_count() == 0);
+	everlive_v4l2_test_get_counters(&counters);
+	CHECK(counters.live_maps == 0);
+
+	/* Repeated cycles must not retain timerfds or buffer mappings. */
+	for (int cycle = 0; cycle < 8; cycle++) {
+		fd0 = everlive_v4l2_open_virtual(0);
+		fd1 = everlive_v4l2_open_virtual(1);
+		CHECK(fd0 >= 0 && fd1 >= 0);
+		h0 = everlive_v4l2_find_handle(fd0);
+		h1 = everlive_v4l2_find_handle(fd1);
+		CHECK(h0 != NULL && h1 != NULL);
+		set_format(h0, 640, 360);
+		set_format(h1, 640, 360);
+		rb.count = 2;
+		CHECK(everlive_v4l2_ioctl(h0, VIDIOC_REQBUFS, &rb) == 0);
+		CHECK(everlive_v4l2_ioctl(h1, VIDIOC_REQBUFS, &rb) == 0);
+		CHECK(everlive_v4l2_close_virtual(fd1) == 0);
+		CHECK(everlive_v4l2_close_virtual(fd0) == 0);
+		everlive_v4l2_test_get_counters(&counters);
+		CHECK(counters.live_maps == 0);
+	}
+	CHECK(count_open_fds() == baseline_fds);
+	cleanup();
+}
+
 static void test_absent_store(void)
 {
 	struct everlive_v4l2_handle *h;
@@ -424,6 +665,8 @@ int main(void)
 {
 	printf("=== Running V4L2 Shim State Tests ===\n");
 	test_state_machine();
+	test_reqbufs_rollback();
+	test_multi_fd_cleanup();
 	test_absent_store();
 	cleanup();
 	printf("=== All V4L2 Shim State Tests Passed! ===\n");

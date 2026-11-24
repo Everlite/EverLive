@@ -78,6 +78,19 @@ bool everlive_v4l2_munmap_buffer(void *addr);
 
 ssize_t everlive_v4l2_read_frame(int fd, void *buffer, size_t n);
 
+#ifdef EVERLIVE_V4L2_TESTING
+struct everlive_v4l2_test_counters {
+	unsigned long mmap_calls;
+	unsigned long munmap_calls;
+	unsigned long close_calls;
+	long live_maps;
+};
+
+void everlive_v4l2_test_reset_hooks(void);
+void everlive_v4l2_test_fail_mmap_after(int successful_mmaps);
+void everlive_v4l2_test_get_counters(struct everlive_v4l2_test_counters *out);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
