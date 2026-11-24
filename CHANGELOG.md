@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **Display audio no longer executes a shell:** `everlive_display` spawns `pw-loopback`, `arecord`, `pw-play` and `wpctl` through `posix_spawnp` with argv arrays instead of `popen`, `system` or `execl("/bin/sh", "-c", …)`. PipeWire node IDs are validated as decimal `uint32` values and node names against a conservative `[A-Za-z0-9._:+-]` allowlist before any exec, so a hostile `node.name` (for example `1; touch /tmp/pwned`) cannot execute anything. Audio routing failures are logged and never stall the video path.
 - **VFIO permissions are now scoped per card:** binding uses subsystem-qualified udev rules and a shared `everlive-vfio-bind` helper. Only the matched card's `/dev/vfio/<iommu_group>` is set to `root:video 0660`; `/dev/vfio/vfio` is handled by one generic container rule, and unrelated VFIO group nodes are no longer touched. The broad `SUBSYSTEM=="vfio"` rule and `TAG+="uaccess"` were removed. GC573 and GC570D cannot claim each other, and `vfio-pci/new_id` plus the global `options vfio-pci ids=` binding were replaced by `driver_override` and per-BDF bind.
 - **Bounded memlock instead of unlimited:** `LimitMEMLOCK=infinity` and the unlimited `limits.d` files were removed. `cap_ipc_lock=+ep` is applied to every installed engine, including HWS, and a bounded 1 GiB fallback with `LimitMEMLOCK=1G` drop-ins is installed only when `setcap` is unavailable.
 - **User-unit hardening (safe subset):** `everlive.service`, `opengc570d-userd.service`, and the Hub-generated fallback unit now restrict address families to `AF_UNIX`, `AF_INET`, and `AF_INET6`, run with `SystemCallArchitectures=native` and `SystemCallFilter=@system-service`, and enable `LockPersonality=yes` plus `RestrictSUIDSGID=yes`. `systemd-analyze security --offline=yes` on systemd 262.2 improves both units from **9.4** to **7.2**. `NoNewPrivileges=` and filesystem namespacing remain off because they would disable the `cap_ipc_lock=+ep` VFIO pinning path; a per-user `LimitMEMLOCK=` cannot raise the user manager's hard limit either.
@@ -18,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed the unused binary-patching helpers from `tools/`. EverLive ships only
   source-built components; no released library is modified after build. CI now
   rejects patch tooling, backup files and compiled binaries in the tree.
+- **Display audio probing no longer needs Python or shell text parsing:**
+  `pw-dump Node` is parsed natively (jsmn) in `tools/everlive/everlive_audio_probe.c`
+  instead of `python3 -c`, `wpctl status | awk` and `pactl list sink-inputs`.
+  The `pactl` fallback was dropped because the pipeline already requires
+  PipeWire (`pw-loopback`/`pw-play`); CI now rejects shell execution in the
+  display audio path. The ALSA fallback uses `plughw:` for `hw:` devices
+  instead of retrying two `arecord` invocations through the shell.
 
 ---
 

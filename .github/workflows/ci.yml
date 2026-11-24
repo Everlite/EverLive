@@ -69,6 +69,25 @@ jobs:
       - name: Compile everything (GCC)
         run: make -j"$(nproc)"
 
+      - name: Compile display renderer (GCC, -Werror for the audio probe)
+        run: |
+          SDL_FLAGS="$(pkg-config --cflags --libs sdl2)"
+          gcc -O2 -Wall -Wextra -Werror -c -o /tmp/everlive_audio_probe.o \
+            tools/everlive/everlive_audio_probe.c
+          gcc -O2 -Wall -Wextra -o /tmp/everlive_display \
+            tools/everlive/everlive_display.c \
+            tools/everlive/everlive_audio_probe.c \
+            tools/libeverlive-core/third_party/jsmn.c \
+            ${SDL_FLAGS} -lGL -lm -lX11 -lpthread
+
+      - name: Verify no shell execution in the display audio path
+        run: |
+          if grep -nE 'popen[[:space:]]*\(|system[[:space:]]*\(|/bin/sh|python3' \
+               tools/everlive/everlive_display.c; then
+            echo "ERROR: shell execution is not allowed in the display audio path" >&2
+            exit 1
+          fi
+
       - name: Compile HWS UHD engine (GCC, opt-in)
         run: make hwsuhd
 
@@ -127,6 +146,12 @@ jobs:
           make CC=clang -j"$(nproc)"
           make CC=clang hwsuhd
           make CC=clang -C tests clean test
+          SDL_FLAGS="$(pkg-config --cflags --libs sdl2)"
+          clang -O2 -Wall -Wextra -o /tmp/everlive_display_clang \
+            tools/everlive/everlive_display.c \
+            tools/everlive/everlive_audio_probe.c \
+            tools/libeverlive-core/third_party/jsmn.c \
+            ${SDL_FLAGS} -lGL -lm -lX11 -lpthread
 
       - name: Sanitizer run
         run: make -C tests asan
