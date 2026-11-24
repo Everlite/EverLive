@@ -537,11 +537,9 @@ int everlive_handoff_state_write(const char *card_id,
 	FILE *f;
 	int ret;
 
-	ret = everlive_ipc_runtime_dir(dir, sizeof(dir));
+	ret = everlive_ipc_prepare_runtime_dir(dir, sizeof(dir));
 	if (ret < 0)
 		return ret;
-	if (mkdir(dir, 0700) < 0 && errno != EEXIST)
-		return -errno;
 	ret = everlive_handoff_state_path(path, sizeof(path));
 	if (ret < 0)
 		return ret;

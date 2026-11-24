@@ -54,7 +54,8 @@ echo "[*] Deinstalliere EverLive..."
 # 1. Laufende Daemons beenden
 killall -9 everlive_userd gc573_user_streamer opengc570d-userd gc570d-ctl 2>/dev/null || true
 EVERLIVE_RUNTIME="${XDG_RUNTIME_DIR:-/run/user/${TARGET_UID}}"
-rm -f "${EVERLIVE_RUNTIME}/gc570d/control.sock" 2>/dev/null || true
+rm -f "${EVERLIVE_RUNTIME}/gc570d/control.sock" \
+      "${EVERLIVE_RUNTIME}/gc570d/control.sock.lock" 2>/dev/null || true
 rm -f "${EVERLIVE_RUNTIME}/everlive.sock" "${EVERLIVE_RUNTIME}/everlive.sock.lock" 2>/dev/null || true
 rm -f /dev/shm/gc570d_v4l2_shm 2>/dev/null || true
 rm -f /dev/shm/gc573_v4l2_shm 2>/dev/null || true

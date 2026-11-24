@@ -237,7 +237,19 @@ everlive_framestore_create(const struct everlive_framestore_config *cfg)
 	if (fd < 0)
 		return NULL;
 
+	/*
+	 * A different user may pre-create an object in /dev/shm.  Refuse it
+	 * before changing its mode; only a regular object owned by this engine
+	 * may be reused.
+	 */
+	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+	    st.st_uid != geteuid())
+		goto fail;
+
 	if (fchmod(fd, 0600) != 0)
+		goto fail;
+
+	if (fstat(fd, &st) != 0 || (st.st_mode & 07777) != 0600)
 		goto fail;
 
 	if (ftruncate(fd, (off_t)region_size) != 0)
@@ -318,7 +330,9 @@ struct everlive_framestore *everlive_framestore_attach(const char *name)
 	if (fd < 0)
 		return NULL;
 
-	if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof(*hdr)) {
+	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+	    st.st_uid != geteuid() || (st.st_mode & 07777) != 0600 ||
+	    st.st_size < (off_t)sizeof(*hdr)) {
 		fs_close(fd);
 		return NULL;
 	}

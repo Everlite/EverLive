@@ -9,6 +9,7 @@
  */
 #include "gc570d.h"
 #include "everlive_framestore.h"
+#include "everlive_ipc.h"
 #include "gc570d_everlive.h"
 #include "everlive_card.h"
 #include "gc570d-jsonrpc.h"
@@ -22,6 +23,7 @@
 #include <signal.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/file.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -2323,19 +2325,54 @@ void gc570d_user_pipeline_stats(struct gc570d_jsonrpc_stats *out)
  * ========================================================================= */
 
 static int g_ctl_listen_fd = -1;
+static int g_ctl_lock_fd = -1;
+static bool g_ctl_bound;
 static char g_ctl_sock_path[280];
 static char g_ctl_dir_path[256];
 
-static void gc570d_get_runtime_dir(char *buf, size_t size)
+static int gc570d_prepare_runtime_dirs(void)
 {
-	const char *xdg = getenv("XDG_RUNTIME_DIR");
-	if (xdg && xdg[0])
-		snprintf(buf, size, "%s/gc570d", xdg);
-	else
-		snprintf(buf, size, "/tmp/gc570d-%u", (unsigned int)geteuid());
+	char base[EVERLIVE_IPC_PATH_MAX] = { 0 };
+	char msg[512];
+	int ret;
+	int n;
+
+	ret = everlive_ipc_prepare_runtime_dir(base, sizeof(base));
+	if (ret < 0) {
+		everlive_ipc_describe_error(ret, base, msg, sizeof(msg));
+		fprintf(stderr, "[gc570d ERR ] %s\n", msg);
+		return ret;
+	}
+
+	ret = everlive_ipc_prepare_runtime_subdir("gc570d", g_ctl_dir_path,
+						  sizeof(g_ctl_dir_path));
+	if (ret < 0) {
+		everlive_ipc_describe_error(ret, g_ctl_dir_path, msg,
+					    sizeof(msg));
+		fprintf(stderr, "[gc570d ERR ] %s\n", msg);
+		return ret;
+	}
+
+	n = snprintf(g_ctl_sock_path, sizeof(g_ctl_sock_path), "%s/control.sock",
+		     g_ctl_dir_path);
+	if (n < 0 || (size_t)n >= sizeof(g_ctl_sock_path)) {
+		fprintf(stderr,
+			"[gc570d ERR ] Control socket path is too long\n");
+		return -ENAMETOOLONG;
+	}
+
+	return 0;
 }
 
-static void gc570d_handle_ctl_client(int client_fd)
+static bool gc570d_debug_command(const char *cmd)
+{
+	return strcmp(cmd, "reinit") == 0 ||
+	       strcmp(cmd, "restart") == 0 ||
+	       strncmp(cmd, "action ", 7) == 0;
+}
+
+static void gc570d_handle_ctl_client(int client_fd, uid_t peer_uid,
+				     pid_t peer_pid)
 {
 	char cmd[256] = { 0 };
 	struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
@@ -2364,6 +2401,22 @@ static void gc570d_handle_ctl_client(int client_fd)
 	FILE *fp = fdopen(dup(client_fd), "w");
 	if (!fp)
 		return;
+
+	if (gc570d_debug_command(cmd)) {
+		if (!everlive_ipc_debug_control_enabled()) {
+			gc570d_log_msg("WARN", NULL,
+				       "control: denied debug command '%s' from uid=%u pid=%d",
+				       cmd, (unsigned int)peer_uid,
+				       (int)peer_pid);
+			fprintf(fp,
+				"ERR debug control disabled (set EVERLIVE_DEBUG_CONTROL=1)\n");
+			fclose(fp);
+			return;
+		}
+		gc570d_log_msg("INFO", NULL,
+			       "control: debug command '%s' from uid=%u pid=%d",
+			       cmd, (unsigned int)peer_uid, (int)peer_pid);
+	}
 
 	if (strcmp(cmd, "status") == 0) {
 		fprintf(fp, "=== OpenGC570D Userspace Driver (VFIO-PCI + PipeWire) ===\n");
@@ -2503,7 +2556,8 @@ static void gc570d_handle_ctl_client(int client_fd)
 		fprintf(fp, "Triggering hardware re-initialization...\n");
 		g_reinit_requested = true;
 	} else {
-		fprintf(fp, "Commands: status | reinit | input <1|2> | osd <0|1> | osd_pos <top|bottom> | pip <0|1> | aspect <auto|16:9|4:3|stretch> | scale <fit|integer> | volume <0..150> | mute <0|1> | list | show <node> | action <node> [1|0] | led <colorful|breathing|static|off>\n");
+		fprintf(fp, "Commands: status | reinit* | input <1|2> | osd <0|1> | osd_pos <top|bottom> | pip <0|1> | aspect <auto|16:9|4:3|stretch> | scale <fit|integer> | volume <0..150> | mute <0|1> | list | show <node> | action <node> [1|0]* | led <colorful|breathing|static|off>\n"
+			   "* requires EVERLIVE_DEBUG_CONTROL=1 in the daemon environment\n");
 	}
 
 	fclose(fp);
@@ -2512,34 +2566,63 @@ static void gc570d_handle_ctl_client(int client_fd)
 static int gc570d_ctl_server_init(void)
 {
 	struct sockaddr_un addr;
+	int ret;
 
-	gc570d_get_runtime_dir(g_ctl_dir_path, sizeof(g_ctl_dir_path));
-	mkdir(g_ctl_dir_path, 0700);
-	snprintf(g_ctl_sock_path, sizeof(g_ctl_sock_path), "%s/control.sock", g_ctl_dir_path);
+	ret = gc570d_prepare_runtime_dirs();
+	if (ret < 0)
+		return ret;
+
+	ret = everlive_ipc_acquire_socket_lock(g_ctl_sock_path, &g_ctl_lock_fd);
+	if (ret < 0)
+		return ret;
+
 	unlink(g_ctl_sock_path);
 
 	g_ctl_listen_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-	if (g_ctl_listen_fd < 0)
-		return -errno;
+	if (g_ctl_listen_fd < 0) {
+		ret = -errno;
+		goto fail;
+	}
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
 	strscpy(addr.sun_path, g_ctl_sock_path, sizeof(addr.sun_path));
-	if (bind(g_ctl_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		close(g_ctl_listen_fd);
-		g_ctl_listen_fd = -1;
-		return -errno;
-	}
-	if (listen(g_ctl_listen_fd, 8) < 0) {
-		int err = -errno;
+	{
+		mode_t old_umask = umask(077);
+		int bind_ret = bind(g_ctl_listen_fd, (struct sockaddr *)&addr,
+				    sizeof(addr));
+		int bind_err = errno;
 
-		close(g_ctl_listen_fd);
-		g_ctl_listen_fd = -1;
-		return err;
+		(void)umask(old_umask);
+		if (bind_ret < 0) {
+			ret = -bind_err;
+			goto fail;
+		}
+	}
+	g_ctl_bound = true;
+	if (listen(g_ctl_listen_fd, 8) < 0) {
+		ret = -errno;
+		goto fail;
 	}
 	/* Only the owning user may issue diagnostic or LED commands. */
 	chmod(g_ctl_sock_path, 0600);
 	return 0;
+
+fail:
+	if (g_ctl_bound) {
+		unlink(g_ctl_sock_path);
+		g_ctl_bound = false;
+	}
+	if (g_ctl_listen_fd >= 0) {
+		close(g_ctl_listen_fd);
+		g_ctl_listen_fd = -1;
+	}
+	if (g_ctl_lock_fd >= 0) {
+		(void)flock(g_ctl_lock_fd, LOCK_UN);
+		close(g_ctl_lock_fd);
+		g_ctl_lock_fd = -1;
+	}
+	return ret;
 }
 
 static void gc570d_ctl_server_shutdown(void)
@@ -2548,8 +2631,15 @@ static void gc570d_ctl_server_shutdown(void)
 		close(g_ctl_listen_fd);
 		g_ctl_listen_fd = -1;
 	}
-	if (g_ctl_sock_path[0])
+	if (g_ctl_bound && g_ctl_sock_path[0]) {
 		unlink(g_ctl_sock_path);
+		g_ctl_bound = false;
+	}
+	if (g_ctl_lock_fd >= 0) {
+		(void)flock(g_ctl_lock_fd, LOCK_UN);
+		close(g_ctl_lock_fd);
+		g_ctl_lock_fd = -1;
+	}
 }
 
 /* =========================================================================
@@ -3089,6 +3179,15 @@ int main(int argc, char **argv)
 	/* Load optional runtime configuration */
 	gc570d_load_config(NULL);
 
+	/*
+	 * Resolve and create the private runtime directories before touching
+	 * the card.  A foreign or permissive fallback directory must abort
+	 * startup instead of becoming a control-socket path.
+	 */
+	ret = gc570d_prepare_runtime_dirs();
+	if (ret < 0)
+		return 1;
+
 	ret = gc570d_vfio_open(&g_pdev, requested_bdf);
 	if (ret < 0)
 		return 1;
@@ -3141,10 +3240,24 @@ int main(int argc, char **argv)
 	if (ret < 0)
 		fprintf(stderr, "[gc570d WARN] Failed to start userspace audio streams: %d\n", ret);
 
-	gc570d_ctl_server_init();
-	fprintf(stderr,
-		"[gc570d INFO] Userspace daemon running (control socket: %s)\n",
-		g_ctl_sock_path);
+	ret = gc570d_ctl_server_init();
+	if (ret < 0) {
+		if (everlive_ipc_is_security_error(ret)) {
+			char msg[512];
+
+			everlive_ipc_describe_error(ret, g_ctl_dir_path, msg,
+						    sizeof(msg));
+			fprintf(stderr, "[gc570d ERR ] %s\n", msg);
+			goto shutdown;
+		}
+		fprintf(stderr,
+			"[gc570d WARN] Legacy control socket unavailable: %s\n",
+			strerror(-ret));
+	} else {
+		fprintf(stderr,
+			"[gc570d INFO] Userspace daemon running (control socket: %s)\n",
+			g_ctl_sock_path);
+	}
 
 	ret = gc570d_everlive_start(g_framestore, g_gc, &live);
 	if (ret < 0)
@@ -3154,7 +3267,16 @@ int main(int argc, char **argv)
 
 	gc570d_jsonrpc_set_stats_fn(gc570d_user_pipeline_stats);
 	gc570d_jsonrpc_set_dev(g_gc);
-	if (gc570d_jsonrpc_init(EVERLIVE_VERSION) < 0) {
+	ret = gc570d_jsonrpc_init(EVERLIVE_VERSION);
+	if (ret < 0) {
+		if (everlive_ipc_is_security_error(ret)) {
+			char msg[512];
+
+			everlive_ipc_describe_error(ret, NULL, msg,
+						    sizeof(msg));
+			fprintf(stderr, "[gc570d ERR ] %s\n", msg);
+			goto shutdown;
+		}
 		fprintf(stderr,
 			"[gc570d WARN] JSON-RPC control socket unavailable; continuing without remote control\n");
 	} else {
@@ -3205,12 +3327,27 @@ int main(int argc, char **argv)
 
 			if (g_ctl_listen_fd >= 0 &&
 			    (pfd[0].revents & POLLIN)) {
+				uid_t peer_uid = (uid_t)-1;
+				pid_t peer_pid = -1;
 				int cfd = accept4(g_ctl_listen_fd, NULL, NULL,
 						  SOCK_CLOEXEC);
 
 				if (cfd >= 0) {
-					gc570d_handle_ctl_client(cfd);
-					close(cfd);
+					if (everlive_ipc_peer_identity(cfd, &peer_uid,
+								       &peer_pid) < 0 ||
+					    peer_uid != geteuid()) {
+						gc570d_log_msg("WARN", NULL,
+							       "control: rejected client uid=%u pid=%d (expected uid %u)",
+							       (unsigned int)peer_uid,
+							       (int)peer_pid,
+							       (unsigned int)geteuid());
+						close(cfd);
+					} else {
+						gc570d_handle_ctl_client(cfd,
+									 peer_uid,
+									 peer_pid);
+						close(cfd);
+					}
 				}
 			}
 		}
@@ -3286,6 +3423,7 @@ int main(int argc, char **argv)
 		}
 	}
 
+shutdown:
 	fprintf(stderr, "[gc570d INFO] Shutting down userspace driver...\n");
 	gc570d_everlive_stop();
 	gc570d_jsonrpc_shutdown();

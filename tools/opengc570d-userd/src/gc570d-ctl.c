@@ -5,22 +5,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <errno.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 
+#include "everlive_ipc.h"
+
 static int get_sock_path(char *buf, size_t size)
 {
-	const char *xdg = getenv("XDG_RUNTIME_DIR");
+	char dir[EVERLIVE_IPC_PATH_MAX];
 	int n;
+	int ret;
 
-	if (xdg && xdg[0])
-		n = snprintf(buf, size, "%s/gc570d/control.sock", xdg);
-	else
-		n = snprintf(buf, size, "/tmp/gc570d-%u/control.sock",
-			     (unsigned int)geteuid());
+	ret = everlive_ipc_runtime_subdir("gc570d", dir, sizeof(dir));
+	if (ret < 0)
+		return -1;
 
+	n = snprintf(buf, size, "%s/control.sock", dir);
 	return (n >= 0 && (size_t)n < size) ? 0 : -1;
 }
 
@@ -45,6 +48,7 @@ int main(int argc, char **argv)
 	char cmd[256] = { 0 };
 	struct sockaddr_un addr;
 	size_t off = 0;
+	bool error_reply = false;
 	int fd;
 
 	if (argc < 2) {
@@ -52,7 +56,7 @@ int main(int argc, char **argv)
 	} else if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
 		printf("Usage:\n"
 		       "  gc570d-ctl status\n"
-		       "  gc570d-ctl reinit                  (re-initialize hardware after sleep/mode change)\n"
+		       "  gc570d-ctl reinit                  (debug: requires EVERLIVE_DEBUG_CONTROL=1 in the daemon)\n"
 		       "  gc570d-ctl list\n"
 		       "  gc570d-ctl input <1|2>             (select HDMI IN 1 or HDMI IN 2)\n"
 		       "  gc570d-ctl osd <0|1>               (toggle the on-screen overlay)\n"
@@ -63,7 +67,7 @@ int main(int argc, char **argv)
 		       "  gc570d-ctl volume <0..150>         (set SDL2 desktop audio volume %%)\n"
 		       "  gc570d-ctl mute <0|1>              (mute/unmute SDL2 desktop audio)\n"
 		       "  gc570d-ctl show <node>             (e.g., splitter_status, it68051_status, vip0_profile)\n"
-		       "  gc570d-ctl action <node> [1|0]     (e.g., it68051_hpd, xilinx_reset)\n"
+		       "  gc570d-ctl action <node> [1|0]     (debug: requires EVERLIVE_DEBUG_CONTROL=1 in the daemon)\n"
 		       "  gc570d-ctl led <colorful|breathing|static|off>\n");
 		return 0;
 	} else {
@@ -82,10 +86,11 @@ int main(int argc, char **argv)
 	}
 
 	if (get_sock_path(sock_path, sizeof(sock_path)) < 0) {
-		fprintf(stderr, "Control socket path is too long\n");
+		fprintf(stderr,
+			"Control socket path is unavailable; refusing to use an unsafe runtime directory\n");
 		return 1;
 	}
-	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (fd < 0) {
 		perror("socket");
 		return 1;
@@ -109,11 +114,19 @@ int main(int argc, char **argv)
 	}
 
 	char buf[4096];
+	char prefix[4] = { 0 };
+	size_t prefix_len = 0;
 	ssize_t n;
 	while ((n = read(fd, buf, sizeof(buf))) > 0) {
-		if (write(STDOUT_FILENO, buf, n) < 0)
+		for (ssize_t i = 0; i < n && prefix_len < sizeof(prefix); i++)
+			prefix[prefix_len++] = buf[i];
+		if (prefix_len == sizeof(prefix) &&
+		    memcmp(prefix, "ERR ", sizeof(prefix)) == 0)
+			error_reply = true;
+		if (write(error_reply ? STDERR_FILENO : STDOUT_FILENO,
+			  buf, n) < 0)
 			break;
 	}
 	close(fd);
-	return 0;
+	return error_reply ? 1 : 0;
 }

@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -30,6 +31,19 @@ static void make_name(char *buf, size_t size, const char *suffix)
 static void unlink_name(const char *name)
 {
 	shm_unlink(name);
+}
+
+static void assert_shm_private(const char *name)
+{
+	struct stat st;
+	int fd = shm_open(name, O_RDONLY, 0);
+
+	assert(fd >= 0);
+	assert(fstat(fd, &st) == 0);
+	assert(S_ISREG(st.st_mode));
+	assert(st.st_uid == geteuid());
+	assert((st.st_mode & 07777) == 0600);
+	close(fd);
 }
 
 static uint64_t monotonic_now_ns(void)
@@ -93,6 +107,7 @@ static void test_create_roundtrip(void)
 
 	fs = everlive_framestore_create(&cfg);
 	assert(fs);
+	assert_shm_private(name);
 	assert(everlive_framestore_port_count(fs) == 1);
 	assert(everlive_framestore_slot_count(fs) == 3);
 	assert(everlive_framestore_frame_stride(fs) >= bytes);
@@ -356,6 +371,86 @@ static void test_heartbeat_and_flags(void)
 	unlink_name(name);
 }
 
+static void test_attach_rejects_permissive_shm(void)
+{
+	const uint32_t width = 16;
+	const uint32_t height = 8;
+	const size_t bytes = (size_t)width * height * 2U;
+	char name[128];
+	struct everlive_framestore_config cfg;
+	struct everlive_framestore *fs;
+	struct everlive_framestore *attached;
+	int fd;
+
+	printf("[*] Frame store rejects permissive shm...\n");
+	make_name(name, sizeof(name), "permissive");
+	cfg.name = name;
+	cfg.pci_bdf = NULL;
+	cfg.port_count = 1;
+	cfg.slot_count = 3;
+	cfg.frame_stride = (unsigned int)bytes;
+
+	fs = everlive_framestore_create(&cfg);
+	assert(fs);
+	assert_shm_private(name);
+
+	fd = shm_open(name, O_RDONLY, 0);
+	assert(fd >= 0);
+	assert(fchmod(fd, 0644) == 0);
+	close(fd);
+	assert(everlive_framestore_attach(name) == NULL);
+
+	fd = shm_open(name, O_RDONLY, 0);
+	assert(fd >= 0);
+	assert(fchmod(fd, 0600) == 0);
+	close(fd);
+	attached = everlive_framestore_attach(name);
+	assert(attached);
+	everlive_framestore_destroy(attached);
+
+	everlive_framestore_destroy(fs);
+	unlink_name(name);
+}
+
+static void test_foreign_owner_rejected_when_root(void)
+{
+	const uint32_t width = 16;
+	const uint32_t height = 8;
+	const size_t bytes = (size_t)width * height * 2U;
+	char name[128];
+	struct everlive_framestore_config cfg;
+	struct everlive_framestore *fs;
+	int fd;
+
+	printf("[*] Frame store rejects foreign-owned shm...\n");
+	make_name(name, sizeof(name), "foreign");
+	cfg.name = name;
+	cfg.pci_bdf = NULL;
+	cfg.port_count = 1;
+	cfg.slot_count = 3;
+	cfg.frame_stride = (unsigned int)bytes;
+
+	fs = everlive_framestore_create(&cfg);
+	assert(fs);
+	if (geteuid() != 0) {
+		printf("    (skipped: requires root to chown a foreign UID)\n");
+		everlive_framestore_destroy(fs);
+		unlink_name(name);
+		return;
+	}
+
+	fd = shm_open(name, O_RDONLY, 0);
+	assert(fd >= 0);
+	assert(fchown(fd, 65534, 65534) == 0);
+	close(fd);
+
+	assert(everlive_framestore_attach(name) == NULL);
+	assert(everlive_framestore_create(&cfg) == NULL);
+
+	everlive_framestore_destroy(fs);
+	unlink_name(name);
+}
+
 struct stress_ctx {
 	struct everlive_framestore *fs;
 	uint32_t width;
@@ -501,6 +596,8 @@ int main(void)
 	test_slot_rotation();
 	test_bad_attach();
 	test_heartbeat_and_flags();
+	test_attach_rejects_permissive_shm();
+	test_foreign_owner_rejected_when_root();
 	test_concurrency();
 	printf("=== All Frame Store Tests Passed! ===\n");
 	return 0;

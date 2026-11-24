@@ -88,8 +88,9 @@ $(OSD_OBJ): $(OSD_DIR)/everlive_osd.c $(OSD_DIR)/everlive_osd.h \
 	    $(OSD_DIR)/everlive_osd_theme.h
 	$(CC) $(USER_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-gc570d-ctl: src/gc570d-ctl.c
-	$(CC) -O2 -g -Wall -Wextra -std=gnu11 -D_GNU_SOURCE -o $@ $<
+gc570d-ctl: src/gc570d-ctl.c $(CORE_LIB)
+	$(CC) -O2 -g -Wall -Wextra -std=gnu11 -D_GNU_SOURCE \
+		-I$(CORE_DIR) -o $@ src/gc570d-ctl.c $(CORE_LIB)
 	@chmod 0755 $@
 
 libgc570d-v4l2.so: src/gc570d-v4l2.c \

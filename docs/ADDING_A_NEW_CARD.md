@@ -694,13 +694,18 @@ The resolver evaluates locations in strict precedence:
 1. Explicit caller override path parameter.
 2. `$EVERLIVE_SOCKET` environment variable (primary override used by `everlive_client.py`).
 3. `$EVERLIVE_CONTROL_SOCKET` environment variable (legacy override).
-4. `$XDG_RUNTIME_DIR/everlive.sock` (if set and writable).
-5. `/run/user/<uid>/everlive.sock` (if writable).
-6. `/tmp/everlive-<uid>/everlive.sock`
+4. `$XDG_RUNTIME_DIR/everlive.sock` (must be a private directory).
+5. `/run/user/<euid>/everlive.sock` (when that private directory exists).
+6. `/tmp/everlive-<euid>/everlive.sock` (created securely by the server)
 
 **Security & Single-Instance Guards**:
-- Acquire an advisory lock (`flock(lock_fd, LOCK_EX | LOCK_NB)`) on a lockfile to prevent multiple conflicting daemons from binding the same socket.
-- Verify connecting clients using `SO_PEERCRED` to ensure only the exact same UID as the daemon process is accepted (`cred.uid == getuid()`). Requests from differing UIDs (including root when the daemon runs as an unprivileged user) are rejected.
+- Runtime directories are security boundaries. An existing directory must be a real directory (not a symlink), owned by `geteuid()`, with mode exactly `0700`. The server creates a missing fallback directory under `umask(077)` and validates it again. A foreign or permissive path is an actionable startup error, never a silent fallback.
+- Explicit `--ipc-socket` / `EVERLIVE_SOCKET` paths are operator-controlled; they are not treated as auto-resolved fallbacks.
+- Acquire an advisory lock (`flock(lock_fd, LOCK_EX | LOCK_NB)`) on `<socket>.lock`. The lock file is opened with `O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW`, checked with `fstat()` for a regular file owned by `geteuid()`, and chmod'd `0600`.
+- Bind the socket with `umask(077)` and set the final socket mode to `0600`. AF_UNIX sockets are created by `bind()`, so directory validation is the path-safety control; lock/state files use `O_NOFOLLOW`.
+- Verify connecting clients using `SO_PEERCRED` and reject any peer whose UID differs from `geteuid()` (including root when the daemon runs unprivileged).
+- The shared frame store is trusted only when it is a regular file owned by `geteuid()` with mode `0600`, on both create and attach.
+- Legacy GC570D debug commands (`reinit`, `action`) require `EVERLIVE_DEBUG_CONTROL=1` in the daemon environment. Normal JSON-RPC feature methods remain available to the same-UID Console Hub.
 
 ### 5.2 Method Dispatch Contract
 

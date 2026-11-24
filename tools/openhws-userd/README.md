@@ -110,7 +110,9 @@ ignored. `--help` lists the rest.
   `scale.set`, `mode.set` (gaming/headless, `parent_winid`), `v4l2.set`,
   `toast.show`. Other methods return `-32601`. One EverLive engine
   can own the default socket at a time; use `--ipc-socket` to run this one
-  next to another card's engine.
+  next to another card's engine. The runtime directory must be a private
+  `0700` directory owned by the engine UID, and clients are authenticated with
+  `SO_PEERCRED`.
 - Hotkeys: `f` fullscreen, `a` aspect, `l` scaling, Up/Down volume, `m` mute,
   `i`/`Tab` stats, `Alt`+`Z` Quick Navigation, `p` OSD top/bottom, `s` streamer mode, `F1` help, `q` quit.
 
