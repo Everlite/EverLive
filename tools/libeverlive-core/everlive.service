@@ -19,6 +19,16 @@ Type=simple
 ExecStart=/usr/local/bin/everlive-service
 Restart=on-failure
 RestartSec=2
+# Safe user-unit hardening.  Keep NoNewPrivileges=, ProtectSystem=,
+# ProtectHome= and PrivateTmp= off until the VFIO memlock path no longer
+# depends on cap_ipc_lock=+ep on the installed engine: NoNewPrivileges blocks
+# file capabilities and user namespaces drop host CAP_IPC_LOCK, while a
+# per-user LimitMEMLOCK= cannot raise the user manager's hard limit.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+LockPersonality=yes
+RestrictSUIDSGID=yes
 # VFIO DMA pinning is provided by cap_ipc_lock=+ep on the installed engine.
 # When setcap is unavailable the installer adds a bounded LimitMEMLOCK drop-in.
 

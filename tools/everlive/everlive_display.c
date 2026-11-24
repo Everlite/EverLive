@@ -12,6 +12,13 @@
  * - Native borderless fullscreen toggle (F11 / f / double-click)
  */
 
+/* glibc declares environ in <unistd.h> only under _GNU_SOURCE.  SDL's
+ * pkg-config supplies -D_GNU_SOURCE on some distros (Arch) but not on
+ * Debian/Ubuntu, so define it here to keep the build self-contained. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -25,6 +32,7 @@
 #include <sys/mman.h>
 #include <sys/poll.h>
 #include <sys/wait.h>
+#include <spawn.h>
 #include <linux/videodev2.h>
 #include <pthread.h>
 #include <time.h>
@@ -38,6 +46,7 @@
 #include <GL/gl.h>
 #include <GL/glext.h>
 #include "font8x8.h"
+#include "everlive_audio_probe.h"
 
 #define BUFFER_COUNT 8
 
@@ -142,27 +151,14 @@ static uint32_t g_preferred_fmt = 0;
 static int g_hdr_mode = 0; // 0 = SDR Monitor Tone-Map (ACES), 1 = HDR Monitor Passthrough (Native), 2 = SDR Bypass
 static float g_hdr_exposure = 50.0f; // Scale factor for HDR tone mapping
 
-static pid_t g_audio_pid = 0;
+static pid_t g_audio_pid = 0;   /* loopback, or arecord in the ALSA fallback */
+static pid_t g_audio_pid2 = 0;  /* pw-play in the ALSA fallback */
 static volatile sig_atomic_t g_audio_resync_needed = 0;
 
-static void stop_audio_pipeline(void)
-{
-    if (g_audio_pid > 0) {
-        pid_t pid = g_audio_pid;
-        g_audio_pid = 0;
-        kill(-pid, SIGTERM);
-        kill(pid, SIGTERM);
-        int status;
-        for (int i = 0; i < 10; i++) {
-            if (waitpid(pid, &status, WNOHANG) > 0)
-                return;
-            usleep(20000);
-        }
-        kill(-pid, SIGKILL);
-        kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
-    }
-}
+/* Validated --pw-node override (node name or numeric object id). */
+static char g_pw_override_name[AUDIO_NODE_NAME_MAX];
+static uint32_t g_pw_override_id = 0;
+static bool g_pw_override_is_id = false;
 
 static void sig_handler(int sig)
 {
@@ -184,370 +180,716 @@ static void sigusr1_handler(int sig)
     g_show_stats = !g_show_stats;
 }
 
-static char g_pw_node[256] = {0};
+#define AUDIO_CMD_TIMEOUT_MS 2000
+#define AUDIO_PROBE_TIMEOUT_MS 3000
+#define AUDIO_BACKOFF_MIN_MS 500
+#define AUDIO_BACKOFF_MAX_MS 5000
 
-static bool detect_pipewire_source(char *out_node, size_t max_len)
+static bool audio_debug_enabled(void)
 {
-    const char *cmd =
-        "python3 -c '"
-        "import json, subprocess, sys\n"
-        "try:\n"
-        "    out = subprocess.check_output([\"pw-dump\", \"Node\"], stderr=subprocess.DEVNULL)\n"
-        "    for n in json.loads(out):\n"
-        "        p = n.get(\"info\", {}).get(\"props\", {})\n"
-        "        if p.get(\"media.class\") == \"Audio/Source\":\n"
-        "            driver = p.get(\"alsa.driver_name\", \"\")\n"
-        "            card_id = p.get(\"alsa.id\", \"\")\n"
-        "            card_name = p.get(\"alsa.card_name\", \"\")\n"
-        "            node_name = p.get(\"node.name\", \"\")\n"
-        "            node_desc = p.get(\"node.description\", \"\")\n"
-        "            alsa_name = p.get(\"alsa.name\", \"\")\n"
-        "            dev = p.get(\"card.profile.device\", p.get(\"alsa.device\", 0))\n"
-        "            is_gc573 = (\n"
-        "                driver == \"open_gc573\"\n"
-        "                or card_id in (\"A4K\", \"GC573\")\n"
-        "                or \"live gamer 4k\" in card_name.lower()\n"
-        "                or \"live gamer 4k\" in node_desc.lower()\n"
-        "                or \"gc573\" in node_name.lower()\n"
-        "                or \"gc573\" in node_desc.lower()\n"
-        "                or \"gc573\" in alsa_name.lower()\n"
-        "            )\n"
-        "            is_hdmi = (\n"
-        "                dev in (0, \"0\", None)\n"
-        "                and \"line\" not in node_desc.lower()\n"
-        "                and \"line\" not in alsa_name.lower()\n"
-        "                and \"input-1\" not in node_name\n"
-        "            )\n"
-        "            if is_gc573 and is_hdmi:\n"
-        "                sys.stdout.write(node_name)\n"
-        "                sys.exit(0)\n"
-        "except Exception:\n"
-        "    pass\n"
-        "try:\n"
-        "    import re\n"
-        "    out = subprocess.check_output([\"wpctl\", \"status\"], stderr=subprocess.DEVNULL).decode(\"utf-8\", errors=\"ignore\")\n"
-        "    in_sources = False\n"
-        "    for line in out.splitlines():\n"
-        "        if \"Sources:\" in line:\n"
-        "            in_sources = True\n"
-        "            continue\n"
-        "        elif in_sources and (\"Sinks:\" in line or \"Filters:\" in line or \"Streams:\" in line):\n"
-        "            break\n"
-        "        if in_sources and (\"live gamer 4k\" in line.lower() or \"gc573\" in line.lower() or \"a4k\" in line.lower()) and \"line\" not in line.lower():\n"
-        "            m = re.search(r\"^\\s*[│\\s*]*(\\d+)\\.\", line)\n"
-        "            if m:\n"
-        "                sys.stdout.write(m.group(1))\n"
-        "                sys.exit(0)\n"
-        "except Exception:\n"
-        "    pass\n"
-        "sys.exit(1)\n"
-        "' 2>/dev/null";
-
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return false;
-
-    if (fgets(out_node, max_len, fp)) {
-        size_t len = strlen(out_node);
-        while (len > 0 && (out_node[len - 1] == '\n' || out_node[len - 1] == '\r')) {
-            out_node[--len] = '\0';
-        }
-        int status = pclose(fp);
-        return (status == 0 && len > 0);
-    }
-    pclose(fp);
-    return false;
+    return getenv("EVERLIVE_AUDIO_DEBUG") != NULL;
 }
 
-static void start_audio_pipeline(const char *adev)
+static int64_t audio_now_ms(void)
 {
-    if (g_audio_pid > 0) return;
+    struct timespec ts;
 
-    pid_t parent_pid = getpid();
-    char cmd[2048] = "";
-    char target_node[256] = "";
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
-    if (g_pw_node[0] != '\0') {
-        strncpy(target_node, g_pw_node, sizeof(target_node) - 1);
-        target_node[sizeof(target_node) - 1] = '\0';
+/* Reaps @pid without blocking longer than @timeout_ms. */
+static bool audio_reap(pid_t pid, int timeout_ms, int *status_out, bool *timed_out)
+{
+    int64_t deadline = audio_now_ms() + timeout_ms;
+    int status = 0;
+    pid_t r;
 
-        /* If a numeric wpctl ID was passed, resolve it to exact PipeWire node.name */
-        if (isdigit((unsigned char)target_node[0])) {
-            char inspect_cmd[512];
-            snprintf(inspect_cmd, sizeof(inspect_cmd), "wpctl inspect %s 2>/dev/null", g_pw_node);
-            FILE *fp = popen(inspect_cmd, "r");
-            if (fp) {
-                char line[512];
-                while (fgets(line, sizeof(line), fp)) {
-                    char *pos = strstr(line, "node.name");
-                    if (pos) {
-                        char *eq = strchr(pos, '=');
-                        if (eq) {
-                            char *val = eq + 1;
-                            while (*val == ' ' || *val == '"') val++;
-                            char *end = val + strlen(val) - 1;
-                            while (end > val && (*end == ' ' || *end == '"' || *end == '\n' || *end == '\r')) {
-                                *end = '\0';
-                                end--;
-                            }
-                            if (strlen(val) > 0) {
-                                strncpy(target_node, val, sizeof(target_node) - 1);
-                                target_node[sizeof(target_node) - 1] = '\0';
-                                break;
-                            }
-                        }
-                    }
-                }
-                pclose(fp);
-            }
+    for (;;) {
+        r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {
+            if (status_out) *status_out = status;
+            if (timed_out) *timed_out = false;
+            return true;
+        }
+        if (r < 0 && errno != EINTR) {
+            if (status_out) *status_out = 0;
+            if (timed_out) *timed_out = false;
+            return false;
+        }
+        if (audio_now_ms() >= deadline)
+            break;
+        usleep(5000);
+    }
+
+    kill(pid, SIGTERM);
+    for (int i = 0; i < 10; i++) {
+        usleep(20000);
+        r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {
+            if (status_out) *status_out = status;
+            if (timed_out) *timed_out = true;
+            return true;
         }
     }
 
-    if (target_node[0] != '\0') {
-        /* Check if dedicated EverLive audio binary exists to guarantee clean client attribution in system mixer */
-        const char *loop_bin = "pw-loopback";
-        char local_bin[512] = "";
-        if (access("/usr/local/bin/everlive-audio", X_OK) == 0) {
-            loop_bin = "/usr/local/bin/everlive-audio";
-        } else {
-            char exe_path[512] = "";
-            ssize_t elen = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-            if (elen > 0) {
-                exe_path[elen] = '\0';
-                char *d = dirname(exe_path);
-                snprintf(local_bin, sizeof(local_bin), "%s/everlive-audio", d);
-                if (access(local_bin, X_OK) == 0) {
-                    loop_bin = local_bin;
+    kill(pid, SIGKILL);
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+    if (status_out) *status_out = status;
+    if (timed_out) *timed_out = true;
+    return true;
+}
+
+/* Spawns an argv array (no shell).  stdin_fd/stdout_fd may be -1 to inherit.
+ * When @silence is set, streams that are not redirected go to /dev/null. */
+static int audio_spawn(char *const argv[], int stdin_fd, int stdout_fd,
+                       bool silence, bool new_group, pid_t *pid_out)
+{
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attr;
+    posix_spawnattr_t *attrp = NULL;
+    pid_t pid = 0;
+    int rc;
+
+    posix_spawn_file_actions_init(&actions);
+
+    if (stdin_fd >= 0)
+        posix_spawn_file_actions_adddup2(&actions, stdin_fd, STDIN_FILENO);
+    if (stdout_fd >= 0)
+        posix_spawn_file_actions_adddup2(&actions, stdout_fd, STDOUT_FILENO);
+
+    if (silence) {
+        if (stdout_fd < 0)
+            posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO,
+                                             "/dev/null", O_WRONLY, 0);
+        if (!audio_debug_enabled())
+            posix_spawn_file_actions_addopen(&actions, STDERR_FILENO,
+                                             "/dev/null", O_WRONLY, 0);
+    }
+
+    if (new_group) {
+        posix_spawnattr_init(&attr);
+        posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+        posix_spawnattr_setpgroup(&attr, 0);
+        attrp = &attr;
+    }
+
+    rc = posix_spawnp(&pid, argv[0], &actions, attrp, argv, environ);
+
+    if (new_group)
+        posix_spawnattr_destroy(&attr);
+    posix_spawn_file_actions_destroy(&actions);
+
+    if (rc != 0)
+        return rc;
+
+    *pid_out = pid;
+    return 0;
+}
+
+/* Runs argv and captures stdout through a pipe.
+ * Returns 0 on exit code 0, a positive exit code on tool failure, -1 on spawn
+ * error, -2 on timeout and -3 when the output cap is exceeded. */
+static int audio_capture(char *const argv[], char **out, size_t *out_len,
+                         size_t max_out, int timeout_ms, const char *label)
+{
+    posix_spawn_file_actions_t actions;
+    int fds[2];
+    pid_t pid = 0;
+    char *buf;
+    size_t used = 0;
+    bool child_done = false;
+    bool eof = false;
+    bool overflow = false;
+    bool timed_out = false;
+    int child_status = 0;
+    int rc;
+    int64_t deadline;
+
+    if (!out || !out_len || max_out == 0)
+        return -1;
+
+    *out = NULL;
+    *out_len = 0;
+
+    buf = malloc(max_out + 1);
+    if (!buf)
+        return -1;
+
+    if (pipe(fds) < 0) {
+        free(buf);
+        return -1;
+    }
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+    posix_spawn_file_actions_addclose(&actions, fds[0]);
+    posix_spawn_file_actions_addclose(&actions, fds[1]);
+    if (!audio_debug_enabled())
+        posix_spawn_file_actions_addopen(&actions, STDERR_FILENO,
+                                         "/dev/null", O_WRONLY, 0);
+    rc = posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+
+    close(fds[1]);
+    if (rc != 0) {
+        close(fds[0]);
+        free(buf);
+        if (label)
+            fprintf(stderr, "[Audio] %s konnte nicht gestartet werden: %s\n",
+                    label, strerror(rc));
+        return -1;
+    }
+
+    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL, 0) | O_NONBLOCK);
+    deadline = audio_now_ms() + timeout_ms;
+
+    while (!(eof && child_done)) {
+        for (;;) {
+            char tmp[8192];
+            ssize_t n = read(fds[0], tmp, sizeof(tmp));
+
+            if (n > 0) {
+                size_t copy = (size_t)n;
+
+                if (copy > max_out - used) {
+                    copy = max_out - used;
+                    overflow = true;
                 }
+                if (copy > 0) {
+                    memcpy(buf + used, tmp, copy);
+                    used += copy;
+                }
+                continue;
+            }
+            if (n == 0) {
+                eof = true;
+                break;
+            }
+            if (errno == EINTR)
+                continue;
+            break; /* EAGAIN */
+        }
+
+        if (!child_done) {
+            int status;
+            pid_t r = waitpid(pid, &status, WNOHANG);
+
+            if (r == pid) {
+                child_done = true;
+                child_status = status;
+            } else if (r < 0 && errno != EINTR) {
+                child_done = true;
             }
         }
+
+        if (eof && child_done)
+            break;
+        if (audio_now_ms() >= deadline) {
+            timed_out = true;
+            break;
+        }
+        usleep(5000);
+    }
+
+    close(fds[0]);
+
+    if (!child_done || timed_out) {
+        bool killed_timeout = false;
+
+        audio_reap(pid, 200, &child_status, &killed_timeout);
+        timed_out = true;
+    }
+
+    buf[used] = '\0';
+
+    if (timed_out) {
+        if (label)
+            fprintf(stderr, "[Audio] %s Zeitüberschreitung (%d ms)\n", label, timeout_ms);
+        free(buf);
+        return -2;
+    }
+    if (overflow) {
+        if (label)
+            fprintf(stderr, "[Audio] %s Ausgabe überschreitet %zu Bytes\n", label, max_out);
+        free(buf);
+        return -3;
+    }
+    if (!WIFEXITED(child_status)) {
+        if (label)
+            fprintf(stderr, "[Audio] %s wurde abnormal beendet\n", label);
+        free(buf);
+        return -1;
+    }
+
+    rc = WEXITSTATUS(child_status);
+    if (rc != 0) {
+        if (label)
+            fprintf(stderr, "[Audio] %s fehlgeschlagen (Status %d)\n", label, rc);
+        free(buf);
+        return rc;
+    }
+
+    *out = buf;
+    *out_len = used;
+    return 0;
+}
+
+/* Runs argv, discards output and returns its exit code (-1 spawn error). */
+static int audio_run(char *const argv[], int timeout_ms, const char *label)
+{
+    pid_t pid = 0;
+    int status = 0;
+    bool timed_out = false;
+    int rc = audio_spawn(argv, -1, -1, true, false, &pid);
+
+    if (rc != 0) {
+        if (audio_debug_enabled())
+            fprintf(stderr, "[Audio] %s konnte nicht gestartet werden: %s\n",
+                    label, strerror(rc));
+        return -1;
+    }
+
+    if (!audio_reap(pid, timeout_ms, &status, &timed_out))
+        return -1;
+    if (timed_out) {
+        if (label && audio_debug_enabled())
+            fprintf(stderr, "[Audio] %s Zeitüberschreitung (%d ms)\n", label, timeout_ms);
+        return -2;
+    }
+    if (!WIFEXITED(status))
+        return -1;
+
+    return WEXITSTATUS(status);
+}
+
+static void stop_audio_pipeline(void)
+{
+    pid_t leader = g_audio_pid;
+    pid_t second = g_audio_pid2;
+
+    g_audio_pid = 0;
+    g_audio_pid2 = 0;
+
+    if (leader <= 0 && second <= 0)
+        return;
+
+    if (leader > 0) {
+        kill(-leader, SIGTERM);
+        kill(leader, SIGTERM);
+    }
+    if (second > 0)
+        kill(second, SIGTERM);
+
+    /* audio_reap() escalates to SIGKILL itself. */
+    if (leader > 0)
+        audio_reap(leader, 200, NULL, NULL);
+    if (second > 0)
+        audio_reap(second, 200, NULL, NULL);
+}
+
+/* Reads the PipeWire graph with `pw-dump Node` and parses it natively.
+ * When a numeric --pw-node override is active, resolves it to a node.name. */
+static bool audio_probe_fetch(struct audio_graph *graph,
+                              char *override_name, size_t override_sz,
+                              bool *have_override, bool quiet)
+{
+    char *json = NULL;
+    size_t json_len = 0;
+    char *argv[] = { (char *)"pw-dump", (char *)"Node", NULL };
+    int rc;
+
+    memset(graph, 0, sizeof(*graph));
+    if (have_override)
+        *have_override = false;
+
+    rc = audio_capture(argv, &json, &json_len, AUDIO_PROBE_MAX_JSON,
+                       AUDIO_PROBE_TIMEOUT_MS, quiet ? NULL : "pw-dump");
+    if (rc != 0)
+        return false;
+
+    if (!audio_probe_graph(json, json_len, graph)) {
+        free(json);
+        return false;
+    }
+
+    if (g_pw_override_is_id && override_name && override_sz > 0) {
+        if (audio_graph_find_name_by_id(json, json_len, g_pw_override_id,
+                                        override_name, override_sz)) {
+            if (have_override)
+                *have_override = true;
+        } else {
+            fprintf(stderr, "[Audio] --pw-node ID %u nicht gefunden, nutze automatische Erkennung\n",
+                    g_pw_override_id);
+        }
+    }
+
+    free(json);
+    return true;
+}
+
+static const char *audio_loop_bin(void)
+{
+    static char local_bin[600];
+    char exe_path[512];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+
+    if (access("/usr/local/bin/everlive-audio", X_OK) == 0)
+        return "/usr/local/bin/everlive-audio";
+
+    if (len > 0) {
+        char *slash;
+
+        exe_path[len] = '\0';
+        slash = strrchr(exe_path, '/');
+        if (slash)
+            *slash = '\0';
+        snprintf(local_bin, sizeof(local_bin), "%s/everlive-audio", exe_path);
+        if (access(local_bin, X_OK) == 0)
+            return local_bin;
+    }
+
+    return "pw-loopback";
+}
+
+static bool start_audio_pipeline(const char *adev, const char *target_node)
+{
+    if (g_audio_pid > 0 || g_audio_pid2 > 0)
+        return true;
+
+    if (target_node && target_node[0] != '\0') {
+        const char *loop_bin = audio_loop_bin();
+        char input_props[1024];
+        char output_props[1200];
+        char *argv[14];
+        pid_t pid = 0;
+        int rc;
 
         printf("[Audio] Starte PipeWire Audio-Pipeline...\n");
         printf("[Audio] Hinweis: Bitte Konsole auf 2-Kanal Linear PCM (Stereo) einstellen, um Aussetzer/Knacken zu vermeiden.\n");
 
-        /* Native PipeWire loopback with adaptive resampler enabled (immune to clock drift, 60ms safe buffer).
-         * IMPORTANT: no forced channel map (-c/-m). Forcing 2ch FL,FR downmixes multichannel console
-         * audio (e.g. PS5 7.1 LPCM) inside the capture stream, which attenuates the center channel and
-         * makes the output much quieter. Native channel passthrough lets the sink do its standard mix.
-         */
-        snprintf(cmd, sizeof(cmd),
-                 "PIPEWIRE_PROPS='{ application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" }' "
-                 "\"%s\" -n EverLive -g EverLive -C \"%s\" "
-                 "-i '{ target.object = \"%s\" resample.disable = false application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" }' -l 60 "
-                 "-o '{ node.virtual = false resample.disable = false resample.quality = 4 application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" "
-                 "application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"EverLive\" "
-                 "node.description = \"EverLive Game Audio\" media.name = \"EverLive\" media.role = \"Game\" }' 2>/dev/null",
-                 loop_bin, target_node, target_node, (int)parent_pid);
-    } else {
-        /* Fallback to ALSA arecord -> pw-play with formatted WAV stream */
-        char plug_dev[256];
-        if (strncmp(adev, "hw:", 3) == 0) {
-            snprintf(plug_dev, sizeof(plug_dev), "plughw:%s", adev + 3);
-        } else {
-            snprintf(plug_dev, sizeof(plug_dev), "%s", adev);
+        snprintf(input_props, sizeof(input_props),
+                 "{ target.object = \"%s\" resample.disable = false application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" }",
+                 target_node);
+        snprintf(output_props, sizeof(output_props),
+                 "{ node.virtual = false resample.disable = false resample.quality = 4 application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"EverLive\" node.description = \"EverLive Game Audio\" media.name = \"EverLive\" media.role = \"Game\" }",
+                 (int)getpid());
+
+        argv[0] = (char *)loop_bin;
+        argv[1] = (char *)"-n";
+        argv[2] = (char *)"EverLive";
+        argv[3] = (char *)"-g";
+        argv[4] = (char *)"EverLive";
+        argv[5] = (char *)"-C";
+        argv[6] = (char *)target_node;
+        argv[7] = (char *)"-i";
+        argv[8] = input_props;
+        argv[9] = (char *)"-l";
+        argv[10] = (char *)"60";
+        argv[11] = (char *)"-o";
+        argv[12] = output_props;
+        argv[13] = NULL;
+
+        rc = audio_spawn(argv, -1, -1, true, true, &pid);
+        if (rc != 0) {
+            fprintf(stderr, "[Audio] %s konnte nicht gestartet werden: %s\n",
+                    loop_bin, strerror(rc));
+            return false;
         }
 
-        snprintf(cmd, sizeof(cmd),
-                 "{ arecord -D \"%s\" -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=250000 -q 2>/dev/null || "
-                 "  arecord -D \"%s\" -t wav -f S16_LE -c 2 -r 48000 --period-time=20000 --buffer-time=250000 -q 2>/dev/null; } | "
-                 "PIPEWIRE_PROPS='{ application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" }' "
-                 "pw-play --latency=60ms -P '{ node.virtual = false application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"EverLive\" node.description = \"EverLive Game Audio\" media.name = \"EverLive\" media.role = \"Game\" }' - 2>/dev/null",
-                 adev, plug_dev, (int)parent_pid);
+        g_audio_pid = pid;
+        return true;
     }
 
-    /* Spawn child process cleanly; no malloc or popen in child context */
-    pid_t pid = fork();
-    if (pid == 0) {
-        setpgid(0, 0);
-        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
-        _exit(127);
-    } else if (pid > 0) {
-        setpgid(pid, pid);
-        g_audio_pid = pid;
+    /* ALSA fallback: arecord | pw-play, both explicit argv (no shell). */
+    {
+        char plug_dev[300];
+        const char *dev = adev ? adev : "default";
+        char play_props[1024];
+        int fds[2];
+        pid_t arec = 0;
+        pid_t play = 0;
+        int rc;
+
+        if (strncmp(dev, "hw:", 3) == 0) {
+            snprintf(plug_dev, sizeof(plug_dev), "plughw:%s", dev + 3);
+            dev = plug_dev;
+        }
+
+        snprintf(play_props, sizeof(play_props),
+                 "{ node.virtual = false application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" application.process.id = %d application.process.binary = \"everlive_display\" node.name = \"EverLive\" node.description = \"EverLive Game Audio\" media.name = \"EverLive\" media.role = \"Game\" }",
+                 (int)getpid());
+
+        {
+            char *arecord_argv[] = {
+                (char *)"arecord", (char *)"-D", (char *)dev,
+                (char *)"-t", (char *)"wav", (char *)"-f", (char *)"S16_LE",
+                (char *)"-c", (char *)"2", (char *)"-r", (char *)"48000",
+                (char *)"--period-time=20000", (char *)"--buffer-time=250000",
+                (char *)"-q", NULL
+            };
+            char *play_argv[] = {
+                (char *)"pw-play", (char *)"--latency=60ms",
+                (char *)"-P", play_props, (char *)"-", NULL
+            };
+
+            printf("[Audio] Starte ALSA-Fallback: arecord (%s) -> pw-play\n", dev);
+
+            if (pipe(fds) < 0) {
+                fprintf(stderr, "[Audio] pipe() fehlgeschlagen: %s\n", strerror(errno));
+                return false;
+            }
+            fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+            fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+
+            rc = audio_spawn(arecord_argv, -1, fds[1], true, true, &arec);
+            close(fds[1]);
+            if (rc != 0) {
+                close(fds[0]);
+                fprintf(stderr, "[Audio] arecord konnte nicht gestartet werden: %s\n",
+                        strerror(rc));
+                return false;
+            }
+
+            rc = audio_spawn(play_argv, fds[0], -1, true, false, &play);
+            close(fds[0]);
+            if (rc != 0) {
+                fprintf(stderr, "[Audio] pw-play konnte nicht gestartet werden: %s\n",
+                        strerror(rc));
+                kill(-arec, SIGTERM);
+                kill(arec, SIGTERM);
+                audio_reap(arec, 200, NULL, NULL);
+                return false;
+            }
+        }
+
+        g_audio_pid = arec;
+        g_audio_pid2 = play;
+        return true;
     }
+}
+
+static void audio_apply_volume(uint32_t source_id, uint32_t stream_id,
+                               float volume, bool muted)
+{
+    char id[16];
+    char vol[16];
+
+    if (muted) {
+        if (source_id > 0) {
+            char *argv[] = { (char *)"wpctl", (char *)"set-mute", id, (char *)"1", NULL };
+
+            snprintf(id, sizeof(id), "%u", source_id);
+            (void)audio_run(argv, AUDIO_CMD_TIMEOUT_MS, "wpctl set-mute");
+        }
+        if (stream_id > 0) {
+            char *argv[] = { (char *)"wpctl", (char *)"set-mute", id, (char *)"1", NULL };
+
+            snprintf(id, sizeof(id), "%u", stream_id);
+            (void)audio_run(argv, AUDIO_CMD_TIMEOUT_MS, "wpctl set-mute");
+        }
+        return;
+    }
+
+    if (audio_format_volume(volume, vol, sizeof(vol)) == 0)
+        snprintf(vol, sizeof(vol), "1.00");
+
+    if (source_id > 0) {
+        char *unmute[] = { (char *)"wpctl", (char *)"set-mute", id, (char *)"0", NULL };
+        char *setvol[] = { (char *)"wpctl", (char *)"set-volume", id, vol, NULL };
+
+        snprintf(id, sizeof(id), "%u", source_id);
+        if (audio_run(unmute, AUDIO_CMD_TIMEOUT_MS, "wpctl set-mute") == 0)
+            (void)audio_run(setvol, AUDIO_CMD_TIMEOUT_MS, "wpctl set-volume");
+    }
+
+    if (stream_id > 0) {
+        char *unmute[] = { (char *)"wpctl", (char *)"set-mute", id, (char *)"0", NULL };
+        char *setvol[] = { (char *)"wpctl", (char *)"set-volume", id, vol, NULL };
+
+        snprintf(id, sizeof(id), "%u", stream_id);
+        if (audio_run(unmute, AUDIO_CMD_TIMEOUT_MS, "wpctl set-mute") == 0)
+            (void)audio_run(setvol, AUDIO_CMD_TIMEOUT_MS, "wpctl set-volume");
+    }
+}
+
+static bool audio_stream_alive(uint32_t id)
+{
+    char idbuf[16];
+    char *argv[] = { (char *)"wpctl", (char *)"inspect", idbuf, NULL };
+    int rc;
+
+    snprintf(idbuf, sizeof(idbuf), "%u", id);
+    rc = audio_run(argv, AUDIO_CMD_TIMEOUT_MS, "wpctl inspect");
+
+    /* A missing/broken wpctl must not tear down a working stream. */
+    if (rc < 0)
+        return true;
+
+    return rc == 0;
 }
 
 static void *audio_supervisor_thread(void *arg)
 {
     const char *adev = (const char *)arg;
-    int stream_node_id = -1;
-    int source_node_id = -1;
+    struct audio_graph graph;
+    char override_name[AUDIO_NODE_NAME_MAX] = "";
+    bool have_override = false;
+    const char *target_node = NULL;
+    uint32_t stream_node_id = 0;
+    uint32_t source_node_id = 0;
     float last_vol = -1.0f;
     bool last_muted = false;
     int fail_count = 0;
     time_t last_start_time = time(NULL);
+    int64_t next_stream_probe;
+    int stream_backoff = AUDIO_BACKOFF_MIN_MS;
+    bool probed;
 
-    start_audio_pipeline(adev);
+    /* Probe in the audio thread only: the video window must never wait for it. */
+    probed = audio_probe_fetch(&graph, override_name, sizeof(override_name),
+                               &have_override, false);
 
-    /* Resolve hardware capture source node ID once at startup */
-    if (g_pw_node[0] != '\0' && isdigit((unsigned char)g_pw_node[0])) {
-        source_node_id = atoi(g_pw_node);
-    }
-    if (source_node_id < 0) {
-        FILE *fp_src = popen("wpctl status 2>/dev/null | awk '/^Audio/{in_audio=1} /^Video|^Settings/{in_audio=0} in_audio && /AVerMedia Live Gamer 4K Pro/ && !/Pro 1/ {for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\\.$/) {sub(/\\./,\"\",$i); print $i; exit}}'", "r");
-        if (fp_src) {
-            char buf[32];
-            if (fgets(buf, sizeof(buf), fp_src)) {
-                int id = atoi(buf);
-                if (id > 0) {
-                    source_node_id = id;
-                    printf("[Audio] Hardware Capture Source aktiv (Node ID: %d)\n", source_node_id);
-                }
-            }
-            pclose(fp_src);
-        }
+    if (!have_override && !g_pw_override_is_id && g_pw_override_name[0] != '\0') {
+        snprintf(override_name, sizeof(override_name), "%s", g_pw_override_name);
+        have_override = true;
     }
 
+    if (!probed && !have_override)
+        fprintf(stderr, "[Audio] PipeWire-Abfrage fehlgeschlagen, nutze ALSA-Fallback\n");
+
+    if (have_override)
+        target_node = override_name;
+    else if (graph.have_source)
+        target_node = graph.source.name;
+
+    /* Keep the hardware source id even with an explicit --pw-node override so
+     * volume/mute still reach the capture source. */
+    if (graph.have_source)
+        source_node_id = graph.source.id;
+
+    if (target_node)
+        printf("[Audio] Native PipeWire Loopback aktiv (Quelle: %s)\n", target_node);
+    else
+        printf("[Audio] Keine PipeWire-Quelle gefunden, ALSA-Fallback (%s)\n",
+               adev ? adev : "default");
+
+    if (graph.have_stream)
+        stream_node_id = graph.stream.id;
+
+    start_audio_pipeline(adev, target_node);
     g_audio_dirty = 1;
+    next_stream_probe = audio_now_ms() + stream_backoff;
 
     while (g_running) {
-        /* Handle explicit re-sync request (from resolution change, stall recovery, or hotkey) */
+        /* Explicit re-sync request (resolution change, stall recovery, hotkey) */
         if (g_audio_resync_needed) {
             g_audio_resync_needed = 0;
             printf("[Audio] Re-syncing audio stream...\n");
             stop_audio_pipeline();
             usleep(100000);
+            stream_node_id = 0;
+            next_stream_probe = 0;
+            stream_backoff = AUDIO_BACKOFF_MIN_MS;
             if (g_running) {
                 last_start_time = time(NULL);
-                start_audio_pipeline(adev);
-                stream_node_id = -1;
+                start_audio_pipeline(adev, target_node);
                 g_audio_dirty = 1;
             }
         }
 
-        /* Monitor child process */
-        if (g_audio_pid > 0) {
-            int status;
-            pid_t r = waitpid(g_audio_pid, &status, WNOHANG);
-            if (r > 0) {
+        /* Reap and restart a dead pipeline (either process of the pair). */
+        {
+            int status = 0;
+            pid_t exited = 0;
+
+            if (g_audio_pid > 0 && waitpid(g_audio_pid, &status, WNOHANG) == g_audio_pid) {
+                exited = g_audio_pid;
                 g_audio_pid = 0;
-                stream_node_id = -1;
+            } else if (g_audio_pid2 > 0 &&
+                       waitpid(g_audio_pid2, &status, WNOHANG) == g_audio_pid2) {
+                exited = g_audio_pid2;
+                g_audio_pid2 = 0;
+            }
+
+            if (exited > 0) {
+                printf("[Audio] Audio-Pipeline beendet (PID %d, Status %d), starte neu...\n",
+                       (int)exited, status);
+                /* The exited pid was already reaped; only stop the survivor. */
+                stop_audio_pipeline();
+                stream_node_id = 0;
+                next_stream_probe = 0;
+                stream_backoff = AUDIO_BACKOFF_MIN_MS;
+
                 time_t now = time(NULL);
-                if (now - last_start_time > 5) {
+                if (now - last_start_time > 5)
                     fail_count = 0;
-                }
                 fail_count++;
 
-                /* Back off before retrying to prevent rapid-fire fork loops and speaker pops */
+                /* Back off to prevent fork loops and speaker pops. */
                 int backoff_sec = 1;
-                if (fail_count > 5) {
+                if (fail_count > 5)
                     backoff_sec = 10;
-                } else if (fail_count > 2) {
+                else if (fail_count > 2)
                     backoff_sec = 4;
-                }
-                for (int s = 0; s < backoff_sec && g_running; s++) {
+                for (int s = 0; s < backoff_sec && g_running; s++)
                     sleep(1);
-                }
 
                 if (g_running) {
                     last_start_time = time(NULL);
-                    start_audio_pipeline(adev);
+                    start_audio_pipeline(adev, target_node);
                     g_audio_dirty = 1;
                 }
             }
         }
 
-        /* Audio Flow Watchdog: periodically check if stream node is still valid and reachable */
+        /* Audio flow watchdog: is the stream node still reachable? */
         static int watchdog_counter = 0;
         if (stream_node_id > 0 && (++watchdog_counter % 80 == 0)) {
-            char chk_cmd[128];
-            snprintf(chk_cmd, sizeof(chk_cmd), "wpctl inspect %d >/dev/null 2>&1", stream_node_id);
-            if (system(chk_cmd) != 0) {
-                printf("[Audio] Stream node %d invalidated (format change or disconnect), recovering...\n", stream_node_id);
-                stream_node_id = -1;
+            if (!audio_stream_alive(stream_node_id)) {
+                printf("[Audio] Stream-Node %u ungültig (Formatwechsel/Trennung), synchronisiere...\n",
+                       stream_node_id);
+                stream_node_id = 0;
+                next_stream_probe = 0;
                 g_audio_resync_needed = 1;
             }
         }
 
-        /* Find PipeWire / PulseAudio stream and capture source node IDs */
-        static int search_counter = 0;
-        if ((stream_node_id < 0 || source_node_id < 0) && (++search_counter % 20 == 0)) {
-            if (stream_node_id < 0 && g_audio_pid > 0) {
-                FILE *fp = popen("wpctl status 2>/dev/null | awk '/^Audio/{in_audio=1} /^Video|^Settings/{in_audio=0} in_audio && (/EverLive/ || /everlive-audio/ || /gc573-audio/) && !/input\\./ {for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\\.$/) {sub(/\\./,\"\",$i); print $i; exit}}'", "r");
-                if (fp) {
-                    char buf[32];
-                    if (fgets(buf, sizeof(buf), fp)) {
-                        int id = atoi(buf);
-                        if (id > 0) {
-                            stream_node_id = id;
-                            printf("[Audio] PipeWire Audio Stream aktiv (Node ID: %d)\n", stream_node_id);
-                            g_audio_dirty = 1;
-                        }
-                    }
-                    pclose(fp);
-                }
+        /* Discover the EverLive playback stream; back off on repeated misses. */
+        if (stream_node_id == 0 && g_audio_pid > 0 &&
+            audio_now_ms() >= next_stream_probe) {
+            struct audio_graph refresh;
 
-                if (stream_node_id < 0) {
-                    FILE *fp2 = popen("pactl list sink-inputs 2>/dev/null | awk '/^Sink Input #[0-9]+|^Sink-Eingabe #[0-9]+/{id=$NF; sub(/#/,\"\",id)} /application.name = \"EverLive\"|application.id = \"everlive\"|node.name = \"EverLive\"/{print id; exit}'", "r");
-                    if (fp2) {
-                        char buf[32];
-                        if (fgets(buf, sizeof(buf), fp2)) {
-                            int id = atoi(buf);
-                            if (id > 0) {
-                                stream_node_id = id;
-                                printf("[Audio] PulseAudio Sink-Input aktiv (ID: %d)\n", stream_node_id);
-                                g_audio_dirty = 1;
-                            }
-                        }
-                        pclose(fp2);
-                    }
+            if (audio_probe_fetch(&refresh, NULL, 0, NULL, true)) {
+                if (source_node_id == 0 && refresh.have_source)
+                    source_node_id = refresh.source.id;
+                if (refresh.have_stream) {
+                    stream_node_id = refresh.stream.id;
+                    printf("[Audio] PipeWire Audio-Stream aktiv (Node ID: %u)\n",
+                           stream_node_id);
+                    g_audio_dirty = 1;
+                    stream_backoff = AUDIO_BACKOFF_MIN_MS;
                 }
             }
 
-            if (source_node_id < 0) {
-                FILE *fp_src = popen("wpctl status 2>/dev/null | awk '/^Audio/{in_audio=1} /^Video|^Settings/{in_audio=0} in_audio && /AVerMedia Live Gamer 4K Pro/ && !/Pro 1/ {for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\\.$/) {sub(/\\./,\"\",$i); print $i; exit}}'", "r");
-                if (fp_src) {
-                    char buf[32];
-                    if (fgets(buf, sizeof(buf), fp_src)) {
-                        int id = atoi(buf);
-                        if (id > 0) {
-                            source_node_id = id;
-                            printf("[Audio] Hardware Capture Source aktiv (Node ID: %d)\n", source_node_id);
-                            g_audio_dirty = 1;
-                        }
-                    }
-                    pclose(fp_src);
-                }
+            if (stream_node_id == 0) {
+                next_stream_probe = audio_now_ms() + stream_backoff;
+                stream_backoff *= 2;
+                if (stream_backoff > AUDIO_BACKOFF_MAX_MS)
+                    stream_backoff = AUDIO_BACKOFF_MAX_MS;
             }
         }
 
-        /* Apply volume or mute updates */
-        if ((stream_node_id > 0 || source_node_id > 0) && (g_audio_dirty || g_volume != last_vol || g_muted != last_muted)) {
+        /* Apply volume or mute updates. */
+        if ((stream_node_id > 0 || source_node_id > 0) &&
+            (g_audio_dirty || g_volume != last_vol || g_muted != last_muted)) {
             g_audio_dirty = 0;
             last_vol = g_volume;
             last_muted = g_muted;
-
-            char cmd_vol[512] = "";
-            if (last_muted) {
-                if (source_node_id > 0 && stream_node_id > 0) {
-                    snprintf(cmd_vol, sizeof(cmd_vol),
-                             "wpctl set-mute %d 1 2>/dev/null; wpctl set-mute %d 1 2>/dev/null || pactl set-sink-input-mute %d 1 2>/dev/null",
-                             source_node_id, stream_node_id, stream_node_id);
-                } else if (source_node_id > 0) {
-                    snprintf(cmd_vol, sizeof(cmd_vol), "wpctl set-mute %d 1 2>/dev/null", source_node_id);
-                } else {
-                    snprintf(cmd_vol, sizeof(cmd_vol), "wpctl set-mute %d 1 2>/dev/null || pactl set-sink-input-mute %d 1 2>/dev/null", stream_node_id, stream_node_id);
-                }
-            } else {
-                if (source_node_id > 0 && stream_node_id > 0) {
-                    snprintf(cmd_vol, sizeof(cmd_vol),
-                             "(wpctl set-mute %d 0 2>/dev/null && wpctl set-volume %d %.2f 2>/dev/null); "
-                             "((wpctl set-mute %d 0 2>/dev/null && wpctl set-volume %d %.2f 2>/dev/null) || "
-                             "(pactl set-sink-input-mute %d 0 2>/dev/null && pactl set-sink-input-volume %d %d%% 2>/dev/null))",
-                             source_node_id, source_node_id, last_vol,
-                             stream_node_id, stream_node_id, last_vol,
-                             stream_node_id, stream_node_id, (int)(last_vol * 100.0f));
-                } else if (source_node_id > 0) {
-                    snprintf(cmd_vol, sizeof(cmd_vol),
-                             "wpctl set-mute %d 0 2>/dev/null && wpctl set-volume %d %.2f 2>/dev/null",
-                             source_node_id, source_node_id, last_vol);
-                } else {
-                    snprintf(cmd_vol, sizeof(cmd_vol),
-                             "(wpctl set-mute %d 0 2>/dev/null && wpctl set-volume %d %.2f 2>/dev/null) || "
-                             "(pactl set-sink-input-mute %d 0 2>/dev/null && pactl set-sink-input-volume %d %d%% 2>/dev/null)",
-                             stream_node_id, stream_node_id, last_vol, stream_node_id, stream_node_id, (int)(last_vol * 100.0f));
-                }
-            }
-            system(cmd_vol);
+            audio_apply_volume(source_node_id, stream_node_id, g_volume, g_muted);
         }
 
         usleep(25000);
@@ -1082,7 +1424,18 @@ int main(int argc, char *argv[])
             }
         }
         else if (!strcmp(argv[i], "--pw-node") && i + 1 < argc) {
-            strncpy(g_pw_node, argv[++i], sizeof(g_pw_node) - 1);
+            const char *node = argv[++i];
+            uint32_t node_id = 0;
+
+            if (audio_parse_node_id(node, &node_id)) {
+                g_pw_override_id = node_id;
+                g_pw_override_is_id = true;
+            } else if (audio_validate_node_name(node)) {
+                snprintf(g_pw_override_name, sizeof(g_pw_override_name), "%s", node);
+            } else {
+                fprintf(stderr, "[Audio] Ungültiger --pw-node Wert '%s' ignoriert "
+                                "(erlaubt: [A-Za-z0-9._:+-] oder numerische ID)\n", node);
+            }
         }
         else if (!strcmp(argv[i], "--no-audio") || !strcmp(argv[i], "-n"))
             adev = "none";
@@ -1113,7 +1466,7 @@ int main(int argc, char *argv[])
             }
         }
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
-            printf("Usage: %s [-f|--fullscreen] [--vsync] [-s|--streamer-mode] [--hdr auto|on|off] [--exposure 1.0-40.0] [-F yuyv|nv12|bgr24|rgb32] [-d /dev/videoX] [-a hw:CARD,DEV|none] [--pw-node node_name] [-w wid] [--no-audio]\n", argv[0]);
+            printf("Usage: %s [-f|--fullscreen] [--vsync] [-s|--streamer-mode] [--hdr auto|on|off] [--exposure 1.0-40.0] [-F yuyv|nv12|bgr24|rgb32] [-d /dev/videoX] [-a hw:CARD,DEV|none] [--pw-node name|id] [-w wid] [--no-audio]\n", argv[0]);
             return 0;
         }
     }
@@ -1141,14 +1494,19 @@ int main(int argc, char *argv[])
     if (!adev)
         adev = detect_adev();
 
-    if (adev && strcmp(adev, "none") != 0 && g_pw_node[0] == '\0') {
-        detect_pipewire_source(g_pw_node, sizeof(g_pw_node));
+    /* Audio routing is probed in the audio thread so the window never waits
+     * for pw-dump.  Only the validated override is reported here. */
+    if (adev && strcmp(adev, "none") != 0) {
+        if (g_pw_override_is_id)
+            printf("[Audio] Node-ID override: %u\n", g_pw_override_id);
+        else if (g_pw_override_name[0] != '\0')
+            printf("[Audio] Node override: %s\n", g_pw_override_name);
     }
-    if (g_pw_node[0] != '\0') {
-        printf("[Audio] Native PipeWire Loopback active (Source: %s)\n", g_pw_node);
-    } else if (adev && strcmp(adev, "none") != 0) {
-        printf("[Audio] ALSA fallback active (Device: %s)\n", adev);
-    }
+
+    /* Applied to every PipeWire client we spawn (pw-loopback / pw-play). */
+    setenv("PIPEWIRE_PROPS",
+           "{ application.name = \"EverLive\" application.icon-name = \"everlive\" application.id = \"everlive\" }",
+           1);
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);

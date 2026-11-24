@@ -31,6 +31,22 @@ To remove EverLive and revert its system configuration:
 sudo ./uninstall.sh
 ```
 
+### Service Hardening
+
+The installed user units (`everlive.service` and `opengc570d-userd.service`)
+restrict socket address families to `AF_UNIX`, `AF_INET`, and `AF_INET6`, run
+with `SystemCallArchitectures=native` and `SystemCallFilter=@system-service`,
+and enable `LockPersonality=yes` plus `RestrictSUIDSGID=yes`.
+
+`NoNewPrivileges=` and the filesystem namespace options (`ProtectSystem=`,
+`ProtectHome=`, `PrivateTmp=`) are intentionally **not** set for these units.
+`NoNewPrivileges=` blocks filesystem capabilities, and user namespaces drop
+host `CAP_IPC_LOCK`, while the VFIO engines rely on `cap_ipc_lock=+ep` for DMA
+page pinning. A per-user `LimitMEMLOCK=` drop-in cannot raise the user
+manager's hard limit, so those options would break 4K capture. Revisit this
+only together with a different memlock strategy (for example a system service
+with `AmbientCapabilities=`).
+
 ---
 
 ## Building, Testing & Packaging
@@ -45,6 +61,19 @@ sudo make install                                       # optional system-wide i
 ```
 
 `./build.sh` wraps the top-level `make`. Arch Linux `PKGBUILD` files (`everlive` and `everlive-git`) live in [`packaging/arch/`](../packaging/arch/).
+
+### Updating Pinned Release Checksums
+
+Whenever bumping a pinned version, always update the version and its SHA-256 checksum together:
+
+- **Optional `lsfg-vk` fallback in `install.sh`:** update `LSFG_VK_VERSION` and `LSFG_VK_SHA256` together after verifying the archive checksum:
+  ```bash
+  curl --proto '=https' --tlsv1.2 --fail --location -fsSL "https://builds.lsfg-vk.dev/lsfg-vk-<VERSION>.tar.xz" | sha256sum
+  ```
+- **Arch release package (`packaging/arch/everlive/PKGBUILD`):** bump `pkgver`, push/tag `v<pkgver>`, and regenerate `packaging/arch/everlive/SHA256SUMS` + `sha256sums` together:
+  ```bash
+  ./packaging/arch/everlive/update-checksums.sh
+  ```
 
 ---
 
