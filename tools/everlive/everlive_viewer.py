@@ -8,6 +8,7 @@ Desktop Studio with low-latency direct-DMA preview for Linux gaming.
 import sys
 import os
 import signal
+import socket
 import stat
 import subprocess
 import time
@@ -736,7 +737,7 @@ try:
         QTabWidget, QStackedWidget, QScrollArea, QDialog, QTextEdit,
         QGraphicsOpacityEffect
     )
-    from PySide6.QtCore import Qt, QTimer, QThread, Signal, QEvent, QUrl, QSize, QRectF, QPointF, QProcess
+    from PySide6.QtCore import Qt, QTimer, QThread, Signal, QEvent, QUrl, QSize, QRectF, QPointF, QProcess, QSocketNotifier
     from PySide6.QtGui import (
         QGuiApplication, QFont, QIcon, QColor, QPalette, QKeySequence, QShortcut,
         QDesktopServices, QPixmap, QPainter, QAction, QPen, QBrush,
@@ -3330,6 +3331,7 @@ if HAS_QT:
             self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             self.setAttribute(Qt.WA_OpaquePaintEvent, True)
             self._image: Optional[QImage] = None
+            self._image_buf: Optional[bytes] = None
             self._thread: Optional[threading.Thread] = None
             self._stream = None
             self._lock = threading.Lock()
@@ -3353,6 +3355,7 @@ if HAS_QT:
             with self._lock:
                 self._pending_frame = None
             self._image = None
+            self._image_buf = None
 
         def _reader(self, stream, width: int, height: int):
             size = width * height * 3
@@ -3380,8 +3383,9 @@ if HAS_QT:
             if payload is None:
                 return
             data, width, height = payload
+            self._image_buf = data
             self._image = QImage(data, width, height, width * 3,
-                                 QImage.Format_RGB888)
+                                 QImage.Format_RGB888).copy()
             self.frames += 1
             self.update()
 
@@ -9951,8 +9955,12 @@ if HAS_QT:
             was_running = self.streamer.is_running
 
             # Close to Tray: clicking [X] hides the window into the system tray
-            # (not when closing to restart on another capture card).
-            if not getattr(self, "_card_restart", None) and getattr(self, "chk_tray", None) and self.chk_tray.isChecked() and getattr(self, "tray_icon", None):
+            # (not when closing to restart on another capture card or on signal).
+            if (not getattr(self, "_force_close", False)
+                    and not getattr(self, "_card_restart", None)
+                    and getattr(self, "chk_tray", None)
+                    and self.chk_tray.isChecked()
+                    and getattr(self, "tray_icon", None)):
                 event.ignore()
                 self.hide()
                 if not getattr(self, "_tray_notified", False):
@@ -10150,76 +10158,105 @@ def main():
               f"Audio={streamer.adev} "
               f"(driver={streamer.hw_info.get('driver') or 'unknown'})")
 
-    # Graceful shutdown on Ctrl+C
-    hub = {"window": None}
+    # Graceful shutdown on Ctrl+C / SIGTERM: never mutate Qt objects inside a
+    # POSIX signal handler; set a flag and wake the main loop via socketpair.
+    sig_r, sig_w = socket.socketpair()
+    sig_r.setblocking(False)
+    sig_w.setblocking(False)
+    sig_state = {"signum": None}
 
     def sig_handler(sig, frame):
-        win = hub["window"]
-        if win is not None:
-            # Multiview engines run in their own sessions; stop them too.
-            win._multiview_stop()
-            win._webcam_stop()
-            # A card switch replaces the window's engine wrapper.
-            win.streamer.stop()
-        streamer.stop()
-        sys.exit(0)
+        sig_state["signum"] = sig
+        try:
+            sig_w.send(bytes([sig & 0xFF]))
+        except OSError:
+            pass
+
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
 
-    if args.cli or not HAS_QT:
-        print("[*] Launching Gaming Screen in low-latency mode...")
-        if streamer.vfio_mode:
-            engine = os.path.basename(streamer.streamer_bin)
-            print(f"[*] Userspace VFIO engine: video and HDMI audio run inside {engine}.")
+    try:
+        if args.cli or not HAS_QT:
+            print("[*] Launching Gaming Screen in low-latency mode...")
+            if streamer.vfio_mode:
+                engine = os.path.basename(streamer.streamer_bin)
+                print(f"[*] Userspace VFIO engine: video and HDMI audio run inside {engine}.")
+            else:
+                info = streamer.get_signal_info()
+                chroma_disp = f" [{info['chroma']}]" if info.get('chroma') else ""
+                print(f"[*] Signal: {info['resolution']} {info['framerate']}{chroma_disp}".strip())
+                if not info["locked"]:
+                    print(f"[!] Warning: No active HDMI signal detected on {streamer.model_label}.")
+                    print("    Please check if the video source is powered on and sending video.")
+            cli_settings = load_settings()
+            if not streamer.start(preset_name=args.preset, fullscreen=args.fullscreen, volume=args.volume, vsync=args.vsync, streamer_mode=args.streamer_mode, v4l2_device=args.v4l2, headless=args.headless, aspect=args.aspect, framegen=cli_settings.get("framegen_mode", "off"), fg_multiplier=cli_settings.get("fg_multiplier", 2), fg_dedup=cli_settings.get("fg_dedup", False), fg_flow_scale=cli_settings.get("fg_flow_scale", 1.0), fg_perf_mode=cli_settings.get("fg_perf_mode", False), fg_low_latency=cli_settings.get("fg_low_latency", True)):
+                sys.exit(1)
+            if streamer.vfio_mode:
+                # The SDL2 sink-input only exists once audio starts flowing.
+                # Ensure host PipeWire stream is at 100% unity gain so --volume
+                # applies cleanly without double-scaling.
+                time.sleep(1.5)
+                set_audio_stream_unity()
+            print("[+] Window opened. Press 'q' in window or Ctrl+C to exit.")
+            while sig_state["signum"] is None and streamer.poll():
+                time.sleep(0.5)
+            if sig_state["signum"] is not None:
+                print(f"\n[*] Received signal {sig_state['signum']}; stopping capture...")
+            streamer.stop()
+            if streamer.vfio_mode and streamer.model == MODEL_GC573:
+                saved_led = load_settings().get("led_mode")
+                mode = saved_led if isinstance(saved_led, int) and 0 <= saved_led <= 9 else 4
+                if not (_proc_running("everlive_userd") and mode == 4):
+                    set_vfio_led(mode)
         else:
-            info = streamer.get_signal_info()
-            chroma_disp = f" [{info['chroma']}]" if info.get('chroma') else ""
-            print(f"[*] Signal: {info['resolution']} {info['framerate']}{chroma_disp}".strip())
-            if not info["locked"]:
-                print(f"[!] Warning: No active HDMI signal detected on {streamer.model_label}.")
-                print("    Please check if the video source is powered on and sending video.")
-        cli_settings = load_settings()
-        if not streamer.start(preset_name=args.preset, fullscreen=args.fullscreen, volume=args.volume, vsync=args.vsync, streamer_mode=args.streamer_mode, v4l2_device=args.v4l2, headless=args.headless, aspect=args.aspect, framegen=cli_settings.get("framegen_mode", "off"), fg_multiplier=cli_settings.get("fg_multiplier", 2), fg_dedup=cli_settings.get("fg_dedup", False), fg_flow_scale=cli_settings.get("fg_flow_scale", 1.0), fg_perf_mode=cli_settings.get("fg_perf_mode", False), fg_low_latency=cli_settings.get("fg_low_latency", True)):
-            sys.exit(1)
-        if streamer.vfio_mode:
-            # The SDL2 sink-input only exists once audio starts flowing.
-            # Ensure host PipeWire stream is at 100% unity gain so --volume
-            # applies cleanly without double-scaling.
-            time.sleep(1.5)
-            set_audio_stream_unity()
-        print("[+] Window opened. Press 'q' in window or Ctrl+C to exit.")
-        while streamer.poll():
-            time.sleep(0.5)
-        streamer.stop()
-        if streamer.vfio_mode and streamer.model == MODEL_GC573:
-            saved_led = load_settings().get("led_mode")
-            mode = saved_led if isinstance(saved_led, int) and 0 <= saved_led <= 9 else 4
-            if not (_proc_running("everlive_userd") and mode == 4):
-                set_vfio_led(mode)
-    else:
-        if os.environ.get("DISPLAY"):
-            os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
-        QGuiApplication.setDesktopFileName("everlive")
-        app = QApplication(sys.argv)
-        app.setApplicationName("EverLive")
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "everlive.png")
-        if os.path.isfile(icon_path):
-            app.setWindowIcon(QIcon(icon_path))
-        window = MainWindow(streamer, vsync=args.vsync, streamer_mode=args.streamer_mode,
-                            headless_start=args.headless, v4l2_device=args.v4l2)
-        hub["window"] = window
-        if not args.tray:
-            window.show()
-        code = app.exec()
-        window._multiview_stop()
-        window._webcam_stop()
-        hub["window"] = None
-        restart_pci = getattr(window, "_card_restart", None)
-        _destroy_qt_objects(app, window)
-        del window
-        if restart_pci:
-            _restart_on_card(restart_pci)
-        sys.exit(code)
+            if os.environ.get("DISPLAY"):
+                os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+            QGuiApplication.setDesktopFileName("everlive")
+            app = QApplication(sys.argv)
+            app.setApplicationName("EverLive")
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "everlive.png")
+            if os.path.isfile(icon_path):
+                app.setWindowIcon(QIcon(icon_path))
+            window = MainWindow(streamer, vsync=args.vsync, streamer_mode=args.streamer_mode,
+                                headless_start=args.headless, v4l2_device=args.v4l2)
+            if not args.tray:
+                window.show()
+
+            notifier = QSocketNotifier(sig_r.fileno(), QSocketNotifier.Type.Read, app)
+
+            def _on_signal_wakeup():
+                notifier.setEnabled(False)
+                try:
+                    sig_r.recv(64)
+                except OSError:
+                    pass
+                signum = sig_state["signum"]
+                print(f"[*] Received signal {signum}; shutting down Hub cleanly...")
+                window._force_close = True
+                rec = getattr(window, "recorder", None)
+                if rec is not None and rec.is_recording:
+                    ok, msg = rec.stop()
+                    print(f"[*] Recorder finalized ({ok}): {msg}")
+                window.close()
+                app.quit()
+
+            notifier.activated.connect(_on_signal_wakeup)
+            code = app.exec()
+            notifier.setEnabled(False)
+            window._multiview_stop()
+            window._webcam_stop()
+            restart_pci = getattr(window, "_card_restart", None)
+            _destroy_qt_objects(app, window)
+            del window
+            if restart_pci:
+                _restart_on_card(restart_pci)
+            sys.exit(code)
+    finally:
+        for sock in (sig_r, sig_w):
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
