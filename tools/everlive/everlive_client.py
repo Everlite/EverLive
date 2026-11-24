@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import stat
 import time
 
 SOCKET_NAME = "everlive.sock"
@@ -61,37 +62,57 @@ except ImportError:  # pragma: no cover - only for Qt-less tooling
     Signal = None
 
 
-def socket_path() -> str:
-    """Return the socket location the streamer binds.
+def _private_runtime_dir(path: str) -> bool:
+    """True when *path* is a real 0700 directory owned by this user."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return (stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode)
+            and st.st_uid == os.geteuid()
+            and stat.S_IMODE(st.st_mode) == 0o700)
 
-    Mirrors ``resolve_socket_path()`` in ``gc573_user_ipc.c`` so both sides
-    always agree, including when ``XDG_RUNTIME_DIR`` is unset (systemd-less
-    sessions, SSH logins, containers).
-    """
-    override = os.environ.get("EVERLIVE_SOCKET")
-    if override:
-        return override
 
-    base = os.environ.get("XDG_RUNTIME_DIR")
-    if base and os.path.isdir(base):
-        return os.path.join(base, SOCKET_NAME)
-
-    fallback = f"/run/user/{os.getuid()}"
-    if os.path.isdir(fallback):
-        return os.path.join(fallback, SOCKET_NAME)
-
-    return os.path.join(f"/tmp/everlive-{os.getuid()}", SOCKET_NAME)
+def _require_private_runtime_dir(path: str) -> None:
+    if not _private_runtime_dir(path):
+        raise PermissionError(
+            f"{path} is not a private runtime directory "
+            f"(expected owner uid {os.geteuid()}, mode 0700); "
+            "remove it or set XDG_RUNTIME_DIR to a safe directory")
 
 
 def runtime_dir() -> str:
     """Mirror ``everlive_ipc_runtime_dir()`` in libeverlive-core."""
     base = os.environ.get("XDG_RUNTIME_DIR")
-    if base and os.path.isdir(base):
+    if base:
+        _require_private_runtime_dir(base)
         return base
-    fallback = f"/run/user/{os.getuid()}"
-    if os.path.isdir(fallback):
+
+    fallback = f"/run/user/{os.geteuid()}"
+    if os.path.lexists(fallback):
+        _require_private_runtime_dir(fallback)
         return fallback
-    return f"/tmp/everlive-{os.getuid()}"
+
+    tail = f"/tmp/everlive-{os.geteuid()}"
+    if os.path.lexists(tail):
+        _require_private_runtime_dir(tail)
+    return tail
+
+
+def socket_path() -> str:
+    """Return the socket location the streamer binds.
+
+    Mirrors ``resolve_socket_path()`` in libeverlive-core so both sides always
+    agree, including when ``XDG_RUNTIME_DIR`` is unset (systemd-less sessions,
+    SSH logins, containers).
+    """
+    override = os.environ.get("EVERLIVE_SOCKET")
+    if override:
+        return override
+    if os.environ.get("EVERLIVE_CONTROL_SOCKET"):
+        return os.environ["EVERLIVE_CONTROL_SOCKET"]
+
+    return os.path.join(runtime_dir(), SOCKET_NAME)
 
 
 def paused_state():

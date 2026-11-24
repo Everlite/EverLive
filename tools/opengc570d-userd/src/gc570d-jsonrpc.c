@@ -776,12 +776,19 @@ static void rpc_client_close_all(void)
 
 static bool rpc_peer_ok(int fd)
 {
-	struct ucred cred;
-	socklen_t len = sizeof(cred);
+	uid_t peer_uid = (uid_t)-1;
+	pid_t peer_pid = -1;
 
-	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0)
+	if (everlive_ipc_peer_identity(fd, &peer_uid, &peer_pid) < 0)
 		return false;
-	return cred.uid == getuid();
+	if (peer_uid == geteuid())
+		return true;
+
+	gc570d_log_msg("WARN", NULL,
+		       "IPC client rejected: uid=%u pid=%d (expected uid %u)",
+		       (unsigned int)peer_uid, (int)peer_pid,
+		       (unsigned int)geteuid());
+	return false;
 }
 
 static void rpc_drain_lines(struct rpc_client *c)
@@ -950,15 +957,9 @@ int gc570d_jsonrpc_init(const char *version)
 	snprintf(g_lock_path, sizeof(g_lock_path), "%.*s.lock",
 		 EVERLIVE_IPC_PATH_MAX - 1, g_path);
 
-	g_lock_fd = open(g_lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-	if (g_lock_fd < 0) {
-		ret = -errno;
+	ret = everlive_ipc_acquire_socket_lock(g_path, &g_lock_fd);
+	if (ret < 0)
 		goto fail;
-	}
-	if (flock(g_lock_fd, LOCK_EX | LOCK_NB) < 0) {
-		ret = (errno == EWOULDBLOCK) ? -EADDRINUSE : -errno;
-		goto fail;
-	}
 
 	/* A leftover socket without a live lock owner is stale. */
 	if (access(g_path, F_OK) == 0)
@@ -974,9 +975,17 @@ int gc570d_jsonrpc_init(const char *version)
 		ret = -errno;
 		goto fail;
 	}
-	if (bind(g_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		ret = -errno;
-		goto fail;
+	{
+		mode_t old_umask = umask(077);
+		int bind_ret = bind(g_listen_fd, (struct sockaddr *)&addr,
+				    sizeof(addr));
+		int bind_err = errno;
+
+		(void)umask(old_umask);
+		if (bind_ret < 0) {
+			ret = -bind_err;
+			goto fail;
+		}
 	}
 	g_bound = true;
 	(void)chmod(g_path, 0600);

@@ -25,8 +25,8 @@ AUDIO_PROBE_SRC := $(EVERLIVE_DIR)/everlive_audio_probe.c
 SANITIZE := -fsanitize=address,undefined -fno-omit-frame-pointer
 
 TARGETS := test_card_registry test_frame_convert test_framestore test_ctl_proto \
-           test_json_rpc test_v4l2_shim test_handoff test_edid test_config \
-           test_framegen test_audio_probe
+           test_json_rpc test_v4l2_shim test_handoff test_ipc test_edid \
+           test_config test_framegen test_audio_probe
 
 all: $(TARGETS)
 
@@ -61,6 +61,9 @@ test_v4l2_shim: test_v4l2_shim.c \
 
 test_handoff: test_handoff.c $(CORE_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ $< $(CORE_LIB) -pthread
+
+test_ipc: test_ipc.c $(CORE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ $< $(CORE_LIB)
 
 # --- GC570D -------------------------------------------------------------
 # These two provide their own kernel-shim stubs, so they must compile the
@@ -97,6 +100,7 @@ test: all
 	@./test_json_rpc
 	@./test_v4l2_shim
 	@./test_handoff
+	@./test_ipc
 	@echo "=== everlive_display ==="
 	@./test_audio_probe
 	@echo "=== GC570D (Live Gamer DUO) ==="
