@@ -154,10 +154,10 @@ jobs:
             ${SDL_FLAGS} -lGL -lm -lX11 -lpthread
 
       - name: Sanitizer run
-        run: make -C tests asan
+        run: make asan
 
-      - name: ThreadSanitizer V4L2 tests
-        run: make -C tests tsan
+      - name: ThreadSanitizer tests
+        run: make tsan
 
       - name: Clean
         run: make clean
