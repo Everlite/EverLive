@@ -91,10 +91,10 @@ osd-theme:
 
 check: test
 
-asan: all
+asan:
 	+$(MAKE) -C $(TESTS_DIR) asan
 
-tsan: all
+tsan:
 	+$(MAKE) -C $(TESTS_DIR) tsan
 
 clean:

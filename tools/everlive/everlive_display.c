@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -47,8 +48,19 @@
 #include <GL/glext.h>
 #include "font8x8.h"
 #include "everlive_audio_probe.h"
+#include "everlive_card.h"
 
 #define BUFFER_COUNT 8
+
+/*
+ * Lock-free atomics shared between the signal handlers, the audio supervisor
+ * thread, and the render loop.  Kept as macros so the memory ordering is
+ * explicit at every access site without obscuring the read/write itself.
+ */
+#define RELAXED_LOAD(var) atomic_load_explicit(&(var), memory_order_relaxed)
+#define RELAXED_STORE(var, value) atomic_store_explicit(&(var), (value), memory_order_relaxed)
+#define RELEASE_STORE(var, value) atomic_store_explicit(&(var), (value), memory_order_release)
+#define ACQ_REL_EXCHANGE(var, value) atomic_exchange_explicit(&(var), (value), memory_order_acq_rel)
 
 static inline uint64_t diff_timespec_us(const struct timespec *end, const struct timespec *start)
 {
@@ -58,46 +70,149 @@ static inline uint64_t diff_timespec_us(const struct timespec *end, const struct
     return (total_us > 0) ? (uint64_t)total_us : 0;
 }
 
+static bool read_v4l2_node_name(const char *name_path, char *out, size_t out_sz)
+{
+    FILE *f;
+    size_t len;
+
+    if (!name_path || !out || out_sz == 0)
+        return false;
+
+    f = fopen(name_path, "r");
+    if (!f)
+        return false;
+    if (!fgets(out, (int)out_sz, f)) {
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+
+    len = strlen(out);
+    while (len > 0 && (out[len - 1] == '\n' || out[len - 1] == '\r'))
+        out[--len] = '\0';
+    return len > 0;
+}
+
+/* Extracts /dev/videoN from a .../video<N>/name sysfs path and verifies we may use it. */
+static bool vdev_node_from_sysfs_name(const char *name_path, char *out, size_t out_sz)
+{
+    char path_copy[512];
+    char dev[64];
+    char *dir;
+    char *node;
+
+    if (!name_path || !out || out_sz == 0)
+        return false;
+    if (snprintf(path_copy, sizeof(path_copy), "%s", name_path) >= (int)sizeof(path_copy))
+        return false;
+
+    dir = dirname(path_copy);
+    if (!dir)
+        return false;
+    node = basename(dir);
+    if (!node || strncmp(node, "video", 5) != 0)
+        return false;
+    if (snprintf(dev, sizeof(dev), "/dev/%s", node) >= (int)sizeof(dev))
+        return false;
+    if (access(dev, R_OK | W_OK) != 0)
+        return false;
+
+    snprintf(out, out_sz, "%s", dev);
+    return true;
+}
+
+static int vdev_name_registry_score(const char *name,
+                                    const struct everlive_device_desc *desc)
+{
+    if (!name || !desc)
+        return 0;
+
+    if (desc->name && desc->name[0]) {
+        if (strcasestr(name, desc->name))
+            return 3;
+        /* Sysfs names usually carry the short marketing name rather than the
+         * full registry description, so accept that direction as well. */
+        if (strlen(name) >= 4 && strcasestr(desc->name, name))
+            return 3;
+    }
+
+    if (desc->model_slug && desc->model_slug[0] &&
+        strcasestr(name, desc->model_slug))
+        return 2;
+
+    return 0;
+}
+
+static bool vdev_name_is_known_fallback(const char *name)
+{
+    return strcasestr(name, "Live Gamer 4K") ||
+           strcasestr(name, "GC573") ||
+           strcasestr(name, "GC570D") ||
+           strcasestr(name, "open_gc573");
+}
+
 static const char *detect_vdev(void)
 {
     static char buf[64];
     glob_t g;
+
     /* 1. Primary: Direct sysfs driver link for open_gc573 */
-    if (glob("/sys/bus/pci/drivers/open_gc573/*/video4linux/video*", 0, NULL, &g) == 0 && g.gl_pathc > 0) {
-        char *base = strrchr(g.gl_pathv[0], '/');
-        if (base) {
-            snprintf(buf, sizeof(buf), "/dev/%s", base + 1);
-            globfree(&g);
-            if (access(buf, F_OK) == 0)
-                return buf;
-        }
-        globfree(&g);
-    }
-    /* 2. Secondary: Scan V4L2 device names for GC573 / Live Gamer 4K */
-    if (glob("/sys/class/video4linux/video*/name", 0, NULL, &g) == 0) {
-        for (size_t i = 0; i < g.gl_pathc; i++) {
-            FILE *f = fopen(g.gl_pathv[i], "r");
-            if (f) {
-                char name[128];
-                if (fgets(name, sizeof(name), f)) {
-                    if (strstr(name, "Live Gamer 4K") || strstr(name, "GC573") || strstr(name, "open_gc573")) {
-                        fclose(f);
-                        char *vnode = strstr(g.gl_pathv[i], "video");
-                        if (vnode) {
-                            char *slash = strchr(vnode, '/');
-                            if (slash) *slash = '\0';
-                            snprintf(buf, sizeof(buf), "/dev/%s", vnode);
-                            globfree(&g);
-                            if (access(buf, F_OK) == 0)
-                                return buf;
-                        }
-                        break;
-                    }
+    if (glob("/sys/bus/pci/drivers/open_gc573/*/video4linux/video*", 0, NULL, &g) == 0) {
+        if (g.gl_pathc > 0) {
+            char *base = strrchr(g.gl_pathv[0], '/');
+            if (base) {
+                snprintf(buf, sizeof(buf), "/dev/%s", base + 1);
+                if (access(buf, R_OK | W_OK) == 0) {
+                    globfree(&g);
+                    return buf;
                 }
-                fclose(f);
             }
         }
         globfree(&g);
+    }
+
+    /* 2. Registry-aware scan of /sys/class/video4linux/video<N>/name.
+     * Registry matches win over the generic fallback substrings, and a
+     * full friendly-name match wins over a model-slug match. */
+    if (glob("/sys/class/video4linux/video*/name", 0, NULL, &g) != 0)
+        return NULL;
+
+    size_t reg_count = 0;
+    const struct everlive_device_desc *registry = everlive_get_card_registry(&reg_count);
+    char best[64] = "";
+    int best_score = 0;
+
+    for (size_t i = 0; i < g.gl_pathc; i++) {
+        char name[128];
+        char dev[64];
+        int score = 0;
+
+        if (!read_v4l2_node_name(g.gl_pathv[i], name, sizeof(name)))
+            continue;
+        if (!vdev_node_from_sysfs_name(g.gl_pathv[i], dev, sizeof(dev)))
+            continue;
+
+        for (size_t j = 0; j < reg_count; j++) {
+            int s = vdev_name_registry_score(name, &registry[j]);
+            if (s > score)
+                score = s;
+            if (score >= 3)
+                break;
+        }
+        if (score == 0 && vdev_name_is_known_fallback(name))
+            score = 1;
+        if (score > best_score) {
+            best_score = score;
+            snprintf(best, sizeof(best), "%s", dev);
+            if (score >= 3)
+                break;
+        }
+    }
+    globfree(&g);
+
+    if (best_score > 0) {
+        snprintf(buf, sizeof(buf), "%s", best);
+        return buf;
     }
     return NULL;
 }
@@ -134,12 +249,12 @@ struct v4l2_mmap_buffer {
     size_t length;
 };
 
-static volatile sig_atomic_t g_running = 1;
+static _Atomic bool g_running = true;
 static bool g_fullscreen = false;
-static bool g_muted = false;
-static float g_volume = 1.0f;
-static volatile sig_atomic_t g_audio_dirty = 1;
-static bool g_show_stats = true;
+static _Atomic bool g_muted = false;
+static _Atomic float g_volume = 1.0f;
+static _Atomic int g_audio_dirty = 1;
+static _Atomic bool g_show_stats = true;
 static bool g_hud_visible = true;
 static bool g_streamer_mode = false;
 static uint32_t g_last_mouse_time = 0;
@@ -153,7 +268,7 @@ static float g_hdr_exposure = 50.0f; // Scale factor for HDR tone mapping
 
 static pid_t g_audio_pid = 0;   /* loopback, or arecord in the ALSA fallback */
 static pid_t g_audio_pid2 = 0;  /* pw-play in the ALSA fallback */
-static volatile sig_atomic_t g_audio_resync_needed = 0;
+static _Atomic int g_audio_resync_needed = 0;
 
 /* Validated --pw-node override (node name or numeric object id). */
 static char g_pw_override_name[AUDIO_NODE_NAME_MAX];
@@ -163,21 +278,22 @@ static bool g_pw_override_is_id = false;
 static void sig_handler(int sig)
 {
     (void)sig;
-    g_running = 0;
+    atomic_store_explicit(&g_running, false, memory_order_relaxed);
 }
 
-static volatile sig_atomic_t g_need_geom_check = 30;
+static _Atomic int g_need_geom_check = 30;
 
 static void sigwinch_handler(int sig)
 {
     (void)sig;
-    g_need_geom_check = 30;
+    atomic_store_explicit(&g_need_geom_check, 30, memory_order_relaxed);
 }
 
 static void sigusr1_handler(int sig)
 {
     (void)sig;
-    g_show_stats = !g_show_stats;
+    bool current = atomic_load_explicit(&g_show_stats, memory_order_relaxed);
+    atomic_store_explicit(&g_show_stats, !current, memory_order_relaxed);
 }
 
 #define AUDIO_CMD_TIMEOUT_MS 2000
@@ -781,23 +897,22 @@ static void *audio_supervisor_thread(void *arg)
         stream_node_id = graph.stream.id;
 
     start_audio_pipeline(adev, target_node);
-    g_audio_dirty = 1;
+    RELEASE_STORE(g_audio_dirty, 1);
     next_stream_probe = audio_now_ms() + stream_backoff;
 
-    while (g_running) {
+    while (RELAXED_LOAD(g_running)) {
         /* Explicit re-sync request (resolution change, stall recovery, hotkey) */
-        if (g_audio_resync_needed) {
-            g_audio_resync_needed = 0;
+        if (ACQ_REL_EXCHANGE(g_audio_resync_needed, 0)) {
             printf("[Audio] Re-syncing audio stream...\n");
             stop_audio_pipeline();
             usleep(100000);
             stream_node_id = 0;
             next_stream_probe = 0;
             stream_backoff = AUDIO_BACKOFF_MIN_MS;
-            if (g_running) {
+            if (RELAXED_LOAD(g_running)) {
                 last_start_time = time(NULL);
                 start_audio_pipeline(adev, target_node);
-                g_audio_dirty = 1;
+                RELEASE_STORE(g_audio_dirty, 1);
             }
         }
 
@@ -835,13 +950,13 @@ static void *audio_supervisor_thread(void *arg)
                     backoff_sec = 10;
                 else if (fail_count > 2)
                     backoff_sec = 4;
-                for (int s = 0; s < backoff_sec && g_running; s++)
+                for (int s = 0; s < backoff_sec && RELAXED_LOAD(g_running); s++)
                     sleep(1);
 
-                if (g_running) {
+                if (RELAXED_LOAD(g_running)) {
                     last_start_time = time(NULL);
                     start_audio_pipeline(adev, target_node);
-                    g_audio_dirty = 1;
+                    RELEASE_STORE(g_audio_dirty, 1);
                 }
             }
         }
@@ -854,7 +969,7 @@ static void *audio_supervisor_thread(void *arg)
                        stream_node_id);
                 stream_node_id = 0;
                 next_stream_probe = 0;
-                g_audio_resync_needed = 1;
+                RELEASE_STORE(g_audio_resync_needed, 1);
             }
         }
 
@@ -870,7 +985,7 @@ static void *audio_supervisor_thread(void *arg)
                     stream_node_id = refresh.stream.id;
                     printf("[Audio] PipeWire Audio-Stream aktiv (Node ID: %u)\n",
                            stream_node_id);
-                    g_audio_dirty = 1;
+                    RELEASE_STORE(g_audio_dirty, 1);
                     stream_backoff = AUDIO_BACKOFF_MIN_MS;
                 }
             }
@@ -884,12 +999,16 @@ static void *audio_supervisor_thread(void *arg)
         }
 
         /* Apply volume or mute updates. */
-        if ((stream_node_id > 0 || source_node_id > 0) &&
-            (g_audio_dirty || g_volume != last_vol || g_muted != last_muted)) {
-            g_audio_dirty = 0;
-            last_vol = g_volume;
-            last_muted = g_muted;
-            audio_apply_volume(source_node_id, stream_node_id, g_volume, g_muted);
+        if (stream_node_id > 0 || source_node_id > 0) {
+            bool dirty = ACQ_REL_EXCHANGE(g_audio_dirty, 0) != 0;
+            float volume = RELAXED_LOAD(g_volume);
+            bool muted = RELAXED_LOAD(g_muted);
+
+            if (dirty || volume != last_vol || muted != last_muted) {
+                last_vol = volume;
+                last_muted = muted;
+                audio_apply_volume(source_node_id, stream_node_id, volume, muted);
+            }
         }
 
         usleep(25000);
@@ -1227,7 +1346,8 @@ static void stream_stop(struct stream_ctx *ctx)
     cleanup_gl_pipeline(ctx);
     if (ctx->active) {
         enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        ioctl(ctx->fd, VIDIOC_STREAMOFF, &type);
+        if (ctx->fd >= 0)
+            ioctl(ctx->fd, VIDIOC_STREAMOFF, &type);
         ctx->active = false;
     }
     for (unsigned int i = 0; i < ctx->buffer_count; i++) {
@@ -1241,7 +1361,8 @@ static void stream_stop(struct stream_ctx *ctx)
         req.count = 0;
         req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         req.memory = V4L2_MEMORY_MMAP;
-        ioctl(ctx->fd, VIDIOC_REQBUFS, &req);
+        if (ctx->fd >= 0)
+            ioctl(ctx->fd, VIDIOC_REQBUFS, &req);
         ctx->buffer_count = 0;
     }
     if (ctx->texture) {
@@ -1266,6 +1387,19 @@ static const char *get_chroma_desc(uint32_t fourcc)
     default:
         return "YUV 4:2:2";
     }
+}
+
+/* Tears down the stream and closes the device so the standby path can reopen
+ * it (unplug/replug, fatal poll or ioctl errors). */
+static void stream_reset_device(struct stream_ctx *ctx, struct pollfd *pfd)
+{
+    stream_stop(ctx);
+    if (ctx->fd >= 0) {
+        close(ctx->fd);
+        ctx->fd = -1;
+    }
+    if (pfd)
+        pfd->fd = -1;
 }
 
 static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
@@ -1332,6 +1466,16 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
     if (ioctl(ctx->fd, VIDIOC_REQBUFS, &req) < 0 || req.count == 0) {
         return false;
     }
+    if (req.count > BUFFER_COUNT) {
+        /* The driver must never hand out more buffers than we can track. */
+        struct v4l2_requestbuffers reset = {};
+        reset.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        reset.memory = V4L2_MEMORY_MMAP;
+        ioctl(ctx->fd, VIDIOC_REQBUFS, &reset);
+        fprintf(stderr, "[Error] Driver returned %u buffers (max %d)\n",
+                req.count, BUFFER_COUNT);
+        return false;
+    }
     ctx->buffer_count = req.count;
 
     for (unsigned int i = 0; i < req.count; i++) {
@@ -1361,6 +1505,10 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
         return false;
     }
 
+    /* Mark active as soon as DMA starts so every later failure unwinds the
+     * stream (STREAMOFF + REQBUFS(0)), not just the mapped buffers. */
+    ctx->active = true;
+
     ctx->texture = SDL_CreateTexture(
         renderer,
         ctx->sdl_format,
@@ -1368,11 +1516,23 @@ static bool stream_start(struct stream_ctx *ctx, SDL_Renderer *renderer)
         (int)ctx->width, (int)ctx->height
     );
     if (!ctx->texture) {
+        fprintf(stderr, "[Error] SDL_CreateTexture failed: %s\n", SDL_GetError());
         stream_stop(ctx);
         return false;
     }
 
-    init_gl_pipeline(ctx);
+    if (!init_gl_pipeline(ctx)) {
+        SDL_RendererInfo rinfo;
+        bool gl_renderer = SDL_GetRendererInfo(renderer, &rinfo) == 0 &&
+                           rinfo.name && strstr(rinfo.name, "opengl");
+
+        if (gl_renderer) {
+            fprintf(stderr, "[Error] OpenGL upload pipeline initialization failed\n");
+            stream_stop(ctx);
+            return false;
+        }
+        fprintf(stderr, "[*] OpenGL pipeline unavailable, falling back to SDL texture uploads\n");
+    }
 
     /* Drain any stale buffers from V4L2 queue for minimal latency */
     struct v4l2_buffer drain_buf = {};
@@ -1420,7 +1580,7 @@ int main(int argc, char *argv[])
         else if ((!strcmp(argv[i], "-v") || !strcmp(argv[i], "--volume")) && i + 1 < argc) {
             float v = strtof(argv[++i], NULL);
             if (v >= 0.0f && v <= 1.5f) {
-                g_volume = v;
+                RELAXED_STORE(g_volume, v);
             }
         }
         else if (!strcmp(argv[i], "--pw-node") && i + 1 < argc) {
@@ -1471,6 +1631,8 @@ int main(int argc, char *argv[])
         }
     }
 
+    bool vdev_pinned = (vdev != NULL);
+
     /* Mesa / AMD Radeon GPU optimization */
     if (enable_vsync) {
         setenv("vblank_mode", "1", 1);
@@ -1482,7 +1644,7 @@ int main(int argc, char *argv[])
     if (g_embed_wid > 0) {
         setenv("SDL_VIDEODRIVER", "x11", 1);
         g_hud_visible = false;
-        g_show_stats = true; /* Keep stats HUD visible so user sees real-time FPS/Lag/Jitter */
+        RELAXED_STORE(g_show_stats, true); /* Keep stats HUD visible so user sees real-time FPS/Lag/Jitter */
     }
 
     if (!vdev)
@@ -1706,9 +1868,9 @@ int main(int argc, char *argv[])
     /* Subscribe to driver resolution change events for seamless auto-switching */
     struct v4l2_event_subscription sub = {};
     sub.type = V4L2_EVENT_SOURCE_CHANGE;
-    ioctl(fd, VIDIOC_SUBSCRIBE_EVENT, &sub);
+    ioctl(ctx.fd, VIDIOC_SUBSCRIBE_EVENT, &sub);
 
-    struct pollfd pfd = { .fd = fd, .events = POLLIN | POLLPRI };
+    struct pollfd pfd = { .fd = ctx.fd, .events = POLLIN | POLLPRI };
     uint64_t frame_count = 0;
     uint32_t last_title_time = SDL_GetTicks();
     uint32_t last_retry_time = SDL_GetTicks();
@@ -1730,10 +1892,10 @@ int main(int argc, char *argv[])
     bool dragging_volume = false;
     int cur_w = 0, cur_h = 0;
 
-    while (g_running) {
+    while (RELAXED_LOAD(g_running)) {
         uint32_t now_ticks = SDL_GetTicks();
-        if (g_need_geom_check > 0) {
-            g_need_geom_check--;
+        if (RELAXED_LOAD(g_need_geom_check) > 0) {
+            atomic_fetch_sub_explicit(&g_need_geom_check, 1, memory_order_relaxed);
             if (g_embed_wid > 0) {
                 Display *x_dpy = XOpenDisplay(NULL);
                 if (x_dpy) {
@@ -1770,7 +1932,7 @@ int main(int argc, char *argv[])
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) {
-                g_running = 0;
+                RELAXED_STORE(g_running, false);
             } else if (ev.type == SDL_MOUSEMOTION) {
                 g_last_mouse_time = SDL_GetTicks();
                 if (!g_streamer_mode) {
@@ -1784,9 +1946,9 @@ int main(int argc, char *argv[])
                     float ratio = (float)(mx - slider_rect.x) / (float)slider_rect.w;
                     if (ratio < 0.0f) ratio = 0.0f;
                     if (ratio > 1.0f) ratio = 1.0f;
-                    g_volume = ratio * 1.5f;
-                    g_muted = false;
-                    g_audio_dirty = 1;
+                    RELAXED_STORE(g_volume, ratio * 1.5f);
+                    RELAXED_STORE(g_muted, false);
+                    RELEASE_STORE(g_audio_dirty, 1);
                     g_volume_toast_time = SDL_GetTicks();
                 }
             } else if (ev.type == SDL_MOUSEBUTTONDOWN) {
@@ -1805,22 +1967,22 @@ int main(int argc, char *argv[])
                         int bx = ev.button.x;
                         /* Mute toggle button (hud_x + 10 .. + 55) */
                         if (bx >= hud_x + 10 && bx <= hud_x + 58) {
-                            g_muted = !g_muted;
-                            g_audio_dirty = 1;
+                            RELAXED_STORE(g_muted, !RELAXED_LOAD(g_muted));
+                            RELEASE_STORE(g_audio_dirty, 1);
                             g_volume_toast_time = SDL_GetTicks();
                         }
                         /* Volume slider (hud_x + 64 .. + 194) */
                         else if (bx >= slider_rect.x && bx <= slider_rect.x + slider_rect.w) {
                             dragging_volume = true;
                             float ratio = (float)(bx - slider_rect.x) / (float)slider_rect.w;
-                            g_volume = ratio * 1.5f;
-                            g_muted = false;
-                            g_audio_dirty = 1;
+                            RELAXED_STORE(g_volume, ratio * 1.5f);
+                            RELAXED_STORE(g_muted, false);
+                            RELEASE_STORE(g_audio_dirty, 1);
                             g_volume_toast_time = SDL_GetTicks();
                         }
                         /* Stats toggle button (hud_x + 475 .. + 530) */
                         else if (bx >= hud_x + 475 && bx <= hud_x + 530) {
-                            g_show_stats = !g_show_stats;
+                            RELAXED_STORE(g_show_stats, !RELAXED_LOAD(g_show_stats));
                         }
                         /* Fullscreen toggle button (hud_x + 535 .. + 590) */
                         else if (bx >= hud_x + 535 && bx <= hud_x + 590) {
@@ -1831,7 +1993,7 @@ int main(int argc, char *argv[])
                         /* Exit button (hud_x + 595 .. + 645) - only active in standalone window */
                         else if (bx >= hud_x + 595 && bx <= hud_x + 645) {
                             if (g_embed_wid == 0) {
-                                g_running = 0;
+                                RELAXED_STORE(g_running, false);
                             }
                         }
                     }
@@ -1847,12 +2009,14 @@ int main(int argc, char *argv[])
                 }
 
                 if (ev.wheel.y > 0) {
-                    g_volume = (g_volume < 1.45f) ? g_volume + 0.05f : 1.5f;
-                    g_muted = false;
+                    float volume = RELAXED_LOAD(g_volume);
+                    RELAXED_STORE(g_volume, (volume < 1.45f) ? volume + 0.05f : 1.5f);
+                    RELAXED_STORE(g_muted, false);
                 } else if (ev.wheel.y < 0) {
-                    g_volume = (g_volume > 0.05f) ? g_volume - 0.05f : 0.0f;
+                    float volume = RELAXED_LOAD(g_volume);
+                    RELAXED_STORE(g_volume, (volume > 0.05f) ? volume - 0.05f : 0.0f);
                 }
-                g_audio_dirty = 1;
+                RELEASE_STORE(g_audio_dirty, 1);
                 if (!g_streamer_mode) {
                     g_volume_toast_time = SDL_GetTicks();
                 }
@@ -1863,7 +2027,7 @@ int main(int argc, char *argv[])
                 }
 
                 if ((ev.key.keysym.sym == SDLK_ESCAPE || ev.key.keysym.sym == SDLK_q) && g_embed_wid == 0) {
-                    g_running = 0;
+                    RELAXED_STORE(g_running, false);
                 } else if ((ev.key.keysym.sym == SDLK_f || ev.key.keysym.sym == SDLK_F11) && g_embed_wid == 0) {
                     update_fullscreen(window, !g_fullscreen);
                 } else if (ev.key.keysym.sym == SDLK_s || ev.key.keysym.sym == SDLK_F10) {
@@ -1877,20 +2041,22 @@ int main(int argc, char *argv[])
                         printf("[*] Streamer Mode DEAKTIVIERT: Normaler OSD-Modus aktiv\n");
                     }
                 } else if (ev.key.keysym.sym == SDLK_m) {
-                    g_muted = !g_muted;
-                    g_audio_dirty = 1;
+                    RELAXED_STORE(g_muted, !RELAXED_LOAD(g_muted));
+                    RELEASE_STORE(g_audio_dirty, 1);
                     if (!g_streamer_mode) g_volume_toast_time = SDL_GetTicks();
                 } else if (ev.key.keysym.sym == SDLK_0 || ev.key.keysym.sym == SDLK_UP || ev.key.keysym.sym == SDLK_PLUS) {
-                    g_volume = (g_volume < 1.45f) ? g_volume + 0.05f : 1.5f;
-                    g_muted = false;
-                    g_audio_dirty = 1;
+                    float volume = RELAXED_LOAD(g_volume);
+                    RELAXED_STORE(g_volume, (volume < 1.45f) ? volume + 0.05f : 1.5f);
+                    RELAXED_STORE(g_muted, false);
+                    RELEASE_STORE(g_audio_dirty, 1);
                     if (!g_streamer_mode) g_volume_toast_time = SDL_GetTicks();
                 } else if (ev.key.keysym.sym == SDLK_9 || ev.key.keysym.sym == SDLK_DOWN || ev.key.keysym.sym == SDLK_MINUS) {
-                    g_volume = (g_volume > 0.05f) ? g_volume - 0.05f : 0.0f;
-                    g_audio_dirty = 1;
+                    float volume = RELAXED_LOAD(g_volume);
+                    RELAXED_STORE(g_volume, (volume > 0.05f) ? volume - 0.05f : 0.0f);
+                    RELEASE_STORE(g_audio_dirty, 1);
                     if (!g_streamer_mode) g_volume_toast_time = SDL_GetTicks();
                 } else if (ev.key.keysym.sym == SDLK_TAB || ev.key.keysym.sym == SDLK_i) {
-                    g_show_stats = !g_show_stats;
+                    RELAXED_STORE(g_show_stats, !RELAXED_LOAD(g_show_stats));
                 } else if (ev.key.keysym.sym == SDLK_h) {
                     g_hdr_mode = (g_hdr_mode + 1) % 3;
                     if (g_hdr_mode == 0)
@@ -1925,7 +2091,7 @@ int main(int argc, char *argv[])
                         globfree(&hg);
                     }
                     stream_stop(&ctx);
-                    g_audio_resync_needed = 1;
+                    RELEASE_STORE(g_audio_resync_needed, 1);
                     snprintf(g_toast_custom, sizeof(g_toast_custom), "HDMI RE-SYNC");
                     g_toast_time = SDL_GetTicks();
                     last_retry_time = SDL_GetTicks() - 100;
@@ -1935,7 +2101,7 @@ int main(int argc, char *argv[])
                     ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
                     ev.window.event == SDL_WINDOWEVENT_EXPOSED ||
                     ev.window.event == SDL_WINDOWEVENT_MOVED) {
-                    g_need_geom_check = 30;
+                    RELAXED_STORE(g_need_geom_check, 30);
                 }
             }
         }
@@ -1944,7 +2110,28 @@ int main(int argc, char *argv[])
         if (!ctx.active) {
             if (now_ticks - last_retry_time >= 300) {
                 last_retry_time = now_ticks;
-                if (stream_start(&ctx, renderer)) {
+
+                /* The device vanished (unplug): retry open before streaming. */
+                if (ctx.fd < 0) {
+                    if (!vdev_pinned) {
+                        const char *detected = detect_vdev();
+                        if (detected)
+                            vdev = detected;
+                    }
+                    if (vdev) {
+                        int new_fd = open(vdev, O_RDWR | O_NONBLOCK);
+                        if (new_fd >= 0) {
+                            ctx.fd = new_fd;
+                            ioctl(ctx.fd, VIDIOC_SUBSCRIBE_EVENT, &sub);
+                            pfd.fd = ctx.fd;
+                            pfd.events = POLLIN | POLLPRI;
+                            pfd.revents = 0;
+                            printf("[*] Reopened V4L2 device %s\n", vdev);
+                        }
+                    }
+                }
+
+                if (ctx.fd >= 0 && stream_start(&ctx, renderer)) {
                     printf("[+] HDMI signal detected and locked: %ux%u%c!\n", ctx.width, ctx.height, ctx.interlaced ? 'i' : 'p');
                     snprintf(g_toast_custom, sizeof(g_toast_custom), "SIGNAL LOCKED");
                     g_toast_time = SDL_GetTicks();
@@ -1991,15 +2178,17 @@ int main(int argc, char *argv[])
                     SDL_RenderDrawRect(renderer, &hud_bg);
 
                     SDL_Rect btn_vol = { hud_x + 10, hud_y + 10, 48, 24 };
-                    SDL_SetRenderDrawColor(renderer, g_muted ? 180 : 35, g_muted ? 40 : 45, g_muted ? 40 : 60, 200);
+                    bool muted = RELAXED_LOAD(g_muted);
+                    float volume = RELAXED_LOAD(g_volume);
+                    SDL_SetRenderDrawColor(renderer, muted ? 180 : 35, muted ? 40 : 45, muted ? 40 : 60, 200);
                     SDL_RenderFillRect(renderer, &btn_vol);
-                    draw_string(renderer, g_muted ? "MUTE" : "VOL", hud_x + 14, hud_y + 14, 1, (SDL_Color){255, 255, 255, 255});
+                    draw_string(renderer, muted ? "MUTE" : "VOL", hud_x + 14, hud_y + 14, 1, (SDL_Color){255, 255, 255, 255});
 
                     SDL_SetRenderDrawColor(renderer, 35, 42, 56, 255);
                     SDL_RenderFillRect(renderer, &slider_rect);
-                    int filled_w = (int)(slider_rect.w * (g_volume / 1.5f));
+                    int filled_w = (int)(slider_rect.w * (volume / 1.5f));
                     if (filled_w > slider_rect.w) filled_w = slider_rect.w;
-                    if (filled_w > 0 && !g_muted) {
+                    if (filled_w > 0 && !muted) {
                         SDL_Rect fill_rect = { slider_rect.x, slider_rect.y, filled_w, slider_rect.h };
                         SDL_SetRenderDrawColor(renderer, 56, 139, 253, 255);
                         SDL_RenderFillRect(renderer, &fill_rect);
@@ -2012,8 +2201,8 @@ int main(int argc, char *argv[])
                     SDL_RenderFillRect(renderer, &handle_rect);
 
                     char vol_txt[16];
-                    if (g_muted) snprintf(vol_txt, sizeof(vol_txt), "OFF");
-                    else snprintf(vol_txt, sizeof(vol_txt), "%3d%%", (int)(g_volume * 100.0f));
+                    if (muted) snprintf(vol_txt, sizeof(vol_txt), "OFF");
+                    else snprintf(vol_txt, sizeof(vol_txt), "%3d%%", (int)(volume * 100.0f));
                     draw_string(renderer, vol_txt, hud_x + 202, hud_y + 18, 1, (SDL_Color){200, 215, 235, 255});
 
                     draw_string(renderer, "STANDBY", hud_x + 260, hud_y + 18, 1, (SDL_Color){210, 153, 34, 255});
@@ -2040,7 +2229,7 @@ int main(int argc, char *argv[])
                     if (g_embed_wid == 0) {
                         char title[180];
                         snprintf(title, sizeof(title), "EverLive - Waiting for HDMI signal... | Vol: %d%%",
-                                 g_muted ? 0 : (int)(g_volume * 100.0f));
+                                 RELAXED_LOAD(g_muted) ? 0 : (int)(RELAXED_LOAD(g_volume) * 100.0f));
                         SDL_SetWindowTitle(window, title);
                     }
                 }
@@ -2053,18 +2242,35 @@ int main(int argc, char *argv[])
 
         struct timespec t_poll_start, t_poll_end, t_dq_end, t_up_end, t_draw_end, t_pres_end;
         clock_gettime(CLOCK_MONOTONIC, &t_poll_start);
+        pfd.revents = 0;
         int poll_ret = poll(&pfd, 1, 50);
         clock_gettime(CLOCK_MONOTONIC, &t_poll_end);
         uint32_t now_ticks_poll = SDL_GetTicks();
         uint32_t elapsed_since_frame = (now_ticks_poll >= last_frame_ticks) ? (now_ticks_poll - last_frame_ticks) : 0;
 
+        if (poll_ret < 0) {
+            if (errno == EINTR)
+                continue;
+            printf("[*] poll() failed (%s), resetting capture device...\n", strerror(errno));
+            stream_reset_device(&ctx, &pfd);
+            continue;
+        }
+
+        if (poll_ret > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            printf("[*] HDMI device disconnected (poll revents 0x%x), switching to standby...\n",
+                   pfd.revents);
+            stream_reset_device(&ctx, &pfd);
+            continue;
+        }
+
+        bool stream_reconfiguring = false;
         if (poll_ret > 0 && (pfd.revents & POLLPRI)) {
             struct v4l2_event ev = {};
-            while (ioctl(fd, VIDIOC_DQEVENT, &ev) == 0) {
+            while (ioctl(ctx.fd, VIDIOC_DQEVENT, &ev) == 0) {
                 if (ev.type == V4L2_EVENT_SOURCE_CHANGE) {
                     struct v4l2_format chk_fmt = {};
                     chk_fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                    if (ioctl(fd, VIDIOC_G_FMT, &chk_fmt) == 0) {
+                    if (ioctl(ctx.fd, VIDIOC_G_FMT, &chk_fmt) == 0) {
                         /* Check if resolution or pixelformat genuinely changed */
                         if (chk_fmt.fmt.pix.width != ctx.width ||
                             chk_fmt.fmt.pix.height != ctx.height ||
@@ -2072,7 +2278,8 @@ int main(int argc, char *argv[])
                             printf("[*] Hardware resolution change: %ux%u -> %ux%u. Re-synchronizing stream...\n",
                                    ctx.width, ctx.height, chk_fmt.fmt.pix.width, chk_fmt.fmt.pix.height);
                             stream_stop(&ctx);
-                            g_audio_resync_needed = 1;
+                            RELEASE_STORE(g_audio_resync_needed, 1);
+                            stream_reconfiguring = true;
                         } else {
                             /* Format/resolution unchanged: dynamically update HDR/color properties without dropping any frames! */
                             ctx.bytesperline = chk_fmt.fmt.pix.bytesperline;
@@ -2080,20 +2287,23 @@ int main(int argc, char *argv[])
                             ctx.is_hdr = (chk_fmt.fmt.pix.colorspace == V4L2_COLORSPACE_BT2020) ||
                                          (chk_fmt.fmt.pix.xfer_func == V4L2_XFER_FUNC_SMPTE2084);
                             ctx.is_hlg = (chk_fmt.fmt.pix.xfer_func == 10);
-                            g_audio_resync_needed = 1;
+                            RELEASE_STORE(g_audio_resync_needed, 1);
                         }
                     }
                 }
             }
         }
 
-        if (poll_ret <= 0) {
+        /* A resolution/format change tears the stream down; wait for the
+         * standby reconnect path instead of issuing a DQBUF on stopped DMA. */
+        if (stream_reconfiguring)
+            continue;
+
+        /* Only dequeue when the driver actually signalled readable data. */
+        if (poll_ret == 0 || !(pfd.revents & POLLIN)) {
             if (ctx.active && elapsed_since_frame > 2500) {
                 printf("[*] HDMI Frame-Stall detected (%u ms without frame), switching to standby...\n",
                        elapsed_since_frame);
-                stream_stop(&ctx);
-            } else if (poll_ret > 0 && (pfd.revents & (POLLERR | POLLHUP))) {
-                printf("[*] HDMI signal disconnected, switching to standby...\n");
                 stream_stop(&ctx);
             }
             continue;
@@ -2102,7 +2312,7 @@ int main(int argc, char *argv[])
         struct v4l2_buffer buf = {};
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
-        if (ioctl(fd, VIDIOC_DQBUF, &buf) < 0) {
+        if (ioctl(ctx.fd, VIDIOC_DQBUF, &buf) < 0) {
             if (errno == EAGAIN || errno == EINTR) {
                 if (ctx.active && elapsed_since_frame > 2500) {
                     printf("[*] HDMI Frame-Stall (EAGAIN/EINTR > 2500 ms), switching to standby...\n");
@@ -2110,11 +2320,18 @@ int main(int argc, char *argv[])
                 }
                 continue;
             }
-            printf("[*] Video buffer invalid (%s), switching to standby...\n", strerror(errno));
-            stream_stop(&ctx);
+            printf("[*] Video buffer invalid (%s), resetting capture device...\n", strerror(errno));
+            stream_reset_device(&ctx, &pfd);
             continue;
         }
         clock_gettime(CLOCK_MONOTONIC, &t_dq_end);
+
+        if (buf.index >= ctx.buffer_count || !ctx.buffers[buf.index].start) {
+            printf("[*] Invalid capture buffer index %u (count %u), switching to standby...\n",
+                   buf.index, ctx.buffer_count);
+            stream_stop(&ctx);
+            continue;
+        }
 
         last_frame_ticks = now_ticks_poll;
 
@@ -2136,8 +2353,14 @@ int main(int argc, char *argv[])
             struct v4l2_buffer next_buf = {};
             next_buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             next_buf.memory = V4L2_MEMORY_MMAP;
-            if (ioctl(fd, VIDIOC_DQBUF, &next_buf) == 0) {
-                ioctl(fd, VIDIOC_QBUF, &buf);
+            if (ioctl(ctx.fd, VIDIOC_DQBUF, &next_buf) == 0) {
+                if (next_buf.index >= ctx.buffer_count || !ctx.buffers[next_buf.index].start) {
+                    printf("[*] Invalid catch-up buffer index %u (count %u), switching to standby...\n",
+                           next_buf.index, ctx.buffer_count);
+                    stream_stop(&ctx);
+                    continue;
+                }
+                ioctl(ctx.fd, VIDIOC_QBUF, &buf);
                 buf = next_buf;
                 buf_time_us = (uint64_t)buf.timestamp.tv_sec * 1000000ULL + buf.timestamp.tv_usec;
                 lat_us = (int64_t)(now_us - buf_time_us);
@@ -2147,7 +2370,13 @@ int main(int argc, char *argv[])
         lat_ms = (double)lat_us / 1000.0;
 
         /* Direct GPU texture upload from DMA buffer (< 0.4 ms) */
+        bool upload_ok = true;
+        GLenum gl_upload_error = GL_NO_ERROR;
         if (ctx.gl_ready) {
+            /* Drop any stale error from earlier drawing before validating upload. */
+            (void)glGetError();
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+
             if (ctx.pixelformat == V4L2_PIX_FMT_YUYV) {
                 glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_y);
                 glPixelStorei(GL_UNPACK_ROW_LENGTH, (int)(ctx.bytesperline / 4));
@@ -2167,10 +2396,12 @@ int main(int argc, char *argv[])
                 glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
             } else if (ctx.pixelformat == V4L2_PIX_FMT_BGR24) {
                 glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_y);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
                 glPixelStorei(GL_UNPACK_ROW_LENGTH, (int)(ctx.bytesperline / 3));
                 glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (int)ctx.width, (int)ctx.height,
                                 GL_BGR, GL_UNSIGNED_BYTE, ctx.buffers[buf.index].start);
                 glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
             } else if (ctx.pixelformat == V4L2_PIX_FMT_RGB32) {
                 glBindTexture(GL_TEXTURE_2D, ctx.gl_tex_y);
                 glPixelStorei(GL_UNPACK_ROW_LENGTH, (int)(ctx.bytesperline / 4));
@@ -2178,19 +2409,42 @@ int main(int argc, char *argv[])
                                 GL_BGRA, GL_UNSIGNED_BYTE, ctx.buffers[buf.index].start);
                 glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
             }
+
+            gl_upload_error = glGetError();
+            if (gl_upload_error != GL_NO_ERROR)
+                upload_ok = false;
         } else {
             if (ctx.sdl_format == SDL_PIXELFORMAT_NV12) {
                 const Uint8 *pixels = (const Uint8 *)ctx.buffers[buf.index].start;
-                SDL_UpdateNVTexture(ctx.texture, NULL,
-                                    pixels, (int)ctx.bytesperline,
-                                    pixels + (size_t)ctx.bytesperline * ctx.height, (int)ctx.bytesperline);
+                if (SDL_UpdateNVTexture(ctx.texture, NULL,
+                                        pixels, (int)ctx.bytesperline,
+                                        pixels + (size_t)ctx.bytesperline * ctx.height,
+                                        (int)ctx.bytesperline) < 0)
+                    upload_ok = false;
             } else {
-                SDL_UpdateTexture(ctx.texture, NULL, ctx.buffers[buf.index].start, (int)ctx.bytesperline);
+                if (SDL_UpdateTexture(ctx.texture, NULL, ctx.buffers[buf.index].start,
+                                      (int)ctx.bytesperline) < 0)
+                    upload_ok = false;
             }
         }
 
+        if (!upload_ok) {
+            if (ctx.gl_ready)
+                fprintf(stderr, "[*] GPU texture upload failed (GL error 0x%04x), resetting stream...\n",
+                        gl_upload_error);
+            else
+                fprintf(stderr, "[*] SDL texture upload failed (%s), resetting stream...\n",
+                        SDL_GetError());
+            stream_stop(&ctx);
+            continue;
+        }
+
         /* Immediately return buffer to driver DMA queue so next frame can capture without starvation */
-        ioctl(fd, VIDIOC_QBUF, &buf);
+        if (ioctl(ctx.fd, VIDIOC_QBUF, &buf) < 0 && errno != EAGAIN) {
+            printf("[*] VIDIOC_QBUF failed (%s), resetting capture device...\n", strerror(errno));
+            stream_reset_device(&ctx, &pfd);
+            continue;
+        }
         clock_gettime(CLOCK_MONOTONIC, &t_up_end);
 
         /* Aspect-ratio preserving letterboxed scaling */
@@ -2333,6 +2587,10 @@ int main(int argc, char *argv[])
 
         /* 1. Draw On-Screen Display HUD if active */
         if (g_hud_visible && !g_streamer_mode) {
+            bool hud_muted = RELAXED_LOAD(g_muted);
+            float hud_volume = RELAXED_LOAD(g_volume);
+            bool hud_stats = RELAXED_LOAD(g_show_stats);
+
             SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
             /* Main HUD Panel Bar */
@@ -2344,18 +2602,18 @@ int main(int argc, char *argv[])
 
             /* Mute / Vol Button */
             SDL_Rect btn_vol = { hud_x + 10, hud_y + 10, 48, 24 };
-            SDL_SetRenderDrawColor(renderer, g_muted ? 180 : 35, g_muted ? 40 : 45, g_muted ? 40 : 60, 200);
+            SDL_SetRenderDrawColor(renderer, hud_muted ? 180 : 35, hud_muted ? 40 : 45, hud_muted ? 40 : 60, 200);
             SDL_RenderFillRect(renderer, &btn_vol);
-            draw_string(renderer, g_muted ? "MUTE" : "VOL", hud_x + 14, hud_y + 14, 1, (SDL_Color){255, 255, 255, 255});
+            draw_string(renderer, hud_muted ? "MUTE" : "VOL", hud_x + 14, hud_y + 14, 1, (SDL_Color){255, 255, 255, 255});
 
             /* Volume Slider Track */
             SDL_SetRenderDrawColor(renderer, 35, 42, 56, 255);
             SDL_RenderFillRect(renderer, &slider_rect);
 
             /* Volume Filled Bar */
-            int filled_w = (int)(slider_rect.w * (g_volume / 1.5f));
+            int filled_w = (int)(slider_rect.w * (hud_volume / 1.5f));
             if (filled_w > slider_rect.w) filled_w = slider_rect.w;
-            if (filled_w > 0 && !g_muted) {
+            if (filled_w > 0 && !hud_muted) {
                 SDL_Rect fill_rect = { slider_rect.x, slider_rect.y, filled_w, slider_rect.h };
                 SDL_SetRenderDrawColor(renderer, 56, 139, 253, 255);
                 SDL_RenderFillRect(renderer, &fill_rect);
@@ -2371,10 +2629,10 @@ int main(int argc, char *argv[])
 
             /* Volume Text (Percentage) */
             char vol_txt[16];
-            if (g_muted)
+            if (hud_muted)
                 snprintf(vol_txt, sizeof(vol_txt), "OFF");
             else
-                snprintf(vol_txt, sizeof(vol_txt), "%3d%%", (int)(g_volume * 100.0f));
+                snprintf(vol_txt, sizeof(vol_txt), "%3d%%", (int)(hud_volume * 100.0f));
             draw_string(renderer, vol_txt, hud_x + 202, hud_y + 18, 1, (SDL_Color){200, 215, 235, 255});
 
             /* Signal Info Badge */
@@ -2389,7 +2647,7 @@ int main(int argc, char *argv[])
 
             /* Stats Button */
             SDL_Rect btn_stats = { hud_x + 472, hud_y + 10, 54, 24 };
-            SDL_SetRenderDrawColor(renderer, g_show_stats ? 40 : 25, g_show_stats ? 60 : 32, g_show_stats ? 80 : 45, 200);
+            SDL_SetRenderDrawColor(renderer, hud_stats ? 40 : 25, hud_stats ? 60 : 32, hud_stats ? 80 : 45, 200);
             SDL_RenderFillRect(renderer, &btn_stats);
             draw_string(renderer, "STATS", hud_x + 477, hud_y + 18, 1, (SDL_Color){220, 230, 245, 255});
 
@@ -2409,7 +2667,7 @@ int main(int argc, char *argv[])
         }
 
         /* 2. Top-Right Stats HUD Overlay (if enabled) */
-        if (g_show_stats && !g_streamer_mode) {
+        if (RELAXED_LOAD(g_show_stats) && !g_streamer_mode) {
             SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
             int box_w = 200;
             bool active_hdr_badge = active_hdr || ctx.is_hdr;
@@ -2464,10 +2722,10 @@ int main(int argc, char *argv[])
             char toast_msg[64];
             if (now_ticks - g_toast_time < 1200 && g_toast_custom[0]) {
                 snprintf(toast_msg, sizeof(toast_msg), "%s", g_toast_custom);
-            } else if (g_muted) {
+            } else if (RELAXED_LOAD(g_muted)) {
                 snprintf(toast_msg, sizeof(toast_msg), "AUDIO: MUTED");
             } else {
-                snprintf(toast_msg, sizeof(toast_msg), "VOLUME: %3d%%", (int)(g_volume * 100.0f));
+                snprintf(toast_msg, sizeof(toast_msg), "VOLUME: %3d%%", (int)(RELAXED_LOAD(g_volume) * 100.0f));
             }
 
             draw_string(renderer, toast_msg, tx + 20, ty + 16, 1, (SDL_Color){240, 246, 252, 255});
@@ -2504,7 +2762,7 @@ int main(int argc, char *argv[])
                      ctx.width, ctx.height, ctx.interlaced ? 'i' : 'p', live_fps,
                      get_chroma_desc(ctx.pixelformat),
                      ctx.is_hdr ? (ctx.is_hlg ? " HLG" : " HDR10") : "",
-                     lat_ms, g_muted ? 0 : (int)(g_volume * 100.0f),
+                     lat_ms, RELAXED_LOAD(g_muted) ? 0 : (int)(RELAXED_LOAD(g_volume) * 100.0f),
                      g_streamer_mode ? " [STREAMER MODE]" : "");
             if (g_embed_wid == 0) {
                 SDL_SetWindowTitle(window, title);
@@ -2526,7 +2784,8 @@ int main(int argc, char *argv[])
     }
 
     stream_stop(&ctx);
-    close(fd);
+    if (ctx.fd >= 0)
+        close(ctx.fd);
 
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
