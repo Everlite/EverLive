@@ -67,6 +67,9 @@ tests/test_fg_native
 tests/test_audio_probe
 tests/test_gc573_vfio
 tests/test_hws_vfio
+tests/test_gc573_edid
+tests/test_osd_utf8
+tests/test_sigpipe
 
 # libeverlive-core build outputs
 tools/libeverlive-core/*.a

@@ -114,30 +114,91 @@ static bool g_edid_programmed;
 /* --raw-edid: load custom files bit-exact instead of unifying their audio. */
 static bool g_edid_raw_custom;
 
-static int edid_validate(const u8 *edid)
+#define EDID_BLOCK_SIZE			128U
+#define EDID_CTA_OFFSET			128U
+#define EDID_CTA_DATA_OFFSET		132U
+#define EDID_CTA_CHECKSUM_OFFSET	255U
+#define EDID_CTA_AUDIO_TAG		1U
+#define EDID_CTA_EXTENDED_TAG		7U
+#define EDID_CTA_EXT_VIDEO_CAPABILITY	0x00U
+#define EDID_CTA_AUDIO_LEN		(sizeof(g_gc573_edid_audio_sads))
+#define EDID_CTA_BLOCK_LEN(len)		(1U + (len))
+#define EDID_DTD_SIZE			18U
+
+int gc573_user_edid_validate(const u8 *edid, size_t len)
 {
 	static const u8 header[8] = {
 		0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
 	};
+	unsigned int blocks;
+	unsigned int dtd_offset;
+	unsigned int data_end;
+	unsigned int offset;
 
+	if (!edid) {
+		pr_err("EDID: NULL buffer");
+		return -EINVAL;
+	}
+	if (len < GC573_EDID_SIZE || (len % EDID_BLOCK_SIZE) != 0) {
+		pr_err("EDID: invalid buffer length %zu (expected %u-byte blocks)",
+		       len, EDID_BLOCK_SIZE);
+		return -EINVAL;
+	}
+
+	blocks = (unsigned int)(len / EDID_BLOCK_SIZE);
+	if (blocks > GC573_EDID_MAX_BLOCKS) {
+		pr_err("EDID: %u blocks exceeds the %u supported",
+		       blocks, GC573_EDID_MAX_BLOCKS);
+		return -EINVAL;
+	}
+	if ((unsigned int)edid[126] + 1U != blocks) {
+		pr_err("EDID: extension count %u does not match a %zu-byte image",
+		       edid[126], len);
+		return -EINVAL;
+	}
 	if (memcmp(edid, header, sizeof(header)) != 0) {
 		pr_err("EDID: invalid base block header");
 		return -EINVAL;
 	}
-	if (edid[126] == 0 || edid[128] != 0x02) {
+	if (edid[EDID_CTA_OFFSET] != 0x02) {
 		pr_err("EDID: missing CEA-861 extension block");
 		return -EINVAL;
 	}
-	for (unsigned int block = 0; block < 2; block++) {
+
+	for (unsigned int block = 0; block < blocks; block++) {
 		u8 sum = 0;
 
-		for (unsigned int i = 0; i < 128; i++)
-			sum += edid[block * 128 + i];
+		for (unsigned int i = 0; i < EDID_BLOCK_SIZE; i++)
+			sum += edid[block * EDID_BLOCK_SIZE + i];
 		if (sum) {
 			pr_err("EDID: block %u checksum mismatch", block);
 			return -EINVAL;
 		}
 	}
+
+	/*
+	 * Walk the CTA-861 Data Block Collection so a malformed collection is
+	 * rejected here instead of being copied to the receiver.  A block whose
+	 * declared length runs past the DTD offset, or a bogus DTD offset, would
+	 * otherwise steer later parsers out of bounds.
+	 */
+	dtd_offset = edid[EDID_CTA_OFFSET + 2];
+	if (dtd_offset < 4 || dtd_offset >= EDID_BLOCK_SIZE) {
+		pr_err("EDID: CTA-861 DTD offset %u out of range", dtd_offset);
+		return -EINVAL;
+	}
+	data_end = EDID_CTA_OFFSET + dtd_offset;
+	for (offset = EDID_CTA_DATA_OFFSET; offset < data_end; ) {
+		unsigned int block_len = edid[offset] & 0x1f;
+
+		if (offset + 1U + block_len > data_end) {
+			pr_err("EDID: CTA-861 data block at %u overruns the collection",
+			       offset);
+			return -EINVAL;
+		}
+		offset += 1U + block_len;
+	}
+
 	return 0;
 }
 
@@ -159,16 +220,6 @@ static u8 g_gc573_edid_1080p240_unified[GC573_EDID_SIZE];
 static bool g_gc573_default_edid_ready;
 static bool g_gc573_edid_1440p120_ready;
 static bool g_gc573_edid_1080p240_ready;
-
-#define EDID_CTA_OFFSET			128U
-#define EDID_CTA_DATA_OFFSET		132U
-#define EDID_CTA_CHECKSUM_OFFSET	255U
-#define EDID_CTA_AUDIO_TAG		1U
-#define EDID_CTA_EXTENDED_TAG		7U
-#define EDID_CTA_EXT_VIDEO_CAPABILITY	0x00U
-#define EDID_CTA_AUDIO_LEN		(sizeof(g_gc573_edid_audio_sads))
-#define EDID_CTA_BLOCK_LEN(len)		(1U + (len))
-#define EDID_DTD_SIZE			18U
 
 /*
  * Rewrite the CTA-861 data block collection of @src into @dst with the
@@ -310,7 +361,7 @@ static int edid_build_unified_profile(const u8 *src, u8 *dst)
 		sum += dst[i];
 	dst[EDID_CTA_CHECKSUM_OFFSET] = (u8)(0x100U - (sum & 0xff));
 
-	return edid_validate(dst);
+	return gc573_user_edid_validate(dst, GC573_EDID_SIZE);
 }
 
 static int edid_load_file(const char *path)
@@ -328,6 +379,27 @@ static int edid_load_file(const char *path)
 		return -errno;
 	}
 	bytes = fread(buffer, 1, sizeof(buffer), file);
+	if (bytes == sizeof(buffer)) {
+		/*
+		 * Read one extra byte: an EDID image is exactly one or more
+		 * 128-byte blocks.  A larger file must be rejected instead of
+		 * silently truncated, and ferror() catches a short read that
+		 * happens to stop mid-block.
+		 */
+		int extra = fgetc(file);
+
+		if (extra != EOF || ferror(file)) {
+			fclose(file);
+			pr_err("EDID: '%s' is larger than %u bytes", path,
+			       GC573_EDID_SIZE);
+			return -EINVAL;
+		}
+	}
+	if (ferror(file)) {
+		fclose(file);
+		pr_err("EDID: read error on '%s'", path);
+		return -EIO;
+	}
 	fclose(file);
 	if (bytes != sizeof(buffer)) {
 		pr_err("EDID: '%s' has %zu bytes, expected %u", path, bytes,
@@ -335,7 +407,7 @@ static int edid_load_file(const char *path)
 		return -EINVAL;
 	}
 
-	ret = edid_validate(buffer);
+	ret = gc573_user_edid_validate(buffer, bytes);
 	if (ret < 0)
 		return ret;
 
