@@ -64,6 +64,9 @@ tests/test_handoff
 tests/test_ipc
 tests/test_framegen
 tests/test_fg_native
+tests/test_audio_probe
+tests/test_gc573_vfio
+tests/test_hws_vfio
 
 # libeverlive-core build outputs
 tools/libeverlive-core/*.a
