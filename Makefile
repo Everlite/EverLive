@@ -58,7 +58,7 @@ GC570D_SED := sed -e 's|/usr/local/libexec/|$(GC570D_RUNDIR)/|g' \
 
 L := $(DESTDIR)$(EVERLIVE_LIBDIR)
 
-.PHONY: all core gc573 gc570d hwsuhd cam test check asan clean \
+.PHONY: all core gc573 gc570d hwsuhd cam test check asan tsan clean \
 	install install-app install-system uninstall uninstall-app uninstall-system \
 	osd-theme
 
@@ -91,8 +91,11 @@ osd-theme:
 
 check: test
 
-asan: all
+asan:
 	+$(MAKE) -C $(TESTS_DIR) asan
+
+tsan:
+	+$(MAKE) -C $(TESTS_DIR) tsan
 
 clean:
 	+$(MAKE) -C $(CORE_DIR) clean

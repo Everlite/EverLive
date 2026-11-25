@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# ThreadSanitizer suppressions for the EverLive test suite.
+#
+# everlive_framestore is a lock-free seqlock.  The producer fills a private
+# back slot and publishes it with release semantics; readers copy the published
+# slot and then re-check the sequence number.  A producer that wraps can
+# overwrite the slot a reader is copying, so the raw frame copies intentionally
+# overlap.  everlive_framestore_read_snapshot() detects that overlap through
+# everlive_framestore_read_validate() and retries, so this is a benign race that
+# TSan cannot model.  Keep the suppression narrow to the two data-path
+# functions.
+race:everlive_framestore_publish
+race:everlive_framestore_read_snapshot

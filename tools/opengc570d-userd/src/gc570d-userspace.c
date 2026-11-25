@@ -2667,10 +2667,71 @@ static int find_gc570d_pci_bdf(char *bdf_out, size_t bdf_size)
 	return -ENODEV;
 }
 
+#define GC570D_VFIO_BAR0_MAX_SIZE	(256ULL * 1024 * 1024)
+
+static void gc570d_vfio_close(struct pci_dev *pdev);
+
+static int gc570d_read_sysfs_bar0_size(const char *bdf, size_t *out_size)
+{
+	char path[512];
+	unsigned long long start, end, flags;
+	struct stat st;
+	FILE *f;
+
+	if (!out_size)
+		return -EINVAL;
+	*out_size = 0;
+	if (!bdf || !bdf[0])
+		return -EINVAL;
+
+	snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/resource", bdf);
+	f = fopen(path, "r");
+	if (f) {
+		int matched = fscanf(f, "%llx %llx %llx", &start, &end, &flags);
+
+		fclose(f);
+		if (matched == 3 && flags != 0 && start <= end &&
+		    end - start + 1 <= SIZE_MAX) {
+			*out_size = (size_t)(end - start + 1);
+			return 0;
+		}
+	}
+
+	/* resource0 is only present while the BAR is enabled. */
+	snprintf(path, sizeof(path),
+		 "/sys/bus/pci/devices/%s/resource0", bdf);
+	if (stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+		*out_size = (size_t)st.st_size;
+		return 0;
+	}
+
+	return -ENODATA;
+}
+
+static int gc570d_validate_bar0_size(size_t region_size, size_t sysfs_size,
+				     size_t page_size, size_t max_size,
+				     size_t *out_size)
+{
+	if (!out_size || !page_size)
+		return -EINVAL;
+	if (!region_size || !sysfs_size)
+		return -EINVAL;
+	if (region_size % page_size || sysfs_size % page_size)
+		return -EINVAL;
+	if (sysfs_size > max_size)
+		return -E2BIG;
+	if (region_size > sysfs_size)
+		return -EINVAL;
+
+	*out_size = min(region_size, sysfs_size);
+	return 0;
+}
+
 static int gc570d_vfio_open(struct pci_dev *pdev, const char *requested_bdf)
 {
 	char iommu_link[512], resolved[512], group_dev_path[128];
 	int group_id = -1;
+	int ret = 0;
 
 	memset(pdev, 0, sizeof(*pdev));
 	pdev->vfio_container_fd = -1;
@@ -2709,52 +2770,90 @@ static int gc570d_vfio_open(struct pci_dev *pdev, const char *requested_bdf)
 
 	pdev->vfio_container_fd = open("/dev/vfio/vfio", O_RDWR | O_CLOEXEC);
 	if (pdev->vfio_container_fd < 0) {
+		int err = errno;
+
 		fprintf(stderr,
 			"[gc570d ERR ] Cannot open /dev/vfio/vfio: %s (run ./install.sh to load vfio-pci and set permissions)\n",
-			strerror(errno));
-		return -errno;
+			strerror(err));
+		ret = -err;
+		goto fail;
 	}
 
-	if (ioctl(pdev->vfio_container_fd, VFIO_GET_API_VERSION) != VFIO_API_VERSION) {
-		fprintf(stderr, "[gc570d ERR ] Unsupported VFIO_API_VERSION\n");
-		return -EINVAL;
+	int api_version = ioctl(pdev->vfio_container_fd, VFIO_GET_API_VERSION);
+	if (api_version != VFIO_API_VERSION) {
+		int err = errno;
+
+		if (api_version < 0) {
+			fprintf(stderr,
+				"[gc570d ERR ] VFIO_GET_API_VERSION failed: %s\n",
+				strerror(err));
+			ret = -err;
+		} else {
+			fprintf(stderr,
+				"[gc570d ERR ] Unsupported VFIO_API_VERSION\n");
+			ret = -EINVAL;
+		}
+		goto fail;
 	}
 
 	snprintf(group_dev_path, sizeof(group_dev_path), "/dev/vfio/%d", group_id);
 	pdev->vfio_group_fd = open(group_dev_path, O_RDWR | O_CLOEXEC);
 	if (pdev->vfio_group_fd < 0) {
+		int err = errno;
+
 		fprintf(stderr,
 			"[gc570d ERR ] Cannot open %s for PCI %s: %s\n"
 			"              Ensure %s is bound to vfio-pci and permissions are applied via 99-gc570d-vfio.rules.\n",
-			group_dev_path, pdev->bdf, strerror(errno), pdev->bdf);
-		return -errno;
+			group_dev_path, pdev->bdf, strerror(err), pdev->bdf);
+		ret = -err;
+		goto fail;
 	}
 
 	struct vfio_group_status group_status = { .argsz = sizeof(group_status) };
-	if (ioctl(pdev->vfio_group_fd, VFIO_GROUP_GET_STATUS, &group_status) < 0 ||
-	    !(group_status.flags & VFIO_GROUP_FLAGS_VIABLE)) {
+	if (ioctl(pdev->vfio_group_fd, VFIO_GROUP_GET_STATUS, &group_status) < 0) {
+		int err = errno;
+
+		fprintf(stderr,
+			"[gc570d ERR ] VFIO_GROUP_GET_STATUS failed for group %d: %s\n",
+			group_id, strerror(err));
+		ret = -err;
+		goto fail;
+	}
+	if (!(group_status.flags & VFIO_GROUP_FLAGS_VIABLE)) {
 		fprintf(stderr,
 			"[gc570d ERR ] VFIO group %d is not viable (all devices in the group must be bound to vfio-pci)\n",
 			group_id);
-		return -EBUSY;
+		ret = -EBUSY;
+		goto fail;
 	}
 
 	if (ioctl(pdev->vfio_group_fd, VFIO_GROUP_SET_CONTAINER, &pdev->vfio_container_fd) < 0) {
-		fprintf(stderr, "[gc570d ERR ] VFIO_GROUP_SET_CONTAINER failed: %s\n", strerror(errno));
-		return -errno;
+		int err = errno;
+
+		fprintf(stderr, "[gc570d ERR ] VFIO_GROUP_SET_CONTAINER failed: %s\n",
+			strerror(err));
+		ret = -err;
+		goto fail;
 	}
 
 	if (ioctl(pdev->vfio_container_fd, VFIO_SET_IOMMU, VFIO_TYPE1v2_IOMMU) < 0 &&
 	    ioctl(pdev->vfio_container_fd, VFIO_SET_IOMMU, VFIO_TYPE1_IOMMU) < 0) {
-		fprintf(stderr, "[gc570d ERR ] VFIO_SET_IOMMU (Type1v2/Type1) failed: %s\n", strerror(errno));
-		return -errno;
+		int err = errno;
+
+		fprintf(stderr, "[gc570d ERR ] VFIO_SET_IOMMU (Type1v2/Type1) failed: %s\n",
+			strerror(err));
+		ret = -err;
+		goto fail;
 	}
 
 	pdev->vfio_device_fd = ioctl(pdev->vfio_group_fd, VFIO_GROUP_GET_DEVICE_FD, pdev->bdf);
 	if (pdev->vfio_device_fd < 0) {
+		int err = errno;
+
 		fprintf(stderr, "[gc570d ERR ] VFIO_GROUP_GET_DEVICE_FD(%s) failed: %s\n",
-			pdev->bdf, strerror(errno));
-		return -errno;
+			pdev->bdf, strerror(err));
+		ret = -err;
+		goto fail;
 	}
 
 	struct vfio_region_info cfg_reg = {
@@ -2769,29 +2868,76 @@ static int gc570d_vfio_open(struct pci_dev *pdev, const char *requested_bdf)
 		.index = VFIO_PCI_BAR0_REGION_INDEX,
 	};
 	if (ioctl(pdev->vfio_device_fd, VFIO_DEVICE_GET_REGION_INFO, &bar0_reg) < 0) {
+		int err = errno;
+
 		fprintf(stderr, "[gc570d ERR ] VFIO_DEVICE_GET_REGION_INFO(BAR0) failed: %s\n",
-			strerror(errno));
-		return -errno;
+			strerror(err));
+		ret = -err;
+		goto fail;
 	}
 
-	pdev->bar0_size = bar0_reg.size;
+	/*
+	 * Do not trust the VFIO-reported size on its own.  Cross-check it with
+	 * sysfs and validate alignment/bounds before creating the mapping; the
+	 * validated length is also what gc570d_vfio_close() must unmap.
+	 */
+	{
+		size_t sysfs_size = 0;
+		size_t validated_size = 0;
+		long page_size = sysconf(_SC_PAGESIZE);
+		int vret;
+
+		if (page_size <= 0) {
+			fprintf(stderr, "[gc570d ERR ] Cannot determine system page size\n");
+			ret = -EINVAL;
+			goto fail;
+		}
+		vret = gc570d_read_sysfs_bar0_size(pdev->bdf, &sysfs_size);
+		if (vret < 0) {
+			fprintf(stderr,
+				"[gc570d ERR ] Cannot read BAR0 size for %s from sysfs: %s\n",
+				pdev->bdf, strerror(-vret));
+			ret = vret;
+			goto fail;
+		}
+		vret = gc570d_validate_bar0_size(bar0_reg.size, sysfs_size,
+						 (size_t)page_size,
+						 GC570D_VFIO_BAR0_MAX_SIZE,
+						 &validated_size);
+		if (vret < 0) {
+			fprintf(stderr,
+				"[gc570d ERR ] Refusing BAR0: VFIO size=0x%llx, sysfs size=0x%zx (%s)\n",
+				(unsigned long long)bar0_reg.size, sysfs_size,
+				strerror(-vret));
+			ret = vret;
+			goto fail;
+		}
+		pdev->bar0_size = validated_size;
+	}
 	pdev->resource[0].start = 0;
-	pdev->resource[0].end = bar0_reg.size ? (bar0_reg.size - 1) : 0;
+	pdev->resource[0].end = pdev->bar0_size ? (pdev->bar0_size - 1) : 0;
 	pdev->resource[0].flags = IORESOURCE_MEM;
 
-	pdev->bar0_vaddr = mmap(NULL, bar0_reg.size, PROT_READ | PROT_WRITE,
+	pdev->bar0_vaddr = mmap(NULL, pdev->bar0_size, PROT_READ | PROT_WRITE,
 				MAP_SHARED, pdev->vfio_device_fd, bar0_reg.offset);
 	if (pdev->bar0_vaddr == MAP_FAILED) {
+		int err = errno;
+
 		pdev->bar0_vaddr = NULL;
-		fprintf(stderr, "[gc570d ERR ] mmap(BAR0, size=0x%llx) failed: %s\n",
-			(unsigned long long)bar0_reg.size, strerror(errno));
-		return -errno;
+		fprintf(stderr, "[gc570d ERR ] mmap(BAR0, size=0x%zx) failed: %s\n",
+			pdev->bar0_size, strerror(err));
+		ret = -err;
+		goto fail;
 	}
 
 	dev_info(&pdev->dev,
 		 "VFIO-PCI initialized: group=%d BAR0 mapped at %p (0x%zx bytes) with IOMMU Type1 DMA\n",
 		 group_id, pdev->bar0_vaddr, pdev->bar0_size);
 	return 0;
+
+fail:
+	gc570d_vfio_close(pdev);
+	return ret;
 }
 
 static void gc570d_vfio_close(struct pci_dev *pdev)
