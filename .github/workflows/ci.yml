@@ -75,8 +75,10 @@ jobs:
           gcc -O2 -Wall -Wextra -Werror -c -o /tmp/everlive_audio_probe.o \
             tools/everlive/everlive_audio_probe.c
           gcc -O2 -Wall -Wextra -o /tmp/everlive_display \
+            -Itools/libeverlive-core \
             tools/everlive/everlive_display.c \
             tools/everlive/everlive_audio_probe.c \
+            tools/libeverlive-core/everlive_card.c \
             tools/libeverlive-core/third_party/jsmn.c \
             ${SDL_FLAGS} -lGL -lm -lX11 -lpthread
 
@@ -148,8 +150,10 @@ jobs:
           make CC=clang -C tests clean test
           SDL_FLAGS="$(pkg-config --cflags --libs sdl2)"
           clang -O2 -Wall -Wextra -o /tmp/everlive_display_clang \
+            -Itools/libeverlive-core \
             tools/everlive/everlive_display.c \
             tools/everlive/everlive_audio_probe.c \
+            tools/libeverlive-core/everlive_card.c \
             tools/libeverlive-core/third_party/jsmn.c \
             ${SDL_FLAGS} -lGL -lm -lX11 -lpthread
 
