@@ -2654,6 +2654,14 @@ class GameStreamer:
         ]
         if self.uvc_mode:
             mpv_cmd.insert(1, "--no-config")
+            if not lsfg:
+                # Bound queued GPU work and honor the Hub's VSync choice in
+                # the embedded OpenGL surface as well as player timing.
+                mpv_cmd.extend([
+                    "--swapchain-depth=1",
+                    f"--opengl-swapinterval={1 if vsync else 0}",
+                    "--opengl-glfinish=yes",
+                ])
         if self.uvc_mode and preset:
             uvc_fmt = "mjpeg" if fmt == "MJPG" else "yuyv422"
             mpv_cmd.append(f"--demuxer-lavf-o-add=input_format={uvc_fmt}")
@@ -2723,7 +2731,7 @@ class GameStreamer:
                                LSFGVK_PACING_MODE="vsync")
             elif self.uvc_mode:
                 mpv_env["DISABLE_LSFGVK"] = "1"
-            if self.uvc_mode:
+            if self.uvc_mode and lsfg:
                 read_fd, write_fd = os.pipe()
                 try:
                     graph = ("[in]split[video][probe];[probe]"

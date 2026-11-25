@@ -319,6 +319,8 @@ class TestGC553G2Control(unittest.TestCase):
                 self.assertIn("--wid=84", args)
                 if ready:
                     self.assertIn("--gpu-context=x11vk", args)
+                    self.assertIn("--vulkan-swap-mode=fifo", args)
+                    self.assertNotIn("--opengl-swapinterval=0", args)
                     self.assertIn("--vf-add=lavfi=[mpdecimate=max=1,fps=30]", args)
                     self.assertNotIn("--untimed", args)
                     self.assertEqual(launch.call_args.kwargs["env"]["LSFGVK_MULTIPLIER"], "2")
@@ -440,13 +442,19 @@ class TestGC553G2Control(unittest.TestCase):
             self.assertIn("--demuxer-lavf-o-add=input_format=mjpeg", mpv_cmd)
             self.assertIn("--demuxer-lavf-o-add=video_size=3840x2160", mpv_cmd)
             self.assertIn("--demuxer-lavf-o-add=framerate=120", mpv_cmd)
+            self.assertIn("--swapchain-depth=1", mpv_cmd)
+            self.assertIn("--opengl-swapinterval=0", mpv_cmd)
+            self.assertIn("--opengl-glfinish=yes", mpv_cmd)
+            self.assertFalse(any(arg.startswith("--vf-pre=") for arg in mpv_cmd))
+            self.assertNotIn("pass_fds", mock_popen.call_args.kwargs)
             streamer.stop()
 
-            ok_60 = streamer.start(preset_name="3840x2160 @ 60 FPS")
+            ok_60 = streamer.start(preset_name="3840x2160 @ 60 FPS", vsync=True)
             self.assertTrue(ok_60)
             mpv_cmd_60 = mock_popen.call_args[0][0]
             self.assertIn("--demuxer-lavf-o-add=input_format=yuyv422", mpv_cmd_60)
             self.assertIn("--demuxer-lavf-o-add=framerate=60", mpv_cmd_60)
+            self.assertIn("--opengl-swapinterval=1", mpv_cmd_60)
             streamer.stop()
 
             mock_run.reset_mock()
