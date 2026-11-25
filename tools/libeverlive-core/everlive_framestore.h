@@ -29,7 +29,7 @@ extern "C" {
 #endif
 
 #define EVERLIVE_FRAMESTORE_MAGIC	0x45564c53U /* "EVLS" */
-#define EVERLIVE_FRAMESTORE_VERSION	3U
+#define EVERLIVE_FRAMESTORE_VERSION	4U
 #define EVERLIVE_FRAMESTORE_MAX_PORTS	2U
 #define EVERLIVE_FRAMESTORE_MAX_SLOTS	8U
 
@@ -65,10 +65,13 @@ struct everlive_framestore_frame {
 /*
  * Create (or truncate and reinitialise) a store.
  *
- * The object is created 0600 and owned by geteuid().  An existing object is
- * reused only when it is a regular file owned by geteuid(); a pre-created
- * foreign object is rejected.  Returns NULL on invalid arguments, ownership or
- * mode failure, allocation failure, SHM creation failure, or mapping failure.
+ * The object is created 0600 and owned by geteuid(); the creator UID is also
+ * recorded in the header.  An existing object is reused only when it is a
+ * regular file owned by geteuid(); a pre-created foreign object is rejected.
+ * The segment is zeroed before the new header is written, so a stale segment
+ * from an older engine (including an older ABI version) is recreated cleanly.
+ * Returns NULL on invalid arguments, ownership or mode failure, allocation
+ * failure, SHM creation failure, or mapping failure.
  */
 struct everlive_framestore *
 everlive_framestore_create(const struct everlive_framestore_config *cfg);
@@ -77,9 +80,11 @@ everlive_framestore_create(const struct everlive_framestore_config *cfg);
  * Attach to an existing store read-only.
  *
  * Validates the object is a regular file owned by geteuid() with mode 0600,
- * then validates magic, version, geometry fields and the object size.
- * Returns NULL when the object does not exist, is foreign or permissive, or
- * does not match the current ABI.  Never unlinks the object.
+ * then validates magic, version, creator UID, geometry fields and the object
+ * size.  A segment written by an older ABI is rejected with a "stale shared
+ * memory" diagnostic on stderr.  Returns NULL when the object does not exist,
+ * is foreign or permissive, or does not match the current ABI.  Never unlinks
+ * the object.
  */
 struct everlive_framestore *everlive_framestore_attach(const char *name);
 
