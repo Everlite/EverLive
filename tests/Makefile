@@ -14,10 +14,12 @@ CORE_V4L2_DIR := $(CORE_DIR)/v4l2
 GC573_DIR  := ../tools/opengc573-userd
 GC570D_DIR := ../tools/opengc570d-userd
 GC570D_SRC := $(GC570D_DIR)/src
+HWS_DIR    := ../tools/openhws-userd
+HWS_SRC    := $(HWS_DIR)/src
 EVERLIVE_DIR := ../tools/everlive
 V4L2_TEST_DSOS := test_gc573-v4l2.so test_gc570d-v4l2.so
 
-INCLUDES := -I$(CORE_DIR) -I$(GC570D_SRC) -I$(GC570D_DIR) -I$(GC573_DIR)/src
+INCLUDES := -I$(CORE_DIR) -I$(GC570D_SRC) -I$(GC570D_DIR) -I$(GC573_DIR)/src -I$(HWS_SRC)
 DEFS_GC570D := -DGC570D_USERSPACE
 
 CORE_LIB := $(CORE_DIR)/libeverlive_core.a
@@ -35,7 +37,8 @@ endif
 
 TARGETS := test_card_registry test_frame_convert test_framestore test_ctl_proto \
            test_json_rpc test_v4l2_shim test_v4l2_preload test_handoff \
-           test_ipc test_edid test_config test_framegen test_audio_probe
+           test_ipc test_edid test_config test_framegen test_audio_probe \
+           test_gc573_vfio test_hws_vfio
 
 all: $(TARGETS)
 
@@ -134,6 +137,18 @@ $(PACER_LIB): FORCE
 test_framegen: test_framegen.c $(GC573_DIR)/src/gc573_user_framegen.c $(PACER_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_framegen.c $(GC573_DIR)/src/gc573_user_framegen.c -pthread -lm -ldl
 
+# --- VFIO lifecycle ------------------------------------------------------
+# One source, two binaries: each engine has its own compat header, so they
+# cannot be compiled into the same translation unit.
+test_gc573_vfio: test_vfio_teardown.c $(GC573_DIR)/src/gc573_vfio.c $(CORE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -DENGINE_GC573 \
+		-o $@ test_vfio_teardown.c $(GC573_DIR)/src/gc573_vfio.c \
+		$(CORE_LIB)
+
+test_hws_vfio: test_vfio_teardown.c $(HWS_SRC)/hws_vfio.c
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -DENGINE_HWS \
+		-o $@ test_vfio_teardown.c $(HWS_SRC)/hws_vfio.c
+
 -include $(TARGETS:=.d)
 
 test: all
@@ -154,6 +169,9 @@ test: all
 	@./test_config
 	@echo "=== GC573 (Live Gamer 4K) ==="
 	@./test_framegen
+	@echo "=== VFIO lifecycle ==="
+	@./test_gc573_vfio
+	@./test_hws_vfio
 	@echo "=== All EverLive tests passed ==="
 
 asan:
