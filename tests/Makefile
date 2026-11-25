@@ -158,12 +158,24 @@ test: all
 
 asan:
 	$(MAKE) clean
+	$(MAKE) -C $(CORE_DIR) clean
 	$(MAKE) CFLAGS="$(CFLAGS) $(SANITIZE)" all
 	$(MAKE) CFLAGS="$(CFLAGS) $(SANITIZE)" test
 
 tsan tsan-v4l2:
 	$(MAKE) clean
-	$(MAKE) CFLAGS="$(CFLAGS) $(TSAN_FLAGS)" v4l2-tsan
+	$(MAKE) -C $(CORE_DIR) clean
+	$(MAKE) CFLAGS="$(CFLAGS) $(TSAN_FLAGS)" tsan-run
+
+# Build the core archive with TSan too, otherwise the frame-store writer would
+# be an uninstrumented race source in the middle of the stress test.
+tsan-run: test_framestore test_v4l2_shim test_v4l2_preload $(V4L2_TEST_DSOS)
+	@./test_framestore
+	@./test_v4l2_shim
+	@./run_v4l2_preload.sh ./test_v4l2_preload \
+		"$(abspath test_gc573-v4l2.so)" \
+		"$(abspath test_gc570d-v4l2.so)" \
+		"$(SANITIZER_RUNTIME)"
 
 v4l2-tsan: test_v4l2_shim test_v4l2_preload $(V4L2_TEST_DSOS)
 	@./test_v4l2_shim
@@ -176,4 +188,4 @@ clean:
 	rm -f $(TARGETS) $(TARGETS:=.d) $(V4L2_TEST_DSOS) \
 		$(V4L2_TEST_DSOS:.so=.d)
 
-.PHONY: all test asan tsan tsan-v4l2 v4l2-preload v4l2-tsan clean
+.PHONY: all test asan tsan tsan-run tsan-v4l2 v4l2-preload v4l2-tsan clean

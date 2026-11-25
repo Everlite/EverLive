@@ -2312,13 +2312,17 @@ static void everlive_log_status(struct everlive_state *st, uint64_t now)
 
 	if (st->last_fps_ns && now > st->last_fps_ns &&
 	    st->last_seen[port] >= st->last_fps_frames) {
+		/*
+		 * The frame store publishes an even seqlock value per frame, so
+		 * two sequence steps make one complete frame.
+		 */
 		fps = (double)(st->last_seen[port] - st->last_fps_frames) *
-			1000000000.0 / (double)(now - st->last_fps_ns);
+			1000000000.0 / (double)(now - st->last_fps_ns) / 2.0;
 	}
 	st->last_fps_ns = now;
 	st->last_fps_frames = st->last_seen[port];
 
-	frames = st->last_seen[port];
+	frames = st->last_seen[port] / 2U;
 	printf("[VIDEO] Capturing %ux%up @ %u.%02u Hz (VIP %u Hz, %s, pclk %u kHz) -> %ux%u\n",
 	       src_w, src_h, src_fps, 0U, src_fps,
 	       shm_profile_name(profile), pclk, out_w, out_h);
