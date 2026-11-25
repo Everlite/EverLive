@@ -4,6 +4,23 @@
  */
 
 #include "gc573_user_i2c.h"
+#include "gc573_user_hw.h"
+
+/*
+ * Each FPGA I2C controller has a single command/status/FIFO register set, so
+ * two concurrent transactions on the same bus would corrupt each other's
+ * address, count and readback.  Serialize per bus; the two buses remain fully
+ * independent.
+ */
+static pthread_mutex_t g_i2c_bus_locks[2] = {
+	PTHREAD_MUTEX_INITIALIZER,
+	PTHREAD_MUTEX_INITIALIZER,
+};
+
+static inline unsigned int gc573_i2c_bus_lock_index(unsigned int bus)
+{
+	return bus == GC573_I2C_BUS_SECONDARY ? 1U : 0U;
+}
 
 #define GC555_I2C_REG_DIVISOR		0x00
 #define GC555_I2C_REG_ADDRESS		0x04
@@ -43,11 +60,12 @@ void gc573_user_i2c_init(void *bar0)
 {
 	u8 *base = (u8 *)bar0;
 
-	/* 1. Release hardware reset for IT6805 / IT6664 HDMI chips (GPIO 3 = High) */
-	u32 gpio = readl(base + 0x00040);
-	gpio |= BIT(3);
-	writel(gpio, base + 0x00040);
-	msleep(100);
+	/*
+	 * 1. Release hardware reset for IT6805 / IT6664 HDMI chips (GPIO 3 =
+	 * high).  Route this through the shared GPIO helper so the output
+	 * shadow and its lock stay coherent with every other caller.
+	 */
+	gc573_user_set_gpio(bar0, GC573_GPIO_SPLITTER_SCDT, true, 100);
 
 	/* 2. Stop FPGA RGB hardware sequencer to disable red error blink (MMIO 0x0804 = 0) */
 	writel(0, base + 0x0804);
@@ -73,12 +91,17 @@ int gc573_user_i2c_read(void *bar0, unsigned int bus, u16 addr,
 		return -EINVAL;
 
 	int code = gc573_i2c_subaddr_code(subaddr_len);
+	unsigned int lock_index = gc573_i2c_bus_lock_index(bus);
+	int ret = 0;
+
 	if (code < 0)
 		return code;
 
 	u32 base = gc573_i2c_bus_base(bus);
 	u8 *reg = (u8 *)bar0 + base;
 	u32 slave = addr << 1;
+
+	pthread_mutex_lock(&g_i2c_bus_locks[lock_index]);
 
 	writel(slave | 1, reg + GC555_I2C_REG_ADDRESS);
 	writel(code, reg + GC555_I2C_REG_SUBADDR_LEN);
@@ -102,7 +125,8 @@ int gc573_user_i2c_read(void *bar0, unsigned int bus, u16 addr,
 
 	if (!(status & GC555_I2C_STATUS_DONE)) {
 		pr_debug("I2C read timed out (status 0x%02x) on addr 0x%02x reg 0x%x", status, addr, subaddr);
-		return (status & GC555_I2C_STATUS_ERROR) ? -EIO : -ETIMEDOUT;
+		ret = (status & GC555_I2C_STATUS_ERROR) ? -EIO : -ETIMEDOUT;
+		goto out;
 	}
 
 	/* Reset FIFO pointer for reading */
@@ -112,7 +136,9 @@ int gc573_user_i2c_read(void *bar0, unsigned int bus, u16 addr,
 		data[i] = (u8)readl(reg + GC555_I2C_REG_RX_FIFO);
 	}
 
-	return 0;
+out:
+	pthread_mutex_unlock(&g_i2c_bus_locks[lock_index]);
+	return ret;
 }
 
 int gc573_user_i2c_write(void *bar0, unsigned int bus, u16 addr,
@@ -123,12 +149,17 @@ int gc573_user_i2c_write(void *bar0, unsigned int bus, u16 addr,
 		return -EINVAL;
 
 	int code = gc573_i2c_subaddr_code(subaddr_len);
+	unsigned int lock_index = gc573_i2c_bus_lock_index(bus);
+	int ret = 0;
+
 	if (code < 0)
 		return code;
 
 	u32 base = gc573_i2c_bus_base(bus);
 	u8 *reg = (u8 *)bar0 + base;
 	u32 slave = addr << 1;
+
+	pthread_mutex_lock(&g_i2c_bus_locks[lock_index]);
 
 	writel(slave, reg + GC555_I2C_REG_ADDRESS);
 	writel(code, reg + GC555_I2C_REG_SUBADDR_LEN);
@@ -156,8 +187,11 @@ int gc573_user_i2c_write(void *bar0, unsigned int bus, u16 addr,
 
 	if (!(status & GC555_I2C_STATUS_DONE)) {
 		pr_debug("I2C write timed out (status 0x%02x) on addr 0x%02x reg 0x%x", status, addr, subaddr);
-		return (status & GC555_I2C_STATUS_ERROR) ? -EIO : -ETIMEDOUT;
+		ret = (status & GC555_I2C_STATUS_ERROR) ? -EIO : -ETIMEDOUT;
+		goto out;
 	}
 
-	return 0;
+out:
+	pthread_mutex_unlock(&g_i2c_bus_locks[lock_index]);
+	return ret;
 }

@@ -1512,6 +1512,8 @@ int main(int argc, char *argv[])
     signal(SIGTERM, sig_handler);
     signal(SIGUSR1, sigusr1_handler);
     signal(SIGWINCH, sigwinch_handler);
+    /* Audio/control pipes may close before the render loop notices. */
+    signal(SIGPIPE, SIG_IGN);
 
     int fd = open(vdev, O_RDWR | O_NONBLOCK);
     if (fd < 0) {

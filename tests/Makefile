@@ -17,7 +17,8 @@ GC570D_SRC := $(GC570D_DIR)/src
 EVERLIVE_DIR := ../tools/everlive
 V4L2_TEST_DSOS := test_gc573-v4l2.so test_gc570d-v4l2.so
 
-INCLUDES := -I$(CORE_DIR) -I$(GC570D_SRC) -I$(GC570D_DIR) -I$(GC573_DIR)/src
+INCLUDES := -I$(CORE_DIR) -I$(CORE_DIR)/osd -I$(GC570D_SRC) \
+            -I$(GC570D_DIR) -I$(GC573_DIR)/src
 DEFS_GC570D := -DGC570D_USERSPACE
 
 CORE_LIB := $(CORE_DIR)/libeverlive_core.a
@@ -35,7 +36,8 @@ endif
 
 TARGETS := test_card_registry test_frame_convert test_framestore test_ctl_proto \
            test_json_rpc test_v4l2_shim test_v4l2_preload test_handoff \
-           test_ipc test_edid test_config test_framegen test_audio_probe
+           test_ipc test_edid test_config test_framegen test_audio_probe \
+           test_gc573_edid test_osd_utf8 test_sigpipe
 
 all: $(TARGETS)
 
@@ -134,6 +136,22 @@ $(PACER_LIB): FORCE
 test_framegen: test_framegen.c $(GC573_DIR)/src/gc573_user_framegen.c $(PACER_LIB)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ test_framegen.c $(GC573_DIR)/src/gc573_user_framegen.c -pthread -lm -ldl
 
+# EDID validation is pure parsing; the hardware entry points are stubbed by
+# the test so no VFIO/I2C device is required.
+test_gc573_edid: test_gc573_edid.c $(GC573_DIR)/src/gc573_user_edid.c \
+		$(GC573_DIR)/src/gc573_user_edid.h
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ \
+		test_gc573_edid.c $(GC573_DIR)/src/gc573_user_edid.c
+
+# The UTF-8 decoder lives in an SDL-free header so it can run under ASan
+# without a font/renderer.
+test_osd_utf8: test_osd_utf8.c $(CORE_DIR)/osd/everlive_utf8.h
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ test_osd_utf8.c
+
+# Reproduces the daemons' SIGPIPE contract with a real closed pipe.
+test_sigpipe: test_sigpipe.c
+	$(CC) $(CFLAGS) $(DEPFLAGS) -o $@ test_sigpipe.c
+
 -include $(TARGETS:=.d)
 
 test: all
@@ -154,6 +172,11 @@ test: all
 	@./test_config
 	@echo "=== GC573 (Live Gamer 4K) ==="
 	@./test_framegen
+	@./test_gc573_edid
+	@echo "=== shared parsers ==="
+	@./test_osd_utf8
+	@echo "=== signal handling ==="
+	@./test_sigpipe
 	@echo "=== All EverLive tests passed ==="
 
 asan:
