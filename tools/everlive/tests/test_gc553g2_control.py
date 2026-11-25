@@ -7,6 +7,7 @@ from pathlib import Path
 import struct
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -166,6 +167,245 @@ class TestGC553G2Control(unittest.TestCase):
                 card_profile, "_detect_usb_from_sysfs", return_value=card_profile.MODEL_GC553G2
             ):
                 self.assertEqual(card_profile._detect_from_sysfs(), card_profile.MODEL_GC553G2)
+
+    @unittest.skipUnless(everlive_viewer.HAS_QT, "PySide6 is not installed")
+    def test_closing_usb_hub_to_tray_stops_capture(self):
+        hub = SimpleNamespace(
+            uvc_mode=True, streamer=SimpleNamespace(is_running=True),
+            chk_tray=mock.Mock(), tray_icon=mock.Mock(), _tray_notified=True,
+            _stop_stream=mock.Mock(), hide=mock.Mock(),
+        )
+        hub.chk_tray.isChecked.return_value = True
+        event = mock.Mock()
+
+        everlive_viewer.MainWindow.closeEvent(hub, event)
+
+        hub._stop_stream.assert_called_once_with()
+        event.ignore.assert_called_once_with()
+        hub.hide.assert_called_once_with()
+
+    def test_player_exit_releases_separate_audio_process(self):
+        hw = {"mode": "uvc", "model": everlive_viewer.MODEL_GC553G2}
+        streamer = everlive_viewer.GameStreamer(vdev="/dev/video4", adev="none", card=hw)
+        streamer.is_running = True
+        streamer.mpv_proc = mock.Mock(pid=22)
+        streamer.mpv_proc.poll.return_value = 0
+        audio = mock.Mock(pid=23)
+        streamer.pwplay_proc = audio
+        with mock.patch("os.getpgid", side_effect=ProcessLookupError):
+            self.assertFalse(streamer.poll())
+
+        audio.terminate.assert_called_once_with()
+        audio.wait.assert_called_once()
+        self.assertIsNone(streamer.pwplay_proc)
+        self.assertFalse(streamer.is_running)
+
+    def test_uvc_status_uses_mpv_video_output(self):
+        hw = {"mode": "uvc", "model": everlive_viewer.MODEL_GC553G2}
+        streamer = everlive_viewer.GameStreamer(vdev="/dev/video4", adev="none", card=hw)
+        streamer._mpv_runtime = SimpleNamespace(name="/tmp/everlive-test")
+        replies = io.BytesIO(
+            b'{"event":"video-reconfig"}\n'
+            b'{"request_id":2,"data":59.94,"error":"success"}\n'
+            b'{"request_id":1,"data":{"w":1920,"h":1080},"error":"success"}\n'
+            b'{"request_id":3,"data":59.83,"error":"success"}\n'
+            b'{"request_id":4,"data":2,"error":"success"}\n'
+            b'{"request_id":5,"data":{"fresh":[{"last":1200000},{"last":400000}]},"error":"success"}\n'
+            b'{"request_id":6,"data":true,"error":"success"}\n'
+        )
+        with mock.patch.object(everlive_viewer.socket, "socket") as connect:
+            client = connect.return_value.__enter__.return_value
+            client.makefile.return_value = replies
+            info = streamer.get_signal_info()
+
+        self.assertTrue(info["locked"])
+        self.assertEqual(info["resolution"], "1920x1080")
+        self.assertEqual(info["framerate"], "59.94 FPS")
+        self.assertEqual(info["filter_fps"], 59.83)
+        self.assertEqual(info["vo_drops"], 2)
+        self.assertEqual(info["render_ms"], 1.6)
+        self.assertTrue(info["fullscreen"])
+
+    def test_game_fps_estimate_requires_consistent_differences_at_60_hz(self):
+        with mock.patch.object(everlive_viewer.time, "monotonic", return_value=102):
+            samples = [(101, diff) for diff in [0.1, 1.3] * 60]
+            self.assertEqual(everlive_viewer._estimate_uvc_game_fps(samples, 59.94), 29.97)
+            self.assertIsNone(everlive_viewer._estimate_uvc_game_fps(samples, 120))
+            continuous = [(101, 1.4)] * 120
+            self.assertIsNone(everlive_viewer._estimate_uvc_game_fps(continuous, 60))
+            static = [(101, 0.02)] * 120
+            self.assertIsNone(everlive_viewer._estimate_uvc_game_fps(static, 60))
+
+    def test_nvidia_telemetry_parses_gpu_utilization_and_vram_in_gib(self):
+        with mock.patch("subprocess.check_output", return_value="42, 9216, 32607\n"):
+            metrics = everlive_viewer._read_nvidia_metrics()
+        self.assertEqual(metrics["gpu_pct"], 42)
+        self.assertEqual(metrics["vram_used_gb"], 9)
+        self.assertAlmostEqual(metrics["vram_total_gb"], 31.8427734375)
+
+    @unittest.skipUnless(everlive_viewer.HAS_QT, "PySide6 is not installed")
+    def test_usb_telemetry_separates_capture_and_pre_framegen_fps_in_fullscreen(self):
+        streamer = mock.Mock(is_running=True, uvc_framegen=True, vdev="/dev/video4")
+        hub = mock.Mock(
+            streamer=streamer, _gc553_settings={"speed_mbps": 10000}, _cinema_fullscreen=True,
+            _live={"locked": True, "capture_fps": 60, "filter_fps": 30,
+                   "render_ms": 1.6, "vo_drops": 2},
+        )
+        hub.chk_osd.isChecked.return_value = True
+        hub.chk_streamer.isChecked.return_value = False
+
+        everlive_viewer.MainWindow._update_uvc_telemetry(hub, {})
+
+        hub.lbl_fps_hero.setText.assert_called_once_with("30.0")
+        hub.lbl_fps_unit.setText.assert_called_once_with("fps before LSFG")
+        hub.lbl_kv_route.setText.assert_called_once_with("V4L2 (/dev/video4)")
+        hub.lbl_drops_counter.setText.assert_called_once_with("2 player drops")
+        streamer.show_uvc_fullscreen_stats.assert_called_once_with(
+            "30.0 FPS (before LSFG)  ·  GPU render 1.60 ms")
+
+    def test_live_hdmi_status_uses_uvc_driver_without_detaching(self):
+        timing = bytearray(40)
+        struct.pack_into("<HH", timing, 6, 1440, 2560)
+        struct.pack_into("<H", timing, 14, 12000)
+        with mock.patch.object(gc553, "find_gc553g2_device"), \
+             mock.patch.object(gc553, "find_gc553g2_video_node", return_value="/dev/video4"), \
+             mock.patch.object(gc553, "open_uvc_control") as libusb, \
+             mock.patch("builtins.open", mock.mock_open()) as node, \
+             mock.patch.object(gc553, "_read_at_reply", side_effect=[b"\x01\x00\x00\x00", timing]) as read:
+            node.return_value.fileno.return_value = 42
+            status = gc553.query_live_hdmi_status()
+
+        libusb.assert_not_called()
+        read.assert_has_calls([
+            mock.call(None, 42, 0x38, allow_short=True),
+            mock.call(None, 42, 0x37, allow_short=True),
+        ])
+        self.assertTrue(status["hdmi_stable"])
+        self.assertEqual(status["hdmi_timing"]["refresh_hz"], 120.0)
+
+    def test_uvc_ioctl_packs_extension_unit_and_returns_control_bytes(self):
+        def ioctl(fd, request, query):
+            self.assertEqual((fd, request), (42, gc553._UVCIOC_CTRL_QUERY))
+            self.assertEqual((query.unit, query.selector, query.query, query.size), (4, 2, 0x85, 2))
+            query.data[0], query.data[1] = 52, 0
+
+        with mock.patch.object(gc553.fcntl, "ioctl", side_effect=ioctl):
+            self.assertEqual(gc553._read_uvc_control(None, 42, 2, 0x85, 2), b"4\x00")
+
+    def test_usb_can_be_selected_alongside_pcie(self):
+        pci = {"pci": "0000:01:00.0", "mode": "vfio", "model": "gc573"}
+        usb = {"pci": None, "usb_port": "2-1", "mode": "uvc", "model": "gc553g2"}
+        with mock.patch.dict("os.environ", {"EVERLIVE_CARD_PCI": "usb:2-1"}):
+            self.assertIs(everlive_viewer.select_capture_card([pci, usb]), usb)
+
+    def test_usb_framegen_switches_to_timed_vulkan_only_when_dependencies_exist(self):
+        hw = {"mode": "uvc", "model": everlive_viewer.MODEL_GC553G2}
+        streamer = everlive_viewer.GameStreamer(vdev="/dev/video4", adev="none", card=hw)
+        for ready in (True, False):
+            with self.subTest(ready=ready), \
+                 mock.patch("os.path.exists", return_value=True), \
+                 mock.patch("subprocess.run"), \
+                 mock.patch("subprocess.Popen") as launch, \
+                 mock.patch("shutil.which", return_value="/usr/bin/mpv"), \
+                 mock.patch.object(streamer, "hdr_label", return_value=""), \
+                 mock.patch.object(streamer, "get_active_format", return_value=(None, None)), \
+                 mock.patch.object(everlive_viewer, "probe_lsfg_vk", return_value={
+                     "layer_found": ready, "dll_found": ready, "dll_path": "/test/lsfg-vk.dll",
+                 }):
+                self.assertTrue(streamer.start("1920x1080 @ 60 FPS", parent_winid=84,
+                                               uvc_framegen=True))
+                args = launch.call_args.args[0]
+                self.assertEqual(streamer.uvc_framegen, ready)
+                self.assertIn("--wid=84", args)
+                if ready:
+                    self.assertIn("--gpu-context=x11vk", args)
+                    self.assertIn("--vf-add=lavfi=[mpdecimate=max=1,fps=30]", args)
+                    self.assertNotIn("--untimed", args)
+                    self.assertEqual(launch.call_args.kwargs["env"]["LSFGVK_MULTIPLIER"], "2")
+                else:
+                    self.assertIn("--gpu-context=x11egl", args)
+                    self.assertIn("--untimed", args)
+                    self.assertEqual(launch.call_args.kwargs["env"]["DISABLE_LSFGVK"], "1")
+                    self.assertIn("missing", streamer.uvc_framegen_notice)
+                with mock.patch("os.getpgid", side_effect=ProcessLookupError):
+                    streamer.stop()
+
+    def test_usb_framegen_flag_never_changes_pcie_launch(self):
+        for model in ("gc573", "gc570d", "hwsuhd"):
+            with self.subTest(model=model):
+                streamer = everlive_viewer.GameStreamer(
+                    card={"model": model, "mode": "vfio", "pci": "0000:01:00.0"})
+                with mock.patch.object(streamer, "_start_vfio", return_value=True) as launch, \
+                     mock.patch.object(everlive_viewer, "probe_lsfg_vk") as probe:
+                    self.assertTrue(streamer.start(framegen="30to60", uvc_framegen=True))
+                self.assertEqual(launch.call_args.kwargs["framegen"], "30to60")
+                self.assertNotIn("uvc_framegen", launch.call_args.kwargs)
+                probe.assert_not_called()
+
+    @unittest.skipUnless(everlive_viewer.HAS_QT, "PySide6 is not installed")
+    def test_vulkan_start_timeout_stops_audio_and_restarts_at_most_once(self):
+        streamer = mock.Mock(is_running=True, uvc_framegen=True, uvc_framegen_deadline=10.0)
+        streamer.mpv_proc.poll.return_value = None
+        streamer.get_signal_info.return_value = {"locked": False, "audio": "No Audio"}
+        hub = mock.Mock(streamer=streamer)
+
+        def stop():
+            streamer.is_running = False
+            streamer.uvc_framegen = False
+            streamer.uvc_framegen_deadline = 0.0
+
+        def start(*, allow_uvc_framegen):
+            self.assertFalse(allow_uvc_framegen)
+            streamer.is_running = True
+
+        hub._stop_stream.side_effect = stop
+        hub.start_gaming_screen.side_effect = start
+        with mock.patch.object(everlive_viewer.time, "monotonic", return_value=11.0):
+            everlive_viewer.MainWindow._update_uvc_status(hub)
+            everlive_viewer.MainWindow._update_uvc_status(hub)
+
+        hub._stop_stream.assert_called_once_with()
+        hub.start_gaming_screen.assert_called_once_with(allow_uvc_framegen=False)
+        self.assertIn("no video", hub.lbl_uvc_framegen.setText.call_args.args[0])
+
+    @unittest.skipUnless(everlive_viewer.HAS_QT, "PySide6 is not installed")
+    def test_clean_exit_does_not_restart_usb_framegen(self):
+        streamer = mock.Mock(is_running=True, uvc_framegen=True, uvc_framegen_deadline=10.0)
+        streamer.mpv_proc.returncode = 0
+        streamer.get_signal_info.return_value = {"locked": False, "audio": "No Audio"}
+        hub = mock.Mock(streamer=streamer)
+
+        def poll():
+            streamer.is_running = False
+            streamer.uvc_framegen = False
+            streamer.uvc_framegen_deadline = 0.0
+            return False
+
+        streamer.poll.side_effect = poll
+        everlive_viewer.MainWindow._update_uvc_status(hub)
+
+        hub._set_launch_running.assert_called_once_with(False)
+        hub.start_gaming_screen.assert_not_called()
+
+    @unittest.skipUnless(everlive_viewer.HAS_QT, "PySide6 is not installed")
+    def test_failed_vulkan_exit_restarts_standard_playback(self):
+        streamer = mock.Mock(is_running=True, uvc_framegen=True, uvc_framegen_deadline=10.0)
+        player = streamer.mpv_proc
+        streamer.get_signal_info.return_value = {"locked": False, "audio": "No Audio"}
+        hub = mock.Mock(streamer=streamer)
+
+        def poll():
+            player.returncode = 2
+            streamer.is_running = False
+            streamer.uvc_framegen = False
+            streamer.uvc_framegen_deadline = 0.0
+            return False
+
+        streamer.poll.side_effect = poll
+        everlive_viewer.MainWindow._update_uvc_status(hub)
+
+        hub.start_gaming_screen.assert_called_once_with(allow_uvc_framegen=False)
+        self.assertIn("exited with an error", hub.lbl_uvc_framegen.setText.call_args.args[0])
 
     def test_uvc_playback_uses_mpv_mjpeg_and_skips_everlive_display(self):
         hw = {

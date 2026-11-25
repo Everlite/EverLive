@@ -334,9 +334,32 @@ def _usb_check(usb, code: int) -> int:
     return code
 
 
+class _UvcXuQuery(C.Structure):
+    _fields_ = [
+        ("unit", C.c_uint8), ("selector", C.c_uint8), ("query", C.c_uint8),
+        ("size", C.c_uint16), ("data", C.POINTER(C.c_ubyte)),
+    ]
+
+
+# Linux _IOWR('u', 0x21, struct uvc_xu_control_query).
+_UVCIOC_CTRL_QUERY = (3 << 30) | (C.sizeof(_UvcXuQuery) << 16) | (ord("u") << 8) | 0x21
+
+
+def _query_uvc_driver(fd: int, selector: int, operation: int, content: bytes) -> bytes:
+    buf = (C.c_ubyte * len(content)).from_buffer_copy(content)
+    query = _UvcXuQuery(4, selector, operation, len(buf), buf)
+    try:
+        fcntl.ioctl(fd, _UVCIOC_CTRL_QUERY, query)
+    except OSError as exc:
+        raise RuntimeError(f"UVC extension unit query failed: {exc.strerror}") from exc
+    return bytes(buf)
+
+
 def _read_uvc_control(usb, handle, selector: int, operation: int, length: int) -> bytes:
     if operation not in (0x81, 0x85, 0x86) or not 1 <= length <= 4096:
         raise ValueError("Only bounded UVC GET requests are allowed")
+    if usb is None:
+        return _query_uvc_driver(handle, selector, operation, bytes(length))
     buf = (C.c_ubyte * length)()
     count = _usb_check(
         usb,
@@ -350,6 +373,9 @@ def _read_uvc_control(usb, handle, selector: int, operation: int, length: int) -
 
 
 def _write_uvc_control(usb, handle, selector: int, content: bytes) -> None:
+    if usb is None:
+        _query_uvc_driver(handle, selector, 0x01, content)
+        return
     buf = (C.c_ubyte * len(content)).from_buffer_copy(content)
     count = _usb_check(
         usb,
@@ -472,6 +498,57 @@ def _require_supported_firmware(usb, handle) -> str:
 # High-level device queries & controls
 # ---------------------------------------------------------------------------
 
+def _read_hdmi_status(usb, handle) -> Dict[str, Any]:
+    data = _read_at_reply(usb, handle, 0x38, allow_short=True)
+    if len(data) < 4:
+        raise RuntimeError("Incomplete HDMI input lock response")
+    stable = int.from_bytes(data[:4], "little") == 1
+    timing = (
+        decode_hdmi_timing(_read_at_reply(usb, handle, 0x37, allow_short=True))
+        if stable else None
+    )
+    return {"hdmi_stable": stable, "hdmi_timing": timing}
+
+
+def _read_at_settings(usb, handle) -> Dict[str, Any]:
+    fw = _read_at_reply(usb, handle, 0x77).split(b"\x00", 1)[0].decode("ascii", "replace")
+    idx_data = _read_at_reply(usb, handle, 0xB1)
+    desc_index = idx_data[4] if len(idx_data) == 132 and idx_data[:4] == b"\x01\x00\x00\x00" else None
+    edid_code = _read_at_reply(usb, handle, 0x4E, allow_short=True)[0]
+    preset_code = _read_at_reply(usb, handle, 0x56, allow_short=True)[0]
+    return {
+        "firmware": fw,
+        "descriptor_index": desc_index,
+        "edid_mode": EDID_NAMES.get(edid_code, f"unknown({edid_code})"),
+        "hdmi_preset": HDMI_PRESET_NAMES.get(preset_code, f"unknown({preset_code})"),
+        "hdcp_detection": bool(_read_at_reply(usb, handle, 0x76, allow_short=True)[0]),
+        "hdr_to_sdr": bool(_read_at_reply(usb, handle, 0x72, allow_short=True)[0]),
+    }
+
+
+def query_live_hdmi_status(
+    port: Optional[str] = None,
+    *,
+    include_settings: bool = False,
+    sys_usb: Path = SYS_USB_DEFAULT,
+    sys_video: Path = SYS_VIDEO_DEFAULT,
+) -> Dict[str, Any]:
+    """Read HDMI lock and timing through uvcvideo without detaching the driver."""
+    device = find_gc553g2_device(port=port, sys_usb=sys_usb)
+    node = find_gc553g2_video_node(device, sys_video=sys_video)
+    if not node:
+        raise RuntimeError("GC553G2 capture node unavailable")
+    with open(node, "r+b", buffering=0) as video:
+        fd = video.fileno()
+        status = _read_hdmi_status(None, fd)
+        if include_settings:
+            try:
+                status["settings"] = _read_at_settings(None, fd)
+            except (RuntimeError, OSError) as exc:
+                status["settings_error"] = str(exc)
+        return status
+
+
 def query_device_status(
     port: Optional[str] = None,
     *,
@@ -492,31 +569,8 @@ def query_device_status(
 
     try:
         with open_uvc_control(device, sys_video=sys_video) as (usb, handle):
-            fw = _read_at_reply(usb, handle, 0x77).split(b"\x00", 1)[0].decode("ascii", "replace")
-            idx_data = _read_at_reply(usb, handle, 0xB1)
-            desc_index = idx_data[4] if len(idx_data) == 132 and idx_data[:4] == b"\x01\x00\x00\x00" else None
-            stable = int.from_bytes(_read_at_reply(usb, handle, 0x38, allow_short=True)[:4], "little") == 1
-            edid_code = _read_at_reply(usb, handle, 0x4E, allow_short=True)[0]
-            preset_code = _read_at_reply(usb, handle, 0x56, allow_short=True)[0]
-            hdcp = bool(_read_at_reply(usb, handle, 0x76, allow_short=True)[0])
-            hdr_to_sdr = bool(_read_at_reply(usb, handle, 0x72, allow_short=True)[0])
-            hdmi_timing = (
-                decode_hdmi_timing(_read_at_reply(usb, handle, 0x37, allow_short=True))
-                if stable
-                else None
-            )
-            info.update(
-                {
-                    "firmware": fw,
-                    "descriptor_index": desc_index,
-                    "hdmi_stable": stable,
-                    "hdmi_timing": hdmi_timing,
-                    "edid_mode": EDID_NAMES.get(edid_code, f"unknown({edid_code})"),
-                    "hdmi_preset": HDMI_PRESET_NAMES.get(preset_code, f"unknown({preset_code})"),
-                    "hdcp_detection": hdcp,
-                    "hdr_to_sdr": hdr_to_sdr,
-                }
-            )
+            info.update(_read_hdmi_status(usb, handle))
+            info.update(_read_at_settings(usb, handle))
     except Exception as exc:
         info["at_error"] = str(exc)
     return info

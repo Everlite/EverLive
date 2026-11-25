@@ -65,7 +65,7 @@ detect_hwsuhd_sysfs() {
 }
 
 # Explicit card choice, in order: EVERLIVE_CARD_PCI (the Console Hub sets it
-# when switching cards), EVERLIVE_CARD (gc573|gc570d|hwsuhd), the card chosen
+# when switching cards), EVERLIVE_CARD (gc573|gc570d|hwsuhd|gc553g2), the card chosen
 # in the Hub's card selector (card_pci in settings.json).  Without one, the
 # auto-detection below applies unchanged.
 card_model_for_bdf() {
@@ -95,9 +95,17 @@ find_card_of_model() {
 }
 
 use_card() {
-    local model
+    local model port dev
 
-    model="$(card_model_for_bdf "$1")" || return 1
+    if [[ "$1" =~ ^usb:([0-9]+-[0-9]+(\.[0-9]+)*)$ ]]; then
+        port="${BASH_REMATCH[1]}"
+        dev="/sys/bus/usb/devices/$port"
+        [ "$(cat "$dev/idVendor" 2>/dev/null)" = "07ca" ] &&
+            [ "$(cat "$dev/idProduct" 2>/dev/null)" = "2553" ] || return 1
+        model="gc553g2"
+    else
+        model="$(card_model_for_bdf "$1")" || return 1
+    fi
     CARD_MODEL="$model"
     CARD_PCI="$1"
 }
@@ -110,6 +118,14 @@ select_card_explicit() {
         echo "[!] EVERLIVE_CARD_PCI=${EVERLIVE_CARD_PCI} ist keine unterstützte Karte; automatische Erkennung." >&2
     fi
     case "${EVERLIVE_CARD:-}" in
+        gc553g2)
+            detect_card_usb_sysfs
+            if [ -z "$CARD_MODEL" ]; then
+                echo "[!] EVERLIVE_CARD=gc553g2, aber keine solche Karte gefunden." >&2
+                exit 1
+            fi
+            return 0
+            ;;
         gc573|gc570d|hwsuhd)
             pci="$(find_card_of_model "${EVERLIVE_CARD}" || true)"
             if [ -z "$pci" ]; then
@@ -140,6 +156,7 @@ detect_card_usb_sysfs() {
         product=$(tr '[:upper:]' '[:lower:]' < "$dev/idProduct" 2>/dev/null || true)
         if [ "$vendor" = "07ca" ] && [ "$product" = "2553" ]; then
             CARD_MODEL="gc553g2"
+            CARD_PCI="usb:$(basename "$dev")"
             break
         fi
     done
