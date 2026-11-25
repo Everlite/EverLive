@@ -292,6 +292,42 @@ class TestGC553G2Control(unittest.TestCase):
         with mock.patch.object(gc553.fcntl, "ioctl", side_effect=ioctl):
             self.assertEqual(gc553._read_uvc_control(None, 42, 2, 0x85, 2), b"4\x00")
 
+    def test_empty_settings_replies_preserve_live_hdmi_status(self):
+        for empty_command in (0x4E, 0x56, 0x76, 0x72):
+            def exchange(usb, handle, packet):
+                command = int.from_bytes(packet[4:8], "little")
+                if command == empty_command:
+                    return bytes.fromhex("a1 00 5f")
+                payload = {0x38: bytes(4), 0x77: b"test-firmware\x00",
+                           0xB1: bytes(132)}.get(command, b"\x01")
+                length = len(payload) + 1
+                raw = bytes([0xA1, 0x80 | (length >> 8), length & 255, 0]) + payload
+                return raw + bytes([(-sum(raw)) & 255])
+
+            with self.subTest(command=hex(empty_command)), \
+                 mock.patch.object(gc553, "find_gc553g2_device"), \
+                 mock.patch.object(gc553, "find_gc553g2_video_node", return_value="/dev/video4"), \
+                 mock.patch("builtins.open", mock.mock_open()), \
+                 mock.patch.object(gc553, "_exchange_at", side_effect=exchange), \
+                 mock.patch.object(gc553.time, "sleep"):
+                status = gc553.query_live_hdmi_status(include_settings=True)
+
+            self.assertFalse(status["hdmi_stable"])
+            self.assertIsNone(status["hdmi_timing"])
+            self.assertNotIn("settings", status)
+            self.assertIn(f"AT query {empty_command:#04x}", status["settings_error"])
+            self.assertIn("Missing AT response payload", status["settings_error"])
+
+    def test_empty_short_reply_is_retried_before_reading_setting(self):
+        payload = b"\x01"
+        raw = bytes([0xA1, 3, 0, 0]) + payload
+        valid_reply = raw + bytes([(-sum(raw)) & 255])
+        with mock.patch.object(gc553, "_exchange_at", side_effect=[
+                bytes.fromhex("a1 00 5f"), valid_reply]) as exchange, \
+             mock.patch.object(gc553.time, "sleep"):
+            self.assertEqual(gc553._read_at_reply(None, 42, 0x4E, allow_short=True), payload)
+        self.assertEqual(exchange.call_count, 2)
+
     def test_usb_can_be_selected_alongside_pcie(self):
         pci = {"pci": "0000:01:00.0", "mode": "vfio", "model": "gc573"}
         usb = {"pci": None, "usb_port": "2-1", "mode": "uvc", "model": "gc553g2"}
