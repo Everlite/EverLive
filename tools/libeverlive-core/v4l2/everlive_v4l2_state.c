@@ -17,6 +17,7 @@
 #include "everlive_framestore.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/videodev2.h>
 #include <poll.h>
 #include <stdatomic.h>
@@ -35,6 +36,8 @@ static const struct everlive_v4l2_card *g_card;
 static struct everlive_framestore *g_framestore;
 static uint8_t *g_yuyv_scratch;
 static size_t g_yuyv_scratch_cap;
+static void (*g_lock_hook)(void);
+static void (*g_unlock_hook)(void);
 
 #ifdef EVERLIVE_V4L2_TESTING
 static unsigned long g_test_mmap_calls;
@@ -479,6 +482,12 @@ int everlive_v4l2_open_count(void)
 	return atomic_load_explicit(&g_open_handle_count, memory_order_relaxed);
 }
 
+void everlive_v4l2_set_lock_hooks(void (*lock)(void), void (*unlock)(void))
+{
+	g_lock_hook = lock;
+	g_unlock_hook = unlock;
+}
+
 static void release_buffers(struct everlive_v4l2_handle *h)
 {
 	for (unsigned int i = 0; i < EVERLIVE_V4L2_MAX_BUFS; i++) {
@@ -808,6 +817,9 @@ static int handle_virtual_ioctl(struct everlive_v4l2_handle *h,
 	case VIDIOC_DQBUF: {
 		struct v4l2_buffer *b = arg;
 		struct pollfd pfd;
+		uint64_t generation;
+		int handle_fd;
+		int timeout_ms;
 		int found = -1;
 		int pr;
 		uint64_t expirations;
@@ -834,17 +846,50 @@ static int handle_virtual_ioctl(struct everlive_v4l2_handle *h,
 			ret = -1;
 			break;
 		}
-		pfd.fd = h->fd;
+
+		/*
+		 * Drop the caller's global lock around poll() so a 1 s DQBUF
+		 * cannot freeze close(), QUERYCAP or another thread.  The handle
+		 * may be closed and its slot recycled while we sleep, so remember
+		 * its generation and revalidate everything before touching it.
+		 */
+		generation = h->generation;
+		handle_fd = h->fd;
+		timeout_ms = h->nonblock ? 0 : 1000;
+		pfd.fd = handle_fd;
 		pfd.events = POLLIN;
-		pr = poll(&pfd, 1, 1000);
+		if (g_unlock_hook)
+			g_unlock_hook();
+		pr = poll(&pfd, 1, timeout_ms);
+		if (g_lock_hook)
+			g_lock_hook();
+
+		if (!h->in_use || h->generation != generation) {
+			errno = EBADF;
+			ret = -1;
+			break;
+		}
+		if (h->fd != handle_fd || !h->streaming ||
+		    !h->bufs[found].queued) {
+			errno = EAGAIN;
+			ret = -1;
+			break;
+		}
+		if (!h->bufs[found].addr || !h->bufs[found].size) {
+			errno = EINVAL;
+			ret = -1;
+			break;
+		}
 		if (pr <= 0) {
 			if (pr == 0)
 				errno = EAGAIN;
 			ret = -1;
 			break;
 		}
-		while (read(h->fd, &expirations, sizeof(expirations)) ==
-		       sizeof(expirations))
+		/* Raw read: the preload DSO now interposes read(). */
+		while (syscall(SYS_read, h->fd, &expirations,
+			       sizeof(expirations)) ==
+		       (long)sizeof(expirations))
 			;
 
 		shm_convert_port(h->port, h->bufs[found].addr,
@@ -919,10 +964,11 @@ static int handle_virtual_ioctl(struct everlive_v4l2_handle *h,
 	return ret;
 }
 
-int everlive_v4l2_open_virtual(unsigned int port)
+int everlive_v4l2_open_virtual(unsigned int port, int flags)
 {
 	const struct everlive_v4l2_card *card = state_card();
 	struct everlive_v4l2_handle *h = NULL;
+	uint64_t generation;
 	int slot = -1;
 	int tfd;
 
@@ -947,10 +993,14 @@ int everlive_v4l2_open_virtual(unsigned int port)
 		return -1;
 
 	h = &g_handles[slot];
+	/* Preserve identity across memset() so stale DQBUF waiters see a bump. */
+	generation = h->generation;
 	memset(h, 0, sizeof(*h));
+	h->generation = generation + 1;
 	h->in_use = true;
 	h->fd = tfd;
 	h->port = port;
+	h->nonblock = (flags & O_NONBLOCK) != 0;
 	h->width = card->default_width;
 	h->height = card->default_height;
 	h->pixfmt = V4L2_PIX_FMT_YUYV;
@@ -964,6 +1014,7 @@ int everlive_v4l2_open_virtual(unsigned int port)
 int everlive_v4l2_close_virtual(int fd)
 {
 	struct everlive_v4l2_handle *h = find_handle(fd);
+	uint64_t generation;
 	int ret;
 
 	if (!h) {
@@ -971,9 +1022,12 @@ int everlive_v4l2_close_virtual(int fd)
 		return -1;
 	}
 
+	generation = h->generation;
 	release_buffers(h);
 	ret = state_close(fd);
 	memset(h, 0, sizeof(*h));
+	/* Bump after clearing so a DQBUF waiter that slept revalidation fails. */
+	h->generation = generation + 1;
 	atomic_fetch_sub_explicit(&g_open_handle_count, 1,
 				  memory_order_relaxed);
 	return ret;
@@ -982,6 +1036,7 @@ int everlive_v4l2_close_virtual(int fd)
 int everlive_v4l2_dup_virtual(int oldfd, int newfd)
 {
 	struct everlive_v4l2_handle *old = find_handle(oldfd);
+	uint64_t generation;
 	int slot = -1;
 
 	if (!old) {
@@ -1000,8 +1055,10 @@ int everlive_v4l2_dup_virtual(int oldfd, int newfd)
 		return -1;
 	}
 
+	generation = g_handles[slot].generation;
 	g_handles[slot] = *old;
 	g_handles[slot].fd = newfd;
+	g_handles[slot].generation = generation + 1;
 	memset(g_handles[slot].bufs, 0, sizeof(g_handles[slot].bufs));
 	g_handles[slot].req_count = 0;
 	atomic_fetch_add_explicit(&g_open_handle_count, 1,
