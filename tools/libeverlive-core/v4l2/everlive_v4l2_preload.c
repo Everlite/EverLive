@@ -138,6 +138,9 @@ static FILE *(*real_fopen)(const char *, const char *) = NULL;
 static FILE *(*real_fopen64)(const char *, const char *) = NULL;
 static ssize_t (*real_read)(int, void *, size_t) = NULL;
 static ssize_t (*real_pread)(int, void *, size_t, off_t) = NULL;
+static ssize_t (*real___read_chk)(int, void *, size_t, size_t) = NULL;
+static ssize_t (*real___pread_chk)(int, void *, size_t, off_t, size_t) = NULL;
+static ssize_t (*real___pread64_chk)(int, void *, size_t, off64_t, size_t) = NULL;
 
 static int (*real_v4l2_open)(const char *, int, ...) = NULL;
 static int (*real_v4l2_fd_open)(int, int) = NULL;
@@ -172,8 +175,11 @@ static void resolve_real_libc_funcs(void)
 	real_closedir = dlsym(RTLD_NEXT, "closedir");
 	real_fopen    = dlsym(RTLD_NEXT, "fopen");
 	real_fopen64  = dlsym(RTLD_NEXT, "fopen64");
-	real_read     = dlsym(RTLD_NEXT, "read");
-	real_pread    = dlsym(RTLD_NEXT, "pread");
+	real_read        = dlsym(RTLD_NEXT, "read");
+	real_pread       = dlsym(RTLD_NEXT, "pread");
+	real___read_chk  = dlsym(RTLD_NEXT, "__read_chk");
+	real___pread_chk = dlsym(RTLD_NEXT, "__pread_chk");
+	real___pread64_chk = dlsym(RTLD_NEXT, "__pread64_chk");
 }
 
 static void init_real_funcs(void)
@@ -783,20 +789,43 @@ int close(int fd)
 	return ret;
 }
 
+static bool try_read_virtual_fd(int fd, void *buffer, size_t count,
+				ssize_t *out_ret)
+{
+	if (everlive_v4l2_open_count() <= 0)
+		return false;
+
+	pthread_mutex_lock(&g_v4l2_lock);
+	if (everlive_v4l2_is_virtual_fd(fd)) {
+		*out_ret = everlive_v4l2_read_frame(fd, buffer, count);
+		pthread_mutex_unlock(&g_v4l2_lock);
+		return true;
+	}
+	pthread_mutex_unlock(&g_v4l2_lock);
+	return false;
+}
+
 ssize_t read(int fd, void *buffer, size_t count)
 {
 	ssize_t ret;
 
 	init_real_funcs();
-	if (everlive_v4l2_open_count() > 0) {
-		pthread_mutex_lock(&g_v4l2_lock);
-		if (everlive_v4l2_is_virtual_fd(fd)) {
-			ret = everlive_v4l2_read_frame(fd, buffer, count);
-			pthread_mutex_unlock(&g_v4l2_lock);
-			return ret;
-		}
-		pthread_mutex_unlock(&g_v4l2_lock);
-	}
+	if (try_read_virtual_fd(fd, buffer, count, &ret))
+		return ret;
+	if (real_read)
+		return real_read(fd, buffer, count);
+	return (ssize_t)syscall(SYS_read, fd, buffer, count);
+}
+
+ssize_t __read_chk(int fd, void *buffer, size_t count, size_t buflen)
+{
+	ssize_t ret;
+
+	init_real_funcs();
+	if (count <= buflen && try_read_virtual_fd(fd, buffer, count, &ret))
+		return ret;
+	if (real___read_chk)
+		return real___read_chk(fd, buffer, count, buflen);
 	if (real_read)
 		return real_read(fd, buffer, count);
 	return (ssize_t)syscall(SYS_read, fd, buffer, count);
@@ -807,21 +836,61 @@ ssize_t pread(int fd, void *buffer, size_t count, off_t offset)
 	ssize_t ret;
 
 	init_real_funcs();
-	if (everlive_v4l2_open_count() > 0) {
-		pthread_mutex_lock(&g_v4l2_lock);
-		if (everlive_v4l2_is_virtual_fd(fd)) {
-			ret = everlive_v4l2_read_frame(fd, buffer, count);
-			pthread_mutex_unlock(&g_v4l2_lock);
-			return ret;
-		}
-		pthread_mutex_unlock(&g_v4l2_lock);
-	}
+	if (try_read_virtual_fd(fd, buffer, count, &ret))
+		return ret;
 	if (real_pread)
 		return real_pread(fd, buffer, count, offset);
 #if defined(SYS_pread64)
 	return (ssize_t)syscall(SYS_pread64, fd, buffer, count, offset);
 #elif defined(SYS_pread)
 	return (ssize_t)syscall(SYS_pread, fd, buffer, count, offset);
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+
+ssize_t __pread_chk(int fd, void *buffer, size_t count, off_t offset,
+		    size_t buflen)
+{
+	ssize_t ret;
+
+	init_real_funcs();
+	if (count <= buflen && try_read_virtual_fd(fd, buffer, count, &ret))
+		return ret;
+	if (real___pread_chk)
+		return real___pread_chk(fd, buffer, count, offset, buflen);
+	if (real_pread)
+		return real_pread(fd, buffer, count, offset);
+#if defined(SYS_pread64)
+	return (ssize_t)syscall(SYS_pread64, fd, buffer, count, offset);
+#elif defined(SYS_pread)
+	return (ssize_t)syscall(SYS_pread, fd, buffer, count, offset);
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+
+ssize_t __pread64_chk(int fd, void *buffer, size_t count, off64_t offset,
+		      size_t buflen)
+{
+	ssize_t ret;
+
+	init_real_funcs();
+	if (count <= buflen && try_read_virtual_fd(fd, buffer, count, &ret))
+		return ret;
+	if (real___pread64_chk)
+		return real___pread64_chk(fd, buffer, count, offset, buflen);
+	if (real___pread_chk)
+		return real___pread_chk(fd, buffer, count, (off_t)offset,
+					buflen);
+	if (real_pread)
+		return real_pread(fd, buffer, count, (off_t)offset);
+#if defined(SYS_pread64)
+	return (ssize_t)syscall(SYS_pread64, fd, buffer, count, offset);
+#elif defined(SYS_pread)
+	return (ssize_t)syscall(SYS_pread, fd, buffer, count, (off_t)offset);
 #else
 	errno = ENOSYS;
 	return -1;

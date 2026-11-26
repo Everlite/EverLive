@@ -538,8 +538,11 @@ static int run_live_node(const char *node, const char *expected_bdf)
 	frame = malloc(TEST_FRAME_BYTES);
 	CHECK(frame != NULL);
 	memset(frame, 0xaa, TEST_FRAME_BYTES);
-	CHECK(read(fd, frame, TEST_FRAME_BYTES) == (ssize_t)TEST_FRAME_BYTES);
-	free(frame);
+	{
+		ssize_t nread = read(fd, frame, TEST_FRAME_BYTES);
+		free(frame);
+		CHECK(nread == (ssize_t)TEST_FRAME_BYTES);
+	}
 
 	CHECK(g_v4l2_ioctl(fd, VIDIOC_STREAMOFF, &type) == 0);
 	CHECK(g_v4l2_close(fd) == 0);
