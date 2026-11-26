@@ -32,11 +32,16 @@
 #define FRAMESTORE_ALIGN	64U
 #define FRAMESTORE_READ_RETRIES	16U
 
+#ifndef AT_EMPTY_PATH
+#define AT_EMPTY_PATH 0x1000
+#endif
+
 /*
- * The frame store is linked into the LD_PRELOAD shim, where mmap(), munmap()
- * and close() are interposed and may take the shim's own lock.  Use raw
- * syscalls for the store's private mapping so creating/attaching a store from
- * inside an ioctl handler can never recurse into that lock.
+ * The frame store is linked into the LD_PRELOAD shim, where mmap(), munmap(),
+ * close() and fstat() are interposed and may take the shim's own lock.  Use
+ * raw syscalls for the store's private metadata operations so creating,
+ * attaching or destroying a store from inside an ioctl handler can never
+ * recurse into that lock.
  */
 static void *fs_mmap(void *addr, size_t length, int prot, int flags,
 		     int fd, off_t offset)
@@ -59,6 +64,28 @@ static int fs_munmap(void *addr, size_t length)
 static int fs_close(int fd)
 {
 	return (int)syscall(SYS_close, fd);
+}
+
+/*
+ * Raw fstat is required for the same reason as fs_mmap()/fs_close(): the
+ * LD_PRELOAD shim interposes fstat() and takes its own global lock, so calling
+ * it from a framestore helper invoked under that lock deadlocks.
+ *
+ * ABI caveat: the kernel's struct stat layout is not always identical to the
+ * 32-bit glibc struct stat (st_ino/st_size fields change width).  EverLive is
+ * built for 64-bit Linux where the layouts match; a 32-bit port must use the
+ * fstat64/fstatat64 syscalls instead.
+ */
+static int fs_fstat(int fd, struct stat *st)
+{
+#if defined(SYS_fstat)
+	return (int)syscall(SYS_fstat, fd, st);
+#elif defined(SYS_newfstatat)
+	return (int)syscall(SYS_newfstatat, fd, "", st, AT_EMPTY_PATH);
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
 }
 
 struct everlive_framestore_port {
@@ -290,14 +317,14 @@ everlive_framestore_create(const struct everlive_framestore_config *cfg)
 	 * before changing its mode; only a regular object owned by this engine
 	 * may be reused.
 	 */
-	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+	if (fs_fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
 	    st.st_uid != geteuid())
 		goto fail;
 
 	if (fchmod(fd, 0600) != 0)
 		goto fail;
 
-	if (fstat(fd, &st) != 0 || (st.st_mode & 07777) != 0600)
+	if (fs_fstat(fd, &st) != 0 || (st.st_mode & 07777) != 0600)
 		goto fail;
 
 	if (ftruncate(fd, (off_t)region_size) != 0)
@@ -308,7 +335,7 @@ everlive_framestore_create(const struct everlive_framestore_config *cfg)
 	if (map == MAP_FAILED)
 		goto fail;
 
-	if (fstat(fd, &st) != 0 || st.st_size < (off_t)region_size) {
+	if (fs_fstat(fd, &st) != 0 || st.st_size < (off_t)region_size) {
 		fs_munmap(map, region_size);
 		map = MAP_FAILED;
 		goto fail;
@@ -379,7 +406,7 @@ struct everlive_framestore *everlive_framestore_attach(const char *name)
 	if (fd < 0)
 		return NULL;
 
-	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+	if (fs_fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
 	    st.st_uid != geteuid() || (st.st_mode & 07777) != 0600 ||
 	    st.st_size < (off_t)sizeof(*hdr)) {
 		fs_close(fd);
@@ -440,8 +467,8 @@ void everlive_framestore_destroy(struct everlive_framestore *fs)
 	if (fs->owner && fs->fd >= 0) {
 		probe = shm_open(fs->name, O_RDONLY, 0);
 		if (probe >= 0) {
-			if (fstat(fs->fd, &created) == 0 &&
-			    fstat(probe, &current) == 0 &&
+			if (fs_fstat(fs->fd, &created) == 0 &&
+			    fs_fstat(probe, &current) == 0 &&
 			    created.st_dev == current.st_dev &&
 			    created.st_ino == current.st_ino)
 				ours = true;

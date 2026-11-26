@@ -6,6 +6,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/videodev2.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -14,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "everlive_framestore.h"
@@ -136,7 +138,7 @@ static void test_state_machine(void)
 					 true) == false);
 
 	CHECK(everlive_v4l2_state_init(everlive_v4l2_card_descriptor()) == 0);
-	fd = everlive_v4l2_open_virtual(0);
+	fd = everlive_v4l2_open_virtual(0, 0);
 	CHECK(fd >= 0);
 	h = everlive_v4l2_find_handle(fd);
 	CHECK(h != NULL);
@@ -458,7 +460,7 @@ static void test_reqbufs_rollback(void)
 
 	cleanup();
 	CHECK(everlive_v4l2_state_init(everlive_v4l2_card_descriptor()) == 0);
-	fd = everlive_v4l2_open_virtual(0);
+	fd = everlive_v4l2_open_virtual(0, 0);
 	CHECK(fd >= 0);
 	h = everlive_v4l2_find_handle(fd);
 	CHECK(h != NULL);
@@ -532,8 +534,8 @@ static void test_multi_fd_cleanup(void)
 	CHECK(everlive_v4l2_state_init(everlive_v4l2_card_descriptor()) == 0);
 	everlive_v4l2_test_reset_hooks();
 
-	fd0 = everlive_v4l2_open_virtual(0);
-	fd1 = everlive_v4l2_open_virtual(1);
+	fd0 = everlive_v4l2_open_virtual(0, 0);
+	fd1 = everlive_v4l2_open_virtual(1, 0);
 	CHECK(fd0 >= 0 && fd0 != fd1 && fd1 >= 0);
 	h0 = everlive_v4l2_find_handle(fd0);
 	h1 = everlive_v4l2_find_handle(fd1);
@@ -607,8 +609,8 @@ static void test_multi_fd_cleanup(void)
 
 	/* Repeated cycles must not retain timerfds or buffer mappings. */
 	for (int cycle = 0; cycle < 8; cycle++) {
-		fd0 = everlive_v4l2_open_virtual(0);
-		fd1 = everlive_v4l2_open_virtual(1);
+		fd0 = everlive_v4l2_open_virtual(0, 0);
+		fd1 = everlive_v4l2_open_virtual(1, 0);
 		CHECK(fd0 >= 0 && fd1 >= 0);
 		h0 = everlive_v4l2_find_handle(fd0);
 		h1 = everlive_v4l2_find_handle(fd1);
@@ -627,6 +629,70 @@ static void test_multi_fd_cleanup(void)
 	cleanup();
 }
 
+static void test_nonblock_dqbuf(void)
+{
+	struct everlive_v4l2_handle *h;
+	struct v4l2_requestbuffers rb;
+	struct v4l2_buffer buf;
+	struct timespec started;
+	struct timespec finished;
+	long elapsed_ms;
+	int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	int fd;
+
+	cleanup();
+	CHECK(everlive_v4l2_state_init(everlive_v4l2_card_descriptor()) == 0);
+	fd = everlive_v4l2_open_virtual(0, O_NONBLOCK);
+	CHECK(fd >= 0);
+	h = everlive_v4l2_find_handle(fd);
+	CHECK(h != NULL);
+	CHECK(h->nonblock);
+	set_format(h, 640, 360);
+	/* A long interval makes the second DQBUF deterministic. */
+	h->fps_num = 1;
+	h->fps_den = 1;
+
+	memset(&rb, 0, sizeof(rb));
+	rb.count = 2;
+	rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	rb.memory = V4L2_MEMORY_MMAP;
+	CHECK(everlive_v4l2_ioctl(h, VIDIOC_REQBUFS, &rb) == 0);
+
+	memset(&buf, 0, sizeof(buf));
+	buf.index = 0;
+	buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	buf.memory = V4L2_MEMORY_MMAP;
+	CHECK(everlive_v4l2_ioctl(h, VIDIOC_QBUF, &buf) == 0);
+	CHECK(everlive_v4l2_ioctl(h, VIDIOC_STREAMON, &type) == 0);
+
+	/* Let the timerfd's initial 1 ms tick become readable. */
+	usleep(30000);
+	memset(&buf, 0, sizeof(buf));
+	buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	buf.memory = V4L2_MEMORY_MMAP;
+	CHECK(everlive_v4l2_ioctl(h, VIDIOC_DQBUF, &buf) == 0);
+	CHECK(buf.index == 0);
+
+	buf.index = 0;
+	buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	buf.memory = V4L2_MEMORY_MMAP;
+	CHECK(everlive_v4l2_ioctl(h, VIDIOC_QBUF, &buf) == 0);
+
+	/* Nothing is ready; O_NONBLOCK must return EAGAIN without the 1 s wait. */
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &started) == 0);
+	errno = 0;
+	CHECK(everlive_v4l2_ioctl(h, VIDIOC_DQBUF, &buf) == -1);
+	CHECK(errno == EAGAIN);
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &finished) == 0);
+	elapsed_ms = (finished.tv_sec - started.tv_sec) * 1000L +
+		     (finished.tv_nsec - started.tv_nsec) / 1000000L;
+	CHECK(elapsed_ms < 100);
+
+	CHECK(everlive_v4l2_ioctl(h, VIDIOC_STREAMOFF, &type) == 0);
+	CHECK(everlive_v4l2_close_virtual(fd) == 0);
+	cleanup();
+}
+
 static void test_absent_store(void)
 {
 	struct everlive_v4l2_handle *h;
@@ -638,7 +704,7 @@ static void test_absent_store(void)
 	/* The previous test unlinks the store on cleanup. */
 	cleanup();
 	CHECK(everlive_v4l2_state_init(everlive_v4l2_card_descriptor()) == 0);
-	fd = everlive_v4l2_open_virtual(0);
+	fd = everlive_v4l2_open_virtual(0, 0);
 	CHECK(fd >= 0);
 	h = everlive_v4l2_find_handle(fd);
 	CHECK(h != NULL);
@@ -667,6 +733,7 @@ int main(void)
 	test_state_machine();
 	test_reqbufs_rollback();
 	test_multi_fd_cleanup();
+	test_nonblock_dqbuf();
 	test_absent_store();
 	cleanup();
 	printf("=== All V4L2 Shim State Tests Passed! ===\n");

@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Bounded memlock instead of unlimited:** `LimitMEMLOCK=infinity` and the unlimited `limits.d` files were removed. `cap_ipc_lock=+ep` is applied to every installed engine, including HWS, and a bounded 1 GiB fallback with `LimitMEMLOCK=1G` drop-ins is installed only when `setcap` is unavailable.
 - **User-unit hardening (safe subset):** `everlive.service`, `opengc570d-userd.service`, and the Hub-generated fallback unit now restrict address families to `AF_UNIX`, `AF_INET`, and `AF_INET6`, run with `SystemCallArchitectures=native` and `SystemCallFilter=@system-service`, and enable `LockPersonality=yes` plus `RestrictSUIDSGID=yes`. `systemd-analyze security --offline=yes` on systemd 262.2 improves both units from **9.4** to **7.2**. `NoNewPrivileges=` and filesystem namespacing remain off because they would disable the `cap_ipc_lock=+ep` VFIO pinning path; a per-user `LimitMEMLOCK=` cannot raise the user manager's hard limit either.
 
+### Fixed
+- **V4L2 preload deadlock with a live frame store:** the shared frame store called the interposed `fstat()` (and could recurse through `mmap()`/`close()`) while the preload shim held its global mutex, so `VIDIOC_QUERYCAP` — and therefore `v4l2-ctl`, OBS and Discord — could hang forever as soon as `/dev/shm/*_v4l2_shm` existed. Frame-store metadata now uses raw `fstat`/`mmap`/`munmap`/`close` syscalls, `VIDIOC_DQBUF` drops the shim lock around a blocking `poll()`, `O_NONBLOCK` is honoured with an immediate `EAGAIN`, and `read()`/`pread()` are interposed for virtual fds. Added timeout-guarded regression tests for live-store QUERYCAP, non-blocking DQBUF and full-frame reads.
+
 ### Removed
 - Removed the unused binary-patching helpers from `tools/`. EverLive ships only
   source-built components; no released library is modified after build. CI now

@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <linux/videodev2.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -20,13 +21,24 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
+
+#include "everlive_framestore.h"
 
 #define TEST_GC573_NODE "/dev/video63"
 #define TEST_GC570D_NODE "/dev/video60"
 #define TEST_GC573_BASE 0x50000000U
 #define TEST_GC570D_BASE 0x51000000U
 #define TEST_SHARED_COOKIE 0x52000000U
+
+#define TEST_GC573_SHM "/gc573_v4l2_shm"
+#define TEST_GC570D_SHM "/gc570d_v4l2_shm"
+#define TEST_GC573_BDF "0000:0a:00.0"
+#define TEST_GC570D_BDF "0000:0b:00.0"
+#define TEST_FRAME_W 640U
+#define TEST_FRAME_H 360U
+#define TEST_FRAME_BYTES (TEST_FRAME_W * TEST_FRAME_H * 2U)
 
 typedef int (*v4l2_open_fn)(const char *, int, ...);
 typedef int (*v4l2_close_fn)(int);
@@ -375,6 +387,207 @@ static int run_dup(void)
 	return 0;
 }
 
+/* -------------------------------------------------------------------------
+ * Live frame-store + QUERYCAP regression (deadlock on interposed fstat)
+ * ------------------------------------------------------------------------- */
+
+static struct everlive_framestore *g_fs_gc573;
+static struct everlive_framestore *g_fs_gc570d;
+static volatile sig_atomic_t g_created_gc573;
+static volatile sig_atomic_t g_created_gc570d;
+
+static void framestore_cleanup(void)
+{
+	if (g_fs_gc573) {
+		everlive_framestore_destroy(g_fs_gc573);
+		g_fs_gc573 = NULL;
+	}
+	if (g_fs_gc570d) {
+		everlive_framestore_destroy(g_fs_gc570d);
+		g_fs_gc570d = NULL;
+	}
+	if (g_created_gc573) {
+		shm_unlink(TEST_GC573_SHM);
+		g_created_gc573 = 0;
+	}
+	if (g_created_gc570d) {
+		shm_unlink(TEST_GC570D_SHM);
+		g_created_gc570d = 0;
+	}
+}
+
+/*
+ * Clean /dev/shm even when the regression deadlocks: shm_unlink() is
+ * async-signal-safe and does not take the shim mutex.
+ */
+static void framestore_alarm(int sig)
+{
+	static const char msg[] =
+		"FAIL: v4l2 framestore test timed out (possible deadlock)\n";
+
+	(void)sig;
+	if (g_created_gc573)
+		shm_unlink(TEST_GC573_SHM);
+	if (g_created_gc570d)
+		shm_unlink(TEST_GC570D_SHM);
+	(void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
+	_exit(124);
+}
+
+static int create_test_store(const char *name, const char *bdf,
+			     struct everlive_framestore **out)
+{
+	struct everlive_framestore_config cfg;
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.name = name;
+	cfg.pci_bdf = bdf;
+	cfg.port_count = 2;
+	cfg.slot_count = 3;
+	cfg.frame_stride = 1920U * 1080U * 2U;
+
+	*out = everlive_framestore_create(&cfg);
+	CHECK(*out != NULL);
+	return 0;
+}
+
+static int64_t monotonic_ns(void)
+{
+	struct timespec ts;
+
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &ts) == 0);
+	return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+}
+
+static int check_querycap_bdf(int fd, const char *expected)
+{
+	struct v4l2_capability cap;
+
+	memset(&cap, 0, sizeof(cap));
+	CHECK(g_v4l2_ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0);
+	CHECK(strcmp((char *)cap.bus_info, expected) == 0);
+	return 0;
+}
+
+static int set_pacing(int fd)
+{
+	struct v4l2_streamparm parm;
+
+	memset(&parm, 0, sizeof(parm));
+	parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	parm.parm.capture.timeperframe.numerator = 1;
+	parm.parm.capture.timeperframe.denominator = 1;
+	CHECK(g_v4l2_ioctl(fd, VIDIOC_S_PARM, &parm) == 0);
+	return 0;
+}
+
+static int queue_buffer(int fd, uint32_t index)
+{
+	struct v4l2_buffer buf;
+
+	memset(&buf, 0, sizeof(buf));
+	buf.index = index;
+	buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	buf.memory = V4L2_MEMORY_MMAP;
+	CHECK(g_v4l2_ioctl(fd, VIDIOC_QBUF, &buf) == 0);
+	return 0;
+}
+
+static int run_live_node(const char *node, const char *expected_bdf)
+{
+	struct v4l2_buffer buf;
+	uint8_t *frame;
+	int64_t started;
+	int64_t elapsed;
+	int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	int fd;
+
+	/* O_NONBLOCK must reach everlive_v4l2_open_virtual() for DQBUF. */
+	fd = g_v4l2_open(node, O_RDWR | O_NONBLOCK);
+	CHECK(fd >= 0);
+
+	/* The old shim deadlocked here while the frame store was attached. */
+	CHECK(check_querycap_bdf(fd, expected_bdf) == 0);
+	CHECK(set_format(fd, TEST_FRAME_W, TEST_FRAME_H) == 0);
+	/* 1 s interval keeps the second non-blocking DQBUF deterministic. */
+	CHECK(set_pacing(fd) == 0);
+	CHECK(request_buffers(fd, 2) == 0);
+	CHECK(queue_buffer(fd, 0) == 0);
+	CHECK(g_v4l2_ioctl(fd, VIDIOC_STREAMON, &type) == 0);
+
+	/* Let the timerfd arm so the first dequeue observes a ready frame. */
+	usleep(30000);
+
+	memset(&buf, 0, sizeof(buf));
+	buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	buf.memory = V4L2_MEMORY_MMAP;
+	CHECK(g_v4l2_ioctl(fd, VIDIOC_DQBUF, &buf) == 0);
+	CHECK(buf.index == 0);
+
+	CHECK(queue_buffer(fd, 0) == 0);
+
+	/* No frame tick is pending; a non-blocking DQBUF must not sleep. */
+	errno = 0;
+	started = monotonic_ns();
+	CHECK(g_v4l2_ioctl(fd, VIDIOC_DQBUF, &buf) == -1);
+	elapsed = monotonic_ns() - started;
+	CHECK(errno == EAGAIN);
+	CHECK(elapsed < 100000000LL);
+
+	/* Plain read() is interposed and must return one complete frame. */
+	frame = malloc(TEST_FRAME_BYTES);
+	CHECK(frame != NULL);
+	memset(frame, 0xaa, TEST_FRAME_BYTES);
+	{
+		ssize_t nread = read(fd, frame, TEST_FRAME_BYTES);
+		free(frame);
+		CHECK(nread == (ssize_t)TEST_FRAME_BYTES);
+	}
+
+	CHECK(g_v4l2_ioctl(fd, VIDIOC_STREAMOFF, &type) == 0);
+	CHECK(g_v4l2_close(fd) == 0);
+	return 0;
+}
+
+static int run_framestore(const char *target)
+{
+	bool want_gc573;
+	bool want_gc570d;
+
+	CHECK(target != NULL);
+	want_gc573 = strstr(target, "gc573") != NULL;
+	want_gc570d = strstr(target, "gc570d") != NULL;
+	CHECK(want_gc573 || want_gc570d);
+
+	/* Register cleanup before anything can fail so /dev/shm stays clean. */
+	CHECK(atexit(framestore_cleanup) == 0);
+	CHECK(signal(SIGALRM, framestore_alarm) != SIG_ERR);
+	alarm(5);
+
+	if (want_gc573) {
+		g_created_gc573 = 1;
+		CHECK(create_test_store(TEST_GC573_SHM, TEST_GC573_BDF,
+					&g_fs_gc573) == 0);
+	}
+	if (want_gc570d) {
+		g_created_gc570d = 1;
+		CHECK(create_test_store(TEST_GC570D_SHM, TEST_GC570D_BDF,
+					&g_fs_gc570d) == 0);
+	}
+
+	if (want_gc573) {
+		CHECK(run_live_node(TEST_GC573_NODE,
+				    "PCI:" TEST_GC573_BDF) == 0);
+	}
+	if (want_gc570d) {
+		CHECK(run_live_node(TEST_GC570D_NODE,
+				    "PCI:" TEST_GC570D_BDF "-hdmi1") == 0);
+	}
+
+	alarm(0);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = argc > 1 ? argv[1] : "";
@@ -389,8 +602,12 @@ int main(int argc, char **argv)
 		return run_coload() == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 	if (strcmp(mode, "dup") == 0)
 		return run_dup() == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+	if (strcmp(mode, "framestore") == 0)
+		return run_framestore(argc > 2 ? argv[2] : "gc573") == 0 ?
+		       EXIT_SUCCESS : EXIT_FAILURE;
 
 	fprintf(stderr,
-		"usage: %s init|dirent|coload|dup\n", argv[0]);
+		"usage: %s init|dirent|coload|dup|framestore [gc573|gc570d|gc573:gc570d]\n",
+		argv[0]);
 	return EXIT_FAILURE;
 }

@@ -116,8 +116,9 @@ test_v4l2_shim: test_v4l2_shim.c \
 		-o $@ $< $(CORE_V4L2_DIR)/everlive_v4l2_state.c \
 		$(CORE_LIB) -pthread
 
-test_v4l2_preload: test_v4l2_preload.c
-	$(CC) $(CFLAGS) $(DEPFLAGS) -o $@ $< -ldl -pthread
+test_v4l2_preload: test_v4l2_preload.c $(CORE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ $< $(CORE_LIB) \
+		-ldl -lrt -pthread
 
 # Build test-local DSOs so sanitizer runs instrument the interposer as well.
 # The production DSOs are still built by their normal engine Makefiles.
