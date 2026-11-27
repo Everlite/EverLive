@@ -73,7 +73,7 @@ TARGETS := test_card_registry test_frame_convert test_framestore test_ctl_proto 
            test_json_rpc test_v4l2_shim test_v4l2_preload test_handoff \
            test_ipc test_edid test_config test_framegen test_audio_probe \
            test_gc573_vfio test_hws_vfio \
-           test_gc573_edid test_osd_utf8 test_sigpipe
+           test_gc573_edid test_osd_utf8 test_sigpipe test_doctor
 
 # Every target here is host-testable (no capture hardware required), so the
 # whole suite can run under TSan.  The V4L2 DSOs are included explicitly so the
@@ -210,6 +210,10 @@ test_osd_utf8: test_osd_utf8.c $(CORE_DIR)/osd/everlive_utf8.h
 test_sigpipe: test_sigpipe.c
 	$(CC) $(CFLAGS) $(DEPFLAGS) -o $@ test_sigpipe.c
 
+test_doctor: test_doctor.c $(CORE_DIR)/everlive_doctor.c $(CORE_DIR)/everlive_doctor.h $(CORE_LIB)
+	$(CC) $(CFLAGS) $(INCLUDES) $(DEPFLAGS) -o $@ \
+		test_doctor.c $(CORE_DIR)/everlive_doctor.c $(CORE_LIB)
+
 -include $(TARGETS:=.d)
 
 test: all
@@ -223,6 +227,7 @@ test: all
 	@$(MAKE) --no-print-directory v4l2-preload
 	@./test_handoff
 	@./test_ipc
+	@./test_doctor
 	@echo "=== everlive_display ==="
 	@./test_audio_probe
 	@echo "=== GC570D (Live Gamer DUO) ==="

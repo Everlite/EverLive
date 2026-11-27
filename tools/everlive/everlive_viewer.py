@@ -5350,6 +5350,16 @@ if HAS_QT:
                 "clipboard for a bug report.")
             self.btn_diag_report.clicked.connect(self._copy_diagnostic_report)
             grid_diag.addWidget(self.btn_diag_report, 1, 0)
+
+            self.btn_run_doctor = QPushButton("Run Diagnostics")
+            self.btn_run_doctor.setObjectName("btnGhost")
+            self.btn_run_doctor.setFixedHeight(ui_theme.BUTTON_H)
+            self.btn_run_doctor.setCursor(Qt.PointingHandCursor)
+            self.btn_run_doctor.setToolTip(
+                "Run everlive-ctl doctor to check IOMMU, VFIO, permissions, "
+                "PipeWire, ffmpeg and binaries.")
+            self.btn_run_doctor.clicked.connect(self._run_doctor_diagnostics)
+            grid_diag.addWidget(self.btn_run_doctor, 2, 0)
             lay_app.addWidget(card_diag)
             lay_app.addStretch(1)
 
@@ -6467,6 +6477,53 @@ if HAS_QT:
                 "Copied to the clipboard. Paste it into your bug report.",
                 seconds=4.0)
             return report
+
+        def _run_doctor_diagnostics(self):
+            tools_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            ctl_bin = os.path.join(tools_dir, "libeverlive-core", "everlive-ctl")
+            if not (os.path.isfile(ctl_bin) and os.access(ctl_bin, os.X_OK)):
+                ctl_bin = shutil.which("everlive-ctl") or "everlive-ctl"
+            try:
+                res = subprocess.run(
+                    [ctl_bin, "doctor", "--verbose"],
+                    capture_output=True, text=True, timeout=6.0,
+                )
+                output = (res.stdout or "") + (
+                    ("\n" + res.stderr) if res.stderr else ""
+                )
+                output = output.strip() or f"everlive-ctl exited with {res.returncode}"
+            except (OSError, subprocess.SubprocessError) as exc:
+                output = f"Failed to run {ctl_bin} doctor: {exc}"
+
+            dlg = QDialog(self)
+            dlg.setWindowTitle("EverLive Diagnostics (everlive-ctl doctor)")
+            dlg.resize(680, 440)
+            lay = QVBoxLayout(dlg)
+            view = QTextEdit(dlg)
+            view.setReadOnly(True)
+            view.setFontFamily("monospace")
+            view.setPlainText(output)
+            lay.addWidget(view, 1)
+
+            row = QHBoxLayout()
+            row.addStretch(1)
+            btn_copy = QPushButton("Copy Report", dlg)
+            btn_copy.clicked.connect(
+                lambda: (
+                    QApplication.clipboard().setText(output),
+                    self._set_vfio_notice(
+                        "Diagnostics Copied",
+                        "everlive-ctl doctor output copied to clipboard.",
+                        seconds=3.5,
+                    ),
+                )
+            )
+            btn_close = QPushButton("Close", dlg)
+            btn_close.clicked.connect(dlg.accept)
+            row.addWidget(btn_copy)
+            row.addWidget(btn_close)
+            lay.addLayout(row)
+            dlg.exec()
 
         def _background_service_blocks_local_start(self) -> bool:
             if not self._background_service_active:

@@ -21,7 +21,7 @@ TARGET_CLI    := everlive-ctl
 CORE_OBJS := everlive_card.o everlive_frame.o everlive_framestore.o \
              everlive_json.o everlive_ipc.o everlive_ctl_proto.o \
              everlive_handoff.o third_party/jsmn.o
-CTL_OBJS  := everlive_ctl.o
+CTL_OBJS  := everlive_ctl.o everlive_doctor.o
 
 INCLUDES := -I.
 

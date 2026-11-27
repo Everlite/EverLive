@@ -5,6 +5,7 @@
 
 #include "everlive_card.h"
 #include "everlive_ctl.h"
+#include "everlive_doctor.h"
 #include "everlive_ipc.h"
 
 #include <stdio.h>
@@ -125,6 +126,8 @@ static void print_usage(const char *prog)
 	printf("Usage: %s <command> [arguments]\n\n"
 	       "Hardware & Diagnostics:\n"
 	       "  detect                  List all installed capture cards and capabilities\n"
+	       "  doctor [--json] [--verbose]\n"
+	       "                          Check IOMMU, VFIO, permissions, PipeWire & binaries\n"
 	       "  list-models             Display all supported card models in EverLive registry\n"
 	       "  status                  Display capture daemon status and active hardware\n\n"
 	       "Runtime control (JSON-RPC to the running engine):\n"
@@ -804,6 +807,21 @@ int main(int argc, char **argv)
 	const char *cmd = argv[1];
 	if (strcmp(cmd, "detect") == 0 || strcmp(cmd, "-d") == 0) {
 		return cmd_detect();
+	} else if (strcmp(cmd, "doctor") == 0) {
+		bool json_mode = false;
+		bool verbose = false;
+		for (int i = 2; i < argc; i++) {
+			if (strcmp(argv[i], "--json") == 0) {
+				json_mode = true;
+			} else if (strcmp(argv[i], "--verbose") == 0 ||
+				   strcmp(argv[i], "-v") == 0) {
+				verbose = true;
+			} else {
+				fprintf(stderr, "Unknown doctor option: %s\n", argv[i]);
+				return 1;
+			}
+		}
+		return everlive_doctor_run(NULL, json_mode, verbose, stdout);
 	} else if (strcmp(cmd, "status") == 0 || strcmp(cmd, "-s") == 0) {
 		return cmd_status();
 	} else if (strcmp(cmd, "init") == 0 || strcmp(cmd, "-i") == 0) {

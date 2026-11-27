@@ -231,7 +231,7 @@ int gc573_vfio_init(struct gc573_vfio_ctx *ctx, const char *pci_addr)
 			pr_err("Cannot open %s: %s (another process is using the capture card)",
 			       group_path, strerror(err));
 		else
-			pr_err("Cannot open %s: %s (Has vfio-pci claimed the device? Try running vfio_bind.sh)",
+			pr_err("Cannot open %s: %s (Has vfio-pci claimed the device? Run /usr/local/libexec/everlive-vfio-bind --card gc573 --bind or everlive-ctl doctor)",
 			       group_path, strerror(err));
 		gc573_vfio_cleanup(ctx);
 		return -err;
