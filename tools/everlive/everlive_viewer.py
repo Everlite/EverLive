@@ -18,6 +18,7 @@ import dataclasses
 import json
 import threading
 import shutil
+import traceback
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List
 
@@ -10032,6 +10033,101 @@ def _restart_on_card(pci: str):
         print(f"[!] Restart failed ({exc}); start EverLive again to use {pci}.")
 
 
+def _hub_debug_enabled() -> bool:
+    """Return True when Hub debug diagnostics are enabled via EVERLIVE_DEBUG."""
+    return os.environ.get("EVERLIVE_DEBUG", "").strip().lower() in ("1", "true", "yes")
+
+
+class MainThreadWatchdog:
+    """Detect Qt main-thread stalls (>50 ms) in debug mode and report call site."""
+
+    def __init__(self, threshold_ms: float = 50.0, poll_interval_s: float = 0.015,
+                 on_stall=None):
+        self.threshold_s = max(0.005, float(threshold_ms) / 1000.0)
+        self.poll_interval_s = max(0.002, float(poll_interval_s))
+        self._main_tid = threading.get_ident()
+        self._lock = threading.Lock()
+        self._last_beat = time.monotonic()
+        self._stalled = False
+        self._stop_event = threading.Event()
+        self._on_stall = on_stall
+        self._thread: Optional[threading.Thread] = None
+
+    def beat(self) -> None:
+        with self._lock:
+            self._last_beat = time.monotonic()
+            self._stalled = False
+
+    def _format_callsite(self) -> str:
+        frame = sys._current_frames().get(self._main_tid)
+        if frame is None:
+            return "<unknown>"
+        stack = traceback.extract_stack(frame)
+        if not stack:
+            return "<unknown>"
+        top = stack[-1]
+        return f"{os.path.basename(top.filename)}:{top.lineno} ({top.name})"
+
+    def check_once(self, now: Optional[float] = None) -> bool:
+        cur = time.monotonic() if now is None else now
+        with self._lock:
+            elapsed = cur - self._last_beat
+            if elapsed <= self.threshold_s or self._stalled:
+                return False
+            self._stalled = True
+        callsite = self._format_callsite()
+        elapsed_ms = elapsed * 1000.0
+        if self._on_stall is not None:
+            self._on_stall(elapsed_ms, callsite)
+        else:
+            print(
+                f"[HUB-WATCHDOG] Main thread blocked for {elapsed_ms:.1f} ms at {callsite}",
+                file=sys.stderr,
+                flush=True,
+            )
+        return True
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self.poll_interval_s):
+            self.check_once()
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._stop_event.clear()
+        self.beat()
+        self._thread = threading.Thread(
+            target=self._run, name="hub-main-watchdog", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        t = self._thread
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=0.2)
+        self._thread = None
+
+
+def install_main_thread_watchdog(app) -> Optional[MainThreadWatchdog]:
+    """Attach the main-thread stall watchdog when EVERLIVE_DEBUG=1 is set."""
+    if not _hub_debug_enabled() or not HAS_QT or app is None:
+        return None
+    watchdog = MainThreadWatchdog(threshold_ms=50.0, poll_interval_s=0.015)
+    timer = QTimer(app)
+    timer.setInterval(15)
+    timer.timeout.connect(watchdog.beat)
+
+    def _cleanup() -> None:
+        timer.stop()
+        watchdog.stop()
+
+    app.aboutToQuit.connect(_cleanup)
+    watchdog.start()
+    timer.start()
+    return watchdog
+
+
 def main():
     parser = argparse.ArgumentParser(description="EverLive - Live Gamer 4K Console Gaming Screen")
     parser.add_argument("-f", "--fullscreen", action="store_true", help="Launch directly in fullscreen")
@@ -10214,6 +10310,7 @@ def main():
             QGuiApplication.setDesktopFileName("everlive")
             app = QApplication(sys.argv)
             app.setApplicationName("EverLive")
+            watchdog = install_main_thread_watchdog(app)
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "everlive.png")
             if os.path.isfile(icon_path):
                 app.setWindowIcon(QIcon(icon_path))
@@ -10242,6 +10339,8 @@ def main():
 
             notifier.activated.connect(_on_signal_wakeup)
             code = app.exec()
+            if watchdog is not None:
+                watchdog.stop()
             notifier.setEnabled(False)
             window._multiview_stop()
             window._webcam_stop()
