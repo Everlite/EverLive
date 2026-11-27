@@ -1,7 +1,7 @@
 # Maintainer: Scyllinice
 
 pkgname=everlive
-pkgver=2.0.1
+pkgver=2.0.2
 pkgrel=1
 pkgdesc="Userspace VFIO capture and console gaming suite for AVerMedia Live Gamer 4K (GC573) and Live Gamer DUO (GC570D)"
 arch=('x86_64')

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive v2.0.1 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573) & Live Gamer DUO (GC570D)
+# EverLive v2.0.2 - 1-Click Installer für AVerMedia Live Gamer 4K (GC573) & Live Gamer DUO (GC570D)
 # ==============================================================================
 # Installiert den 100% blob-freien Userspace VFIO-Treiber, udev-Hardware-Rechte,
 # cap_ipc_lock für die Engines und die EverLive Desktop-App für HDMI Console Gaming.
@@ -33,7 +33,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}===================================================================${NC}"
-echo -e "${BLUE}   EverLive (2.0.1) - GC573 & GC570D Gaming Suite Installer   ${NC}"
+echo -e "${BLUE}   EverLive (2.0.2) - GC573 & GC570D Gaming Suite Installer   ${NC}"
 echo -e "${BLUE}===================================================================${NC}"
 
 # Optionale Virtual Camera: standardmäßig ja, per --no-loopback abschaltbar.
@@ -931,7 +931,7 @@ INSTALLED_VERSION="$(sed -n 's/^__version__ = "\([^"]*\)".*/\1/p' "${APP_VIEWER_
 INSTALLED_VERSION="${INSTALLED_VERSION:-unknown}"
 
 echo -e "\n${GREEN}===================================================================${NC}"
-echo -e "${GREEN}   EverLive v2.0.1 erfolgreich installiert!                        ${NC}"
+echo -e "${GREEN}   EverLive v2.0.2 erfolgreich installiert!                        ${NC}"
 echo -e "${GREEN}===================================================================${NC}"
 echo -e "Du kannst EverLive ab sofort direkt über dein Startmenü"
 echo -e "starten (Eintrag \"EverLive\"), oder im Terminal mit:"
