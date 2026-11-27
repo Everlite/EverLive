@@ -18,7 +18,11 @@ import dataclasses
 import json
 import threading
 import shutil
+import socket
+import tempfile
+from collections import deque
 from pathlib import Path
+from statistics import median
 from typing import Optional, Tuple, Dict, List
 
 _VALID_BDF_RE = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
@@ -196,6 +200,8 @@ DEFAULT_SETTINGS = {
     "fg_flow_scale": 1.0,
     "fg_perf_mode": False,
     "fg_low_latency": True,
+    "uvc_framegen": False,
+    "uvc_fullscreen_stats": True,
     "minimize_to_tray": True,
     "duo_input": 0,
     "duo_edid_bridge": True,
@@ -470,6 +476,48 @@ def probe_lsfg_vk() -> Dict[str, object]:
     }
 
 
+def _read_uvc_frame_differences(fd, differences):
+    with os.fdopen(fd, "rb") as stream:
+        for line in stream:
+            if line.startswith(b"lavfi.signalstats.YDIF="):
+                try:
+                    differences.append((time.monotonic(), float(line.split(b"=", 1)[1])))
+                except ValueError:
+                    continue
+
+
+def _estimate_uvc_game_fps(differences, capture_fps):
+    """Return an estimate only for a sustained alternating repeat at 60 Hz."""
+    if not capture_fps or not 59 <= capture_fps <= 61 or len(differences) < 60:
+        return None
+    if time.monotonic() - differences[-1][0] > 2:
+        return None
+    samples = [diff for _, diff in differences[-120:]]
+    even, odd = samples[::2], samples[1::2]
+    low, high = (even, odd) if median(even) < median(odd) else (odd, even)
+    if median(high) < 0.5 or median(low) > median(high) * 0.35:
+        return None
+    pairs = list(zip(low, high))
+    repeated = sum(change >= 0.35 and repeat <= change * 0.40 for repeat, change in pairs)
+    return capture_fps / 2 if repeated >= len(pairs) * 0.75 else None
+
+
+def _read_nvidia_metrics():
+    try:
+        data = subprocess.check_output([
+            "nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+        ], text=True, stderr=subprocess.DEVNULL, timeout=1.5)
+        rows = data.strip().splitlines()
+        if len(rows) == 1:
+            gpu, used, total = (int(field.strip()) for field in rows[0].split(","))
+            return {"gpu_pct": gpu, "vram_used_gb": used / 1024,
+                    "vram_total_gb": total / 1024}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return {}
+
+
 def _read_sysfs(path: str) -> str:
     try:
         with open(path, "r") as f:
@@ -483,8 +531,8 @@ def _identify_card(dev: str) -> Optional[str]:
     return identify_pci_card(dev)
 
 
-def detect_capture_cards() -> List[Dict[str, Optional[str]]]:
-    """Every supported capture card, in PCI address order.
+def detect_capture_cards(include_usb: bool = False) -> List[Dict[str, Optional[str]]]:
+    """Return PCIe cards in address order, optionally followed by USB cards.
 
     GC573 (Live Gamer 4K) and GC570D (Live Gamer DUO) both use PCI device
     1461:0054.  Only ``subsystem_device`` separates them: 0x5730 is the GC573
@@ -521,11 +569,23 @@ def detect_capture_cards() -> List[Dict[str, Optional[str]]]:
             "subsystem": subsystem or None,
             "model": model,
         })
+    if include_usb and _gc553g2_control is not None:
+        for device in _gc553g2_control.find_gc553g2_devices():
+            cards.append({"mode": "uvc", "driver": "uvcvideo", "pci": None,
+                          "subsystem": None, "model": MODEL_GC553G2,
+                          "usb_port": device.name})
     return cards
+
+
+def card_selection_id(card: Dict[str, Optional[str]]) -> Optional[str]:
+    port = card.get("usb_port")
+    return f"usb:{port}" if port else card.get("pci")
 
 
 def card_display_name(card: Dict[str, Optional[str]]) -> str:
     """Short selector label, e.g. "GC573 · 85:00.0"."""
+    if card.get("usb_port"):
+        return f"GC553G2 · USB {card['usb_port']}"
     short = {MODEL_GC573: "GC573", MODEL_GC570D: "GC570D",
              MODEL_HWSUHD: "HWS UHD"}.get(card.get("model") or "", "Card")
     pci = card.get("pci") or ""
@@ -546,7 +606,7 @@ def select_capture_card(cards: List[Dict[str, Optional[str]]]
     """
     if not cards:
         return None
-    by_pci = {c["pci"]: c for c in cards}
+    by_pci = {card_selection_id(c): c for c in cards}
     pci = os.environ.get("EVERLIVE_CARD_PCI", "").strip()
     if pci in by_pci:
         return by_pci[pci]
@@ -572,16 +632,9 @@ def detect_gc573_driver() -> Dict[str, Optional[str]]:
         "subsystem": None,
         "model": MODEL_GC573,
     }
-    card = select_capture_card(detect_capture_cards())
+    card = select_capture_card(detect_capture_cards(include_usb=True))
     if card is not None:
         result.update(card)
-    elif _gc553g2_control is not None:
-        usb_devs = _gc553g2_control.find_gc553g2_devices()
-        if usb_devs:
-            result["mode"] = "uvc"
-            result["driver"] = "uvcvideo"
-            result["model"] = MODEL_GC553G2
-            result["usb_port"] = usb_devs[0].name
     return result
 
 
@@ -809,7 +862,7 @@ def find_gc573_adev() -> str:
     return "hw:CARD=A4K,DEV=0"
 
 
-def find_pipewire_source_node() -> Optional[str]:
+def find_pipewire_source_node(alsa_card: Optional[int] = None) -> Optional[str]:
     """Finds the native PipeWire Audio/Source node.name for GC573 HDMI Capture."""
     try:
         out = subprocess.check_output(["pw-dump", "Node"], stderr=subprocess.DEVNULL)
@@ -823,7 +876,8 @@ def find_pipewire_source_node() -> Optional[str]:
                 node_desc = p.get("node.description", "")
                 alsa_name = p.get("alsa.name", "")
 
-                is_gc573 = (
+                is_capture = (str(p.get("api.alsa.pcm.card", p.get("alsa.card"))) == str(alsa_card)
+                              if alsa_card is not None else (
                     driver == "open_gc573"
                     or card_id in ("A4K", "GC573", "GC553G2")
                     or "live gamer 4k" in card_name.lower()
@@ -836,7 +890,7 @@ def find_pipewire_source_node() -> Optional[str]:
                     or "gc553g2" in node_name.lower()
                     or "gc553g2" in node_desc.lower()
                     or "gc553g2" in alsa_name.lower()
-                )
+                ))
                 is_line = (
                     "line" in node_desc.lower()
                     or "line" in alsa_name.lower()
@@ -844,10 +898,13 @@ def find_pipewire_source_node() -> Optional[str]:
                     or "pro-input-1" in node_name
                     or p.get("alsa.device") == 1
                 )
-                if is_gc573 and not is_line:
+                if is_capture and not is_line:
                     return node_name
     except Exception:
         pass
+
+    if alsa_card is not None:
+        return None
 
     # Secondary check via wpctl status if pw-dump didn't match directly
     try:
@@ -1402,6 +1459,11 @@ class GameStreamer:
             self.vdev = vdev or ""
             self.adev = adev or ""
             self.pw_node = None
+        elif self.uvc_mode:
+            self._uvc_video_override = vdev
+            self._uvc_audio_override = adev
+            self.uvc_presets = {}
+            self._refresh_uvc_devices()
         else:
             self.vdev = vdev if vdev is not None else find_gc573_vdev()
             self.adev = adev if adev is not None else find_gc573_adev()
@@ -1409,6 +1471,12 @@ class GameStreamer:
 
         self.force_mpv = bool(force_mpv) and not self.vfio_mode
         self.mpv_proc: Optional[subprocess.Popen] = None
+        self._mpv_runtime = None
+        self.embedded = False
+        self.uvc_framegen = False
+        self.uvc_framegen_notice = ""
+        self.uvc_framegen_deadline = 0.0
+        self._uvc_frame_differences = deque(maxlen=120)
         self.arecord_proc: Optional[subprocess.Popen] = None
         self.pwplay_proc: Optional[subprocess.Popen] = None
         self.is_running = False
@@ -1699,10 +1767,104 @@ class GameStreamer:
             return f"L-PCM {khz:g}kHz ({channel_label})"
         return "No Audio"
 
+    def _refresh_uvc_devices(self):
+        port = self.hw_info.get("usb_port")
+        device = Path("/sys/bus/usb/devices") / port if port else None
+        self.vdev = self._uvc_video_override or ""
+        self.adev = self._uvc_audio_override or "none"
+        self.pw_node = None
+        if device is None or not device.exists():
+            return
+        if not self._uvc_video_override:
+            self.vdev = _gc553g2_control.find_gc553g2_video_node(device) or ""
+        if self._uvc_audio_override is None:
+            usb_path = device.resolve()
+            for card in Path("/sys/class/sound").glob("card[0-9]*"):
+                if usb_path in card.resolve().parents:
+                    card_number = int(card.name[4:])
+                    self.adev = f"hw:{card_number},0"
+                    self.pw_node = find_pipewire_source_node(card_number)
+                    break
+
+    def _uvc_playback_info(self) -> Dict[str, object]:
+        audio_live = self.pwplay_proc is not None and self.pwplay_proc.poll() is None
+        info = {"locked": False, "resolution": "", "framerate": "",
+                "audio": "Stereo LPCM" if audio_live else "No Audio"}
+        runtime = self._mpv_runtime
+        if runtime is None:
+            return info
+
+        # Read the player state without reopening the card or interrupting UVC.
+        commands = (
+            {"command": ["get_property", "video-out-params"], "request_id": 1},
+            {"command": ["get_property", "container-fps"], "request_id": 2},
+            {"command": ["get_property", "estimated-vf-fps"], "request_id": 3},
+            {"command": ["get_property", "frame-drop-count"], "request_id": 4},
+            {"command": ["get_property", "vo-passes"], "request_id": 5},
+            {"command": ["get_property", "fullscreen"], "request_id": 6},
+        )
+        replies = {}
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(0.025)
+                client.connect(os.path.join(runtime.name, "mpv.sock"))
+                client.sendall("".join(json.dumps(cmd) + "\n" for cmd in commands).encode())
+                with client.makefile("rb") as stream:
+                    while len(replies) < len(commands):
+                        line = stream.readline(65536)
+                        if not line:
+                            break
+                        reply = json.loads(line)
+                        if reply.get("request_id") in range(1, len(commands) + 1):
+                            replies[reply["request_id"]] = reply.get("data")
+        except (OSError, ValueError):
+            pass
+        video = replies.get(1)
+        if isinstance(video, dict) and video.get("w") and video.get("h"):
+            fps = replies.get(2)
+            capture_fps = fps if isinstance(fps, (int, float)) and fps > 0 else None
+            info.update(locked=True, resolution=f"{video['w']}x{video['h']}",
+                        framerate=(f"{capture_fps:.2f}".rstrip("0").rstrip(".") + " FPS"
+                                   if capture_fps else ""),
+                        capture_fps=capture_fps,
+                        fullscreen=replies.get(6) is True,
+                        pixel_format=video.get("pixelformat"),
+                        color_matrix=video.get("colormatrix"))
+            filter_fps = replies.get(3)
+            if isinstance(filter_fps, (float, int)) and filter_fps > 0:
+                info["filter_fps"] = filter_fps
+            if isinstance(replies.get(4), int):
+                info["vo_drops"] = replies[4]
+            passes = replies.get(5)
+            if isinstance(passes, dict):
+                render_ns = [
+                    p["last"] for p in passes.get("fresh", [])
+                    if isinstance(p.get("last"), int) and p["last"] > 0
+                ]
+                if render_ns:
+                    info["render_ms"] = sum(render_ns) / 1_000_000
+            info["game_fps_estimate"] = _estimate_uvc_game_fps(
+                tuple(self._uvc_frame_differences.copy()), capture_fps)
+        return info
+
+    def show_uvc_fullscreen_stats(self, text: str):
+        if not self.uvc_mode or self._mpv_runtime is None:
+            return
+        command = {"command": ["show-text", text, 1200, 1]}
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(0.025)
+                client.connect(os.path.join(self._mpv_runtime.name, "mpv.sock"))
+                client.sendall((json.dumps(command) + "\n").encode())
+        except OSError:
+            pass
+
     def get_signal_info(self) -> Dict[str, object]:
         """Queries current signal status via v4l2-ctl (kernel mode) or cache."""
         if self.vfio_mode:
             return self.get_vfio_signal_info()
+        if self.uvc_mode:
+            return self._uvc_playback_info()
 
         info = {
             "locked": False,
@@ -2329,7 +2491,7 @@ class GameStreamer:
             return False
         return True
 
-    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None, osd: bool = True, osd_pos: str = "top", audio_tap: Optional[str] = None, hdr: bool = True, hdr_exposure: float = 0.0, scale: str = "fit", framegen: str = "off", fg_multiplier: int = 2, fg_backend: str = "lsfg", fg_dedup: bool = False, fg_flow_scale: float = 1.0, fg_perf_mode: bool = False, fg_low_latency: bool = True, parent_winid: Optional[int] = None) -> bool:
+    def start(self, preset_name: str = "Auto (HDMI Signal)", fullscreen: bool = False, volume: float = 1.0, vsync: bool = False, streamer_mode: bool = False, v4l2_device: Optional[str] = None, headless: bool = False, aspect: Optional[str] = None, osd: bool = True, osd_pos: str = "top", audio_tap: Optional[str] = None, hdr: bool = True, hdr_exposure: float = 0.0, scale: str = "fit", framegen: str = "off", fg_multiplier: int = 2, fg_backend: str = "lsfg", fg_dedup: bool = False, fg_flow_scale: float = 1.0, fg_perf_mode: bool = False, fg_low_latency: bool = True, parent_winid: Optional[int] = None, uvc_framegen: bool = False) -> bool:
         if self.is_running:
             return True
 
@@ -2366,19 +2528,40 @@ class GameStreamer:
 
         self.last_error = ""
         self.vsync = vsync
+        if self.uvc_mode:
+            self._refresh_uvc_devices()
         if not self.vdev or not os.path.exists(self.vdev):
             self.last_error = f"Video device {self.vdev or '(none)'} not found"
             print(f"[!] Error: Video device {self.vdev} does not exist.")
             return False
 
-        preset = PRESETS.get(preset_name)
+        preset = (self.uvc_presets.get(preset_name) if self.uvc_mode else None)
+        preset = preset or PRESETS.get(preset_name)
+        lsfg = None
+        self.uvc_framegen_notice = ""
+        if self.uvc_mode and uvc_framegen:
+            if preset is None:
+                preset = (self.uvc_presets.get("1920x1080 @ 60 FPS")
+                          or self.uvc_presets.get("1920x1080 @ 59.94 FPS"))
+            if not preset or not 59.9 <= preset["fps"] <= 60:
+                self.uvc_framegen_notice = "Select a 60 FPS capture preset for 30 → 60."
+            else:
+                probe = probe_lsfg_vk()
+                if probe["layer_found"] and probe["dll_found"]:
+                    lsfg = probe
+                else:
+                    self.uvc_framegen_notice = "LSFG-VK layer or Steam DLL missing. Using standard playback."
+            if lsfg is None and preset_name == "Auto (HDMI Signal)":
+                preset = None
         width, height, fps = None, None, None
 
         if preset:
             width = preset["width"]
             height = preset["height"]
             fps = preset["fps"]
-            fmt = "MJPG" if (self.uvc_mode and fps >= 100) else preset["fmt"]
+            fmt = preset["fmt"]
+            if self.uvc_mode and preset_name not in self.uvc_presets and fps >= 100:
+                fmt = "MJPG"
             # Apply fixed preset to V4L2 device
             v4l2_args = [
                 "v4l2-ctl", "-d", self.vdev,
@@ -2469,13 +2652,26 @@ class GameStreamer:
             "--no-terminal",
             "--input-default-bindings=yes",
         ]
+        if self.uvc_mode:
+            mpv_cmd.insert(1, "--no-config")
+            if not lsfg:
+                # Bound queued GPU work and honor the Hub's VSync choice in
+                # the embedded OpenGL surface as well as player timing.
+                mpv_cmd.extend([
+                    "--swapchain-depth=1",
+                    f"--opengl-swapinterval={1 if vsync else 0}",
+                    "--opengl-glfinish=yes",
+                ])
         if self.uvc_mode and preset:
-            uvc_fmt = "mjpeg" if fps and fps >= 100 else "yuyv422"
+            uvc_fmt = "mjpeg" if fmt == "MJPG" else "yuyv422"
             mpv_cmd.append(f"--demuxer-lavf-o-add=input_format={uvc_fmt}")
             mpv_cmd.append(f"--demuxer-lavf-o-add=video_size={width}x{height}")
             mpv_cmd.append(f"--demuxer-lavf-o-add=framerate={fps}")
 
-        if fullscreen:
+        if self.uvc_mode and parent_winid:
+            mpv_cmd.extend([f"--wid={parent_winid}",
+                            "--gpu-context=x11vk" if lsfg else "--gpu-context=x11egl"])
+        elif fullscreen:
             mpv_cmd.append("--fullscreen")
         if streamer_mode:
             mpv_cmd.extend(["--no-osc", "--osd-level=0", "--cursor-autohide=always"])
@@ -2491,10 +2687,25 @@ class GameStreamer:
             mpv_cmd.append("--vf=setparams=range=limited:color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc")
             print("[*] HLG (BT.2020) signal detected: Auto-configured mpv HLG GPU tone-mapping (zero CPU delay)")
 
+        if lsfg:
+            # Present each timed input frame once so the Vulkan layer can
+            # interpolate and pace the intermediate frames.
+            overridden = {"--untimed", "--no-correct-pts", "--video-latency-hacks=yes", "--vo=gpu"}
+            mpv_cmd = [arg for arg in mpv_cmd if arg not in overridden
+                       and not arg.startswith(("--video-sync=", "--framedrop="))]
+            rate = "30000/1001" if fps < 60 else "30"
+            mpv_cmd.extend(["--vo=gpu-next", "--gpu-api=vulkan", "--vulkan-swap-mode=fifo",
+                            "--scale=ewa_lanczos", "--video-sync=audio", "--framedrop=no",
+                            "--video-latency-hacks=no",
+                            f"--vf-add=lavfi=[mpdecimate=max=1,fps={rate}]"])
+
         # Anamorphic 3840x1080 scaling:
         # 3840x1080 is an anamorphic half-vertical 4K120 signal (e.g. RetroTINK 4K Pro)
         # that requires 2x vertical stretching to restore the intended 16:9 aspect ratio (3840x2160).
-        active_fmt, _ = self.get_active_format()
+        if self.uvc_mode:
+            active_fmt = f"{width}x{height}" if preset else None
+        else:
+            active_fmt, _ = self.get_active_format()
         if active_fmt and "3840x1080" in active_fmt:
             mpv_cmd.append("--video-aspect-override=16:9")
             print("[*] Anamorphic 3840x1080 signal detected: Auto-configured 16:9 aspect ratio (2x vertical stretch) in mpv")
@@ -2509,7 +2720,41 @@ class GameStreamer:
 
         try:
             mpv_env = os.environ.copy()
-            self.mpv_proc = subprocess.Popen(mpv_cmd, env=mpv_env, start_new_session=True)
+            if self.uvc_mode:
+                self._mpv_runtime = tempfile.TemporaryDirectory(prefix="everlive-mpv-")
+                mpv_cmd.append(f"--input-ipc-server={self._mpv_runtime.name}/mpv.sock")
+            if lsfg:
+                mpv_env.pop("DISABLE_LSFGVK", None)
+                mpv_env.pop("LSFGVK_PRESERVE_SWAPCHAIN_IMAGE_COUNT", None)
+                mpv_env.update(LSFGVK_ENV="1", LSFGVK_MULTIPLIER="2",
+                               LSFGVK_DLL_PATH=lsfg["dll_path"], LSFGVK_OVERRIDE_PRESENT_MODE="1",
+                               LSFGVK_PACING_MODE="vsync")
+            elif self.uvc_mode:
+                mpv_env["DISABLE_LSFGVK"] = "1"
+            if self.uvc_mode and lsfg:
+                read_fd, write_fd = os.pipe()
+                try:
+                    graph = ("[in]split[video][probe];[probe]"
+                             "scale=64:36:flags=area,format=yuv420p,signalstats,"
+                             "metadata=mode=print:key=lavfi.signalstats.YDIF:"
+                             f"file=/proc/self/fd/{write_fd}:direct=1,nullsink;[video]null[out]")
+                    mpv_cmd.append(f"--vf-pre=lavfi=[{graph}]")
+                    self.mpv_proc = subprocess.Popen(
+                        mpv_cmd, env=mpv_env, start_new_session=True, pass_fds=(write_fd,))
+                    self._uvc_frame_differences = deque(maxlen=120)
+                    threading.Thread(
+                        target=_read_uvc_frame_differences,
+                        args=(read_fd, self._uvc_frame_differences), daemon=True).start()
+                    read_fd = None
+                finally:
+                    os.close(write_fd)
+                    if read_fd is not None:
+                        os.close(read_fd)
+            else:
+                self.mpv_proc = subprocess.Popen(mpv_cmd, env=mpv_env, start_new_session=True)
+            self.embedded = self.uvc_mode and bool(parent_winid)
+            self.uvc_framegen = lsfg is not None
+            self.uvc_framegen_deadline = time.monotonic() + 10 if self.uvc_framegen else 0.0
             self.is_running = True
             if self.adev and self.adev != "none":
                 try:
@@ -2545,30 +2790,29 @@ class GameStreamer:
                             "-c", "2", "-r", "48000", "--period-time=20000",
                             "--buffer-time=80000", "-q",
                         ]
-                        arecord_proc = subprocess.Popen(
+                        self.arecord_proc = subprocess.Popen(
                             arecord_cmd,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL,
                             start_new_session=True,
                         )
-                        if arecord_proc.poll() is not None:
+                        if self.arecord_proc.poll() is not None:
+                            self.arecord_proc.wait()
                             arecord_cmd[2] = plug_adev
-                            arecord_proc = subprocess.Popen(
+                            self.arecord_proc = subprocess.Popen(
                                 arecord_cmd,
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL,
                                 start_new_session=True,
                             )
-                        self.pwplay_proc = subprocess.Popen(
-                            ["pw-play", "--latency=40ms", "-P", props, "-"],
-                            stdin=arecord_proc.stdout,
-                            env=audio_env,
-                            stderr=subprocess.DEVNULL,
-                            start_new_session=True,
-                        )
-                        if arecord_proc.stdout:
-                            arecord_proc.stdout.close()
-                        self.arecord_proc = arecord_proc
+                        with self.arecord_proc.stdout as audio_pipe:
+                            self.pwplay_proc = subprocess.Popen(
+                                ["pw-play", "--latency=40ms", "-P", props, "-"],
+                                stdin=audio_pipe,
+                                env=audio_env,
+                                stderr=subprocess.DEVNULL,
+                                start_new_session=True,
+                            )
                 except Exception as ae:
                     print(f"[*] Note while starting audio stream: {ae}")
             return True
@@ -2652,6 +2896,12 @@ class GameStreamer:
                         pass
             self.arecord_proc = None
 
+        if self._mpv_runtime is not None:
+            self._mpv_runtime.cleanup()
+            self._mpv_runtime = None
+        self.embedded = False
+        self.uvc_framegen = False
+        self.uvc_framegen_deadline = 0.0
         self.headless = False
         self.v4l2_device = None
         self.v4l2_device_2 = None
@@ -3503,6 +3753,14 @@ if HAS_QT:
             self.streamer = streamer
             self.vfio_mode = streamer.vfio_mode
             self.uvc_mode = getattr(streamer, "uvc_mode", False)
+            self._gc553_live_probe = None
+            self._gc553_live_result = {}
+            self._gc553_live_player = None
+            self._gc553_probe_after = 0.0
+            self._gc553_settings = {}
+            self._uvc_nvidia_probe = None
+            self._uvc_nvidia_metrics = {}
+            self._uvc_nvidia_after = 0.0
             self.duo_mode = getattr(streamer, "duo_mode", False)
             self.model = getattr(streamer, "model", MODEL_GC573)
             self.card_profile = detect_card_profile(self.model)
@@ -3712,14 +3970,15 @@ if HAS_QT:
             source_layout.addWidget(self.lbl_card_title, 0, Qt.AlignVCenter)
 
             # Card selector: only when more than one supported card exists.
-            self._capture_cards = detect_capture_cards()
+            self._capture_cards = detect_capture_cards(include_usb=True)
             if len(self._capture_cards) > 1:
-                current_pci = getattr(self.streamer, "hw_info", {}).get("pci")
+                current_pci = card_selection_id(self.streamer.hw_info)
                 self.combo_card = QComboBox()
                 self.combo_card.setObjectName("sourceInputCombo")
                 for card in self._capture_cards:
-                    self.combo_card.addItem(card_display_name(card), card["pci"])
-                    if card["pci"] == current_pci:
+                    selection = card_selection_id(card)
+                    self.combo_card.addItem(card_display_name(card), selection)
+                    if selection == current_pci:
                         self.combo_card.setCurrentIndex(
                             self.combo_card.count() - 1)
                 self.combo_card.setFixedHeight(ui_theme.CONTROL_H)
@@ -4101,8 +4360,10 @@ if HAS_QT:
             seg3 = QVBoxLayout()
             seg3.setContentsMargins(0, 0, 0, 0)
             seg3.setSpacing(5)
-            self.bar_dma = VeyraMetricBar("PCIe DMA", "#38BDF8", "#BB96F3")
-            self.bar_latency = VeyraMetricBar("Latency", "#5ED4B2", "#38BDF8")
+            self.bar_dma = VeyraMetricBar(
+                "USB Link" if self.uvc_mode else "PCIe DMA", "#38BDF8", "#BB96F3")
+            self.bar_latency = VeyraMetricBar(
+                "GPU Render" if self.uvc_mode else "Latency", "#5ED4B2", "#38BDF8")
             self.bar_vram = VeyraMetricBar(
                 "VRAM", "#BB96F3", "#F287A7", self.telemetry_strip)
             self.bar_vram.setVisible(False)
@@ -4136,7 +4397,7 @@ if HAS_QT:
             orbs_row = QHBoxLayout()
             orbs_row.setContentsMargins(0, 0, 0, 0)
             orbs_row.setSpacing(8)
-            self.orb_budget = VeyraPerfOrb("DMA", size=52)
+            self.orb_budget = VeyraPerfOrb("SOURCE" if self.uvc_mode else "DMA", size=52)
             self.orb_gpu = VeyraPerfOrb("GPU", size=52)
             self.orb_cpu = VeyraPerfOrb("CPU", size=52)
             orbs_row.addWidget(self.orb_budget)
@@ -4350,6 +4611,8 @@ if HAS_QT:
                     "compressed audio is decoded automatically. "
                     "Applies live over IPC when the engine is running.")
                 self.combo_presets.setToolTip(self._presets_tooltip)
+            elif self.uvc_mode:
+                self._set_uvc_presets([], self.saved_cfg.get("preset"))
             else:
                 self.combo_presets.addItems(list(PRESETS.keys()))
                 if "preset" in self.saved_cfg and self.saved_cfg["preset"] in PRESETS:
@@ -4607,6 +4870,19 @@ if HAS_QT:
             if not self.card_profile.supports_framegen:
                 card_fg.setVisible(False)
             lay_video.addWidget(card_fg)
+            if self.uvc_mode:
+                usb_fg, grid_usb_fg = _section("FRAME GENERATION", "#F287A7")
+                self.chk_uvc_framegen = QCheckBox("30 → 60 FPS (LSFG-VK · Experimental)")
+                self.chk_uvc_framegen.setChecked(self.saved_cfg.get("uvc_framegen") is True)
+                self.chk_uvc_framegen.setToolTip(
+                    "For 30 FPS console games in a 60 Hz HDMI signal. "
+                    "Use Cinema Fullscreen on a 4K display for 4K output.")
+                self.chk_uvc_framegen.toggled.connect(self.on_uvc_framegen_toggled)
+                grid_usb_fg.addWidget(_toggle(self.chk_uvc_framegen), 0, 0)
+                self.lbl_uvc_framegen = QLabel()
+                self.lbl_uvc_framegen.setWordWrap(True)
+                grid_usb_fg.addWidget(self.lbl_uvc_framegen, 1, 0)
+                lay_video.addWidget(usb_fg)
 
             # =============================================================
             # VIDEO & AUDIO TAB: SOUND ROUTING
@@ -4671,11 +4947,11 @@ if HAS_QT:
 
             if self.uvc_mode:
                 self.chk_osd.blockSignals(True)
-                self.chk_osd.setChecked(False)
+                self.chk_osd.setChecked(self.saved_cfg.get("uvc_fullscreen_stats", True) is True)
                 self.chk_osd.blockSignals(False)
-                self.chk_osd.setEnabled(False)
+                self.chk_osd.setText("Show FPS in Fullscreen")
                 self.chk_osd.setToolTip(
-                    "Built-in engine stats OSD is available on VFIO PCIe cards.")
+                    "Shows USB playback FPS and available render timing in fullscreen.")
                 self.combo_osd_pos.setEnabled(False)
                 self.combo_osd_pos.setToolTip(
                     "Built-in engine stats OSD is available on VFIO PCIe cards.")
@@ -5112,7 +5388,13 @@ if HAS_QT:
                 self.lbl_gc553_status = QLabel("USB UVC (07ca:2553) · Click Refresh for AT/HDMI status")
                 self.lbl_gc553_status.setObjectName("hintText")
                 self.lbl_gc553_status.setWordWrap(True)
-                grid_uvc.addWidget(self.lbl_gc553_status, 0, 0, 1, 2)
+                self.lbl_gc553_input = QLabel("HDMI input status unknown")
+                self.lbl_gc553_input.setObjectName("hintText")
+                self.lbl_gc553_input.setWordWrap(True)
+                usb_status = QVBoxLayout()
+                usb_status.addWidget(self.lbl_gc553_status)
+                usb_status.addWidget(self.lbl_gc553_input)
+                grid_uvc.addLayout(usb_status, 0, 0, 1, 2)
 
                 btn_uvc_row = QHBoxLayout()
                 btn_uvc_row.setContentsMargins(0, 0, 0, 0)
@@ -5120,7 +5402,7 @@ if HAS_QT:
                 self.btn_gc553_refresh = QPushButton("Refresh Status")
                 self.btn_gc553_refresh.setObjectName("btnGhost")
                 self.btn_gc553_refresh.setFixedHeight(ui_theme.BUTTON_H)
-                self.btn_gc553_refresh.clicked.connect(self._refresh_gc553_status)
+                self.btn_gc553_refresh.clicked.connect(lambda: self._refresh_gc553_status())
                 btn_uvc_row.addWidget(self.btn_gc553_refresh)
 
                 self.btn_gc553_144 = QPushButton("Enable 120/144 Hz MJPEG")
@@ -5143,6 +5425,8 @@ if HAS_QT:
                 self.combo_gc553_preset = _shrinkable(QComboBox())
                 for label, key in [("HDMI 2.1 (4K144)", "2.1-144"), ("HDMI 2.1 (4K120)", "2.1-120"), ("HDMI 2.0", "2.0")]:
                     self.combo_gc553_preset.addItem(label, key)
+                self.combo_gc553_preset.setPlaceholderText("HDMI preset unknown")
+                self.combo_gc553_preset.setCurrentIndex(-1)
                 self.combo_gc553_preset.activated.connect(self._on_gc553_hdmi_preset)
                 grid_uvc.addWidget(_stacked_field(
                     "HDMI Preset", self.combo_gc553_preset), 2, 0, 1, 2)
@@ -5150,6 +5434,8 @@ if HAS_QT:
                 self.combo_gc553_edid = _shrinkable(QComboBox())
                 for label, key in [("Merge", "merge"), ("Copy", "copy"), ("Internal", "internal")]:
                     self.combo_gc553_edid.addItem(label, key)
+                self.combo_gc553_edid.setPlaceholderText("EDID mode unknown")
+                self.combo_gc553_edid.setCurrentIndex(-1)
                 self.combo_gc553_edid.activated.connect(self._on_gc553_edid_mode)
                 grid_uvc.addWidget(_stacked_field(
                     "EDID Mode", self.combo_gc553_edid), 3, 0, 1, 2)
@@ -5756,6 +6042,9 @@ if HAS_QT:
             audio = (self.lbl_audio_fmt.text()
                      if hasattr(self, "lbl_audio_fmt") else "No Audio")
             if not live.get("locked"):
+                if getattr(self, "uvc_mode", False):
+                    return (("Waiting for USB video", "warn") if self.streamer.is_running
+                            else ("USB capture in standby", "idle"))
                 if getattr(self, "_remote", False):
                     return "Remote • No Signal", "accent"
                 if getattr(self, "_launch_mode", None):
@@ -5764,7 +6053,8 @@ if HAS_QT:
 
             resolution = str(live.get("resolution") or "—")
             rate = str(live.get("framerate") or "")
-            text = f"CAPTURE ACTIVE • {resolution}"
+            state = "USB VIDEO ACTIVE" if getattr(self, "uvc_mode", False) else "CAPTURE ACTIVE"
+            text = f"{state} • {resolution}"
             if rate:
                 text += f" @ {rate}"
             return text, "active"
@@ -5903,6 +6193,7 @@ if HAS_QT:
             return (
                 self._launch_mode == "gaming"
                 and (self.streamer.is_running or self._remote_docked)
+                and (not self.uvc_mode or self.streamer.embedded)
                 and not (hasattr(self, "chk_popout") and self.chk_popout.isChecked())
                 and self._get_video_host_winid() > 0
             )
@@ -5972,10 +6263,16 @@ if HAS_QT:
                 self.video_standby_overlay.set_messages(
                     "STUDIO HEADLESS ACTIVE",
                     "Publishing zero-copy video & audio to OBS / PipeWire")
-            elif self._launch_mode == "gaming" and hasattr(self, "chk_popout") and self.chk_popout.isChecked():
+            elif self._launch_mode == "gaming" and (
+                    self.uvc_mode or (hasattr(self, "chk_popout") and self.chk_popout.isChecked())):
                 self.video_standby_overlay.set_messages(
                     "EXTERNAL POP-OUT ACTIVE",
-                    "Uncheck 'Pop-out Window' below to dock the stream back here")
+                    "Video is playing in a separate window" if self.uvc_mode
+                    else "Uncheck 'Pop-out Window' below to dock the stream back here")
+            elif self.uvc_mode:
+                self.video_standby_overlay.set_messages(
+                    "GC553G2 READY",
+                    "Start Gaming to open the USB video stream")
             else:
                 self.video_standby_overlay.set_messages(
                     "NO HDMI SIGNAL",
@@ -5986,13 +6283,22 @@ if HAS_QT:
             self.saved_cfg["popout_window"] = bool(checked)
             if checked and getattr(self, "_cinema_fullscreen", False):
                 self._set_cinema_fullscreen(False)
-            if self._launch_mode == "gaming" and self._ipc is not None and self._ipc.connected:
+            if self.uvc_mode and self.streamer.is_running:
+                self.streamer.stop()
+                self.start_gaming_screen()
+            elif self._launch_mode == "gaming" and self._ipc is not None and self._ipc.connected:
                 target_wid = 0 if checked else self._get_video_host_winid()
                 if self._ipc.set_mode("gaming", parent_winid=target_wid):
                     print(f"[*] Live window dock switch -> {'pop-out' if checked else f'embedded (0x{target_wid:x})'}")
             self._refresh_stage_overlay()
 
         def _set_launch_running(self, running: bool, mode: Optional[str] = None):
+            if self.uvc_mode:
+                for control in (
+                    self.btn_gc553_144, self.btn_gc553_60, self.combo_gc553_preset,
+                    self.combo_gc553_edid, self.chk_gc553_hdcp, self.chk_gc553_hdr_sdr,
+                ):
+                    control.setEnabled(not running)
             if running:
                 self._launch_mode = mode or "gaming"
                 self._last_launch_mode = self._launch_mode
@@ -7956,8 +8262,15 @@ if HAS_QT:
             self.lbl_hero_meta.setText(detail)
             self._vfio_notice_until = time.time() + seconds
 
-        def start_gaming_screen(self):
+        def on_uvc_framegen_toggled(self, checked):
+            save_settings({"uvc_framegen": checked})
+            self.lbl_uvc_framegen.clear()
             if self.streamer.is_running:
+                self.streamer.stop()
+                self.start_gaming_screen()
+
+        def start_gaming_screen(self, *, allow_uvc_framegen=True):
+            if self._ipc_shutdown or self.streamer.is_running:
                 return
             if self._background_service_blocks_local_start():
                 return
@@ -8080,11 +8393,21 @@ if HAS_QT:
                 "streamer_mode": is_streamer,
                 "engine": engine,
             })
+            parent_wid = (self._target_parent_winid()
+                          if self.uvc_mode and QGuiApplication.platformName() == "xcb" else 0)
             success = self.streamer.start(
                 preset_name=preset, fullscreen=is_fs, volume=vol,
-                vsync=is_vsync, streamer_mode=is_streamer)
+                vsync=is_vsync, streamer_mode=is_streamer, parent_winid=parent_wid,
+                uvc_framegen=(self.uvc_mode and allow_uvc_framegen
+                              and self.chk_uvc_framegen.isChecked()))
+            if self.uvc_mode:
+                self.lbl_uvc_framegen.setText(
+                    "Starting Vulkan playback…" if self.streamer.uvc_framegen
+                    else self.streamer.uvc_framegen_notice)
             if success:
                 self._set_launch_running(True, "gaming")
+                if is_fs and parent_wid:
+                    self._set_cinema_fullscreen(True)
                 set_audio_volume(self.slider_vol.value())
                 QTimer.singleShot(600, lambda: set_audio_volume(self.slider_vol.value()))
             elif getattr(self.streamer, "last_error", ""):
@@ -8361,7 +8684,7 @@ if HAS_QT:
         def on_card_changed(self, index: int):
             pci = self.combo_card.itemData(index)
             label = self.combo_card.itemText(index)
-            current = getattr(self.streamer, "hw_info", {}).get("pci")
+            current = card_selection_id(self.streamer.hw_info)
             if not pci or pci == current or getattr(self, "_card_switching", False):
                 return
             if self._remote:
@@ -8380,8 +8703,8 @@ if HAS_QT:
                 if answer != QMessageBox.Yes:
                     self._select_card_combo(current)
                     return
-            if not self.vfio_mode:
-                # A kernel-driver session builds a different UI; restart.
+            if not self.vfio_mode or pci.startswith("usb:"):
+                # Kernel and USB sessions build a different UI from VFIO.
                 save_settings({"card_pci": pci})
                 self._card_restart = pci
                 self.close()
@@ -8578,6 +8901,10 @@ if HAS_QT:
             self._sync_osd_mode()
 
         def on_osd_changed(self, enabled: bool):
+            if self.uvc_mode:
+                self.saved_cfg["uvc_fullscreen_stats"] = bool(enabled)
+                save_settings({"uvc_fullscreen_stats": bool(enabled)})
+                return
             self.saved_cfg["osd_enabled"] = bool(enabled)
             save_settings({"osd_enabled": bool(enabled)})
             self._update_osd_controls()
@@ -8977,9 +9304,103 @@ if HAS_QT:
                 "vram_used_gb": vram_used_gb,
                 "vram_total_gb": vram_total_gb,
             }
+            if self.uvc_mode and gpu_pct is None and shutil.which("nvidia-smi"):
+                if self._uvc_nvidia_probe is not None:
+                    worker, metrics = self._uvc_nvidia_probe
+                    if not worker.is_alive():
+                        self._uvc_nvidia_probe = None
+                        self._uvc_nvidia_metrics = metrics
+                if self._uvc_nvidia_probe is None and now >= self._uvc_nvidia_after:
+                    metrics = {}
+                    worker = threading.Thread(
+                        target=lambda result=metrics: result.update(_read_nvidia_metrics()),
+                        daemon=True)
+                    self._uvc_nvidia_probe = (worker, metrics)
+                    self._uvc_nvidia_after = now + 2
+                    worker.start()
+                result.update(self._uvc_nvidia_metrics)
             self._host_metrics_ts = now
             self._host_metrics_cache = result
             return result
+
+        def _update_uvc_telemetry(self, host):
+            active = self.streamer.is_running
+            live = (getattr(self, "_live", None) or {}) if active else {}
+            capture_fps = live.get("capture_fps")
+            filter_fps = live.get("filter_fps")
+            game_fps = live.get("game_fps_estimate")
+            framegen = self.streamer.uvc_framegen
+            fps = filter_fps or (None if framegen else capture_fps)
+            render_ms = live.get("render_ms")
+            drops = live.get("vo_drops")
+            device = self.streamer.vdev
+
+            self.lbl_sig_tag.setText(
+                "● USB VIDEO" if live.get("locked") else "● WAITING" if active else "● STANDBY")
+            self.lbl_kv_route.setText(f"V4L2 ({device})" if device else "USB capture")
+            if not live.get("locked"):
+                self.lbl_kv_color.setText("—")
+                self.lbl_kv_pclk.setText("USB capture")
+                self.lbl_kv_audio.setText(live.get("audio", "No Audio"))
+
+            self.lbl_fps_hero.setText(f"≈{game_fps:g}" if game_fps else f"{fps:.1f}" if fps else "—")
+            self.lbl_fps_unit.setText("game fps" if game_fps else "fps before LSFG" if framegen else
+                                     "fps (mpv)" if filter_fps else "fps (capture)")
+            if fps:
+                self.fps_sparkline.push_sample(
+                    game_fps or fps, target=30 if game_fps or framegen else capture_fps or 60,
+                    accent_hex="#7EE8C8")
+            else:
+                self.fps_sparkline.clear_samples()
+            self.lbl_drops_counter.setText(f"{drops} player drops" if drops is not None else "Drops: —")
+
+            speed = self._gc553_settings.get("speed_mbps")
+            self.bar_dma.set_metric(
+                min(speed / 10000, 1.0) if speed else 0.0,
+                f"{speed / 1000:g} Gbit/s" if speed else "—", known=bool(speed),
+                tip="Negotiated USB link speed")
+            interval = 1000 / fps if fps else None
+            self.bar_latency.set_metric(
+                render_ms / interval if render_ms and interval else 0.0,
+                f"{render_ms:.2f} ms" if render_ms else "—", known=bool(render_ms),
+                tip="mpv GPU render passes for a new video frame")
+            interval_label = f"Frame interval {interval:.1f} ms" if interval else "Frame interval —"
+            self.lbl_budget_note.setText(f"{interval_label} · HDMI latency —")
+            if (fps and (self._cinema_fullscreen or live.get("fullscreen"))
+                    and self.chk_osd.isChecked() and not self.chk_streamer.isChecked()):
+                fps_label = "before LSFG" if framegen else "playback" if filter_fps else "source"
+                text = f"{fps:.1f} FPS ({fps_label})"
+                if game_fps:
+                    text = f"Game ≈{game_fps:g} FPS"
+                    if capture_fps:
+                        text += f"  ·  Capture {capture_fps:g} FPS"
+                if render_ms:
+                    text += f"  ·  GPU render {render_ms:.2f} ms"
+                self.streamer.show_uvc_fullscreen_stats(text)
+
+            vram_used = host.get("vram_used_gb")
+            vram_total = host.get("vram_total_gb")
+            self.lbl_fg_status.setText(
+                f"VRAM: {vram_used:.1f} / {vram_total:.1f} GiB"
+                if vram_used is not None and vram_total else "VRAM: —")
+            self.orb_budget.set_state(
+                min(capture_fps / 60, 1.0) if capture_fps else 0.0,
+                f"{capture_fps:.0f}" if capture_fps else "—", known=bool(capture_fps),
+                tip="USB source FPS reported by mpv")
+            gpu_pct = host.get("gpu_pct")
+            self.orb_gpu.set_state(
+                gpu_pct / 100 if gpu_pct is not None else 0.0,
+                f"{gpu_pct}%" if gpu_pct is not None else "—", known=gpu_pct is not None)
+            cpu_pct = host.get("cpu_pct")
+            self.orb_cpu.set_state(
+                cpu_pct / 100 if cpu_pct is not None else 0.0,
+                f"{cpu_pct:.0f}%" if cpu_pct is not None else "—", known=cpu_pct is not None)
+            if hasattr(self, "status_light"):
+                self.status_light.set_status(
+                    "warn" if drops else "ok" if live.get("locked") else "idle",
+                    "USB video active" if live.get("locked") else
+                    "Waiting for USB video" if active else "USB capture in standby")
+            self._refresh_signal_badge()
 
         def _update_telemetry_cards(self, status: Optional[Dict] = None):
             """Keep the bottom visual telemetry cards and top badge updated with live metrics."""
@@ -8990,6 +9411,9 @@ if HAS_QT:
                 status = self._remote_status
 
             host = self._sample_host_metrics()
+            if self.uvc_mode:
+                self._update_uvc_telemetry(host)
+                return
             cpu_pct = float(host.get("cpu_pct") or 0.0)
             eng_cpu_pct = host.get("eng_cpu_pct")
             gpu_pct = host.get("gpu_pct")
@@ -9279,7 +9703,11 @@ if HAS_QT:
             save_settings({"preset": preset})
             if self.streamer.is_running:
                 self.streamer.stop()
-                QTimer.singleShot(150, self.start_gaming_screen)
+                QTimer.singleShot(150, self._restart_gaming_after_preset_change)
+
+        def _restart_gaming_after_preset_change(self):
+            if self._launch_mode == "gaming" and not self._ipc_shutdown:
+                self.start_gaming_screen()
 
         def _edid_profile_label(self) -> str:
             profile = self.saved_cfg.get("edid_profile", "default")
@@ -9385,8 +9813,90 @@ if HAS_QT:
         def _gc553_usb_port(self) -> Optional[str]:
             return getattr(self.streamer, "hw_info", {}).get("usb_port")
 
+        def _poll_gc553_hdmi(self):
+            player = self.streamer.mpv_proc
+            if player is not self._gc553_live_player:
+                self._gc553_live_player = player
+                self._gc553_live_result = {}
+                self._gc553_probe_after = 0.0
+                self.lbl_gc553_input.setText("Checking HDMI input…" if player else
+                                            self._gc553_hdmi_label(self._gc553_settings))
+            if self._gc553_live_probe is not None:
+                worker, result, owner = self._gc553_live_probe
+                if worker.is_alive():
+                    return
+                self._gc553_live_probe = None
+                if owner is player and player is not None:
+                    settings = result.get("settings")
+                    if settings:
+                        self._gc553_settings.update(settings)
+                        self._apply_gc553_settings(settings)
+                    result.setdefault("settings_loaded", (settings is not None
+                                      or "settings_error" in result
+                                      or self._gc553_live_result.get("settings_loaded", False)))
+                    self._gc553_live_result = result
+                    self.lbl_gc553_input.setText(self._gc553_hdmi_label(result))
+                    self.lbl_gc553_input.setToolTip(result.get("at_error", ""))
+                    self._gc553_probe_after = time.monotonic() + (
+                        15.0 if "at_error" in result else 2.0)
+            if player is None or time.monotonic() < self._gc553_probe_after:
+                return
+
+            result = {}
+            port = self._gc553_usb_port()
+            include_settings = not self._gc553_live_result.get("settings_loaded", False)
+
+            def read_hdmi():
+                try:
+                    result.update(_gc553g2_control.query_live_hdmi_status(
+                        port=port, include_settings=include_settings))
+                except (RuntimeError, OSError) as exc:
+                    result["at_error"] = str(exc)
+
+            worker = threading.Thread(target=read_hdmi, daemon=True)
+            self._gc553_live_probe = (worker, result, player)
+            worker.start()
+
+        def _gc553_hdmi_label(self, status):
+            timing = status.get("hdmi_timing")
+            if timing:
+                scan = "i" if timing["interlaced"] else "p"
+                return (f"HDMI input {timing['width']}×{timing['height']}{scan}"
+                        f" @ {timing['refresh_hz']:g} Hz")
+            if status.get("hdmi_stable") is False:
+                return "No HDMI signal"
+            if status.get("at_error"):
+                return "HDMI input status unavailable"
+            return "HDMI input status unknown"
+
+        def _set_uvc_presets(self, modes, selected):
+            presets = {}
+            for mode in modes:
+                if mode["format"] not in ("MJPG", "YUYV"):
+                    continue
+                width, height = mode["width"], mode["height"]
+                for fps in mode["fps"]:
+                    label = f"{width}x{height} @ {fps:g} FPS"
+                    if label not in presets or mode["format"] == ("MJPG" if fps > 60 else "YUYV"):
+                        presets[label] = dict(width=width, height=height, fps=fps, fmt=mode["format"])
+            self.streamer.uvc_presets = presets
+            self.combo_presets.clear()
+            self.combo_presets.addItem("Auto (HDMI Signal)")
+            self.combo_presets.addItems(list(presets))
+            if selected in presets:
+                self.combo_presets.setCurrentText(selected)
+
         def _refresh_gc553_status(self, include_at: bool = True):
             if not (self.uvc_mode and _gc553g2_control is not None and hasattr(self, "lbl_gc553_status")):
+                return
+            if include_at and self.streamer.is_running:
+                self._gc553_probe_after = 0.0
+                self._gc553_live_result["settings_loaded"] = False
+                self._poll_gc553_hdmi()
+            # libusb AT reads temporarily detach uvcvideo.
+            include_at = include_at and not self.streamer.is_running
+            if include_at and self._gc553_live_probe and self._gc553_live_probe[0].is_alive():
+                self.lbl_gc553_status.setText("Previous HDMI query still running. Try again shortly.")
                 return
             try:
                 st = _gc553g2_control.query_device_status(
@@ -9395,6 +9905,17 @@ if HAS_QT:
             except Exception as exc:
                 self.lbl_gc553_status.setText(f"GC553G2 query error: {exc}")
                 return
+            if include_at:
+                self._gc553_settings = st
+            else:
+                st = {**self._gc553_settings, **st}
+                self._gc553_settings = st
+
+            if not self.streamer.is_running:
+                selected = self.combo_presets.currentText()
+                if not self.streamer.uvc_presets:
+                    selected = self.saved_cfg.get("preset", selected)
+                self._set_uvc_presets(st.get("modes") or [], selected)
 
             speed = st.get("speed_mbps")
             speed_txt = f"{speed} Mbps" if speed else "USB ?"
@@ -9406,11 +9927,13 @@ if HAS_QT:
 
             if st.get("firmware"):
                 parts.append(f"FW {st['firmware']}")
-            if st.get("hdmi_timing"):
-                t = st["hdmi_timing"]
-                parts.append(f"HDMI {t['width']}x{t['height']}@{t['refresh_hz']:.0f}Hz")
-            elif include_at and not st.get("at_error"):
-                parts.append("HDMI standby")
+            if st.get("descriptor_index") is not None:
+                usb_mode = {0: "60 Hz", 1: "120/144 Hz MJPEG"}.get(
+                    st["descriptor_index"], str(st["descriptor_index"]))
+                parts.append(f"USB mode {usb_mode}")
+            if not self.streamer.is_running:
+                self.lbl_gc553_input.setText(self._gc553_hdmi_label(st))
+                self.lbl_gc553_input.setToolTip(st.get("at_error", ""))
             if st.get("at_error"):
                 at_err = str(st["at_error"])
                 if "LIBUSB_ERROR_ACCESS" in at_err or "Permission" in at_err:
@@ -9421,7 +9944,9 @@ if HAS_QT:
                 else:
                     parts.append(f"AT: {at_err}")
             self.lbl_gc553_status.setText(" · ".join(parts))
+            self._apply_gc553_settings(st)
 
+        def _apply_gc553_settings(self, st):
             for combo, key in (
                 (getattr(self, "combo_gc553_preset", None), st.get("hdmi_preset")),
                 (getattr(self, "combo_gc553_edid", None), st.get("edid_mode")),
@@ -9445,11 +9970,16 @@ if HAS_QT:
         def _run_gc553_op(self, fn, *args):
             if not (self.uvc_mode and _gc553g2_control is not None):
                 return
-            if self.streamer.is_running:
+            if self.streamer.is_running and fn is not _gc553g2_control.set_rgb_mode:
                 self.lbl_gc553_status.setText("Stop the stream before changing USB/AT settings.")
+                return
+            if (fn is not _gc553g2_control.set_rgb_mode and self._gc553_live_probe
+                    and self._gc553_live_probe[0].is_alive()):
+                self.lbl_gc553_status.setText("Waiting for the previous HDMI query. Try again shortly.")
                 return
             try:
                 res = fn(*args, port=self._gc553_usb_port())
+                self._gc553_settings.update(res)
                 self._refresh_gc553_status(include_at=False)
                 return res
             except PermissionError:
@@ -9464,6 +9994,7 @@ if HAS_QT:
                     )
                 else:
                     self.lbl_gc553_status.setText(f"GC553G2 error: {msg}")
+            self._apply_gc553_settings(self._gc553_settings)
             return None
 
         def _apply_gc553_descriptor_result(self, index: int, res: Optional[Dict]):
@@ -9651,7 +10182,23 @@ if HAS_QT:
             self.lbl_pill.setText(f"● {res} @ {fps}{chroma_str}{hdr_str}")
             self.lbl_pill.setStyleSheet(
                 "background-color: #122B26; color: #5ED4B2; border: 1px solid #24584B;")
-            self.lbl_hero_signal.setText(f"{res_clean} @ {fps}".strip())
+            self.lbl_hero_signal.setText(" @ ".join(filter(None, (res_clean, fps))))
+            if self.uvc_mode:
+                signal = self._gc553_hdmi_label(self._gc553_live_result)
+                self.lbl_hero_meta.setText(f"{signal} · USB video · {info['audio']}")
+                if self.streamer.uvc_framegen:
+                    fps_before_fg = info.get("filter_fps")
+                    fps_text = f"{fps_before_fg:.1f} FPS before LSFG · " if fps_before_fg else ""
+                    self.lbl_uvc_framegen.setText(
+                        f"{fps_text}Output target 60 FPS (2×). Display FPS not measured.")
+                color = " · ".join(filter(None, (info.get("pixel_format"),
+                                                 info.get("color_matrix"))))
+                self.lbl_kv_color.setText(color or "—")
+                self.lbl_kv_pclk.setText("USB capture")
+                self.lbl_kv_audio.setText(info["audio"])
+                self._update_telemetry_cards()
+                self._refresh_stage_overlay()
+                return
             hdr_val = info.get('hdr', 'SDR')
             chroma_val = info.get('chroma', 'YUV 4:2:2')
             self.lbl_hero_meta.setText(f"Chroma: {chroma_val} • Color: {hdr_val} • Stereo LPCM (PipeWire)")
@@ -9748,10 +10295,54 @@ if HAS_QT:
                 return
             self._set_vfio_standby(info)
 
+        def _update_uvc_status(self):
+            streamer = self.streamer
+            fg_failure = None
+            if streamer.is_running:
+                player = streamer.mpv_proc
+                had_framegen = streamer.uvc_framegen
+                if not streamer.poll():
+                    if had_framegen and player is not None and player.returncode not in (None, 0):
+                        fg_failure = "Vulkan playback exited with an error."
+                    self._set_launch_running(False)
+                    self.lbl_uvc_framegen.setText(streamer.uvc_framegen_notice)
+                    self.lbl_hero_signal.setText("USB playback stopped")
+            info = streamer.get_signal_info()
+            if streamer.uvc_framegen and streamer.uvc_framegen_deadline:
+                if info["locked"]:
+                    streamer.uvc_framegen_deadline = 0.0
+                elif time.monotonic() >= streamer.uvc_framegen_deadline:
+                    fg_failure = "Vulkan playback produced no video within 10 seconds."
+                    self._stop_stream()
+            if fg_failure:
+                self.start_gaming_screen(allow_uvc_framegen=False)
+                message = ("Using standard playback." if streamer.is_running
+                           else "Standard playback could not start.")
+                self.lbl_uvc_framegen.setText(f"{fg_failure} {message}")
+                info = streamer.get_signal_info()
+
+            self._poll_gc553_hdmi()
+            self._live = info
+            self._set_audio_status(info["audio"])
+            if info["locked"]:
+                self._show_live(info)
+                return
+            if streamer.is_running:
+                self.lbl_hero_signal.setText("Waiting for USB video")
+            elif self.lbl_hero_signal.text() != "USB playback stopped":
+                self.lbl_hero_signal.setText("Ready for Gaming")
+            signal = self._gc553_live_result if streamer.is_running else self._gc553_settings
+            self.lbl_hero_meta.setText(self._gc553_hdmi_label(signal))
+            self._update_telemetry_cards()
+            self._refresh_stage_overlay()
+
         def update_status(self):
             self._poll_recording_state()
             if self.vfio_mode:
                 self._update_status_vfio()
+                return
+            if self.uvc_mode:
+                self._update_uvc_status()
                 return
 
             # While the gaming screen is open, only read the cached driver format and HDR control.
@@ -9961,6 +10552,8 @@ if HAS_QT:
                     and getattr(self, "chk_tray", None)
                     and self.chk_tray.isChecked()
                     and getattr(self, "tray_icon", None)):
+                if self.uvc_mode:
+                    self._stop_stream()
                 event.ignore()
                 self.hide()
                 if not getattr(self, "_tray_notified", False):
@@ -10023,7 +10616,7 @@ def _restart_on_card(pci: str):
     print(f"[*] Restarting the Console Hub on capture card {pci}...")
     sys.stdout.flush()
     try:
-        if os.access(play, os.X_OK):
+        if not pci.startswith("usb:") and os.access(play, os.X_OK):
             os.execve(play, [play], env)
         args = [a for a in sys.argv[1:] if a not in ("--tray", "--minimized")]
         os.execve(sys.executable,
@@ -10181,7 +10774,7 @@ def main():
             if streamer.vfio_mode:
                 engine = os.path.basename(streamer.streamer_bin)
                 print(f"[*] Userspace VFIO engine: video and HDMI audio run inside {engine}.")
-            else:
+            elif not streamer.uvc_mode:
                 info = streamer.get_signal_info()
                 chroma_disp = f" [{info['chroma']}]" if info.get('chroma') else ""
                 print(f"[*] Signal: {info['resolution']} {info['framerate']}{chroma_disp}".strip())
