@@ -1,0 +1,27 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# System sleep/resume hook for EverLive capture services (GC573, HWS UHD, GC570D).
+
+set -eu
+
+LIBEXECDIR="/usr/local/libexec"
+
+case "${1:-post}" in
+    pre)
+        exit 0
+        ;;
+    post|resume|*)
+        if [ -x "${LIBEXECDIR}/everlive-vfio-bind" ]; then
+            "${LIBEXECDIR}/everlive-vfio-bind" --card gc573 --bind >/dev/null 2>&1 || true
+            "${LIBEXECDIR}/everlive-vfio-bind" --card hwsuhd --bind >/dev/null 2>&1 || true
+        fi
+        sleep 1
+        for rdir in /run/user/*; do
+            [ -d "$rdir" ] || continue
+            uid=$(basename "$rdir")
+            user=$(id -nu "$uid" 2>/dev/null || true)
+            [ -n "$user" ] || continue
+            systemctl --machine="${user}@.host" --user try-restart everlive.service >/dev/null 2>&1 || true
+        done
+        ;;
+esac

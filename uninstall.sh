@@ -96,7 +96,8 @@ if [ -d "${SCRIPT_DIR}/tools/opengc570d-userd" ]; then
     make -C "${SCRIPT_DIR}/tools/opengc570d-userd" uninstall >/dev/null 2>&1 || true
 fi
 rm -f /etc/security/limits.d/99-gc570d-memlock.conf
-rm -f /usr/lib/systemd/system-sleep/gc570d-sleep.sh
+rm -f /usr/lib/systemd/system-sleep/gc570d-sleep.sh \
+      /usr/lib/systemd/system-sleep/everlive-sleep.sh
 rm -f /etc/gc570d.conf.example
 rm -f /usr/local/bin/opengc570d-userd /usr/local/bin/gc570d-ctl
 rm -f /usr/local/lib/libgc570d-v4l2.so
@@ -104,7 +105,8 @@ rm -f /usr/local/lib/libgc573-v4l2.so
 rm -f /usr/local/lib/libeverlive-vk-pacer.so
 rm -f /usr/local/libexec/gc570d-vfio-bind.sh /usr/local/libexec/gc570d-sleep.sh
 rm -f /usr/local/libexec/vfio_pci_bind.sh /usr/local/libexec/hws-vfio-bind.sh
-rm -f /usr/local/libexec/everlive-vfio-bind /usr/local/libexec/everlive-setcap
+rm -f /usr/local/libexec/everlive-vfio-bind /usr/local/libexec/everlive-setcap \
+      /usr/local/libexec/everlive-sleep
 rm -f /usr/libexec/gc570d-vfio-bind.sh /usr/libexec/vfio_pci_bind.sh \
       /usr/libexec/hws-vfio-bind.sh /usr/libexec/everlive-vfio-bind \
       /usr/libexec/everlive-setcap

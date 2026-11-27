@@ -174,8 +174,11 @@ install-system: all
 		rm -f $(DESTDIR)$(SYSLIBDIR)/systemd/user/everlive.service.d/10-memlock.conf \
 			$(DESTDIR)$(SYSLIBDIR)/systemd/user/opengc570d-userd.service.d/10-memlock.conf; \
 	fi
-	# GC570D resume hook and per-user service
+	# Sleep/resume hooks and per-user service
 	install -d $(DESTDIR)$(SYSLIBDIR)/systemd/system-sleep $(DESTDIR)$(SYSLIBDIR)/systemd/user
+	sed 's|/usr/local/libexec|$(LIBEXECDIR)|g' $(PKG_DIR)/libexec/everlive-sleep > $(DESTDIR)$(LIBEXECDIR)/everlive-sleep
+	chmod 0755 $(DESTDIR)$(LIBEXECDIR)/everlive-sleep
+	ln -sf $(LIBEXECDIR)/everlive-sleep $(DESTDIR)$(SYSLIBDIR)/systemd/system-sleep/everlive-sleep.sh
 	ln -sf $(GC570D_RUNDIR)/gc570d-sleep.sh $(DESTDIR)$(SYSLIBDIR)/systemd/system-sleep/gc570d-sleep.sh
 	$(GC570D_SED) $(GC570D_DIR)/opengc570d-userd.service > $(DESTDIR)$(SYSLIBDIR)/systemd/user/opengc570d-userd.service
 	chmod 0644 $(DESTDIR)$(SYSLIBDIR)/systemd/user/opengc570d-userd.service
@@ -219,6 +222,8 @@ uninstall-system:
 	rm -f $(DESTDIR)$(SYSLIBDIR)/systemd/user/opengc570d-userd.service.d/10-memlock.conf
 	rmdir $(DESTDIR)$(SYSLIBDIR)/systemd/user/everlive.service.d 2>/dev/null || true
 	rmdir $(DESTDIR)$(SYSLIBDIR)/systemd/user/opengc570d-userd.service.d 2>/dev/null || true
+	rm -f $(DESTDIR)$(LIBEXECDIR)/everlive-sleep
+	rm -f $(DESTDIR)$(SYSLIBDIR)/systemd/system-sleep/everlive-sleep.sh
 	rm -f $(DESTDIR)$(SYSLIBDIR)/systemd/system-sleep/gc570d-sleep.sh
 	rm -f $(DESTDIR)$(SYSLIBDIR)/systemd/user/opengc570d-userd.service
 	rm -f $(DESTDIR)$(SYSDATADIR)/pipewire/pipewire.conf.d/50-everlive-capture.conf

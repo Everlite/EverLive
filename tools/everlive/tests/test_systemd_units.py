@@ -42,8 +42,8 @@ FORBIDDEN_SERVICE_SETTINGS = (
 )
 
 
-def service_settings(text: str) -> dict[str, str]:
-    """Return key/value pairs from the [Service] section of a unit file."""
+def unit_settings(text: str, target_section: str) -> dict[str, str]:
+    """Return key/value pairs from the requested section of a unit file."""
     settings: dict[str, str] = {}
     section = ""
     for raw_line in text.splitlines():
@@ -53,16 +53,31 @@ def service_settings(text: str) -> dict[str, str]:
         if line.startswith("[") and line.endswith("]"):
             section = line[1:-1]
             continue
-        if section != "Service" or "=" not in line:
+        if section != target_section or "=" not in line:
             continue
         key, value = line.split("=", 1)
         settings[key.strip()] = value.strip()
     return settings
 
 
+def service_settings(text: str) -> dict[str, str]:
+    """Return key/value pairs from the [Service] section of a unit file."""
+    return unit_settings(text, "Service")
+
+
 class UnitHardeningTests(unittest.TestCase):
     def assert_hardened(self, text: str, source: str) -> None:
+        unit = unit_settings(text, "Unit")
         settings = service_settings(text)
+
+        with self.subTest(source=source, setting="StartLimitIntervalSec"):
+            self.assertEqual("60", unit.get("StartLimitIntervalSec"))
+        with self.subTest(source=source, setting="StartLimitBurst"):
+            self.assertEqual("5", unit.get("StartLimitBurst"))
+        with self.subTest(source=source, setting="Restart"):
+            self.assertEqual("on-failure", settings.get("Restart"))
+        with self.subTest(source=source, setting="RestartSec"):
+            self.assertEqual("2", settings.get("RestartSec"))
 
         for key, expected in REQUIRED_SERVICE_SETTINGS.items():
             with self.subTest(source=source, setting=key):
