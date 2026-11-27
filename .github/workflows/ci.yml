@@ -117,6 +117,8 @@ jobs:
           test -x "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive-cam/everlive_camd"
           test -x "$RUNNER_TEMP/stage/usr/libexec/everlive-vfio-bind"
           test -x "$RUNNER_TEMP/stage/usr/libexec/everlive-setcap"
+          test -x "$RUNNER_TEMP/stage/usr/libexec/everlive-sleep"
+          test -L "$RUNNER_TEMP/stage/usr/lib/systemd/system-sleep/everlive-sleep.sh"
           test -f "$RUNNER_TEMP/stage/usr/lib/udev/rules.d/70-everlive-vfio.rules"
           if command -v setcap >/dev/null 2>&1; then
             test ! -e "$RUNNER_TEMP/stage/etc/security/limits.d/99-everlive-memlock.conf"
@@ -191,6 +193,7 @@ jobs:
           bash -n build.sh
           sh -n packaging/libexec/everlive-vfio-bind
           sh -n packaging/libexec/everlive-setcap
+          sh -n packaging/libexec/everlive-sleep
           sh -n tools/opengc573-userd/vfio_pci_bind.sh
           sh -n tools/opengc570d-userd/gc570d-vfio-bind.sh
           sh -n tools/openhws-userd/hws-vfio-bind.sh
