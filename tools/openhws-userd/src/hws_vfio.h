@@ -10,6 +10,9 @@
 
 #define HWS_VFIO_MAX_DMA_REGIONS	32
 
+/* Upper bound for a capture-card BAR0 MMIO window. */
+#define HWS_VFIO_BAR0_MAX_SIZE	(256ULL * 1024 * 1024)
+
 struct hws_vfio_dma_region {
 	void *vaddr;
 	size_t size;
@@ -62,6 +65,21 @@ static inline void hws_vfio_irq_unlock(struct hws_vfio_ctx *ctx)
  * Returns 0 on success, negative errno on failure.
  */
 int hws_vfio_init(struct hws_vfio_ctx *ctx, const char *pci_addr);
+
+/**
+ * hws_vfio_validate_bar0_size - Validate a BAR0 size against sysfs
+ * @region_size: Size reported by VFIO_DEVICE_GET_REGION_INFO
+ * @sysfs_size: Size derived from /sys/bus/pci/devices/<bdf>/resource
+ * @page_size: System page size
+ * @max_size: Largest acceptable BAR0 size
+ * @out_size: Receives the validated mappable length
+ *
+ * Returns 0 on success, or a negative errno if either size is zero,
+ * unaligned, implausible, or VFIO claims more than sysfs advertises.
+ */
+int hws_vfio_validate_bar0_size(size_t region_size, size_t sysfs_size,
+				size_t page_size, size_t max_size,
+				size_t *out_size);
 
 /**
  * hws_vfio_resolve - Find the card without opening it

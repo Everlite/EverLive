@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -35,7 +35,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -71,14 +71,16 @@ jobs:
 
       - name: Compile display renderer (GCC, -Werror for the audio probe)
         run: |
-          SDL_FLAGS="$(pkg-config --cflags --libs sdl2)"
+          read -r -a sdl_flags <<< "$(pkg-config --cflags --libs sdl2)"
           gcc -O2 -Wall -Wextra -Werror -c -o /tmp/everlive_audio_probe.o \
             tools/everlive/everlive_audio_probe.c
           gcc -O2 -Wall -Wextra -o /tmp/everlive_display \
+            -Itools/libeverlive-core \
             tools/everlive/everlive_display.c \
             tools/everlive/everlive_audio_probe.c \
+            tools/libeverlive-core/everlive_card.c \
             tools/libeverlive-core/third_party/jsmn.c \
-            ${SDL_FLAGS} -lGL -lm -lX11 -lpthread
+            "${sdl_flags[@]}" -lGL -lm -lX11 -lpthread
 
       - name: Verify no shell execution in the display audio path
         run: |
@@ -146,18 +148,20 @@ jobs:
           make CC=clang -j"$(nproc)"
           make CC=clang hwsuhd
           make CC=clang -C tests clean test
-          SDL_FLAGS="$(pkg-config --cflags --libs sdl2)"
+          read -r -a sdl_flags <<< "$(pkg-config --cflags --libs sdl2)"
           clang -O2 -Wall -Wextra -o /tmp/everlive_display_clang \
+            -Itools/libeverlive-core \
             tools/everlive/everlive_display.c \
             tools/everlive/everlive_audio_probe.c \
+            tools/libeverlive-core/everlive_card.c \
             tools/libeverlive-core/third_party/jsmn.c \
-            ${SDL_FLAGS} -lGL -lm -lX11 -lpthread
+            "${sdl_flags[@]}" -lGL -lm -lX11 -lpthread
 
       - name: Sanitizer run
-        run: make -C tests asan
+        run: make asan
 
-      - name: ThreadSanitizer V4L2 tests
-        run: make -C tests tsan
+      - name: ThreadSanitizer tests
+        run: make tsan
 
       - name: Clean
         run: make clean

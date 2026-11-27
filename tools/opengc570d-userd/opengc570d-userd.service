@@ -13,6 +13,8 @@
 Description=EverLive GC570D (Live Gamer DUO) userspace capture engine
 After=pipewire.service wireplumber.service
 Wants=pipewire.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple

@@ -9,6 +9,8 @@
 #include "gc573-user-compat.h"
 
 #define GC573_EDID_SIZE		256
+/* The GC573 hardware only exposes a base block plus one CTA-861 extension. */
+#define GC573_EDID_MAX_BLOCKS	2
 
 /* Selectable 256-byte EDID profiles advertised to the HDMI source. */
 #define GC573_EDID_PROFILE_DEFAULT	"default"
@@ -19,6 +21,19 @@
  * multi-channel L-PCM, so "bitstream" now resolves to the unified default.
  */
 #define GC573_EDID_PROFILE_BITSTREAM	"bitstream"
+
+/**
+ * gc573_user_edid_validate - Validate a complete EDID image
+ * @edid: Buffer holding one or more 128-byte EDID blocks
+ * @len: Buffer length in bytes
+ *
+ * Requires at least GC573_EDID_SIZE bytes, a whole number of 128-byte
+ * blocks, no more than GC573_EDID_MAX_BLOCKS, and an extension count in
+ * edid[126] that matches the image.  Verifies the base-block header, the
+ * CTA-861 extension tag, every 128-byte checksum, the CTA DTD offset and
+ * every CTA data-block length.  Returns 0 when valid, -EINVAL otherwise.
+ */
+int gc573_user_edid_validate(const u8 *edid, size_t len);
 
 /**
  * gc573_user_program_edid - Write the selected EDID table to IT6805 DDC RAM

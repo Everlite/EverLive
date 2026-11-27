@@ -78,7 +78,7 @@ except ImportError:  # imported as a module from another working directory
     from everlive_client import (EverLiveIpcClient, probe as ipc_probe,
                                  paused_state as handoff_paused_state)
 
-__version__ = "2.0.1"
+__version__ = "2.0.2"
 
 CONFIG_DIR = os.path.expanduser("~/.config/everlive")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")

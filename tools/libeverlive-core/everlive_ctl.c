@@ -522,7 +522,12 @@ static int ctl_call(const char *method, const char *params)
 	request_len = strlen(request);
 
 	while (off < request_len) {
-		ssize_t n = write(fd, request + off, request_len - off);
+		/*
+		 * Use MSG_NOSIGNAL so a server that closes mid-request yields
+		 * EPIPE here instead of killing the CLI with SIGPIPE.
+		 */
+		ssize_t n = send(fd, request + off, request_len - off,
+				 MSG_NOSIGNAL);
 
 		if (n < 0) {
 			if (errno == EINTR)

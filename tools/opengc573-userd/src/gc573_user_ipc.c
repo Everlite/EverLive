@@ -39,6 +39,8 @@ struct ipc_client {
 	int fd;
 	bool active;
 	bool hello_done;
+	/* A write hit EPIPE/ECONNRESET: drop the client after this request. */
+	bool peer_gone;
 	size_t inlen;
 	char inbuf[GC573_IPC_MAX_FRAME];
 };
@@ -130,8 +132,18 @@ static void ipc_send_raw(struct ipc_client *c, const char *data, size_t len)
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
+			/*
+			 * MSG_NOSIGNAL already suppresses SIGPIPE; record the
+			 * terminal peer errors so the control loop closes the
+			 * slot instead of retrying a dead socket.
+			 */
+			if (errno == EPIPE || errno == ECONNRESET ||
+			    errno == ENOTCONN)
+				c->peer_gone = true;
 			return;	/* peer is gone or its window is full */
 		}
+		if (n == 0)
+			return;	/* no progress; never spin here */
 		data += n;
 		len -= (size_t)n;
 	}
@@ -202,6 +214,7 @@ static void ipc_close_client(struct ipc_server *s, struct ipc_client *c)
 	c->fd = -1;
 	__atomic_store_n(&c->active, false, __ATOMIC_RELEASE);
 	c->hello_done = false;
+	c->peer_gone = false;
 	c->inlen = 0;
 }
 
@@ -1057,6 +1070,11 @@ static void ipc_drain_lines(struct ipc_server *s, struct ipc_client *c)
 		if (line[0] != '\0')
 			ipc_handle_line(s, c, line);
 		consumed += len + 1U;
+		if (c->peer_gone) {
+			/* The reply hit EPIPE/ECONNRESET: retire this client. */
+			ipc_close_client(s, c);
+			return;
+		}
 		if (!c->active)
 			return;
 	}
@@ -1139,6 +1157,7 @@ static void ipc_accept_all(struct ipc_server *s)
 
 		c->fd = fd;
 		c->hello_done = false;
+		c->peer_gone = false;
 		c->inlen = 0;
 		c->inbuf[0] = '\0';
 		__atomic_store_n(&c->active, true, __ATOMIC_RELEASE);

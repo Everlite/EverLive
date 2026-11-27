@@ -32,6 +32,8 @@ _RESTART_POLICY = """\
 Description=EverLive Universal Userspace Capture Service
 After=pipewire.service wireplumber.service
 Wants=pipewire.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
