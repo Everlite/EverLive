@@ -14,6 +14,11 @@ Module.symvers
 .module-common.o
 .tmp_versions/
 
+# Local backup/patch leftovers — must never be committed
+*.bak
+*.orig
+*.rej
+
 # Lokaler RE-Ordner — niemals auf GitHub
 do not push do github/
 
@@ -52,9 +57,19 @@ tests/test_framestore
 tests/test_ctl_proto
 tests/test_json_rpc
 tests/test_v4l2_shim
+tests/test_v4l2_preload
+tests/test_gc573-v4l2.so
+tests/test_gc570d-v4l2.so
 tests/test_handoff
+tests/test_ipc
 tests/test_framegen
 tests/test_fg_native
+tests/test_audio_probe
+tests/test_gc573_vfio
+tests/test_hws_vfio
+tests/test_gc573_edid
+tests/test_osd_utf8
+tests/test_sigpipe
 
 # libeverlive-core build outputs
 tools/libeverlive-core/*.a

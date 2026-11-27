@@ -142,7 +142,14 @@ install: all
 	install -d $(BINDIR) $(LIBDIR)
 	install -m 0755 gc573_user_streamer everlive_userd gc573_user_probe gc573_user_diag $(BINDIR)/
 	install -m 0644 libgc573-v4l2.so libeverlive-vk-pacer.so $(LIBDIR)/
-	command -v setcap >/dev/null 2>&1 && setcap cap_ipc_lock=+ep $(BINDIR)/gc573_user_streamer 2>/dev/null || true
+	@if [ -x ../../packaging/libexec/everlive-setcap ]; then \
+		../../packaging/libexec/everlive-setcap \
+			$(BINDIR)/gc573_user_streamer \
+			$(BINDIR)/gc573_user_probe \
+			$(BINDIR)/gc573_user_diag 2>/dev/null || true; \
+	elif command -v setcap >/dev/null 2>&1; then \
+		setcap cap_ipc_lock=+ep $(BINDIR)/gc573_user_streamer $(BINDIR)/gc573_user_probe $(BINDIR)/gc573_user_diag 2>/dev/null || true; \
+	fi
 
 uninstall:
 	rm -f $(BINDIR)/gc573_user_streamer $(BINDIR)/everlive_userd $(BINDIR)/gc573_user_probe $(BINDIR)/gc573_user_diag

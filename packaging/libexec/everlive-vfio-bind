@@ -1,0 +1,463 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# everlive-vfio-bind -- one bind/restore/status path for EverLive PCIe cards.
+#
+#   everlive-vfio-bind --card gc573   --bind
+#   everlive-vfio-bind --card gc570d  --bind --bdf 0000:84:00.0
+#   everlive-vfio-bind --card hwsuhd  --udev 0000:85:00.0
+#   everlive-vfio-bind --card gc573   --restore
+#   everlive-vfio-bind --card gc573   --status
+#
+# Binding is per BDF and uses driver_override, never vfio-pci/new_id.  After
+# the card is bound, only its own /dev/vfio/<iommu_group> node is handed to
+# root:video 0660.  The shared container node and every unrelated VFIO group
+# node are left alone.
+
+set -eu
+
+PROG=${0##*/}
+SYSFS_PCI=/sys/bus/pci/devices
+PCI_DRIVERS=/sys/bus/pci/drivers
+STATE_DIR=/run/everlive-vfio
+
+CARD=
+BDF=
+ACTION=status
+FORCE=0
+
+usage() {
+	cat <<EOF
+Usage: $PROG --card gc573|gc570d|hwsuhd [--bdf BDF] ACTION
+
+Actions:
+  --bind, -b                 bind the card to vfio-pci
+  --restore, -r              return the card to its previous driver
+  --status, -s               show card, IOMMU group and VFIO node state
+  --udev BDF                 bind from a udev RUN rule (same as --bind --bdf)
+
+Options:
+  --bdf BDF                  PCI address, e.g. 0000:84:00.0
+  --force                    allow an otherwise-unmatched 1461:0054 GC573
+                             (manual use only; never used by udev)
+EOF
+}
+
+say() {
+	printf '%s\n' "$*"
+}
+
+warn() {
+	printf '%s: %s\n' "$PROG" "$*" >&2
+}
+
+die() {
+	printf '%s: %s\n' "$PROG" "$*" >&2
+	exit 1
+}
+
+card_name() {
+	case "$1" in
+		gc573)  printf 'GC573' ;;
+		gc570d) printf 'GC570D' ;;
+		hwsuhd) printf 'HWS UHD' ;;
+		*)      printf '%s' "$1" ;;
+	esac
+}
+
+attr() {
+	cat "$1" 2>/dev/null || true
+}
+
+# Mutating actions need root.  Keep the convenience of the old per-card
+# scripts when a user runs the helper directly.
+if [ "$(id -u)" -ne 0 ]; then
+	for arg in "$@"; do
+		case "$arg" in
+			--bind|-b|--restore|--restore-kernel|--unbind|-r|-u|--udev)
+				if command -v sudo >/dev/null 2>&1; then
+					exec sudo "$0" "$@"
+				fi
+				die "root privileges required for $arg"
+				;;
+		esac
+	done
+fi
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--card)
+			[ $# -ge 2 ] || die "--card needs a value"
+			CARD=$2
+			shift 2
+			;;
+		--card=*)
+			CARD=${1#*=}
+			shift
+			;;
+		--bdf)
+			[ $# -ge 2 ] || die "--bdf needs a value"
+			BDF=$2
+			shift 2
+			;;
+		--bdf=*)
+			BDF=${1#*=}
+			shift
+			;;
+		--udev)
+			ACTION=bind
+			if [ $# -ge 2 ]; then
+				BDF=$2
+				shift 2
+			else
+				shift
+			fi
+			;;
+		--bind|-b)
+			ACTION=bind
+			shift
+			;;
+		--restore|--restore-kernel|--unbind|-r|-u)
+			ACTION=restore
+			shift
+			;;
+		--status|-s)
+			ACTION=status
+			shift
+			;;
+		--force)
+			FORCE=1
+			shift
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		-*)
+			die "unknown option: $1"
+			;;
+		*)
+			if [ -z "$BDF" ] && [ -d "$SYSFS_PCI/$1" ]; then
+				BDF=$1
+				shift
+			else
+				die "unexpected argument: $1"
+			fi
+			;;
+	esac
+done
+
+is_valid_bdf() {
+	case "$1" in
+		[0-9a-f][0-9a-f][0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f].[0-7])
+			return 0
+			;;
+	esac
+	return 1
+}
+
+[ -n "$CARD" ] || die "--card is required"
+case "$CARD" in
+	gc573|gc570d|hwsuhd) ;;
+	*) die "unknown card: $CARD" ;;
+esac
+
+if [ -n "$BDF" ] && ! is_valid_bdf "$BDF"; then
+	die "invalid PCI BDF: $BDF"
+fi
+
+current_driver() {
+	if [ -L "$SYSFS_PCI/$1/driver" ]; then
+		basename "$(readlink -f "$SYSFS_PCI/$1/driver")"
+	else
+		printf 'none\n'
+	fi
+}
+
+iommu_group() {
+	_link=$(readlink -f "$SYSFS_PCI/$1/iommu_group" 2>/dev/null) || return 1
+	_group=${_link##*/}
+	case "$_group" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	printf '%s\n' "$_group"
+}
+
+# card_matches BDF [allow_force]
+card_matches() {
+	_bdf=$1
+	_allow_force=${2:-0}
+	_dev="$SYSFS_PCI/$_bdf"
+	[ -d "$_dev" ] || return 1
+	_v=$(attr "$_dev/vendor")
+	_d=$(attr "$_dev/device")
+	_sv=$(attr "$_dev/subsystem_vendor")
+	_sd=$(attr "$_dev/subsystem_device")
+
+	case "$CARD" in
+		gc573)
+			if [ "$_v" = "0x1461" ] && [ "$_d" = "0x0055" ]; then
+				return 0
+			fi
+			if [ "$_v" = "0x1461" ] && [ "$_d" = "0x0054" ] &&
+			   [ "$_sv" = "0x1461" ] && [ "$_sd" = "0x5730" ]; then
+				return 0
+			fi
+			if [ "$_allow_force" = 1 ] &&
+			   [ "$_v" = "0x1461" ] && [ "$_d" = "0x0054" ]; then
+				return 0
+			fi
+			return 1
+			;;
+		gc570d)
+			if [ "$_v" = "0x1461" ] && [ "$_d" = "0x0054" ] &&
+			   [ "$_sv" = "0x1461" ] && [ "$_sd" = "0x5700" ]; then
+				return 0
+			fi
+			return 1
+			;;
+		hwsuhd)
+			[ "$_sd" = "0x0007" ] || return 1
+			case "$_v:$_d" in
+				0x8888:0x8581|0x8888:0x85a1|0x8888:0x8591|0x1f33:0x8581)
+					return 0
+					;;
+			esac
+			return 1
+			;;
+	esac
+	return 1
+}
+
+card_find() {
+	_best=
+	for _dev in "$SYSFS_PCI"/*; do
+		[ -d "$_dev" ] || continue
+		_bdf=${_dev##*/}
+		card_matches "$_bdf" 0 || continue
+		if [ -z "$_best" ]; then
+			_best=$_bdf
+		else
+			_best=$(printf '%s\n%s\n' "$_best" "$_bdf" |
+				LC_ALL=C sort | head -n 1)
+		fi
+	done
+	[ -n "$_best" ] || return 1
+	printf '%s\n' "$_best"
+}
+
+resolve_bdf() {
+	if [ -n "$BDF" ]; then
+		[ -d "$SYSFS_PCI/$BDF" ] || die "PCI device $BDF not found"
+		card_matches "$BDF" "$FORCE" ||
+			die "$BDF is not a $(card_name "$CARD") (refusing to use it)"
+	else
+		BDF=$(card_find) || die "no $(card_name "$CARD") card found"
+	fi
+}
+
+state_put() {
+	mkdir -p "$STATE_DIR"
+	chmod 0755 "$STATE_DIR" 2>/dev/null || true
+	printf '%s\n' "$2" > "$STATE_DIR/$1"
+}
+
+state_get() {
+	cat "$STATE_DIR/$1" 2>/dev/null || true
+}
+
+state_del() {
+	rm -f "$STATE_DIR/$1"
+}
+
+set_group_perms() {
+	_bdf=$1
+	_group=$(iommu_group "$_bdf") ||
+		die "$(card_name "$CARD") $_bdf: no IOMMU group (enable the IOMMU)"
+	_node="/dev/vfio/$_group"
+	_i=0
+	while [ ! -e "$_node" ]; do
+		_i=$((_i + 1))
+		if [ "$_i" -ge 50 ]; then
+			die "$(card_name "$CARD") $_bdf: $_node did not appear"
+		fi
+		sleep 0.1
+	done
+	chown root:video "$_node" ||
+		die "$(card_name "$CARD") $_bdf: cannot chown $_node"
+	chmod 0660 "$_node" ||
+		die "$(card_name "$CARD") $_bdf: cannot chmod $_node"
+	if command -v setfacl >/dev/null 2>&1; then
+		setfacl -b "$_node" 2>/dev/null || true
+	fi
+	say "$(card_name "$CARD") $_bdf: $_node root:video 0660"
+}
+
+card_post_bind() {
+	_bdf=$1
+	_dev="$SYSFS_PCI/$_bdf"
+
+	case "$CARD" in
+		hwsuhd)
+			if [ -w "$_dev/reset_method" ]; then
+				printf '\n' > "$_dev/reset_method" 2>/dev/null || true
+			fi
+			if [ -w "$_dev/power/control" ]; then
+				printf 'on\n' > "$_dev/power/control" 2>/dev/null || true
+			fi
+			;;
+	esac
+}
+
+card_post_restore() {
+	_bdf=$1
+	_dev="$SYSFS_PCI/$_bdf"
+
+	case "$CARD" in
+		hwsuhd)
+			if [ -w "$_dev/reset_method" ]; then
+				printf 'default\n' > "$_dev/reset_method" 2>/dev/null || true
+			fi
+			if [ -w "$_dev/power/control" ]; then
+				printf 'auto\n' > "$_dev/power/control" 2>/dev/null || true
+			fi
+			;;
+	esac
+}
+
+bind_card() {
+	resolve_bdf
+	_dev="$SYSFS_PCI/$BDF"
+	_group=$(iommu_group "$BDF") ||
+		die "$(card_name "$CARD") $BDF: no IOMMU group (enable the IOMMU)"
+	_cur=$(current_driver "$BDF")
+
+	if [ "$_cur" = "vfio-pci" ]; then
+		printf 'vfio-pci\n' > "$_dev/driver_override" 2>/dev/null || true
+		say "$(card_name "$CARD") $BDF: already bound to vfio-pci (IOMMU group $_group)"
+		card_post_bind "$BDF"
+		set_group_perms "$BDF"
+		return 0
+	fi
+
+	state_put "$BDF" "$_cur"
+	modprobe vfio-pci 2>/dev/null || true
+	[ -d "$PCI_DRIVERS/vfio-pci" ] ||
+		die "$(card_name "$CARD") $BDF: vfio-pci is not available"
+
+	printf 'vfio-pci\n' > "$_dev/driver_override" 2>/dev/null ||
+		die "$(card_name "$CARD") $BDF: cannot set driver_override"
+
+	if [ -L "$_dev/driver" ]; then
+		printf '%s\n' "$BDF" > "$_dev/driver/unbind" 2>/dev/null ||
+			warn "$(card_name "$CARD") $BDF: could not unbind from $_cur"
+	fi
+
+	_bound=0
+	if printf '%s\n' "$BDF" > "$PCI_DRIVERS/vfio-pci/bind" 2>/dev/null; then
+		_bound=1
+	fi
+	if [ "$_bound" -eq 0 ]; then
+		printf '%s\n' "$BDF" > /sys/bus/pci/drivers_probe 2>/dev/null || true
+	fi
+
+	_i=0
+	while [ "$(current_driver "$BDF")" != "vfio-pci" ]; do
+		_i=$((_i + 1))
+		[ "$_i" -ge 50 ] && break
+		sleep 0.1
+	done
+
+	if [ "$(current_driver "$BDF")" != "vfio-pci" ]; then
+		# Do not leave the card unbound if the per-BDF bind failed.
+		printf '\n' > "$_dev/driver_override" 2>/dev/null || true
+		if [ "$_cur" != "none" ]; then
+			modprobe "$_cur" 2>/dev/null || true
+		fi
+		printf '%s\n' "$BDF" > /sys/bus/pci/drivers_probe 2>/dev/null || true
+		die "$(card_name "$CARD") $BDF: binding to vfio-pci failed (driver: $(current_driver "$BDF"))"
+	fi
+
+	say "$(card_name "$CARD") $BDF: bound to vfio-pci (IOMMU group $_group)"
+	card_post_bind "$BDF"
+	set_group_perms "$BDF"
+}
+
+restore_card() {
+	resolve_bdf
+	_dev="$SYSFS_PCI/$BDF"
+	_prev=$(state_get "$BDF")
+	_cur=$(current_driver "$BDF")
+
+	if [ "$_cur" = "vfio-pci" ]; then
+		printf '%s\n' "$BDF" > "$_dev/driver/unbind" 2>/dev/null || true
+	fi
+	printf '\n' > "$_dev/driver_override" 2>/dev/null || true
+
+	card_post_restore "$BDF"
+
+	if [ "$CARD" = "gc573" ] &&
+	   { [ -z "$_prev" ] || [ "$_prev" = "none" ]; }; then
+		if modprobe open_gc573 2>/dev/null; then
+			_prev=open_gc573
+		fi
+	fi
+
+	if [ -n "$_prev" ] && [ "$_prev" != "none" ]; then
+		modprobe "$_prev" 2>/dev/null || true
+	fi
+	printf '%s\n' "$BDF" > /sys/bus/pci/drivers_probe 2>/dev/null || true
+	state_del "$BDF"
+
+	_i=0
+	while [ "$(current_driver "$BDF")" = "none" ] && [ "$_i" -lt 20 ]; do
+		_i=$((_i + 1))
+		sleep 0.1
+	done
+
+	say "$(card_name "$CARD") $BDF: driver $(current_driver "$BDF")"
+}
+
+status_card() {
+	resolve_bdf
+	_dev="$SYSFS_PCI/$BDF"
+	_group=$(iommu_group "$BDF" 2>/dev/null || true)
+
+	say "$(card_name "$CARD") $BDF ($(attr "$_dev/vendor"):$(attr "$_dev/device"), subsystem $(attr "$_dev/subsystem_vendor"):$(attr "$_dev/subsystem_device"))"
+	say "  IOMMU group : ${_group:-none}"
+	say "  Driver      : $(current_driver "$BDF")"
+
+	if [ -n "$_group" ]; then
+		_node="/dev/vfio/$_group"
+		if [ -e "$_node" ]; then
+			_perms=$(stat -c '%U:%G 0%a' "$_node" 2>/dev/null || printf '?')
+			say "  Group node  : $_node ($_perms)"
+		else
+			say "  Group node  : $_node (missing)"
+		fi
+	fi
+
+	if [ "$CARD" = "hwsuhd" ]; then
+		say "  Reset method: $(attr "$_dev/reset_method")"
+		say "  Power       : $(attr "$_dev/power_state") (runtime PM: $(attr "$_dev/power/control"))"
+		if [ -n "$_group" ] &&
+		   [ -d "/sys/kernel/iommu_groups/$_group/devices" ]; then
+			say "  Group peers : $(ls "/sys/kernel/iommu_groups/$_group/devices" | tr '\n' ' ')"
+		fi
+	fi
+}
+
+case "$ACTION" in
+	bind)
+		bind_card
+		;;
+	restore)
+		restore_card
+		;;
+	status)
+		status_card
+		;;
+	*)
+		die "unknown action: $ACTION"
+		;;
+esac

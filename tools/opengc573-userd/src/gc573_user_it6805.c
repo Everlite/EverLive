@@ -1252,7 +1252,7 @@ int gc573_user_it6805_init(void *bar0)
 
 	memset(&g_audio, 0, sizeof(g_audio));
 	g_audio.state = IT6805_AUDIO_OFF;
-	g_audio_path_enabled = false;
+	__atomic_store_n(&g_audio_path_enabled, false, __ATOMIC_RELAXED);
 
 	pr_info("Starting IT6805 userspace initialization...");
 
@@ -2828,7 +2828,7 @@ static int it6805_service_audio(void *bar0)
 {
 	int ret;
 
-	if (!g_audio_path_enabled)
+	if (!__atomic_load_n(&g_audio_path_enabled, __ATOMIC_RELAXED))
 		return 0;
 
 	switch (g_audio.state) {
@@ -2923,7 +2923,7 @@ int gc573_user_it6805_audio_disable(void *bar0)
 	if (!bar0)
 		return -EINVAL;
 
-	g_audio_path_enabled = false;
+	__atomic_store_n(&g_audio_path_enabled, false, __ATOMIC_RELAXED);
 	memset(&g_audio, 0, sizeof(g_audio));
 	g_audio.state = IT6805_AUDIO_OFF;
 	return it6805_clear_audio_output(bar0);
@@ -2938,7 +2938,7 @@ static void it6805_begin_audio_output(void *bar0, bool is_dvi)
 
 	memset(&g_audio, 0, sizeof(g_audio));
 	g_audio.state = IT6805_AUDIO_REQUEST;
-	g_audio_path_enabled = true;
+	__atomic_store_n(&g_audio_path_enabled, true, __ATOMIC_RELAXED);
 }
 
 static int it6805_release_video_tristate(void *bar0)

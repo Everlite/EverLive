@@ -169,12 +169,88 @@ static void test_cta_block_merging(void)
 	      "HDR block missing or corrupted");
 }
 
+static void test_cta_block_merging_malformed(void)
+{
+	printf("\n--- Test: CTA Extension Block Bounds ---\n");
+
+	u8 base_dst[128];
+	u8 base_src[128];
+	u8 dst[128];
+	u8 src[128];
+
+	memset(base_dst, 0, sizeof(base_dst));
+	memset(base_src, 0, sizeof(base_src));
+
+	/* A valid destination with one VDB and a source with an HDR block. */
+	base_dst[0] = 0x02;
+	base_dst[1] = 0x03;
+	base_dst[2] = 0x08;
+	base_dst[4] = 0x43;
+	base_dst[5] = 0x10;
+	base_dst[6] = 0x1f;
+	base_dst[7] = 0x04;
+
+	base_src[0] = 0x02;
+	base_src[1] = 0x03;
+	base_src[2] = 0x08;
+	base_src[4] = 0xe3;
+	base_src[5] = 0x06;
+	base_src[6] = 0x05;
+	base_src[7] = 0x01;
+
+	/* Destination DTD offset below the mandatory 4-byte header. */
+	memcpy(dst, base_dst, sizeof(dst));
+	memcpy(src, base_src, sizeof(src));
+	dst[2] = 0x03;
+	u8 expected[128];
+
+	memcpy(expected, dst, sizeof(expected));
+	gc570d_splitter_merge_cta_data_blocks(dst, src);
+	check(memcmp(dst, expected, sizeof(dst)) == 0 && dst[2] == 0x03,
+	      "Merge ignores dest DTD offset < 4", "Destination was modified");
+
+	/* Source DTD offset outside the 128-byte block. */
+	memcpy(dst, base_dst, sizeof(dst));
+	memcpy(src, base_src, sizeof(src));
+	src[2] = 0x80;
+	gc570d_splitter_merge_cta_data_blocks(dst, src);
+	check(memcmp(dst, base_dst, sizeof(dst)) == 0,
+	      "Merge ignores source DTD offset > 127", "Destination was modified");
+
+	/* Source data block claims more bytes than the collection holds. */
+	memcpy(dst, base_dst, sizeof(dst));
+	memcpy(src, base_src, sizeof(src));
+	src[4] = 0x47;	/* tag 2, length 7 -> 8 bytes from offset 4 */
+	gc570d_splitter_merge_cta_data_blocks(dst, src);
+	check(memcmp(dst, base_dst, sizeof(dst)) == 0,
+	      "Merge stops on overflowing source block", "Destination was modified");
+
+	/* No room left in the destination for another block. */
+	memcpy(dst, base_dst, sizeof(dst));
+	memcpy(src, base_src, sizeof(src));
+	dst[2] = 126;
+	dst[126] = 0;
+	dst[127] = 0;
+	gc570d_splitter_merge_cta_data_blocks(dst, src);
+	check(dst[2] == 126 && dst[126] == 0 && dst[127] == 0,
+	      "Merge refuses to overflow the dest block", "Destination was modified");
+
+	/* Source with no data blocks (DTD offset 4) must be a no-op. */
+	memcpy(dst, base_dst, sizeof(dst));
+	memcpy(src, base_src, sizeof(src));
+	src[2] = 0x04;
+	gc570d_splitter_merge_cta_data_blocks(dst, src);
+	check(memcmp(dst, base_dst, sizeof(dst)) == 0,
+	      "Merge ignores a source with no data blocks", "Destination was modified");
+}
+
 int main(void)
 {
 	printf("=== Running OpenGC570D EDID & CTA Unit Tests ===\n");
 	test_it68051_edid_bit_for_bit();
 	test_bridge_edid_generation();
 	test_cta_block_merging();
+	test_cta_block_merging_malformed();
 
 	if (failures == 0) {
 		printf("\n>>> All EDID tests passed successfully! <<<\n");

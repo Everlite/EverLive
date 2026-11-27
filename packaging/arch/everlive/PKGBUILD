@@ -1,7 +1,7 @@
 # Maintainer: Scyllinice
 
 pkgname=everlive
-pkgver=2.0.1
+pkgver=2.0.2
 pkgrel=1
 pkgdesc="Userspace VFIO capture and console gaming suite for AVerMedia Live Gamer 4K (GC573) and Live Gamer DUO (GC570D)"
 arch=('x86_64')
@@ -13,10 +13,9 @@ optdepends=('v4l2loopback-dkms: Virtual Camera (/dev/video10) loopback node for 
             'v4l-utils: v4l2-ctl for the virtual camera'
             'lsfg-vk: 2x console frame generation'
             'polkit: bind the card to vfio-pci from the desktop without a terminal')
-backup=('etc/security/limits.d/99-everlive-memlock.conf')
 install=everlive.install
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('1d0ec47dc1ca5c70dd08923d7d6bfb8011771a639ced45b9fc8ee669b359fd04')
 
 build() {
   cd "EverLive-$pkgver"

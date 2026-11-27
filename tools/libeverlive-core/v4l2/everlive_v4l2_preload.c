@@ -49,6 +49,20 @@ static struct everlive_dir_track g_dev_dirs[EVERLIVE_V4L2_MAX_DIRS];
 static pthread_mutex_t g_v4l2_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /*
+ * Hooks let the state machine release this mutex around blocking poll() in
+ * VIDIOC_DQBUF.  Unit tests that link the state directly leave them unset.
+ */
+static void preload_lock(void)
+{
+	pthread_mutex_lock(&g_v4l2_lock);
+}
+
+static void preload_unlock(void)
+{
+	pthread_mutex_unlock(&g_v4l2_lock);
+}
+
+/*
  * Optional per-process opt-in.  LD_PRELOAD is inherited by every child of a
  * launched application, but this shim is only meaningful in the process that
  * actually opens the virtual camera.  When EVERLIVE_V4L2_TARGET is set to a
@@ -109,10 +123,8 @@ static int (*real_openat)(int, const char *, int, ...) = NULL;
 static int (*real_openat64)(int, const char *, int, ...) = NULL;
 static int (*real_close)(int) = NULL;
 static int (*real_dup)(int) = NULL;
-static int (*real_dup2)(int, int) = NULL;
 static int (*real_ioctl)(int, unsigned long, ...) = NULL;
 static void *(*real_mmap)(void *, size_t, int, int, int, off_t) = NULL;
-static void *(*real_mmap64)(void *, size_t, int, int, int, off_t) = NULL;
 static int (*real_munmap)(void *, size_t) = NULL;
 static int (*real_stat)(const char *, struct stat *) = NULL;
 static int (*real_lstat)(const char *, struct stat *) = NULL;
@@ -124,6 +136,11 @@ static struct dirent *(*real_readdir)(DIR *) = NULL;
 static int (*real_closedir)(DIR *) = NULL;
 static FILE *(*real_fopen)(const char *, const char *) = NULL;
 static FILE *(*real_fopen64)(const char *, const char *) = NULL;
+static ssize_t (*real_read)(int, void *, size_t) = NULL;
+static ssize_t (*real_pread)(int, void *, size_t, off_t) = NULL;
+static ssize_t (*real___read_chk)(int, void *, size_t, size_t) = NULL;
+static ssize_t (*real___pread_chk)(int, void *, size_t, off_t, size_t) = NULL;
+static ssize_t (*real___pread64_chk)(int, void *, size_t, off64_t, size_t) = NULL;
 
 static int (*real_v4l2_open)(const char *, int, ...) = NULL;
 static int (*real_v4l2_fd_open)(int, int) = NULL;
@@ -134,43 +151,45 @@ static ssize_t (*real_v4l2_read)(int, void *, size_t) = NULL;
 static void *(*real_v4l2_mmap)(void *, size_t, int, int, int, int64_t) = NULL;
 static int (*real_v4l2_munmap)(void *, size_t) = NULL;
 
-static bool g_libc_funcs_ready = false;
-static bool g_v4l2_funcs_ready = false;
+static pthread_once_t g_libc_once = PTHREAD_ONCE_INIT;
+static pthread_once_t g_v4l2_once = PTHREAD_ONCE_INIT;
+
+static void resolve_real_libc_funcs(void)
+{
+	real_open     = dlsym(RTLD_NEXT, "open");
+	real_open64   = dlsym(RTLD_NEXT, "open64");
+	real_openat   = dlsym(RTLD_NEXT, "openat");
+	real_openat64 = dlsym(RTLD_NEXT, "openat64");
+	real_close    = dlsym(RTLD_NEXT, "close");
+	real_dup      = dlsym(RTLD_NEXT, "dup");
+	real_ioctl    = dlsym(RTLD_NEXT, "ioctl");
+	real_mmap     = dlsym(RTLD_NEXT, "mmap");
+	real_munmap   = dlsym(RTLD_NEXT, "munmap");
+	real_stat     = dlsym(RTLD_NEXT, "stat");
+	real_lstat    = dlsym(RTLD_NEXT, "lstat");
+	real_fstat    = dlsym(RTLD_NEXT, "fstat");
+	real_fstatat  = dlsym(RTLD_NEXT, "fstatat");
+	real_access   = dlsym(RTLD_NEXT, "access");
+	real_opendir  = dlsym(RTLD_NEXT, "opendir");
+	real_readdir  = dlsym(RTLD_NEXT, "readdir");
+	real_closedir = dlsym(RTLD_NEXT, "closedir");
+	real_fopen    = dlsym(RTLD_NEXT, "fopen");
+	real_fopen64  = dlsym(RTLD_NEXT, "fopen64");
+	real_read        = dlsym(RTLD_NEXT, "read");
+	real_pread       = dlsym(RTLD_NEXT, "pread");
+	real___read_chk  = dlsym(RTLD_NEXT, "__read_chk");
+	real___pread_chk = dlsym(RTLD_NEXT, "__pread_chk");
+	real___pread64_chk = dlsym(RTLD_NEXT, "__pread64_chk");
+}
 
 static void init_real_funcs(void)
 {
-	if (g_libc_funcs_ready)
-		return;
-	if (!real_open)     real_open     = dlsym(RTLD_NEXT, "open");
-	if (!real_open64)   real_open64   = dlsym(RTLD_NEXT, "open64");
-	if (!real_openat)   real_openat   = dlsym(RTLD_NEXT, "openat");
-	if (!real_openat64) real_openat64 = dlsym(RTLD_NEXT, "openat64");
-	if (!real_close)    real_close    = dlsym(RTLD_NEXT, "close");
-	if (!real_dup)      real_dup      = dlsym(RTLD_NEXT, "dup");
-	if (!real_dup2)     real_dup2     = dlsym(RTLD_NEXT, "dup2");
-	if (!real_ioctl)    real_ioctl    = dlsym(RTLD_NEXT, "ioctl");
-	if (!real_mmap)     real_mmap     = dlsym(RTLD_NEXT, "mmap");
-	if (!real_mmap64)   real_mmap64   = dlsym(RTLD_NEXT, "mmap64");
-	if (!real_munmap)   real_munmap   = dlsym(RTLD_NEXT, "munmap");
-	if (!real_stat)     real_stat     = dlsym(RTLD_NEXT, "stat");
-	if (!real_lstat)    real_lstat    = dlsym(RTLD_NEXT, "lstat");
-	if (!real_fstat)    real_fstat    = dlsym(RTLD_NEXT, "fstat");
-	if (!real_fstatat)  real_fstatat  = dlsym(RTLD_NEXT, "fstatat");
-	if (!real_access)   real_access   = dlsym(RTLD_NEXT, "access");
-	if (!real_opendir)  real_opendir  = dlsym(RTLD_NEXT, "opendir");
-	if (!real_readdir)  real_readdir  = dlsym(RTLD_NEXT, "readdir");
-	if (!real_closedir) real_closedir = dlsym(RTLD_NEXT, "closedir");
-	if (!real_fopen)    real_fopen    = dlsym(RTLD_NEXT, "fopen");
-	if (!real_fopen64)  real_fopen64  = dlsym(RTLD_NEXT, "fopen64");
-	g_libc_funcs_ready = true;
+	(void)pthread_once(&g_libc_once, resolve_real_libc_funcs);
 }
 
-static void init_real_v4l2_funcs(void)
+static void resolve_real_v4l2_funcs(void)
 {
 	init_real_funcs();
-	if (g_v4l2_funcs_ready)
-		return;
-	g_v4l2_funcs_ready = true;
 	real_v4l2_open    = dlsym(RTLD_NEXT, "v4l2_open");
 	real_v4l2_fd_open = dlsym(RTLD_NEXT, "v4l2_fd_open");
 	real_v4l2_close   = dlsym(RTLD_NEXT, "v4l2_close");
@@ -179,6 +198,11 @@ static void init_real_v4l2_funcs(void)
 	real_v4l2_read    = dlsym(RTLD_NEXT, "v4l2_read");
 	real_v4l2_mmap    = dlsym(RTLD_NEXT, "v4l2_mmap");
 	real_v4l2_munmap  = dlsym(RTLD_NEXT, "v4l2_munmap");
+}
+
+static void init_real_v4l2_funcs(void)
+{
+	(void)pthread_once(&g_v4l2_once, resolve_real_v4l2_funcs);
 }
 
 static const struct everlive_v4l2_card *card(void)
@@ -205,6 +229,7 @@ __attribute__((constructor))
 static void everlive_v4l2_preload_init(void)
 {
 	(void)everlive_v4l2_state_init(card());
+	everlive_v4l2_set_lock_hooks(preload_lock, preload_unlock);
 }
 
 static int virtual_node_path(unsigned int port, char *buf, size_t size)
@@ -439,13 +464,17 @@ DIR *opendir(const char *name)
 
 struct dirent *readdir(DIR *dirp)
 {
-	static struct dirent tls_fake_dirent;
+	static _Thread_local struct dirent tls_fake_dirent;
 	const struct everlive_v4l2_card *c = card();
 	struct everlive_dir_track *tr;
 	struct dirent *ent;
+	bool tracked;
 
 	init_real_funcs();
-	if (!find_dir_track(dirp))
+	pthread_mutex_lock(&g_v4l2_lock);
+	tracked = find_dir_track(dirp) != NULL;
+	pthread_mutex_unlock(&g_v4l2_lock);
+	if (!tracked)
 		return real_readdir(dirp);
 
 	ent = real_readdir(dirp);
@@ -483,18 +512,17 @@ struct dirent *readdir(DIR *dirp)
 
 int closedir(DIR *dirp)
 {
-	init_real_funcs();
-	if (find_dir_track(dirp)) {
-		pthread_mutex_lock(&g_v4l2_lock);
-		struct everlive_dir_track *tr = find_dir_track(dirp);
+	struct everlive_dir_track *tr;
 
-		if (tr) {
-			tr->dirp = NULL;
-			tr->step = 0;
-			tr->is_sysfs = false;
-		}
-		pthread_mutex_unlock(&g_v4l2_lock);
+	init_real_funcs();
+	pthread_mutex_lock(&g_v4l2_lock);
+	tr = find_dir_track(dirp);
+	if (tr) {
+		tr->dirp = NULL;
+		tr->step = 0;
+		tr->is_sysfs = false;
 	}
+	pthread_mutex_unlock(&g_v4l2_lock);
 	return real_closedir(dirp);
 }
 
@@ -547,8 +575,6 @@ int fstat(int fd, struct stat *buf)
 	int ret;
 
 	init_real_funcs();
-	if (!everlive_v4l2_is_virtual_fd(fd))
-		return real_fstat(fd, buf);
 	pthread_mutex_lock(&g_v4l2_lock);
 	h = everlive_v4l2_find_handle(fd);
 	if (!h) {
@@ -586,12 +612,12 @@ int access(const char *pathname, int mode)
 	return real_access(pathname, mode);
 }
 
-static int open_virtual_video(unsigned int port)
+static int open_virtual_video(unsigned int port, int flags)
 {
 	int fd;
 
 	pthread_mutex_lock(&g_v4l2_lock);
-	fd = everlive_v4l2_open_virtual(port);
+	fd = everlive_v4l2_open_virtual(port, flags);
 	pthread_mutex_unlock(&g_v4l2_lock);
 	return fd;
 }
@@ -605,7 +631,7 @@ FILE *fopen(const char *pathname, const char *mode)
 	init_real_funcs();
 	port = match_virtual_video_path(pathname);
 	if (port >= 0) {
-		fd = open_virtual_video((unsigned int)port);
+		fd = open_virtual_video((unsigned int)port, 0);
 		if (fd < 0)
 			return NULL;
 		file = fdopen(fd, mode);
@@ -634,7 +660,7 @@ FILE *fopen64(const char *pathname, const char *mode)
 	init_real_funcs();
 	port = match_virtual_video_path(pathname);
 	if (port >= 0) {
-		fd = open_virtual_video((unsigned int)port);
+		fd = open_virtual_video((unsigned int)port, 0);
 		if (fd < 0)
 			return NULL;
 		file = fdopen(fd, mode);
@@ -665,7 +691,7 @@ int open(const char *pathname, int flags, ...)
 	init_real_funcs();
 	port = match_virtual_video_path(pathname);
 	if (port >= 0)
-		return open_virtual_video((unsigned int)port);
+		return open_virtual_video((unsigned int)port, flags);
 	sfd = open_virtual_sysfs(pathname);
 	if (sfd >= 0)
 		return sfd;
@@ -688,7 +714,7 @@ int open64(const char *pathname, int flags, ...)
 	init_real_funcs();
 	port = match_virtual_video_path(pathname);
 	if (port >= 0)
-		return open_virtual_video((unsigned int)port);
+		return open_virtual_video((unsigned int)port, flags);
 	sfd = open_virtual_sysfs(pathname);
 	if (sfd >= 0)
 		return sfd;
@@ -711,7 +737,7 @@ int openat(int dirfd, const char *pathname, int flags, ...)
 	init_real_funcs();
 	port = match_virtual_video_path(pathname);
 	if (port >= 0)
-		return open_virtual_video((unsigned int)port);
+		return open_virtual_video((unsigned int)port, flags);
 	sfd = open_virtual_sysfs(pathname);
 	if (sfd >= 0)
 		return sfd;
@@ -734,7 +760,7 @@ int openat64(int dirfd, const char *pathname, int flags, ...)
 	init_real_funcs();
 	port = match_virtual_video_path(pathname);
 	if (port >= 0)
-		return open_virtual_video((unsigned int)port);
+		return open_virtual_video((unsigned int)port, flags);
 	sfd = open_virtual_sysfs(pathname);
 	if (sfd >= 0)
 		return sfd;
@@ -753,12 +779,127 @@ int close(int fd)
 	int ret;
 
 	init_real_funcs();
-	if (!everlive_v4l2_is_virtual_fd(fd))
-		return real_close(fd);
 	pthread_mutex_lock(&g_v4l2_lock);
+	if (!everlive_v4l2_is_virtual_fd(fd)) {
+		pthread_mutex_unlock(&g_v4l2_lock);
+		return real_close(fd);
+	}
 	ret = everlive_v4l2_close_virtual(fd);
 	pthread_mutex_unlock(&g_v4l2_lock);
 	return ret;
+}
+
+static bool try_read_virtual_fd(int fd, void *buffer, size_t count,
+				ssize_t *out_ret)
+{
+	if (everlive_v4l2_open_count() <= 0)
+		return false;
+
+	pthread_mutex_lock(&g_v4l2_lock);
+	if (everlive_v4l2_is_virtual_fd(fd)) {
+		*out_ret = everlive_v4l2_read_frame(fd, buffer, count);
+		pthread_mutex_unlock(&g_v4l2_lock);
+		return true;
+	}
+	pthread_mutex_unlock(&g_v4l2_lock);
+	return false;
+}
+
+ssize_t read(int fd, void *buffer, size_t count)
+{
+	ssize_t ret;
+
+	init_real_funcs();
+	if (try_read_virtual_fd(fd, buffer, count, &ret))
+		return ret;
+	if (real_read)
+		return real_read(fd, buffer, count);
+	return (ssize_t)syscall(SYS_read, fd, buffer, count);
+}
+
+ssize_t __read_chk(int fd, void *buffer, size_t count, size_t buflen)
+{
+	ssize_t ret;
+
+	init_real_funcs();
+	if (count <= buflen && try_read_virtual_fd(fd, buffer, count, &ret))
+		return ret;
+	if (real___read_chk)
+		return real___read_chk(fd, buffer, count, buflen);
+	if (real_read)
+		return real_read(fd, buffer, count);
+	return (ssize_t)syscall(SYS_read, fd, buffer, count);
+}
+
+ssize_t pread(int fd, void *buffer, size_t count, off_t offset)
+{
+	ssize_t ret;
+
+	init_real_funcs();
+	if (try_read_virtual_fd(fd, buffer, count, &ret))
+		return ret;
+	if (real_pread)
+		return real_pread(fd, buffer, count, offset);
+#if defined(SYS_pread64)
+	return (ssize_t)syscall(SYS_pread64, fd, buffer, count, offset);
+#elif defined(SYS_pread)
+	return (ssize_t)syscall(SYS_pread, fd, buffer, count, offset);
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+
+ssize_t __pread_chk(int fd, void *buffer, size_t count, off_t offset,
+		    size_t buflen)
+{
+	ssize_t ret;
+
+	init_real_funcs();
+	if (count <= buflen && try_read_virtual_fd(fd, buffer, count, &ret))
+		return ret;
+	if (real___pread_chk)
+		return real___pread_chk(fd, buffer, count, offset, buflen);
+	if (real_pread)
+		return real_pread(fd, buffer, count, offset);
+#if defined(SYS_pread64)
+	return (ssize_t)syscall(SYS_pread64, fd, buffer, count, offset);
+#elif defined(SYS_pread)
+	return (ssize_t)syscall(SYS_pread, fd, buffer, count, offset);
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+
+ssize_t __pread64_chk(int fd, void *buffer, size_t count, off64_t offset,
+		      size_t buflen)
+{
+	ssize_t ret;
+
+	init_real_funcs();
+	if (count <= buflen && try_read_virtual_fd(fd, buffer, count, &ret))
+		return ret;
+	if (real___pread64_chk)
+		return real___pread64_chk(fd, buffer, count, offset, buflen);
+	if (real___pread_chk)
+		return real___pread_chk(fd, buffer, count, (off_t)offset,
+					buflen);
+	if (real_pread)
+		return real_pread(fd, buffer, count, (off_t)offset);
+#if defined(SYS_pread64)
+	return (ssize_t)syscall(SYS_pread64, fd, buffer, count, offset);
+#elif defined(SYS_pread)
+	return (ssize_t)syscall(SYS_pread, fd, buffer, count, (off_t)offset);
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+
+ssize_t pread64(int fd, void *buffer, size_t count, off64_t offset)
+{
+	return pread(fd, buffer, count, (off_t)offset);
 }
 
 int ioctl(int fd, unsigned long request, ...)
@@ -772,9 +913,6 @@ int ioctl(int fd, unsigned long request, ...)
 	va_start(ap, request);
 	arg = va_arg(ap, void *);
 	va_end(ap);
-
-	if (!everlive_v4l2_is_virtual_fd(fd))
-		return real_ioctl(fd, request, arg);
 
 	pthread_mutex_lock(&g_v4l2_lock);
 	h = everlive_v4l2_find_handle(fd);
@@ -790,14 +928,21 @@ int ioctl(int fd, unsigned long request, ...)
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 {
 	void *p;
+	bool owned = false;
 
 	init_real_funcs();
-	if (fd >= 0 && everlive_v4l2_is_virtual_fd(fd)) {
+	if (fd >= 0) {
 		pthread_mutex_lock(&g_v4l2_lock);
-		p = everlive_v4l2_mmap_buffer(fd, (uint64_t)offset);
+		owned = everlive_v4l2_is_virtual_fd(fd);
+		p = owned ? everlive_v4l2_mmap_buffer(fd, (uint64_t)offset) :
+			    NULL;
 		pthread_mutex_unlock(&g_v4l2_lock);
-		if (p)
-			return p;
+		if (owned) {
+			if (p)
+				return p;
+			errno = EINVAL;
+			return MAP_FAILED;
+		}
 	}
 	if (!real_mmap)
 		return direct_mmap(addr, length, prot, flags, fd, offset);
@@ -838,7 +983,7 @@ int v4l2_open(const char *file, int oflag, ...)
 	init_real_v4l2_funcs();
 	port = match_virtual_video_path(file);
 	if (port >= 0)
-		return open_virtual_video((unsigned int)port);
+		return open_virtual_video((unsigned int)port, oflag);
 	if (oflag & O_CREAT) {
 		va_list ap;
 
@@ -868,9 +1013,16 @@ int v4l2_fd_open(int fd, int v4l2_flags)
 
 int v4l2_close(int fd)
 {
+	int ret;
+
 	init_real_v4l2_funcs();
-	if (everlive_v4l2_is_virtual_fd(fd))
-		return close(fd);
+	pthread_mutex_lock(&g_v4l2_lock);
+	if (everlive_v4l2_is_virtual_fd(fd)) {
+		ret = everlive_v4l2_close_virtual(fd);
+		pthread_mutex_unlock(&g_v4l2_lock);
+		return ret;
+	}
+	pthread_mutex_unlock(&g_v4l2_lock);
 	if (real_v4l2_close)
 		return real_v4l2_close(fd);
 	return real_close(fd);
@@ -879,18 +1031,30 @@ int v4l2_close(int fd)
 int v4l2_dup(int fd)
 {
 	int newfd;
+	int saved_errno;
 
 	init_real_v4l2_funcs();
+	pthread_mutex_lock(&g_v4l2_lock);
 	if (!everlive_v4l2_is_virtual_fd(fd)) {
+		pthread_mutex_unlock(&g_v4l2_lock);
 		if (real_v4l2_dup)
 			return real_v4l2_dup(fd);
 		return real_dup(fd);
 	}
 	newfd = real_dup(fd);
-	if (newfd < 0)
-		return newfd;
-	pthread_mutex_lock(&g_v4l2_lock);
-	everlive_v4l2_dup_virtual(fd, newfd);
+	if (newfd < 0) {
+		saved_errno = errno;
+		pthread_mutex_unlock(&g_v4l2_lock);
+		errno = saved_errno;
+		return -1;
+	}
+	if (everlive_v4l2_dup_virtual(fd, newfd) < 0) {
+		saved_errno = errno;
+		pthread_mutex_unlock(&g_v4l2_lock);
+		(void)syscall(SYS_close, newfd);
+		errno = saved_errno;
+		return -1;
+	}
 	pthread_mutex_unlock(&g_v4l2_lock);
 	return newfd;
 }
@@ -907,11 +1071,6 @@ int v4l2_ioctl(int fd, unsigned long int request, ...)
 	arg = va_arg(ap, void *);
 	va_end(ap);
 
-	if (!everlive_v4l2_is_virtual_fd(fd)) {
-		if (real_v4l2_ioctl)
-			return real_v4l2_ioctl(fd, request, arg);
-		return real_ioctl(fd, request, arg);
-	}
 	pthread_mutex_lock(&g_v4l2_lock);
 	h = everlive_v4l2_find_handle(fd);
 	if (h) {
@@ -930,12 +1089,15 @@ ssize_t v4l2_read(int fd, void *buffer, size_t n)
 	ssize_t ret;
 
 	init_real_v4l2_funcs();
+	pthread_mutex_lock(&g_v4l2_lock);
 	if (!everlive_v4l2_is_virtual_fd(fd)) {
+		pthread_mutex_unlock(&g_v4l2_lock);
 		if (real_v4l2_read)
 			return real_v4l2_read(fd, buffer, n);
-		return read(fd, buffer, n);
+		if (real_read)
+			return real_read(fd, buffer, n);
+		return (ssize_t)syscall(SYS_read, fd, buffer, n);
 	}
-	pthread_mutex_lock(&g_v4l2_lock);
 	ret = everlive_v4l2_read_frame(fd, buffer, n);
 	pthread_mutex_unlock(&g_v4l2_lock);
 	return ret;
@@ -945,14 +1107,21 @@ void *v4l2_mmap(void *start, size_t length, int prot, int flags, int fd,
 		int64_t offset)
 {
 	void *p;
+	bool owned = false;
 
 	init_real_v4l2_funcs();
-	if (fd >= 0 && everlive_v4l2_is_virtual_fd(fd)) {
+	if (fd >= 0) {
 		pthread_mutex_lock(&g_v4l2_lock);
-		p = everlive_v4l2_mmap_buffer(fd, (uint64_t)offset);
+		owned = everlive_v4l2_is_virtual_fd(fd);
+		p = owned ? everlive_v4l2_mmap_buffer(fd, (uint64_t)offset) :
+			    NULL;
 		pthread_mutex_unlock(&g_v4l2_lock);
-		if (p)
-			return p;
+		if (owned) {
+			if (p)
+				return p;
+			errno = EINVAL;
+			return MAP_FAILED;
+		}
 	}
 	if (real_v4l2_mmap)
 		return real_v4l2_mmap(start, length, prot, flags, fd, offset);

@@ -6,13 +6,47 @@ on:
   pull_request:
     branches: [ main, dev, 'exp/*' ]
 
+permissions:
+  contents: read
+
 jobs:
+  actionlint:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Run actionlint
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$tmp_dir"' EXIT
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz" \
+            -o "$tmp_dir/actionlint.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $tmp_dir/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$tmp_dir/actionlint.tar.gz" -C "$tmp_dir" actionlint
+          "$tmp_dir/actionlint"
+
   build:
     runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Release hygiene (no patchers or compiled binaries)
+        run: python3 tools/check_tree_hygiene.py
+
+      - name: Release archive hygiene
+        run: |
+          mkdir -p "$RUNNER_TEMP/archive"
+          git archive --format=tar HEAD | tar -x -C "$RUNNER_TEMP/archive"
+          python3 tools/check_tree_hygiene.py --tree "$RUNNER_TEMP/archive"
 
       - name: Install userspace dependencies
         run: |
@@ -34,6 +68,27 @@ jobs:
 
       - name: Compile everything (GCC)
         run: make -j"$(nproc)"
+
+      - name: Compile display renderer (GCC, -Werror for the audio probe)
+        run: |
+          read -r -a sdl_flags <<< "$(pkg-config --cflags --libs sdl2)"
+          gcc -O2 -Wall -Wextra -Werror -c -o /tmp/everlive_audio_probe.o \
+            tools/everlive/everlive_audio_probe.c
+          gcc -O2 -Wall -Wextra -o /tmp/everlive_display \
+            -Itools/libeverlive-core \
+            tools/everlive/everlive_display.c \
+            tools/everlive/everlive_audio_probe.c \
+            tools/libeverlive-core/everlive_card.c \
+            tools/libeverlive-core/third_party/jsmn.c \
+            "${sdl_flags[@]}" -lGL -lm -lX11 -lpthread
+
+      - name: Verify no shell execution in the display audio path
+        run: |
+          if grep -nE 'popen[[:space:]]*\(|system[[:space:]]*\(|/bin/sh|python3' \
+               tools/everlive/everlive_display.c; then
+            echo "ERROR: shell execution is not allowed in the display audio path" >&2
+            exit 1
+          fi
 
       - name: Compile HWS UHD engine (GCC, opt-in)
         run: make hwsuhd
@@ -60,6 +115,12 @@ jobs:
           test -f "$RUNNER_TEMP/stage/usr/lib/libeverlive-vk-pacer.so"
           test -f "$RUNNER_TEMP/stage/usr/lib/libeverlive-cam-v4l2.so"
           test -x "$RUNNER_TEMP/stage/usr/lib/everlive/tools/everlive-cam/everlive_camd"
+          test -x "$RUNNER_TEMP/stage/usr/libexec/everlive-vfio-bind"
+          test -x "$RUNNER_TEMP/stage/usr/libexec/everlive-setcap"
+          test -f "$RUNNER_TEMP/stage/usr/lib/udev/rules.d/70-everlive-vfio.rules"
+          if command -v setcap >/dev/null 2>&1; then
+            test ! -e "$RUNNER_TEMP/stage/etc/security/limits.d/99-everlive-memlock.conf"
+          fi
           make uninstall DESTDIR="$RUNNER_TEMP/stage" PREFIX=/usr
 
       - name: Staged app-only install and uninstall
@@ -87,9 +148,20 @@ jobs:
           make CC=clang -j"$(nproc)"
           make CC=clang hwsuhd
           make CC=clang -C tests clean test
+          read -r -a sdl_flags <<< "$(pkg-config --cflags --libs sdl2)"
+          clang -O2 -Wall -Wextra -o /tmp/everlive_display_clang \
+            -Itools/libeverlive-core \
+            tools/everlive/everlive_display.c \
+            tools/everlive/everlive_audio_probe.c \
+            tools/libeverlive-core/everlive_card.c \
+            tools/libeverlive-core/third_party/jsmn.c \
+            "${sdl_flags[@]}" -lGL -lm -lX11 -lpthread
 
       - name: Sanitizer run
-        run: make -C tests asan
+        run: make asan
+
+      - name: ThreadSanitizer tests
+        run: make tsan
 
       - name: Clean
         run: make clean
@@ -117,7 +189,42 @@ jobs:
           bash -n uninstall.sh
           bash -n play.sh
           bash -n build.sh
-          bash -n tools/opengc573-userd/vfio_pci_bind.sh
-          bash -n tools/opengc570d-userd/gc570d-vfio-bind.sh
+          sh -n packaging/libexec/everlive-vfio-bind
+          sh -n packaging/libexec/everlive-setcap
+          sh -n tools/opengc573-userd/vfio_pci_bind.sh
+          sh -n tools/opengc570d-userd/gc570d-vfio-bind.sh
+          sh -n tools/openhws-userd/hws-vfio-bind.sh
           bash -n tools/opengc570d-userd/gc570d-sleep.sh
           bash -n tools/libeverlive-core/everlive-service.sh
+
+      - name: Verify VFIO permission invariants
+        run: |
+          fail() { echo "ERROR: $*" >&2; exit 1; }
+          if grep -R "new_id" packaging tools --include='*.sh' --include='*.rules' --include='*.conf'; then
+            fail "new_id must not be used"
+          fi
+          if grep -E 'SUBSYSTEM=="vfio".*TAG\+="uaccess"' packaging/70-everlive.rules; then
+            fail "VFIO group nodes must not use uaccess"
+          fi
+          if grep -R 'TAG+="uaccess"' packaging/70-everlive-vfio.rules \
+               tools/opengc570d-userd/99-gc570d-vfio.rules \
+               tools/openhws-userd/99-hwsuhd-vfio.rules; then
+            fail "VFIO rules must not use uaccess"
+          fi
+          if grep -R --exclude-dir=__pycache__ 'LimitMEMLOCK=infinity' tools \
+               --include='*.service' --include='*.py' --include='*.sh'; then
+            fail "unlimited LimitMEMLOCK is not allowed"
+          fi
+          if grep -R -E 'memlock[[:space:]]+unlimited' packaging --include='*.conf' \
+               tools --include='*.conf'; then
+            fail "unlimited memlock is not allowed"
+          fi
+          if grep -R -E 'options[[:space:]]+vfio-pci[[:space:]]+ids=' packaging --include='*.conf' \
+               tools --include='*.conf'; then
+            fail "global vfio-pci ids= binding is not allowed"
+          fi
+          if command -v udevadm >/dev/null 2>&1 && udevadm verify --help >/dev/null 2>&1; then
+            udevadm verify packaging/70-everlive.rules packaging/70-everlive-vfio.rules \
+              tools/opengc570d-userd/99-gc570d-vfio.rules \
+              tools/openhws-userd/99-hwsuhd-vfio.rules
+          fi

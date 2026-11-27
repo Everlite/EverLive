@@ -11,6 +11,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.2] - 2026-11-27
+
+### Security
+- **Private runtime directories, sockets and shared memory:** control-socket resolution now centralises the `$XDG_RUNTIME_DIR` → `/run/user/<euid>` → `/tmp` fallback, validates every existing directory as a real `0700` directory owned by `geteuid()`, rejects symlinks, and creates missing fallback directories under `umask(077)`. Foreign or permissive paths abort startup with an actionable error instead of being silently reused. Lock files are opened `O_NOFOLLOW` and ownership-checked; the GC570D legacy socket now verifies `SO_PEERCRED`; `reinit` and raw `action` debug commands require `EVERLIVE_DEBUG_CONTROL=1` in the daemon environment; and frame-store shm is accepted only when it is a `0600` object owned by the engine UID. Added runtime-dir, lock, peer-credential and shm ownership/mode tests.
+- **Display audio no longer executes a shell:** `everlive_display` spawns `pw-loopback`, `arecord`, `pw-play` and `wpctl` through `posix_spawnp` with argv arrays instead of `popen`, `system` or `execl("/bin/sh", "-c", …)`. PipeWire node IDs are validated as decimal `uint32` values and node names against a conservative `[A-Za-z0-9._:+-]` allowlist before any exec, so a hostile `node.name` (for example `1; touch /tmp/pwned`) cannot execute anything. Audio routing failures are logged and never stall the video path.
+- **VFIO permissions are now scoped per card:** binding uses subsystem-qualified udev rules and a shared `everlive-vfio-bind` helper. Only the matched card's `/dev/vfio/<iommu_group>` is set to `root:video 0660`; `/dev/vfio/vfio` is handled by one generic container rule, and unrelated VFIO group nodes are no longer touched. The broad `SUBSYSTEM=="vfio"` rule and `TAG+="uaccess"` were removed. GC573 and GC570D cannot claim each other, and `vfio-pci/new_id` plus the global `options vfio-pci ids=` binding were replaced by `driver_override` and per-BDF bind.
+- **Bounded memlock instead of unlimited:** `LimitMEMLOCK=infinity` and the unlimited `limits.d` files were removed. `cap_ipc_lock=+ep` is applied to every installed engine, including HWS, and a bounded 1 GiB fallback with `LimitMEMLOCK=1G` drop-ins is installed only when `setcap` is unavailable.
+- **User-unit hardening (safe subset):** `everlive.service`, `opengc570d-userd.service`, and the Hub-generated fallback unit now restrict address families to `AF_UNIX`, `AF_INET`, and `AF_INET6`, run with `SystemCallArchitectures=native` and `SystemCallFilter=@system-service`, and enable `LockPersonality=yes` plus `RestrictSUIDSGID=yes`. `systemd-analyze security --offline=yes` on systemd 262.2 improves both units from **9.4** to **7.2**. `NoNewPrivileges=` and filesystem namespacing remain off because they would disable the `cap_ipc_lock=+ep` VFIO pinning path; a per-user `LimitMEMLOCK=` cannot raise the user manager's hard limit either.
+- **Trusted helpers, installer supply chain & CI hardening:** validated `pkexec` helpers, PCI BDFs and V4L2 arguments (`#147`); pinned `lsfg-vk` and release `PKGBUILD` checksums (`#146`); pinned GitHub Actions to commit SHAs with least-privilege permissions, `actionlint`, and Dependabot (`#148`); added `docs/THREAT_MODEL.md` and updated `SECURITY.md` / `CONTRIBUTING.md` (`#149`).
+
+### Fixed
+- **V4L2 preload deadlock with a live frame store:** the shared frame store called the interposed `fstat()` (and could recurse through `mmap()`/`close()`) while the preload shim held its global mutex, so `VIDIOC_QUERYCAP` — and therefore `v4l2-ctl`, OBS and Discord — could hang forever as soon as `/dev/shm/*_v4l2_shm` existed. Frame-store metadata now uses raw `fstat`/`mmap`/`munmap`/`close` syscalls, `VIDIOC_DQBUF` drops the shim lock around a blocking `poll()`, `O_NONBLOCK` is honoured with an immediate `EAGAIN`, and `read()`/`pread()` are interposed for virtual fds. Added timeout-guarded regression tests for live-store QUERYCAP, non-blocking DQBUF and full-frame reads (`#163`), alongside preload threading and buffer lifecycle hardening (`#155`).
+- **Frame store v2, VFIO & engine concurrency hardening:** corrected odd/even seqlock critical sections and ABI ownership in the frame store (`#156`); bounded VFIO DMA teardown, preserved `errno`, and validated BAR0 (`#157`); hardened `everlive_display` V4L2 capture lifecycle and device discovery (`#158`); hardened signal handling, I2C, audio, EDID and OSD parsing (`#161`); and added full-core sanitizer instrumentation with expanded TSan coverage (`#159`).
+- **Console Hub & recorder:** fixed PiP `QImage` lifetime and Qt-safe signal shutdown (`#150`); added optional `gpu-screen-recorder` viewport capture, VAAPI PiP overlay, and monitor-Hz FPS options (`#151`).
+
+### Removed
+- Removed the unused binary-patching helpers from `tools/`. EverLive ships only
+  source-built components; no released library is modified after build. CI now
+  rejects patch tooling, backup files and compiled binaries in the tree.
+- **Display audio probing no longer needs Python or shell text parsing:**
+  `pw-dump Node` is parsed natively (jsmn) in `tools/everlive/everlive_audio_probe.c`
+  instead of `python3 -c`, `wpctl status | awk` and `pactl list sink-inputs`.
+  The `pactl` fallback was dropped because the pipeline already requires
+  PipeWire (`pw-loopback`/`pw-play`); CI now rejects shell execution in the
+  display audio path. The ALSA fallback uses `plughw:` for `hw:` devices
+  instead of retrying two `arecord` invocations through the shell.
+
+---
+
 ## [2.0.1] - 2026-11-22
 
 ### Fixed

@@ -26,6 +26,7 @@
 #include "gc573_user_bitstream.h"
 #include "gc573_user_nosignal.h"
 #include "gc573_user_ipc.h"
+#include "everlive_ipc.h"
 #include "gc573_user_audio_tap.h"
 #include "gc573_user_hdr.h"
 #include "gc573_user_framegen.h"
@@ -67,7 +68,7 @@
  * tools/everlive/everlive_viewer.py.
  */
 #ifndef EVERLIVE_VERSION
-#define EVERLIVE_VERSION "2.0.1"
+#define EVERLIVE_VERSION "2.0.2"
 #endif
 
 /* Desktop identity: window title, Wayland/X11 WM class and PipeWire app name. */
@@ -144,6 +145,19 @@ static enum audio_channel_mode g_audio_channel_mode = AUDIO_CHANNELS_AUTO;
  */
 static uint32_t g_audio_layout_seq;
 
+static enum audio_channel_mode audio_channel_mode_get(void)
+{
+	enum audio_channel_mode mode;
+
+	__atomic_load(&g_audio_channel_mode, &mode, __ATOMIC_RELAXED);
+	return mode;
+}
+
+static void audio_channel_mode_set(enum audio_channel_mode mode)
+{
+	__atomic_store(&g_audio_channel_mode, &mode, __ATOMIC_RELAXED);
+}
+
 static const char *audio_channel_mode_name(enum audio_channel_mode mode)
 {
 	switch (mode) {
@@ -186,7 +200,7 @@ static bool audio_channel_mode_parse(const char *value,
 /* Channels the playback device should be opened with. */
 static unsigned int audio_output_channels(unsigned int source_channels)
 {
-	switch (g_audio_channel_mode) {
+	switch (audio_channel_mode_get()) {
 	case AUDIO_CHANNELS_STEREO:
 		return 2;
 	case AUDIO_CHANNELS_5_1:
@@ -1778,7 +1792,7 @@ static int configure_and_start(struct gc573_vfio_ctx *ctx,
 static void framegen_describe(char *out, size_t len);
 static float float_from_bits(uint32_t bits);
 static uint32_t float_to_bits(float value);
-static uint32_t g_audio_gain_bits;
+static uint32_t g_audio_gain_bits = 0x3F800000u;	/* 1.0f */
 static int g_audio_mute_flag;
 static unsigned long g_parent_winid;
 static int g_embed_last_w;
@@ -5031,8 +5045,6 @@ static bool audio_scan_bitstream(struct audio_stream *as, const uint8_t *data,
 #define AUDIO_GAIN_RAMP_MS	20U
 #define AUDIO_GAIN_MAX		1.5f
 
-static uint32_t g_audio_gain_bits = 0x3F800000u;	/* 1.0f */
-static int g_audio_mute_flag;
 static float g_audio_gain_current = 1.0f;
 static uint8_t g_gain_scratch[65536];
 
@@ -6347,10 +6359,15 @@ static void framegen_describe(char *out, size_t len)
 	bool ready;
 
 	out[0] = '\0';
-	if (!g_framegen)
-		return;
 
+	pthread_mutex_lock(&g_framegen_lock);
+	if (!g_framegen) {
+		pthread_mutex_unlock(&g_framegen_lock);
+		return;
+	}
 	gc573_framegen_get_stats(g_framegen, &st);
+	pthread_mutex_unlock(&g_framegen_lock);
+
 	if (st.mode == GC573_FG_OFF)
 		return;
 
@@ -6410,10 +6427,12 @@ static bool framegen_prepare_vulkan(void)
 	 */
 	gc573_fg_update_pacer_hz(0.0);
 
+	pthread_mutex_lock(&g_framegen_lock);
 	if (g_framegen) {
 		gc573_framegen_set_probe(g_framegen, &probe);
 		gc573_framegen_set_config(g_framegen, &cfg);
 	}
+	pthread_mutex_unlock(&g_framegen_lock);
 
 	if (!ready) {
 		pr_warn("lsfg-vk incomplete: layer %s, lsfg-vk.dll %s "
@@ -6825,10 +6844,12 @@ static int presentation_open(SDL_Window **window, SDL_Renderer **renderer,
 		}
 	}
 
+	pthread_mutex_lock(&g_framegen_lock);
 	if (g_framegen)
 		gc573_framegen_set_vulkan_active(g_framegen,
 						 g_present_driver ==
 						 PRESENT_DRIVER_VULKAN);
+	pthread_mutex_unlock(&g_framegen_lock);
 
 	quicknav_sync_cursor();
 	return 0;
@@ -6850,8 +6871,10 @@ static void presentation_destroy(SDL_Window **window, SDL_Renderer **renderer,
 		*window = NULL;
 	}
 	g_present_driver = PRESENT_DRIVER_OPENGL;
+	pthread_mutex_lock(&g_framegen_lock);
 	if (g_framegen)
 		gc573_framegen_set_vulkan_active(g_framegen, false);
+	pthread_mutex_unlock(&g_framegen_lock);
 	if (!framegen_path_wanted())
 		gc573_fg_update_pacer_hz(0.0);
 }
@@ -6957,7 +6980,7 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 	st.ring_buffers = video->num_buffers;
 	st.ring_channels = video->num_channels;
 	snprintf(st.audio_layout, sizeof(st.audio_layout), "%s",
-		 audio_channel_mode_name(g_audio_channel_mode));
+		 audio_channel_mode_name(audio_channel_mode_get()));
 	st.audio_out_channels = audio->playback.channels;
 
 	if (audio->streaming) {
@@ -7026,6 +7049,7 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 
 	/* lsfg-vk frame generation telemetry. */
 	memset(&fgst, 0, sizeof(fgst));
+	pthread_mutex_lock(&g_framegen_lock);
 	if (g_framegen)
 		gc573_framegen_get_stats(g_framegen, &fgst);
 	snprintf(st.framegen_mode, sizeof(st.framegen_mode), "%s",
@@ -7033,13 +7057,14 @@ static void publish_ipc_stats(bool have_signal, bool streaming,
 	st.framegen_multiplier = fgst.multiplier > 1
 		? fgst.multiplier
 		: gc573_fg_clamp_multiplier(g_fg_config.multiplier);
+	st.framegen_flow_scale = g_fg_config.flow_scale;
+	st.framegen_perf_mode = g_fg_config.perf_mode;
+	st.framegen_low_latency = g_fg_config.low_latency;
+	pthread_mutex_unlock(&g_framegen_lock);
 	st.framegen_present_fps = fgst.present_fps;
 	st.framegen_output_fps = fgst.output_fps;
 	st.framegen_unique_fps = fgst.unique_fps;
 	st.framegen_raw_fps = fgst.raw_fps;
-	st.framegen_flow_scale = g_fg_config.flow_scale;
-	st.framegen_perf_mode = g_fg_config.perf_mode;
-	st.framegen_low_latency = g_fg_config.low_latency;
 	st.framegen_layer_found = fgst.layer_found;
 	st.framegen_dll_found = fgst.dll_found;
 	st.framegen_vulkan_active = fgst.vulkan_active;
@@ -7155,17 +7180,21 @@ static void apply_ipc_command(const struct gc573_ipc_cmd *cmd,
 				 __ATOMIC_RELAXED);
 		printf("[IPC] Audio mute: %s\n", cmd->a ? "on" : "off");
 		break;
-	case GC573_IPC_CMD_AUDIO_CHANNELS:
-		if (!audio_channel_mode_parse(cmd->mode, &g_audio_channel_mode)) {
+	case GC573_IPC_CMD_AUDIO_CHANNELS: {
+		enum audio_channel_mode mode;
+
+		if (!audio_channel_mode_parse(cmd->mode, &mode)) {
 			printf("[IPC] Audio layout: unknown mode '%s'\n",
 			       cmd->mode);
 			break;
 		}
+		audio_channel_mode_set(mode);
 		/* The format poll re-opens the device; DMA and video are untouched. */
 		__atomic_add_fetch(&g_audio_layout_seq, 1, __ATOMIC_RELEASE);
 		printf("[IPC] Audio layout: %s\n",
-		       audio_channel_mode_name(g_audio_channel_mode));
+		       audio_channel_mode_name(audio_channel_mode_get()));
 		break;
+	}
 	case GC573_IPC_CMD_OSD_ENABLE:
 		g_osd_enabled = cmd->a != 0;
 		g_stats_hover_action = EVERLIVE_OSD_ACTION_NONE;
@@ -7523,6 +7552,12 @@ int main(int argc, char *argv[])
 	unsetenv(HANDOFF_RESUME_ENV);
 	signal(SIGINT, sig_handler);
 	signal(SIGTERM, sig_handler);
+	/*
+	 * A control client or pipe reader may disappear at any time.  Ignore
+	 * SIGPIPE process-wide so those write()/send() callers observe EPIPE
+	 * and can drop the peer instead of terminating the streamer.
+	 */
+	signal(SIGPIPE, SIG_IGN);
 	g_trace_mode = getenv("GC573_TEARDOWN_TRACE") != NULL;
 
 	for (int i = 1; i < argc; i++) {
@@ -7644,14 +7679,20 @@ int main(int argc, char *argv[])
 			audio_tap_node = argv[i] + 12;
 		} else if (strcmp(argv[i], "--audio-channels") == 0 &&
 			   i + 1 < argc) {
-			if (!audio_channel_mode_parse(argv[++i],
-						      &g_audio_channel_mode))
+			enum audio_channel_mode mode;
+
+			if (audio_channel_mode_parse(argv[++i], &mode))
+				audio_channel_mode_set(mode);
+			else
 				fprintf(stderr,
 					"[AUDIO] Unknown channel mode '%s'; using auto\n",
 					argv[i]);
 		} else if (strncmp(argv[i], "--audio-channels=", 17) == 0) {
-			if (!audio_channel_mode_parse(argv[i] + 17,
-						      &g_audio_channel_mode))
+			enum audio_channel_mode mode;
+
+			if (audio_channel_mode_parse(argv[i] + 17, &mode))
+				audio_channel_mode_set(mode);
+			else
 				fprintf(stderr,
 					"[AUDIO] Unknown channel mode '%s'; using auto\n",
 					argv[i] + 17);
@@ -7687,7 +7728,8 @@ int main(int argc, char *argv[])
 				vol = 0.0f;
 			if (vol > AUDIO_GAIN_MAX)
 				vol = AUDIO_GAIN_MAX;
-			g_audio_gain_bits = float_to_bits(vol);
+			__atomic_store_n(&g_audio_gain_bits, float_to_bits(vol),
+					 __ATOMIC_RELAXED);
 		} else if (strncmp(argv[i], "--volume=", 9) == 0) {
 			float vol = strtof(argv[i] + 9, NULL);
 
@@ -7695,7 +7737,8 @@ int main(int argc, char *argv[])
 				vol = 0.0f;
 			if (vol > AUDIO_GAIN_MAX)
 				vol = AUDIO_GAIN_MAX;
-			g_audio_gain_bits = float_to_bits(vol);
+			__atomic_store_n(&g_audio_gain_bits, float_to_bits(vol),
+					 __ATOMIC_RELAXED);
 		} else if (strcmp(argv[i], "--scale") == 0 && i + 1 < argc) {
 			const char *scale_spec = argv[++i];
 
@@ -8059,7 +8102,7 @@ int main(int argc, char *argv[])
 			pr_info("Audio worker: draining DMA every %u ms",
 				AUDIO_DMA_POLL_MS);
 		pr_info("Audio: playback layout %s (--audio-channels)",
-			audio_channel_mode_name(g_audio_channel_mode));
+			audio_channel_mode_name(audio_channel_mode_get()));
 	} else {
 		pr_warn("Audio DMA mapping failed; continuing video-only");
 	}
@@ -8095,9 +8138,18 @@ int main(int argc, char *argv[])
 		int ipc_ret = gc573_ipc_start(EVERLIVE_VERSION,
 					      ipc_socket_override);
 
-		if (ipc_ret < 0)
+		if (ipc_ret < 0) {
+			if (everlive_ipc_is_security_error(ipc_ret)) {
+				char msg[512];
+
+				everlive_ipc_describe_error(ipc_ret, NULL, msg,
+							    sizeof(msg));
+				pr_warn("%s", msg);
+				return 1;
+			}
 			pr_warn("IPC control socket unavailable (%s); continuing without remote control",
 				strerror(-ipc_ret));
+		}
 	}
 
 	if (audio_tap_node) {
@@ -8753,10 +8805,12 @@ int main(int argc, char *argv[])
 								input_rate_x100 =
 									fresh.frame_rate_x100;
 								g_fg_source_hz_x100 = input_rate_x100;
+								pthread_mutex_lock(&g_framegen_lock);
 								if (g_framegen)
 									gc573_framegen_set_source_hz(
 										g_framegen,
 										input_rate_x100);
+								pthread_mutex_unlock(&g_framegen_lock);
 								framegen_sync_pacer();
 								last_frames = __atomic_load_n(&video.frames,
 											      __ATOMIC_RELAXED);
@@ -8842,9 +8896,11 @@ int main(int argc, char *argv[])
 							input_rate_x100 =
 								sig.frame_rate_x100;
 							g_fg_source_hz_x100 = input_rate_x100;
+							pthread_mutex_lock(&g_framegen_lock);
 							if (g_framegen)
 								gc573_framegen_set_source_hz(
 									g_framegen, input_rate_x100);
+							pthread_mutex_unlock(&g_framegen_lock);
 							framegen_sync_pacer();
 							last_frames = __atomic_load_n(&video.frames,
 									      __ATOMIC_RELAXED);

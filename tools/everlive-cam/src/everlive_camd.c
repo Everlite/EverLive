@@ -462,6 +462,8 @@ int main(int argc, char **argv)
 	sa.sa_handler = on_signal;
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
+	/* A reader closing the frame pipe must not terminate the bridge. */
+	signal(SIGPIPE, SIG_IGN);
 
 	memset(&c, 0, sizeof(c));
 	c.fd = open(device, O_RDWR | O_NONBLOCK | O_CLOEXEC);

@@ -15,6 +15,34 @@
 
 ---
 
+## V4L2 Applications Hang or Freeze on Startup
+
+**Symptom:** `v4l2-ctl -d /dev/video60 --all` (or OBS, Discord, a browser camera
+preview) never returns while `LD_PRELOAD=.../libgc570d-v4l2.so` is active. A
+stack trace shows the process blocked in `fstat()` → `pthread_mutex_lock`, and
+`/dev/shm/gc570d_v4l2_shm` or `/dev/shm/gc573_v4l2_shm` exists.
+
+**Cause:** the shared frame store called the shim's interposed `fstat()`,
+`mmap()` or `close()` while the shim already held its global `g_v4l2_lock`.
+The non-recursive mutex then deadlocked, which blocked `VIDIOC_QUERYCAP` and
+every later ioctl.
+
+**Fix:** frame-store metadata now uses raw syscalls, `VIDIOC_DQBUF` releases the
+lock around its blocking `poll()`, and `open(..., O_NONBLOCK)` is honoured.
+Upgrade to the current build. If you are on an older release, remove the stale
+store before retrying so the old shim starts from a clean state:
+
+```bash
+rm -f /dev/shm/gc573_v4l2_shm /dev/shm/gc570d_v4l2_shm \
+      /dev/shm/hwsuhd_v4l2_shm /dev/shm/everlive_cam_v4l2_shm
+```
+
+The regression test `make -C tests v4l2-preload` creates a live store, runs
+`VIDIOC_QUERYCAP`, checks non-blocking `VIDIOC_DQBUF`, and reads a full frame,
+with a `SIGALRM`/`timeout` guard so CI fails instead of wedging.
+
+---
+
 ## Known Architecture Limitations
 
 1. **Stale `/dev/shm/*_v4l2_shm` after `kill -9` or crash across users:**

@@ -270,6 +270,8 @@ int main(int argc, char *argv[])
 
 	signal(SIGINT, sig_handler);
 	signal(SIGTERM, sig_handler);
+	/* Status pipes and sockets may close under us; report EPIPE locally. */
+	signal(SIGPIPE, SIG_IGN);
 
 	setlinebuf(stdout);
 	setlinebuf(stderr);

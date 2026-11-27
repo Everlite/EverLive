@@ -406,7 +406,8 @@ Uncompressed 4K60 / 1440p120 video frames require substantial DMA buffer pools:
 > **Understanding the Memlock Architecture**:
 > - `mmap(MAP_LOCKED)` requests the kernel to lock pages into RAM, but it does not bypass `RLIMIT_MEMLOCK`. If the process memory limit is exceeded, `mmap()` fails with `ENOMEM`.
 > - During `VFIO_IOMMU_MAP_DMA`, the kernel IOMMU driver pins physical memory pages. If the process exceeds its locked memory allowance, `ioctl(VFIO_IOMMU_MAP_DMA)` fails with `ENOMEM`.
-> - Setting file capability `cap_ipc_lock=+ep` on the engine binary allows unprivileged users to lock arbitrary memory ranges. In EverLive, this is paired with `ulimit -l unlimited` in `play.sh` and `/etc/security/limits.d/99-everlive-memlock.conf`.
+> - Setting file capability `cap_ipc_lock=+ep` on the engine binary allows unprivileged users to lock arbitrary memory ranges. EverLive applies this to every installed engine through `packaging/libexec/everlive-setcap`.
+> - No unlimited `memlock` limit is shipped. If `setcap` is unavailable, the installer adds a bounded 1 GiB `@video` fallback in `/etc/security/limits.d/99-everlive-memlock.conf` plus bounded `LimitMEMLOCK=1G` user-unit drop-ins.
 
 Explicitly map host virtual memory into the IOMMU virtual address space (IOVA):
 ```c
@@ -693,13 +694,18 @@ The resolver evaluates locations in strict precedence:
 1. Explicit caller override path parameter.
 2. `$EVERLIVE_SOCKET` environment variable (primary override used by `everlive_client.py`).
 3. `$EVERLIVE_CONTROL_SOCKET` environment variable (legacy override).
-4. `$XDG_RUNTIME_DIR/everlive.sock` (if set and writable).
-5. `/run/user/<uid>/everlive.sock` (if writable).
-6. `/tmp/everlive-<uid>/everlive.sock`
+4. `$XDG_RUNTIME_DIR/everlive.sock` (must be a private directory).
+5. `/run/user/<euid>/everlive.sock` (when that private directory exists).
+6. `/tmp/everlive-<euid>/everlive.sock` (created securely by the server)
 
 **Security & Single-Instance Guards**:
-- Acquire an advisory lock (`flock(lock_fd, LOCK_EX | LOCK_NB)`) on a lockfile to prevent multiple conflicting daemons from binding the same socket.
-- Verify connecting clients using `SO_PEERCRED` to ensure only the exact same UID as the daemon process is accepted (`cred.uid == getuid()`). Requests from differing UIDs (including root when the daemon runs as an unprivileged user) are rejected.
+- Runtime directories are security boundaries. An existing directory must be a real directory (not a symlink), owned by `geteuid()`, with mode exactly `0700`. The server creates a missing fallback directory under `umask(077)` and validates it again. A foreign or permissive path is an actionable startup error, never a silent fallback.
+- Explicit `--ipc-socket` / `EVERLIVE_SOCKET` paths are operator-controlled; they are not treated as auto-resolved fallbacks.
+- Acquire an advisory lock (`flock(lock_fd, LOCK_EX | LOCK_NB)`) on `<socket>.lock`. The lock file is opened with `O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW`, checked with `fstat()` for a regular file owned by `geteuid()`, and chmod'd `0600`.
+- Bind the socket with `umask(077)` and set the final socket mode to `0600`. AF_UNIX sockets are created by `bind()`, so directory validation is the path-safety control; lock/state files use `O_NOFOLLOW`.
+- Verify connecting clients using `SO_PEERCRED` and reject any peer whose UID differs from `geteuid()` (including root when the daemon runs unprivileged).
+- The shared frame store is trusted only when it is a regular file owned by `geteuid()` with mode `0600`, on both create and attach.
+- Legacy GC570D debug commands (`reinit`, `action`) require `EVERLIVE_DEBUG_CONTROL=1` in the daemon environment. Normal JSON-RPC feature methods remain available to the same-UID Console Hub.
 
 ### 5.2 Method Dispatch Contract
 
@@ -755,7 +761,7 @@ To ensure compatibility with the PySide6 Console Hub, `status.get` must return a
   "id": 1,
   "result": {
     "proto": 1,
-    "version": "2.0.1",
+    "version": "2.0.2",
     "pid": 21080,
     "headless": false,
     "streaming": true,
@@ -865,15 +871,18 @@ Packaging rules differ depending on the card's transport branch:
 Match by vendor, device, and subsystem IDs to prevent misbinding cards that share device IDs:
 ```udev
 # Example: Match specific Branch A card by subsystem
-ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1461", ATTR{device}=="0x0054", ATTR{subsystem_vendor}=="0x1461", ATTR{subsystem_device}=="0x5730", ATTR{driver_override}="vfio-pci"
-
-# Global VFIO device permissions
-SUBSYSTEM=="vfio", MODE="0660", TAG+="uaccess", GROUP="video"
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1461", ATTR{device}=="0x0054", ATTR{subsystem_vendor}=="0x1461", ATTR{subsystem_device}=="0x5730", ATTR{driver_override}="vfio-pci", RUN+="/usr/local/libexec/vfio_pci_bind.sh --udev %k"
 ```
 
-> **Repository Rules vs. Subsystem Discrimination**: The currently shipped `packaging/70-everlive.rules` binds `0x1461:0x0054` and `0x1461:0x0055` at the vendor+device level because the hardware targets configured in this repository (the verified GC573 and GC570D, plus the unverified Live Gamer BOLT (GC555) preview template) are native PCIe/Thunderbolt endpoints requiring `vfio-pci`. Distinction between specific models sharing IDs occurs in userspace (`play.sh` and `everlive-ctl`) via sysfs subsystem inspection. When introducing a Branch B device sharing a device ID with Branch A hardware, subsystem-qualified udev rules or explicit userspace binding via `vfio_pci_bind.sh` must be used to avoid inadvertently capturing the USB host controller into VFIO.
+Do **not** add a global `SUBSYSTEM=="vfio"` permission rule. The shared `everlive-vfio-bind` helper resolves the card's IOMMU group and changes only `/dev/vfio/<group>` to `root:video 0660`. The shared container node is handled once by `packaging/70-everlive-vfio.rules`:
+
+```udev
+SUBSYSTEM=="misc", KERNEL=="vfio", GROUP="video", MODE="0660"
+```
+
+> **Repository Rules vs. Subsystem Discrimination**: The shipped rules bind GC573 (`1461:0054` + subsystem `1461:5730`, and `1461:0055`) and GC570D (`1461:0054` + subsystem `1461:5700`) separately. When introducing a Branch B device sharing a device ID with Branch A hardware, use subsystem-qualified udev rules and the shared bind helper; never add a global `/dev/vfio/*` permission rule. For a rare GC573 revision with an unknown `0054` subsystem, bind it explicitly with `vfio_pci_bind.sh --bind --bdf <BDF> --force`; udev never uses `--force`.
 >
-> **Driver Override vs. Active Binding**: Writing to `driver_override` registers the preferred driver for subsequent kernel probe events. If the device was already claimed by another driver or booted without an automatic probe, `tools/opengc*-userd/vfio_pci_bind.sh` unbinds it from `/sys/bus/pci/devices/<BDF>/driver/unbind` and writes to `/sys/bus/pci/drivers/vfio-pci/bind` to execute the active binding at runtime.
+> **Driver Override vs. Active Binding**: Writing to `driver_override` registers the preferred driver for subsequent kernel probe events. If the device was already claimed by another driver, `packaging/libexec/everlive-vfio-bind` unbinds it from `/sys/bus/pci/devices/<BDF>/driver/unbind` and writes that BDF to `/sys/bus/pci/drivers/vfio-pci/bind`. It never writes `new_id`.
 
 #### For Branch B (UVC / USB Bridge):
 **Do not set driver_override="vfio-pci"**. Grant permissions on the video nodes instead:
@@ -882,12 +891,14 @@ SUBSYSTEM=="vfio", MODE="0660", TAG+="uaccess", GROUP="video"
 KERNEL=="video[0-9]*", SUBSYSTEM=="video4linux", ATTRS{idVendor}=="07ca", MODE="0660", TAG+="uaccess", GROUP="video"
 ```
 
-### 6.2 Early Kernel Module Binding (`packaging/everlive-vfio.modprobe.conf`)
-Add Device IDs for **Branch A devices only**:
-```conf
-options vfio-pci ids=1461:0054,1461:0055
-```
-> **Shared Device ID Precaution**: Note that `options vfio-pci ids=` matches globally on Vendor:Device without subsystem awareness. The shipped configuration binds `1461:0054` (GC573, GC570D) and `1461:0055` (Live Gamer BOLT GC555 preview). If two physical models share the same Device ID (such as `1461:0054`), `ids=` binds both indiscriminately. If one of those devices must remain bound to a different driver or requires selective handling, omit it from `everlive-vfio.modprobe.conf` and rely exclusively on subsystem-specific udev rules and `vfio_pci_bind.sh`. Never add Branch B devices here; the kernel must bind them to `xhci_hcd` and `uvcvideo`.
+### 6.2 Per-BDF Binding (No Global `ids=`)
+
+EverLive no longer ships `options vfio-pci ids=...`. That option matches only Vendor:Device and would bind GC573 and GC570D indiscriminately. Instead:
+
+- `packaging/everlive-vfio.modules-load.conf` loads `vfio`, `vfio_pci` and `vfio_iommu_type1`.
+- Vendor/device/subsystem-qualified udev rules set `driver_override=vfio-pci`.
+- `packaging/libexec/everlive-vfio-bind` writes the matched **BDF** to `/sys/bus/pci/drivers/vfio-pci/bind` (falling back to `drivers_probe`).
+- Never add `new_id` or `options vfio-pci ids=`. Never add Branch B devices here; the kernel must bind them to `xhci_hcd` and `uvcvideo`.
 
 ### 6.3 Launcher & Service Integration
 
@@ -1131,9 +1142,9 @@ Ensure all items are verified before submitting a pull request:
 - [ ] Engine daemon implements the unified JSON-RPC 2.0 contract (`hello`, `ping`, `status.get`, etc.).
 - [ ] Canonical `status.get` schema matches all 18 top-level keys.
 - [ ] Unsupported commands return error code `-32601`.
-- [ ] Memory locking limits (`cap_ipc_lock` / `RLIMIT_MEMLOCK`) configured (Branch A).
-- [ ] Udev rules match subsystems accurately (and avoid `vfio-pci` on Branch B devices).
-- [ ] `packaging/everlive-vfio.modprobe.conf` contains PCI IDs for Branch A devices only.
+- [ ] `cap_ipc_lock=+ep` is applied to every installed engine; no unlimited `memlock` file or unit limit is shipped.
+- [ ] Udev rules match vendor/device/subsystem accurately (and avoid `vfio-pci` on Branch B devices).
+- [ ] No `new_id`, no `options vfio-pci ids=`, and only the matched card's `/dev/vfio/<group>` is made `root:video 0660`.
 - [ ] Top-level `play.sh` routes the model slug to the engine binary.
 - [ ] Root `Makefile` supports `all`, `install`, `uninstall`, and `clean` with `DESTDIR`/`PREFIX`.
 - [ ] Unit tests added to `tests/test_card_registry.c`.

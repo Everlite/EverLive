@@ -1,6 +1,6 @@
 # EverLive — Linux Console Gaming Suite & Userspace Driver
 
-[![Version](https://img.shields.io/badge/version-v2.0.1-blue.svg)](https://github.com/Everlite/EverLive/releases)
+[![Version](https://img.shields.io/badge/version-v2.0.2-blue.svg)](https://github.com/Everlite/EverLive/releases)
 [![Status](https://img.shields.io/badge/GC573-verified%20(1440p120%20%2B%204K60)-brightgreen.svg)](docs/CARDS.md)
 [![Driver](https://img.shields.io/badge/driver-Userspace%20VFIO%20(Blob--Free)-2e7d32.svg)](docs/ARCHITECTURE.md)
 [![Kernel Modules](https://img.shields.io/badge/DKMS-None%20Required-success.svg)](docs/INSTALL.md)

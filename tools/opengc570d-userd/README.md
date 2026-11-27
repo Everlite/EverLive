@@ -25,13 +25,14 @@ without PipeWire the capture rings and control socket remain available.
 
 ## Permissions and interrupts
 
-VFIO pins every DMA buffer, so the daemon needs either `CAP_IPC_LOCK` on the
-binary (`cap_ipc_lock=+ep`) or an `RLIMIT_MEMLOCK` large enough for both video
-rings. The packaged `99-gc570d-memlock.conf` and the per-user systemd unit
-raise the memlock budget; alternatively, grant the file capability. No root
-privileges are needed once either is in place. Rebuilding with `make` replaces
-the binary and clears its file capability, so re-apply `cap_ipc_lock=+ep` if
-you rely on the capability instead of a session memlock limit.
+VFIO pins every DMA buffer, so the daemon needs `CAP_IPC_LOCK` on the binary
+(`cap_ipc_lock=+ep`). The installers apply it with
+`packaging/libexec/everlive-setcap`; no unlimited memlock limit is shipped.
+If `setcap` is unavailable, the installer adds a bounded 1 GiB `@video`
+fallback plus a bounded `LimitMEMLOCK=1G` user-unit drop-in. No root
+privileges are needed once the capability is in place. Rebuilding with `make`
+replaces the binary and clears its file capability, so re-apply
+`cap_ipc_lock=+ep`.
 
 VFIO interrupts are allocated MSI-first. INTx is only a fallback because its
 mask/unmask path can stall the bridge I2C engine on some hosts. When INTx or
@@ -109,7 +110,8 @@ frame store directly and does not replace the v4l2loopback path.
 The daemon serves the unified newline-delimited JSON-RPC 2.0 protocol on
 `$XDG_RUNTIME_DIR/everlive.sock` (used by `everlive-ctl` and the Console Hub)
 as well as the legacy text protocol on `$XDG_RUNTIME_DIR/gc570d/control.sock`
-used by `gc570d-ctl`:
+used by `gc570d-ctl`. When `XDG_RUNTIME_DIR` is unset, the same private
+`/run/user/<uid>/` or `/tmp/gc570d-<uid>/` fallback rules apply to both sides.
 
 ```sh
 gc570d-ctl status
@@ -117,11 +119,28 @@ gc570d-ctl input 2                 # switch the window to HDMI IN 2
 gc570d-ctl osd 0                  # hide the overlay
 gc570d-ctl pip 1                  # enable picture-in-picture
 gc570d-ctl led colorful            # colorful | breathing | static | off
-gc570d-ctl action splitter_windows_bridge_edid 1
-gc570d-ctl action splitter_windows_edid_copy 1
-gc570d-ctl action it68051_hpd 1   # pulse HDMI IN 1 hot-plug
-gc570d-ctl action it6802_hpd 1    # pulse HDMI IN 2 hot-plug
 ```
+
+Both sockets only accept clients with the daemon's own UID. The runtime
+directory must be a real `0700` directory owned by that UID; a foreign or
+permissive path aborts daemon startup instead of being reused.
+
+The raw diagnostic commands `reinit` and `action <node>` are debug-gated. They
+require `EVERLIVE_DEBUG_CONTROL=1` in the **daemon** environment:
+
+```sh
+systemctl --user set-environment EVERLIVE_DEBUG_CONTROL=1
+systemctl --user restart opengc570d-userd.service
+
+gc570d-ctl reinit
+gc570d-ctl action splitter_windows_bridge_edid 1
+gc570d-ctl action it68051_hpd 1   # pulse HDMI IN 1 hot-plug
+```
+
+Normal controls stay available without the debug flag. The Hub uses the
+JSON-RPC feature methods (`hotplug`, `edid.set`, `led.mode.set`, and so on) for
+its DUO controls. On resume, `gc570d-sleep.sh` restarts the user unit rather
+than issuing the gated `reinit` command.
 
 The unified socket also accepts `mode.set`, which swaps only the presentation
 layer.  The Console Hub uses it to dock a headless session into its viewport
@@ -135,9 +154,10 @@ everlive-ctl runtime mode gaming "$WINDOW_ID"   # 0 = standalone window
 ## Installation
 
 `make install` installs the daemon, `gc570d-ctl`, the optional preload bridge,
-the udev rule, the VFIO bind helper, the memlock limits and a per-user systemd
-unit. `PREFIX` defaults to `/usr/local`; the udev rule and sleep hook are
-rewritten to match the chosen prefix.
+the subsystem-qualified udev rule, the shared VFIO bind helper and a per-user
+systemd unit. `PREFIX` defaults to `/usr/local`; the udev rule and sleep hook
+are rewritten to match the chosen prefix. No unlimited memlock file is
+installed; `cap_ipc_lock=+ep` is applied to the daemon.
 
 ```sh
 sudo make -C tools/opengc570d-userd install

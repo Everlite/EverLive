@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive - One-Click Launcher for Console Gaming Suite (v2.0.1)
+# EverLive - One-Click Launcher for Console Gaming Suite (v2.0.2)
 # 100% Blob-Free Userspace VFIO Engine for AVerMedia Live Gamer 4K (GC573)
 # and Live Gamer DUO (GC570D)
 # ==============================================================================
@@ -174,7 +174,7 @@ if [ "${1:-}" = "--all" ]; then
         echo "[!] Keine unterstützte PCIe-Capture-Karte gefunden." >&2
         exit 1
     fi
-    ulimit -S -l unlimited 2>/dev/null || ulimit -S -l "$(ulimit -H -l)" 2>/dev/null || true
+    ulimit -S -l "$(ulimit -H -l)" 2>/dev/null || true
     exec "$(hub_python)" "${SCRIPT_DIR}/tools/everlive/everlive_multi.py" "$@"
 fi
 
@@ -243,14 +243,22 @@ if [ ! -x "${STREAMER_BIN}" ]; then
     fi
 fi
 if [ ! -x "${BIND_SCRIPT}" ]; then
-    if [ "$CARD_MODEL" = "gc570d" ] && command -v gc570d-vfio-bind.sh >/dev/null 2>&1; then
-        BIND_SCRIPT="$(command -v gc570d-vfio-bind.sh)"
+    if [ "$CARD_MODEL" = "gc570d" ]; then
+        for cand in /usr/local/libexec/gc570d-vfio-bind.sh \
+                    /usr/libexec/gc570d-vfio-bind.sh \
+                    "$(command -v gc570d-vfio-bind.sh 2>/dev/null || true)"; do
+            [ -n "$cand" ] && [ -x "$cand" ] && BIND_SCRIPT="$cand" && break
+        done
     elif [ "$CARD_MODEL" = "hwsuhd" ]; then
         for cand in /usr/local/libexec/hws-vfio-bind.sh /usr/libexec/hws-vfio-bind.sh; do
             [ -x "$cand" ] && BIND_SCRIPT="$cand" && break
         done
-    elif command -v vfio_pci_bind.sh >/dev/null 2>&1; then
-        BIND_SCRIPT="$(command -v vfio_pci_bind.sh)"
+    else
+        for cand in /usr/local/libexec/vfio_pci_bind.sh \
+                    /usr/libexec/vfio_pci_bind.sh \
+                    "$(command -v vfio_pci_bind.sh 2>/dev/null || true)"; do
+            [ -n "$cand" ] && [ -x "$cand" ] && BIND_SCRIPT="$cand" && break
+        done
     fi
 fi
 
@@ -265,23 +273,14 @@ if [ -f "${USERD_DIR}/Makefile" ] && { [ ! -x "${STREAMER_BIN}" ] || ! make -q -
     make -C "${USERD_DIR}" -j"$(nproc)"
 fi
 
-# 2. Raise soft memlock limit to hard limit and ensure cap_ipc_lock=+ep on the binary
-# (rebuilding with make strips file capabilities, which otherwise caps VFIO DMA at 8 MiB)
-ulimit -S -l unlimited 2>/dev/null || ulimit -S -l "$(ulimit -H -l)" 2>/dev/null || true
+# 2. Ensure cap_ipc_lock=+ep on the engine binary (rebuilding with make strips
+# file capabilities).  A bounded soft-to-hard memlock raise is only a fallback
+# for systems where setcap is unavailable.
+ulimit -S -l "$(ulimit -H -l)" 2>/dev/null || true
 if [ -f "${STREAMER_BIN}" ] && command -v setcap >/dev/null 2>&1; then
-    NEED_CAP=1
-    cur_memlock="$(ulimit -l 2>/dev/null || echo 0)"
-    if [ "$cur_memlock" = "unlimited" ] || [ "${cur_memlock:-0}" -ge 65536 ] 2>/dev/null; then
-        NEED_CAP=0
-    fi
-    if [ "$NEED_CAP" -eq 1 ] && command -v getcap >/dev/null 2>&1; then
-        if getcap "${STREAMER_BIN}" 2>/dev/null | grep -q "cap_ipc_lock"; then
-            NEED_CAP=0
-        fi
-    fi
-    if [ "$NEED_CAP" -eq 1 ]; then
+    if ! getcap "${STREAMER_BIN}" 2>/dev/null | grep -q "cap_ipc_lock"; then
+        echo "[*] Setze cap_ipc_lock=+ep auf $(basename "${STREAMER_BIN}") (für VFIO IOMMU DMA Mapping)..."
         if ! setcap cap_ipc_lock=+ep "${STREAMER_BIN}" 2>/dev/null; then
-            echo "[*] Setze cap_ipc_lock=+ep auf $(basename "${STREAMER_BIN}") (für VFIO IOMMU DMA Mapping)..."
             if command -v pkexec >/dev/null 2>&1 && [ ! -t 0 ]; then
                 pkexec setcap cap_ipc_lock=+ep "${STREAMER_BIN}" || true
             else
@@ -312,14 +311,16 @@ if [ -n "$CARD_PCI" ] && [ "$IS_VFIO" -eq 0 ]; then
         else
             echo "[!] GC573 ist noch nicht an vfio-pci gebunden. Binde an Userspace-Treiber..."
         fi
+        BIND_ARGS=(--bind)
+        [ -n "$CARD_PCI" ] && BIND_ARGS+=(--bdf "$CARD_PCI")
         if [ "$EUID" -ne 0 ]; then
             if command -v pkexec >/dev/null 2>&1 && [ ! -t 0 ]; then
-                pkexec "${BIND_SCRIPT}" --bind || true
+                pkexec "${BIND_SCRIPT}" "${BIND_ARGS[@]}" || true
             else
-                sudo "${BIND_SCRIPT}" --bind || true
+                sudo "${BIND_SCRIPT}" "${BIND_ARGS[@]}" || true
             fi
         else
-            "${BIND_SCRIPT}" --bind || true
+            "${BIND_SCRIPT}" "${BIND_ARGS[@]}" || true
         fi
     fi
 fi

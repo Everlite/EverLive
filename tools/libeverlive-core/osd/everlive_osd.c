@@ -8,6 +8,7 @@
  */
 
 #include "everlive_osd.h"
+#include "everlive_utf8.h"
 
 #include <SDL_ttf.h>
 #include <math.h>
@@ -286,19 +287,6 @@ static void draw_text(SDL_Surface *surface, const char *text, TTF_Font *font,
 	blit_surface(surface, rendered, x, y);
 }
 
-static int utf8_char_size(unsigned char lead)
-{
-	if (lead < 0x80)
-		return 1;
-	if ((lead & 0xe0) == 0xc0)
-		return 2;
-	if ((lead & 0xf0) == 0xe0)
-		return 3;
-	if ((lead & 0xf8) == 0xf0)
-		return 4;
-	return 1;
-}
-
 static int text_width_tracked(const char *text, TTF_Font *font, int size,
 			      int tracking)
 {
@@ -310,13 +298,11 @@ static int text_width_tracked(const char *text, TTF_Font *font, int size,
 		return 0;
 	while (*p) {
 		char glyph[5] = { 0 };
-		int n = utf8_char_size((unsigned char)*p);
+		size_t n = everlive_utf8_next(p);
 
-		if (n < 1)
-			n = 1;
-		if (n > 4)
-			n = 4;
-		memcpy(glyph, p, (size_t)n);
+		if (n == 0)
+			break;
+		memcpy(glyph, p, n);
 		if (!first)
 			width += tracking;
 		width += text_width(glyph, font, size);
@@ -339,14 +325,12 @@ static void draw_text_tracked(SDL_Surface *surface, const char *text,
 		return;
 	while (*p) {
 		char glyph[5] = { 0 };
-		int n = utf8_char_size((unsigned char)*p);
+		size_t n = everlive_utf8_next(p);
 		int w = 0;
 
-		if (n < 1)
-			n = 1;
-		if (n > 4)
-			n = 4;
-		memcpy(glyph, p, (size_t)n);
+		if (n == 0)
+			break;
+		memcpy(glyph, p, n);
 		draw_text(surface, glyph, font, size, x, y, rgb, alpha, &w);
 		x += w + tracking;
 		if (out_w)

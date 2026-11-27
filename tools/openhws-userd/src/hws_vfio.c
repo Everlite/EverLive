@@ -6,6 +6,7 @@
 #include "hws_vfio.h"
 #include <dirent.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 
 /*
  * Card discovery is a private sysfs scan: this engine is kept separate from
@@ -118,6 +119,68 @@ int hws_vfio_resolve(const char *pci_addr, char *bdf, size_t len,
 	return 0;
 }
 
+static int hws_vfio_read_sysfs_bar0_size(const char *bdf, size_t *out_size)
+{
+	char path[512];
+	unsigned long long start, end, flags;
+	struct stat st;
+	FILE *f;
+
+	if (!out_size)
+		return -EINVAL;
+	*out_size = 0;
+	if (!bdf || !bdf[0])
+		return -EINVAL;
+
+	snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/resource", bdf);
+	f = fopen(path, "r");
+	if (f) {
+		int matched = fscanf(f, "%llx %llx %llx", &start, &end, &flags);
+
+		fclose(f);
+		if (matched == 3 && flags != 0 && start <= end &&
+		    end - start + 1 <= SIZE_MAX) {
+			*out_size = (size_t)(end - start + 1);
+			return 0;
+		}
+	}
+
+	/* resource0 is only present while the BAR is enabled. */
+	snprintf(path, sizeof(path),
+		 "/sys/bus/pci/devices/%s/resource0", bdf);
+	if (stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+		*out_size = (size_t)st.st_size;
+		return 0;
+	}
+
+	return -ENODATA;
+}
+
+/*
+ * Validate a VFIO-reported BAR0 size against the size advertised by sysfs.
+ * Both sizes must be non-zero and page-aligned, the sysfs size must be sane
+ * for a capture-card MMIO BAR, and VFIO must not claim more than sysfs says
+ * exists.  @out_size receives the length that is safe to mmap().
+ */
+int hws_vfio_validate_bar0_size(size_t region_size, size_t sysfs_size,
+				size_t page_size, size_t max_size,
+				size_t *out_size)
+{
+	if (!out_size || !page_size)
+		return -EINVAL;
+	if (!region_size || !sysfs_size)
+		return -EINVAL;
+	if (region_size % page_size || sysfs_size % page_size)
+		return -EINVAL;
+	if (sysfs_size > max_size)
+		return -E2BIG;
+	if (region_size > sysfs_size)
+		return -EINVAL;
+
+	*out_size = min(region_size, sysfs_size);
+	return 0;
+}
+
 int hws_vfio_init(struct hws_vfio_ctx *ctx, const char *pci_addr)
 {
 	struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
@@ -136,6 +199,7 @@ int hws_vfio_init(struct hws_vfio_ctx *ctx, const char *pci_addr)
 	ctx->group_fd = -1;
 	ctx->device_fd = -1;
 	ctx->irq_efd = -1;
+	ctx->iommu_group = -1;
 
 	if (pci_addr && pci_addr[0]) {
 		snprintf(ctx->pci_addr, sizeof(ctx->pci_addr), "%s", pci_addr);
@@ -155,22 +219,50 @@ int hws_vfio_init(struct hws_vfio_ctx *ctx, const char *pci_addr)
 			return ret;
 	}
 
+	if (ctx->iommu_group < 0) {
+		pr_err("PCI device %s has no usable IOMMU group (is the IOMMU enabled?)",
+		       ctx->pci_addr);
+		return -ENODEV;
+	}
+
 	pr_info("Found HWS UHD card at %s (IOMMU Group %d)", ctx->pci_addr, ctx->iommu_group);
 
 	/* 1. Open VFIO Container */
 	ctx->container_fd = open("/dev/vfio/vfio", O_RDWR);
 	if (ctx->container_fd < 0) {
-		pr_err("Cannot open /dev/vfio/vfio: %s (Is vfio module loaded?)", strerror(errno));
-		return -errno;
+		int err = errno;
+
+		pr_err("Cannot open /dev/vfio/vfio: %s (Is vfio module loaded?)",
+		       strerror(err));
+		return -err;
 	}
 
-	if (ioctl(ctx->container_fd, VFIO_GET_API_VERSION) != VFIO_API_VERSION) {
+	int api_version = ioctl(ctx->container_fd, VFIO_GET_API_VERSION);
+	if (api_version != VFIO_API_VERSION) {
+		int err = errno;
+
+		if (api_version < 0) {
+			pr_err("ioctl(VFIO_GET_API_VERSION) failed: %s",
+			       strerror(err));
+			hws_vfio_cleanup(ctx);
+			return -err;
+		}
 		pr_err("Unsupported VFIO API version!");
 		hws_vfio_cleanup(ctx);
 		return -EINVAL;
 	}
 
-	if (!ioctl(ctx->container_fd, VFIO_CHECK_EXTENSION, VFIO_TYPE1_IOMMU)) {
+	int have_type1 = ioctl(ctx->container_fd, VFIO_CHECK_EXTENSION,
+			       VFIO_TYPE1_IOMMU);
+	if (have_type1 <= 0) {
+		int err = errno;
+
+		if (have_type1 < 0) {
+			pr_err("ioctl(VFIO_CHECK_EXTENSION) failed: %s",
+			       strerror(err));
+			hws_vfio_cleanup(ctx);
+			return -err;
+		}
 		pr_err("VFIO_TYPE1_IOMMU extension is not supported by kernel!");
 		hws_vfio_cleanup(ctx);
 		return -EINVAL;
@@ -195,9 +287,11 @@ int hws_vfio_init(struct hws_vfio_ctx *ctx, const char *pci_addr)
 
 	struct vfio_group_status group_status = { .argsz = sizeof(group_status) };
 	if (ioctl(ctx->group_fd, VFIO_GROUP_GET_STATUS, &group_status) < 0) {
-		pr_err("ioctl(VFIO_GROUP_GET_STATUS) failed: %s", strerror(errno));
+		int err = errno;
+
+		pr_err("ioctl(VFIO_GROUP_GET_STATUS) failed: %s", strerror(err));
 		hws_vfio_cleanup(ctx);
-		return -errno;
+		return -err;
 	}
 
 	if (!(group_status.flags & VFIO_GROUP_FLAGS_VIABLE)) {
@@ -208,24 +302,30 @@ int hws_vfio_init(struct hws_vfio_ctx *ctx, const char *pci_addr)
 
 	/* Attach group to container */
 	if (ioctl(ctx->group_fd, VFIO_GROUP_SET_CONTAINER, &ctx->container_fd) < 0) {
-		pr_err("ioctl(VFIO_GROUP_SET_CONTAINER) failed: %s", strerror(errno));
+		int err = errno;
+
+		pr_err("ioctl(VFIO_GROUP_SET_CONTAINER) failed: %s", strerror(err));
 		hws_vfio_cleanup(ctx);
-		return -errno;
+		return -err;
 	}
 
 	/* Enable Type1 IOMMU */
 	if (ioctl(ctx->container_fd, VFIO_SET_IOMMU, VFIO_TYPE1_IOMMU) < 0) {
-		pr_err("ioctl(VFIO_SET_IOMMU) failed: %s", strerror(errno));
+		int err = errno;
+
+		pr_err("ioctl(VFIO_SET_IOMMU) failed: %s", strerror(err));
 		hws_vfio_cleanup(ctx);
-		return -errno;
+		return -err;
 	}
 
 	/* 3. Get Device Descriptor */
 	ctx->device_fd = ioctl(ctx->group_fd, VFIO_GROUP_GET_DEVICE_FD, ctx->pci_addr);
 	if (ctx->device_fd < 0) {
-		pr_err("ioctl(VFIO_GROUP_GET_DEVICE_FD, %s) failed: %s", ctx->pci_addr, strerror(errno));
+		int err = errno;
+
+		pr_err("ioctl(VFIO_GROUP_GET_DEVICE_FD, %s) failed: %s", ctx->pci_addr, strerror(err));
 		hws_vfio_cleanup(ctx);
-		return -errno;
+		return -err;
 	}
 
 	/*
@@ -257,22 +357,62 @@ int hws_vfio_init(struct hws_vfio_ctx *ctx, const char *pci_addr)
 		.index = VFIO_PCI_BAR0_REGION_INDEX
 	};
 	if (ioctl(ctx->device_fd, VFIO_DEVICE_GET_REGION_INFO, &bar0_info) < 0) {
-		pr_err("ioctl(VFIO_DEVICE_GET_REGION_INFO, BAR0) failed: %s", strerror(errno));
+		int err = errno;
+
+		pr_err("ioctl(VFIO_DEVICE_GET_REGION_INFO, BAR0) failed: %s",
+		       strerror(err));
 		hws_vfio_cleanup(ctx);
-		return -errno;
+		return -err;
 	}
 
-	ctx->bar0_size = bar0_info.size;
+	/*
+	 * Never trust the VFIO size on its own: cross-check it against sysfs
+	 * so a bad descriptor cannot make us mmap an absurd or unaligned
+	 * window.  The validated length is also the one we must unmap later.
+	 */
+	{
+		size_t sysfs_size = 0;
+		size_t validated_size = 0;
+		long page_size = sysconf(_SC_PAGESIZE);
+		int ret;
+
+		if (page_size <= 0) {
+			pr_err("Cannot determine system page size");
+			hws_vfio_cleanup(ctx);
+			return -EINVAL;
+		}
+		ret = hws_vfio_read_sysfs_bar0_size(ctx->pci_addr, &sysfs_size);
+		if (ret < 0) {
+			pr_err("Cannot read BAR0 size for %s from sysfs: %s",
+			       ctx->pci_addr, strerror(-ret));
+			hws_vfio_cleanup(ctx);
+			return ret;
+		}
+		ret = hws_vfio_validate_bar0_size(bar0_info.size, sysfs_size,
+						  (size_t)page_size,
+						  HWS_VFIO_BAR0_MAX_SIZE,
+						  &validated_size);
+		if (ret < 0) {
+			pr_err("Refusing BAR0: VFIO size=%llu, sysfs size=%zu (%s)",
+			       (unsigned long long)bar0_info.size, sysfs_size,
+			       strerror(-ret));
+			hws_vfio_cleanup(ctx);
+			return ret;
+		}
+		ctx->bar0_size = validated_size;
+	}
 	ctx->bar0_offset = bar0_info.offset;
 
 	/* 5. Map BAR0 MMIO into Userspace Address Space */
 	ctx->bar0 = mmap(NULL, ctx->bar0_size, PROT_READ | PROT_WRITE,
 			 MAP_SHARED, ctx->device_fd, ctx->bar0_offset);
 	if (ctx->bar0 == MAP_FAILED) {
-		pr_err("mmap(BAR0, size=%zu) failed: %s", ctx->bar0_size, strerror(errno));
+		int err = errno;
+
+		pr_err("mmap(BAR0, size=%zu) failed: %s", ctx->bar0_size, strerror(err));
 		ctx->bar0 = NULL;
 		hws_vfio_cleanup(ctx);
-		return -errno;
+		return -err;
 	}
 
 	pr_info("Mapped BAR0 MMIO (%zu KB) at %p",
@@ -331,17 +471,49 @@ void hws_vfio_unmap_bar(struct hws_vfio_ctx *ctx)
 	}
 }
 
+/*
+ * Unmap every tracked DMA region.  The loop is bounded by both the hardware
+ * limit and the array size, and it always drops the entry even when the
+ * kernel ioctl fails: a broken/unresponsive container must never turn
+ * teardown into an infinite spin.
+ */
+static void hws_vfio_unmap_all_dma(struct hws_vfio_ctx *ctx)
+{
+	unsigned int n;
+	int first_err = 0;
+
+	if (!ctx)
+		return;
+
+	n = ctx->nr_dma_regions;
+	if (n > HWS_VFIO_MAX_DMA_REGIONS)
+		n = HWS_VFIO_MAX_DMA_REGIONS;
+
+	for (unsigned int i = n; i > 0; i--) {
+		struct hws_vfio_dma_region *region = &ctx->dma_regions[i - 1];
+		uint64_t iova = region->iova;
+		size_t size = region->size;
+		int ret = hws_vfio_unmap_dma(ctx, iova, size);
+
+		if (ret < 0 && !first_err)
+			first_err = ret;
+
+		memset(region, 0, sizeof(*region));
+		ctx->nr_dma_regions = i - 1;
+	}
+	ctx->nr_dma_regions = 0;
+
+	if (first_err)
+		pr_warn("Failed to unmap one or more IOMMU DMA regions (first error: %s)",
+			strerror(-first_err));
+}
+
 void hws_vfio_prepare_inherit(struct hws_vfio_ctx *ctx)
 {
 	if (!ctx)
 		return;
 
-	while (ctx->nr_dma_regions) {
-		struct hws_vfio_dma_region *region =
-			&ctx->dma_regions[ctx->nr_dma_regions - 1];
-
-		hws_vfio_unmap_dma(ctx, region->iova, region->size);
-	}
+	hws_vfio_unmap_all_dma(ctx);
 	hws_vfio_release_irq(ctx);
 	hws_vfio_unmap_bar(ctx);
 	hws_vfio_keep_fds(ctx);
@@ -361,12 +533,7 @@ void hws_vfio_cleanup(struct hws_vfio_ctx *ctx)
 	if (!ctx)
 		return;
 
-	while (ctx->nr_dma_regions) {
-		struct hws_vfio_dma_region *region =
-			&ctx->dma_regions[ctx->nr_dma_regions - 1];
-
-		hws_vfio_unmap_dma(ctx, region->iova, region->size);
-	}
+	hws_vfio_unmap_all_dma(ctx);
 
 	if (ctx->bar0 && ctx->bar0_size) {
 		munmap(ctx->bar0, ctx->bar0_size);
@@ -416,9 +583,11 @@ int hws_vfio_map_dma(struct hws_vfio_ctx *ctx, void *vaddr, size_t size, uint64_
 	}
 
 	if (ioctl(ctx->container_fd, VFIO_IOMMU_MAP_DMA, &dma_map) < 0) {
+		int err = errno;
+
 		pr_err("ioctl(VFIO_IOMMU_MAP_DMA, size=%zu, iova=0x%lx) failed: %s",
-		       size, (unsigned long)iova, strerror(errno));
-		return -errno;
+		       size, (unsigned long)iova, strerror(err));
+		return -err;
 	}
 
 	ctx->dma_regions[ctx->nr_dma_regions].vaddr = vaddr;
@@ -431,9 +600,31 @@ int hws_vfio_map_dma(struct hws_vfio_ctx *ctx, void *vaddr, size_t size, uint64_
 	return 0;
 }
 
+static bool hws_vfio_test_fail_unmap_dma(void)
+{
+	const char *value = getenv("EVERLIVE_TEST_FAIL_UNMAP_DMA");
+
+	return value && strcmp(value, "1") == 0;
+}
+
 int hws_vfio_unmap_dma(struct hws_vfio_ctx *ctx, uint64_t iova, size_t size)
 {
-	if (!ctx || ctx->container_fd < 0 || !size)
+	if (!ctx || !size)
+		return -EINVAL;
+
+	/*
+	 * Hardware-free fault injection: lets the teardown paths be exercised
+	 * without a real VFIO container fd.
+	 */
+	if (hws_vfio_test_fail_unmap_dma()) {
+		int err = EIO;
+
+		pr_err("ioctl(VFIO_IOMMU_UNMAP_DMA, iova=0x%lx) failed: %s (injected)",
+		       (unsigned long)iova, strerror(err));
+		return -err;
+	}
+
+	if (ctx->container_fd < 0)
 		return -EINVAL;
 
 	struct vfio_iommu_type1_dma_unmap dma_unmap = {
@@ -444,9 +635,11 @@ int hws_vfio_unmap_dma(struct hws_vfio_ctx *ctx, uint64_t iova, size_t size)
 	};
 
 	if (ioctl(ctx->container_fd, VFIO_IOMMU_UNMAP_DMA, &dma_unmap) < 0) {
+		int err = errno;
+
 		pr_err("ioctl(VFIO_IOMMU_UNMAP_DMA, iova=0x%lx) failed: %s",
-		       (unsigned long)iova, strerror(errno));
-		return -errno;
+		       (unsigned long)iova, strerror(err));
+		return -err;
 	}
 
 	for (unsigned int i = 0; i < ctx->nr_dma_regions; i++) {
@@ -470,8 +663,10 @@ int hws_vfio_setup_msi(struct hws_vfio_ctx *ctx)
 
 	ctx->irq_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 	if (ctx->irq_efd < 0) {
-		pr_err("Failed to create eventfd for IRQ: %s", strerror(errno));
-		return -errno;
+		int err = errno;
+
+		pr_err("Failed to create eventfd for IRQ: %s", strerror(err));
+		return -err;
 	}
 
 	char irq_set_buf[sizeof(struct vfio_irq_set) + sizeof(int)];
@@ -485,13 +680,18 @@ int hws_vfio_setup_msi(struct hws_vfio_ctx *ctx)
 	*(int *)&irq_set->data = ctx->irq_efd;
 
 	if (ioctl(ctx->device_fd, VFIO_DEVICE_SET_IRQS, irq_set) < 0) {
-		pr_warn("MSI interrupt setup failed, trying INTx: %s", strerror(errno));
+		int err = errno;
+
+		pr_warn("MSI interrupt setup failed, trying INTx: %s", strerror(err));
 		irq_set->index = VFIO_PCI_INTX_IRQ_INDEX;
 		if (ioctl(ctx->device_fd, VFIO_DEVICE_SET_IRQS, irq_set) < 0) {
-			pr_err("INTx interrupt setup also failed: %s", strerror(errno));
+			int intx_err = errno;
+
+			pr_err("INTx interrupt setup also failed: %s",
+			       strerror(intx_err));
 			close(ctx->irq_efd);
 			ctx->irq_efd = -1;
-			return -errno;
+			return -intx_err;
 		}
 		pr_info("Registered INTx interrupt handler on eventfd %d", ctx->irq_efd);
 		return 0;

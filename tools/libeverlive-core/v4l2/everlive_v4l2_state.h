@@ -8,9 +8,10 @@
  * supplies the libc wrappers and serialises calls with its own lock.
  *
  * All functions except the init/shutdown pair assume the caller serialises
- * access (the preload DSO holds its global mutex).  Internal buffer mappings
- * and timerfd closes use raw syscalls so they remain safe while that mutex is
- * held.
+ * access (the preload DSO holds its global mutex).  While that mutex is held,
+ * internal shim and frame-store helpers may only use raw syscalls (mmap,
+ * munmap, close, fstat and read) because the preload DSO interposes the libc
+ * wrappers and those wrappers take the same mutex.
  */
 
 #ifndef EVERLIVE_V4L2_STATE_H
@@ -39,6 +40,9 @@ struct everlive_v4l2_buffer {
 
 struct everlive_v4l2_handle {
 	bool in_use;
+	bool streaming;
+	/* From open(2) flags; fcntl(F_SETFL) toggling is not interposed. */
+	bool nonblock;
 	int fd;
 	unsigned int port;
 	uint32_t width;
@@ -47,8 +51,13 @@ struct everlive_v4l2_handle {
 	uint32_t fps_num;
 	uint32_t fps_den;
 	uint32_t req_count;
-	bool streaming;
 	uint32_t sequence;
+	/*
+	 * Bumped whenever the slot is closed or reused.  VIDIOC_DQBUF drops the
+	 * caller's lock around poll() and uses this to detect that the handle
+	 * was closed and recycled while it slept.
+	 */
+	uint64_t generation;
 	struct everlive_v4l2_buffer bufs[EVERLIVE_V4L2_MAX_BUFS];
 };
 
@@ -62,8 +71,18 @@ struct everlive_v4l2_handle *everlive_v4l2_find_handle(int fd);
 bool everlive_v4l2_is_virtual_fd(int fd);
 int everlive_v4l2_open_count(void);
 
-/* Open/close/dup a virtual handle.  Return 0/-1 (open/dup return fd). */
-int everlive_v4l2_open_virtual(unsigned int port);
+/*
+ * Optional lock hooks.  The preload DSO registers its global mutex so a
+ * blocking VIDIOC_DQBUF can drop it around poll().  Unit tests that call the
+ * state machine directly leave the hooks unset.
+ */
+void everlive_v4l2_set_lock_hooks(void (*lock)(void), void (*unlock)(void));
+
+/*
+ * Open/close/dup a virtual handle.  Return 0/-1 (open/dup return fd).
+ * @flags is the caller's open(2) flags; O_NONBLOCK is honoured by DQBUF.
+ */
+int everlive_v4l2_open_virtual(unsigned int port, int flags);
 int everlive_v4l2_close_virtual(int fd);
 int everlive_v4l2_dup_virtual(int oldfd, int newfd);
 
@@ -77,6 +96,19 @@ void *everlive_v4l2_mmap_buffer(int fd, uint64_t offset);
 bool everlive_v4l2_munmap_buffer(void *addr);
 
 ssize_t everlive_v4l2_read_frame(int fd, void *buffer, size_t n);
+
+#ifdef EVERLIVE_V4L2_TESTING
+struct everlive_v4l2_test_counters {
+	unsigned long mmap_calls;
+	unsigned long munmap_calls;
+	unsigned long close_calls;
+	long live_maps;
+};
+
+void everlive_v4l2_test_reset_hooks(void);
+void everlive_v4l2_test_fail_mmap_after(int successful_mmaps);
+void everlive_v4l2_test_get_counters(struct everlive_v4l2_test_counters *out);
+#endif
 
 #ifdef __cplusplus
 }

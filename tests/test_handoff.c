@@ -11,6 +11,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,12 +19,12 @@
 #include <time.h>
 #include <unistd.h>
 
-static volatile sig_atomic_t g_requested;
+static atomic_bool g_requested;
 
 static void on_request(void *user)
 {
 	(void)user;
-	g_requested = 1;
+	atomic_store_explicit(&g_requested, true, memory_order_relaxed);
 }
 
 static void card_name(char *buf, size_t size, const char *tag)
@@ -65,14 +66,20 @@ static pid_t spawn_holder(const char *card, int role, int linger_ms)
 
 	if (everlive_handoff_serve(card, NULL, role, on_request, NULL) < 0)
 		_exit(2);
-	for (int i = 0; i < linger_ms / 10 && !g_requested; i++)
+	for (int i = 0;
+	     i < linger_ms / 10 &&
+	     !atomic_load_explicit(&g_requested, memory_order_relaxed); i++)
 		sleep_ms(10);
-	if (!g_requested) {
+	if (!atomic_load_explicit(&g_requested, memory_order_relaxed)) {
 		everlive_handoff_stop();
 		_exit(3);
 	}
-	if (role == EVERLIVE_HANDOFF_ROLE_KEEPER)
-		_exit(0);	/* a keeper yields by exiting */
+	if (role == EVERLIVE_HANDOFF_ROLE_KEEPER) {
+		/* A keeper yields by exiting; stop the server thread first so
+		 * TSan does not report the intentional process exit as a leak. */
+		everlive_handoff_stop();
+		_exit(0);
+	}
 
 	struct everlive_handoff_peer peer;
 	int fd;

@@ -16,7 +16,6 @@ optdepends=('v4l2loopback-dkms: Virtual Camera (/dev/video10) for OBS'
             'polkit: bind the card to vfio-pci from the desktop without a terminal')
 provides=("$_pkgname")
 conflicts=("$_pkgname")
-backup=('etc/security/limits.d/99-everlive-memlock.conf')
 install=everlive.install
 source=("$_pkgname::git+$url.git")
 sha256sums=('SKIP')

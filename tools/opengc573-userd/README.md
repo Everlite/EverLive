@@ -53,7 +53,7 @@ As of **EverLive v1.0.0**, this userspace engine is the default, primary driver 
 | **`gc573_user_video.[ch]`** | Mode table, timings verification, and FPGA VIP configuration. |
 | **`gc573_user_fpga.[ch]`** | Artix-7 FPGA register definitions and RGB lighting control. |
 | **`gc573_vfio.[ch]`** | Low-level VFIO container, group, device, and IOMMU DMA mapping primitives. |
-| **`vfio_pci_bind.sh`** | Utility script to bind or unbind the capture card to/from `vfio-pci`. |
+| **`vfio_pci_bind.sh`** | Shim for the shared `everlive-vfio-bind` helper (bind, restore, status). |
 
 ---
 
@@ -127,11 +127,15 @@ process can never open the card. Instead of failing with "an external instance
 already owns the device", the streamer publishes its state over a Unix domain
 socket and the Control Hub attaches to it as a read-only **Remote Session**.
 
-- Path: `$XDG_RUNTIME_DIR/everlive.sock` (fallback `/run/user/<uid>`, then
-  `/tmp/everlive-<uid>`), mode `0600`.
-- Auth: `SO_PEERCRED` — only clients with the streamer's own UID are accepted.
-- Ownership: an `flock` on `everlive.sock.lock` is authoritative. A socket left
-  behind by a crash is detected and removed on the next start.
+- Path: `$XDG_RUNTIME_DIR/everlive.sock` (fallback `/run/user/<euid>`, then
+  `/tmp/everlive-<euid>`), mode `0600`. Every existing runtime directory must be
+  a real `0700` directory owned by `geteuid()`; symlinks and foreign or
+  permissive directories are rejected at startup.
+- Auth: `SO_PEERCRED` — only clients with the streamer's own effective UID are
+  accepted.
+- Ownership: an `flock` on `everlive.sock.lock` is authoritative. The lock file
+  is opened `O_NOFOLLOW` and must be a regular file owned by `geteuid()`. A
+  socket left behind by a crash is detected and removed on the next start.
 - Transport: newline-delimited JSON-RPC 2.0, max 64 KiB per line.
 
 Methods: `hello`, `ping`, `status.get`, and the write path
@@ -145,7 +149,7 @@ render loop through a seqlock, so remote queries never touch the DMA path.
 ```console
 $ printf '{"jsonrpc":"2.0","id":1,"method":"status.get"}\n' \
     | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/everlive.sock"
-{"jsonrpc":"2.0","id":1,"result":{"proto":1,"version":"2.0.1",...}}
+{"jsonrpc":"2.0","id":1,"result":{"proto":1,"version":"2.0.2",...}}
 ```
 
 ## Sharing the Card Between Users
@@ -168,9 +172,9 @@ While paused, the Control Hub shows **Capture Paused** and offers
 `$XDG_RUNTIME_DIR/everlive.paused`.
 
 - Auth: `SO_PEERCRED` / `SO_PEERGROUPS`. Only users who have group access to
-  the card's `/dev/vfio/<group>` node (the `video` group in the shipped udev
-  rule) may ask. A user who reaches the node only through a logind ACL is not
-  recognised.
+  the card's `/dev/vfio/<group>` node (set to `root:video 0660` by
+  `everlive-vfio-bind`) may ask. A user who reaches the node only through a
+  logind ACL is not recognised.
 - A second instance started by the *same* user still fails as before.
   `EVERLIVE_HANDOFF_SAME_USER=1` lifts that for testing with one account.
 - Capture in the yielding session stops for as long as the other user holds

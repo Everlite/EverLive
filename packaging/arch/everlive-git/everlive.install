@@ -1,9 +1,54 @@
 _caps() {
     local d=/usr/lib/everlive/tools
-    setcap cap_ipc_lock=+ep "$d/opengc573-userd/gc573_user_streamer" 2>/dev/null || true
-    setcap cap_ipc_lock=+ep "$d/opengc570d-userd/opengc570d-userd" 2>/dev/null || true
-    setcap cap_ipc_lock=+ep /usr/bin/gc573_user_streamer 2>/dev/null || true
-    setcap cap_ipc_lock=+ep /usr/bin/opengc570d-userd 2>/dev/null || true
+    local s=/usr/libexec/everlive-setcap
+    local bins=(
+        "$d/opengc573-userd/gc573_user_streamer"
+        "$d/opengc573-userd/gc573_user_probe"
+        "$d/opengc573-userd/gc573_user_diag"
+        "$d/opengc570d-userd/opengc570d-userd"
+        "$d/openhws-userd/hws_user_streamer"
+        "$d/openhws-userd/hws_user_probe"
+        /usr/bin/gc573_user_streamer
+        /usr/bin/gc573_user_probe
+        /usr/bin/gc573_user_diag
+        /usr/bin/opengc570d-userd
+        /usr/bin/hws_user_streamer
+        /usr/bin/hws_user_probe
+    )
+    if [ -x "$s" ]; then
+        "$s" "${bins[@]}" 2>/dev/null || true
+    else
+        local bin
+        for bin in "${bins[@]}"; do
+            [ -f "$bin" ] && setcap cap_ipc_lock=+ep "$bin" 2>/dev/null || true
+        done
+    fi
+}
+
+_cleanup_legacy_config() {
+    local f
+    for f in /etc/security/limits.d/99-everlive-memlock.conf \
+             /etc/security/limits.d/99-gc570d-memlock.conf; do
+        if [ -f "$f" ] && grep -q 'memlock.*unlimited' "$f"; then
+            rm -f "$f"
+        fi
+    done
+    if [ -f /etc/modprobe.d/everlive-vfio.conf ] &&
+       grep -q 'options vfio-pci ids=' /etc/modprobe.d/everlive-vfio.conf; then
+        rm -f /etc/modprobe.d/everlive-vfio.conf
+    fi
+    # Older install.sh copies in /etc override the package rules and contain
+    # the broad SUBSYSTEM=="vfio" permission rule.
+    for f in /etc/udev/rules.d/70-everlive.rules \
+             /etc/udev/rules.d/99-gc570d-vfio.rules; do
+        if [ -f "$f" ] && grep -q 'SUBSYSTEM=="vfio"' "$f"; then
+            rm -f "$f"
+        fi
+    done
+    rm -f /etc/systemd/user/everlive.service.d/10-memlock.conf \
+          /etc/systemd/user/opengc570d-userd.service.d/10-memlock.conf
+    rmdir /etc/systemd/user/everlive.service.d \
+          /etc/systemd/user/opengc570d-userd.service.d 2>/dev/null || true
 }
 
 _legacy_warning() {
@@ -23,6 +68,8 @@ _legacy_warning() {
 
 post_install() {
     _caps
+    _cleanup_legacy_config
+    udevadm control --reload-rules 2>/dev/null || true
     udevadm trigger --subsystem-match=pci --attr-match=vendor=0x1461 2>/dev/null || true
     _legacy_warning
     cat <<'MSG'
@@ -42,5 +89,6 @@ MSG
 
 post_upgrade() {
     _caps
+    _cleanup_legacy_config
     _legacy_warning
 }

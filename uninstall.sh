@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EverLive - Deinstaller (v2.0.1)
+# EverLive - Deinstaller (v2.0.2)
 # ==============================================================================
 set -euo pipefail
 
@@ -54,7 +54,8 @@ echo "[*] Deinstalliere EverLive..."
 # 1. Laufende Daemons beenden
 killall -9 everlive_userd gc573_user_streamer opengc570d-userd gc570d-ctl 2>/dev/null || true
 EVERLIVE_RUNTIME="${XDG_RUNTIME_DIR:-/run/user/${TARGET_UID}}"
-rm -f "${EVERLIVE_RUNTIME}/gc570d/control.sock" 2>/dev/null || true
+rm -f "${EVERLIVE_RUNTIME}/gc570d/control.sock" \
+      "${EVERLIVE_RUNTIME}/gc570d/control.sock.lock" 2>/dev/null || true
 rm -f "${EVERLIVE_RUNTIME}/everlive.sock" "${EVERLIVE_RUNTIME}/everlive.sock.lock" 2>/dev/null || true
 rm -f /dev/shm/gc570d_v4l2_shm 2>/dev/null || true
 rm -f /dev/shm/gc573_v4l2_shm 2>/dev/null || true
@@ -73,14 +74,24 @@ rm -f /usr/local/share/pixmaps/everlive.bmp
 
 # 3. VFIO & Memlock Regeln entfernen
 rm -f /etc/udev/rules.d/99-gc573-vfio.rules
+rm -f /etc/udev/rules.d/70-everlive-vfio.rules
 rm -f /etc/security/limits.d/99-everlive-memlock.conf
+rm -f /etc/systemd/user/everlive.service.d/10-memlock.conf \
+      /etc/systemd/user/opengc570d-userd.service.d/10-memlock.conf
+rmdir /etc/systemd/user/everlive.service.d \
+      /etc/systemd/user/opengc570d-userd.service.d 2>/dev/null || true
+rm -f /usr/lib/systemd/user/everlive.service.d/10-memlock.conf \
+      /usr/lib/systemd/user/opengc570d-userd.service.d/10-memlock.conf
+rmdir /usr/lib/systemd/user/everlive.service.d \
+      /usr/lib/systemd/user/opengc570d-userd.service.d 2>/dev/null || true
 # GC573 engine binaries:
 if [ -d "${SCRIPT_DIR}/tools/opengc573-userd" ]; then
     make -C "${SCRIPT_DIR}/tools/opengc573-userd" uninstall >/dev/null 2>&1 || true
 fi
-rm -f /usr/local/bin/gc573_user_streamer /usr/local/bin/everlive_userd /usr/local/bin/gc573_user_probe
+rm -f /usr/local/bin/gc573_user_streamer /usr/local/bin/everlive_userd \
+      /usr/local/bin/gc573_user_probe /usr/local/bin/gc573_user_diag
 # GC570D (DUO) packaging installed through tools/opengc570d-userd/Makefile:
-# binaries, udev rule, memlock limits, systemd user unit and sleep hook.
+# binaries, udev rule, systemd user unit and sleep hook.
 if [ -d "${SCRIPT_DIR}/tools/opengc570d-userd" ]; then
     make -C "${SCRIPT_DIR}/tools/opengc570d-userd" uninstall >/dev/null 2>&1 || true
 fi
@@ -92,8 +103,15 @@ rm -f /usr/local/lib/libgc570d-v4l2.so
 rm -f /usr/local/lib/libgc573-v4l2.so
 rm -f /usr/local/lib/libeverlive-vk-pacer.so
 rm -f /usr/local/libexec/gc570d-vfio-bind.sh /usr/local/libexec/gc570d-sleep.sh
+rm -f /usr/local/libexec/vfio_pci_bind.sh /usr/local/libexec/hws-vfio-bind.sh
+rm -f /usr/local/libexec/everlive-vfio-bind /usr/local/libexec/everlive-setcap
+rm -f /usr/libexec/gc570d-vfio-bind.sh /usr/libexec/vfio_pci_bind.sh \
+      /usr/libexec/hws-vfio-bind.sh /usr/libexec/everlive-vfio-bind \
+      /usr/libexec/everlive-setcap
+rm -f /usr/local/bin/gc570d-vfio-bind.sh
 rm -f /usr/local/lib/systemd/user/opengc570d-userd.service
 rm -f /etc/udev/rules.d/99-gc570d-vfio.rules
+rm -f /etc/udev/rules.d/99-hwsuhd-vfio.rules
 
 # libeverlive-core (everlive-ctl, library, headers, service unit, service script)
 if [ -d "${SCRIPT_DIR}/tools/libeverlive-core" ]; then
@@ -118,12 +136,17 @@ if command -v dkms >/dev/null 2>&1; then
 fi
 rm -f /etc/modules-load.d/everlive.conf 2>/dev/null || true
 rm -f /etc/modules-load.d/everlive-vfio.conf 2>/dev/null || true
-rm -f /etc/modprobe.d/everlive-vfio.conf 2>/dev/null || true
+rm -f /etc/modprobe.d/everlive-vfio.conf /usr/lib/modprobe.d/everlive-vfio.conf 2>/dev/null || true
 rm -f /etc/modules-load.d/everlive-v4l2loopback.conf 2>/dev/null || true
 rm -f /etc/modprobe.d/everlive-v4l2loopback.conf 2>/dev/null || true
 rm -f /etc/modprobe.d/blacklist-everlive-legacy.conf 2>/dev/null || true
 rm -f /etc/pipewire/pipewire.conf.d/50-everlive-capture.conf 2>/dev/null || true
 rm -f /etc/udev/rules.d/70-everlive.rules 2>/dev/null || true
+rm -f /etc/udev/rules.d/70-everlive-vfio.rules 2>/dev/null || true
+rm -f /usr/lib/udev/rules.d/70-everlive.rules 2>/dev/null || true
+rm -f /usr/lib/udev/rules.d/70-everlive-vfio.rules 2>/dev/null || true
+rm -f /usr/lib/udev/rules.d/99-gc570d-vfio.rules 2>/dev/null || true
+rm -f /usr/lib/udev/rules.d/99-hwsuhd-vfio.rules 2>/dev/null || true
 rm -f /usr/local/bin/everlive-audio 2>/dev/null || true
 
 # Virtual Camera entladen (das Paket v4l2loopback bleibt installiert).
